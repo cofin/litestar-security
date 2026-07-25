@@ -1,0 +1,14 @@
+:root {
+  --security-amber: #f5b942;
+  --security-amber-dark: #bd7b00;
+}
+
+html[data-accent-color="amber"] {
+  --accent-9: var(--security-amber);
+  --accent-10: var(--security-amber-dark);
+}
+
+.sy-head-brand img {
+  width: 2rem;
+  height: 2rem;
+}

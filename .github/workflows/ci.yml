@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prek:
+    name: Ruff and prek
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --all-groups --python 3.14
+      - run: make lint
+
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --all-groups --python 3.14
+      - run: make mypy
+
+  pyright:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --all-groups --python 3.14
+      - run: make pyright
+
+  slotscheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --all-groups --python 3.14
+      - run: make slotscheck
+
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv sync --group tests --python ${{ matrix.python-version }}
+      - if: matrix.python-version != '3.14'
+        run: make test
+      - if: matrix.python-version == '3.14'
+        run: make coverage
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --group docs --python 3.14
+      - run: make docs
+      - run: make docs-linkcheck
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --group build --python 3.14
+      - run: make build
+      - name: Install and smoke-test wheel
+        run: |
+          uv venv --python 3.14 /tmp/litestar-security-smoke
+          uv pip install --python /tmp/litestar-security-smoke/bin/python dist/*.whl
+          /tmp/litestar-security-smoke/bin/python - <<'PY'
+          from importlib.resources import files
+
+          import litestar_security
+          from litestar_security import SecurityConfig, SecurityPlugin
+
+          assert litestar_security.__project__ == "litestar-security"
+          assert litestar_security.__version__ == "0.1.0"
+          assert SecurityConfig is not None
+          assert SecurityPlugin is not None
+          assert files("litestar_security").joinpath("py.typed").is_file()
+          PY
+          /tmp/litestar-security-smoke/bin/litestar security --help
+          /tmp/litestar-security-smoke/bin/litestar security --version

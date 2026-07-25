@@ -1,0 +1,214 @@
+####################
+# Project Metadata #
+####################
+[project]
+name = "litestar-security"
+version = "0.1.0"
+description = "Security integration primitives for Litestar applications"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Cody Fincher", email = "cody@litestar.dev" }]
+keywords = ["authentication", "authorization", "litestar", "security"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Web Environment",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Natural Language :: English",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+dependencies = ["litestar>=2.24.0"]
+
+[project.urls]
+Issues = "https://github.com/cofin/litestar-security/issues"
+Source = "https://github.com/cofin/litestar-security"
+
+[project.entry-points."litestar.commands"]
+security = "litestar_security._cli:security_group"
+
+######################
+# Build & Versioning #
+######################
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/litestar_security"]
+
+[tool.bumpversion]
+current_version = "0.1.0"
+parse = """(?x)
+    (?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)
+    (-(?P<pre>alpha|beta|rc)\\.(?P<pre_n>\\d+))?
+"""
+serialize = ["{major}.{minor}.{patch}", "{major}.{minor}.{patch}-{pre}.{pre_n}"]
+search = "{current_version}"
+replace = "{new_version}"
+regex = false
+ignore_missing_version = false
+ignore_missing_files = false
+tag = false
+sign_tags = false
+commit = false
+allow_dirty = true
+
+[tool.bumpversion.parts.pre]
+values = ["alpha", "beta", "rc", "stable"]
+optional_value = "stable"
+first_value = "stable"
+
+[tool.bumpversion.parts.pre_n]
+first_value = "1"
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "uv.lock"
+search = """
+name = "litestar-security"
+version = "{current_version}"
+"""
+replace = """
+name = "litestar-security"
+version = "{new_version}"
+"""
+
+#####################
+# Dependency Groups #
+#####################
+[dependency-groups]
+build = ["bump-my-version"]
+docs = [
+  "shibuya",
+  "sphinx>=7.1.2",
+  "sphinx-copybutton>=0.5.2",
+  "sphinx-design>=0.5.0",
+]
+tests = [
+  "coverage[toml]",
+  "pytest",
+  "pytest-cov",
+]
+lint = [
+  "codespell",
+  "mypy",
+  "prek",
+  "pyright",
+  "ruff",
+  "slotscheck",
+]
+dev = [
+  { include-group = "build" },
+  { include-group = "docs" },
+  { include-group = "tests" },
+  { include-group = "lint" },
+]
+
+###########
+# Testing #
+###########
+[tool.pytest.ini_options]
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+testpaths = ["src/tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/litestar_security"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = true
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+]
+
+#########
+# Ruff  #
+#########
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+src = ["src"]
+extend-exclude = ["docs/_build"]
+
+[tool.ruff.format]
+docstring-code-format = true
+preview = true
+skip-magic-trailing-comma = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "COM812",
+  "CPY001",
+  "D100",
+  "D104",
+  "ISC001",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["litestar_security"]
+split-on-trailing-comma = false
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"docs/conf.py" = ["A001", "INP001"]
+"src/tests/**/*.py" = ["ANN", "D", "PLR2004", "S101"]
+"tools/**/*.py" = ["T201"]
+
+########
+# Mypy #
+########
+[tool.mypy]
+check_untyped_defs = true
+disallow_any_generics = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+disallow_untyped_defs = true
+implicit_reexport = false
+show_error_codes = true
+strict = true
+warn_redundant_casts = true
+warn_return_any = true
+warn_unreachable = true
+warn_unused_configs = true
+warn_unused_ignores = true
+files = ["src/litestar_security"]
+
+###########
+# Pyright #
+###########
+[tool.pyright]
+include = ["src/litestar_security"]
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
+
+##############
+# Slotscheck #
+##############
+[tool.slotscheck]
+strict-imports = false
+
+#############
+# Codespell #
+#############
+[tool.codespell]
+skip = "uv.lock,docs/_build"
