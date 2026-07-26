@@ -1,26 +1,50 @@
 """Immutable request security context contracts."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Generic, Protocol, TypeVar, runtime_checkable
+from typing import ClassVar, Generic, Protocol, TypeVar, cast, runtime_checkable
 
+from litestar.enums import ScopeType
 from litestar.exceptions import NotAuthorizedException
+from litestar.types import Scope
 
 __all__ = (
     "AuthenticationEvidence",
     "AuthorizationSnapshot",
     "CredentialRestrictions",
+    "LitestarSessionHandle",
+    "NullSessionHandle",
     "Principal",
     "SecurityContext",
     "SessionHandle",
+    "SessionPersistenceUnavailableError",
+    "SessionUnavailableError",
 )
 
-UserT = TypeVar("UserT")
+UserT = TypeVar("UserT") # ai: should this not just reuse what's in litestar?
 
 
+class SessionUnavailableError(RuntimeError):
+    """Raised when no native session storage is attached."""
+
+    def __init__(self) -> None:
+        """Initialize the stable public error."""
+        message = "Session storage is unavailable"
+        super().__init__(message)
+
+
+class SessionPersistenceUnavailableError(SessionUnavailableError):
+    """Raised when attached session state is read-only."""
+
+    def __init__(self) -> None:
+        """Initialize the stable public error."""
+        message = "WebSocket sessions cannot persist mutations"
+        RuntimeError.__init__(self, message)
+
+# ai: private functions should not be above public ones
 def _normalize_text(value: str, label: str) -> str:
     normalized = value.strip()
     if not normalized:
@@ -81,6 +105,77 @@ class SessionHandle(Protocol):
     def clear(self) -> None:
         """Remove all session values."""
         ...  # pragma: no cover
+
+
+@dataclass(frozen=True, slots=True)
+class LitestarSessionHandle:
+    """Live view over Litestar's native session scope value."""
+
+    scope: Scope
+
+    @property
+    def is_available(self) -> bool:
+        """Return whether native session middleware attached state."""
+        return "session" in self.scope
+
+    @property
+    def can_persist(self) -> bool:
+        """Return whether this connection permits session mutation."""
+        return self.is_available and self.scope["type"] == ScopeType.HTTP
+
+    def _session(self) -> MutableMapping[str, object]:
+        if not self.is_available:
+            raise SessionUnavailableError
+        return cast("MutableMapping[str, object]", self.scope["session"])
+
+    def _writable_session(self) -> MutableMapping[str, object]:
+        session = self._session()
+        if not self.can_persist:
+            raise SessionPersistenceUnavailableError
+        return session
+
+    def get(self, key: str, default: object = None) -> object:
+        """Read the current native session mapping."""
+        return self._session().get(key, default)
+
+    def set(self, key: str, value: object) -> None:
+        """Store a value when the native session can persist."""
+        self._writable_session()[key] = value
+
+    def pop(self, key: str, default: object = None) -> object:
+        """Remove a value when the native session can persist."""
+        return self._writable_session().pop(key, default)
+
+    def clear(self) -> None:
+        """Clear the native session when it can persist."""
+        self._writable_session().clear()
+
+
+@dataclass(frozen=True, slots=True)
+class NullSessionHandle:
+    """Stateless session capability for applications without sessions."""
+
+    is_available: ClassVar[bool] = False
+    can_persist: ClassVar[bool] = False
+
+    def get(self, key: str, default: object = None) -> object:
+        """Return the caller's default."""
+        del key
+        return default
+
+    def set(self, key: str, value: object) -> None:
+        """Reject writes when session storage is unavailable."""
+        del key, value
+        raise SessionUnavailableError
+
+    def pop(self, key: str, default: object = None) -> object:
+        """Return the caller's default without retaining state."""
+        del key
+        return default
+
+    def clear(self) -> None:
+        """Reject clearing when session storage is unavailable."""
+        raise SessionUnavailableError
 
 
 @dataclass(frozen=True, slots=True)
