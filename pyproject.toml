@@ -219,13 +219,13 @@ warn_return_any = true
 warn_unreachable = true
 warn_unused_configs = true
 warn_unused_ignores = true
-files = ["src/litestar_security", "src/tests/typing/runtime_foundation.py"]
+files = ["src/litestar_security", "src/tests/typing/helpers.py"]
 
 ###########
 # Pyright #
 ###########
 [tool.pyright]
-include = ["src/litestar_security", "src/tests/typing/runtime_foundation.py"]
+include = ["src/litestar_security", "src/tests/typing/helpers.py"]
 pythonVersion = "3.10"
 typeCheckingMode = "strict"
 

@@ -1,4 +1,4 @@
-"""Positive strict-typing fixture for the public runtime foundation."""
+"""Positive strict-typing fixture for the public typing helpers."""
 
 from __future__ import annotations
 
