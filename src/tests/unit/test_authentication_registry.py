@@ -1,7 +1,9 @@
 """Unit tests for authentication outcomes and registry compilation."""
 
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
+from typing import cast
 
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException
@@ -9,12 +11,23 @@ from litestar.exceptions import ImproperlyConfiguredException
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
+    AuthenticationPolicy,
     AuthenticationRegistry,
     InvalidCredentials,
+    MechanismRequirement,
     NoCredentials,
     PresentedCredential,
     VerificationUnavailable,
+    all_of,
+    any_of,
+    at_least,
+    mechanism,
+    optional,
+    public,
+    required,
+    security,
 )
+from litestar_security.config import SecurityConfig
 from litestar_security.context import AuthenticationEvidence, Principal
 
 
@@ -129,6 +142,78 @@ def test_required_default_plan_rejects_zero_participants() -> None:
             mechanisms=[_mechanism("api-key", "x-api-key", participates_by_default=False)],
             require_default=True,
         )
+
+
+def test_policy_helpers_are_immutable_hashable_and_deterministic() -> None:
+    oidc = mechanism(" oidc ", " reports:read ", "profile")
+    policies = (
+        public(),
+        required(),
+        required("session"),
+        any_of("session", oidc),
+        all_of("session", oidc),
+        at_least(2, "session", oidc, "api-key"),
+        optional(all_of("session", oidc)),
+    )
+
+    assert oidc == MechanismRequirement("oidc", ("reports:read", "profile"))
+    assert required("session") == any_of("session")
+    assert policies == tuple(policies)
+    assert len(set(policies)) == len(policies)
+    with pytest.raises(FrozenInstanceError):
+        oidc.name = "changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("factory", "match"),
+    [
+        (AuthenticationPolicy, "policy helper"),
+        (lambda: security(cast("AuthenticationPolicy", object())), "policy helper"),
+        (lambda: mechanism(" "), "mechanism name"),
+        (lambda: mechanism("oidc", " "), "scope"),
+        (lambda: mechanism("oidc", "read", " read "), "Duplicate scope"),
+        (any_of, "at least one"),
+        (lambda: any_of("session", " session "), "Duplicate mechanism"),
+        (all_of, "at least one"),
+        (lambda: all_of("session", mechanism("session")), "Duplicate mechanism"),
+        (lambda: optional(public()), "positive"),
+        (lambda: optional(optional(required("session"))), "nested optional"),
+        (lambda: at_least(0, "a"), "between 1 and"),
+        (lambda: at_least(2, "a"), "between 1 and"),
+        (lambda: at_least(1, "a", " a "), "Duplicate mechanism"),
+    ],
+)
+def test_policy_helpers_reject_invalid_or_unfaithful_expressions(factory: Callable[[], object], match: str) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        factory()
+
+
+def test_required_without_arguments_is_the_implicit_secure_default() -> None:
+    config = SecurityConfig()
+
+    assert isinstance(config.default_policy, AuthenticationPolicy)
+    assert config.default_policy == required()
+    assert config.default_policy != public()
+    assert required() != required("session")
+
+
+@pytest.mark.parametrize("case", [(None,), (True,), (False,)])
+def test_security_returns_fresh_route_metadata_without_changing_policy(case: tuple[bool | None]) -> None:
+    csrf_required = case[0]
+    policy = optional(required(mechanism("oidc", "profile")))
+
+    first = security(policy, csrf_required=csrf_required)
+    second = security(policy, csrf_required=csrf_required)
+    first_declaration = next(iter(first.values()))
+    second_declaration = next(iter(second.values()))
+
+    assert first is not second
+    assert first == second
+    assert first_declaration.policy is policy
+    assert first_declaration.csrf_required is csrf_required
+    assert first_declaration == second_declaration
+    with pytest.raises(FrozenInstanceError):
+        first_declaration.csrf_required = not csrf_required  # type: ignore[misc]
 
 
 @pytest.mark.anyio

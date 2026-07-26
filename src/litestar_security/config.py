@@ -1,13 +1,19 @@
 """Configuration for the Litestar Security plugin."""
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
 from litestar.middleware.session.base import BaseSessionBackend
 from litestar.types import Scope
 
-from litestar_security.authentication import AuthenticationMechanism, CredentialSlot, SecurityRuntimePlan
+from litestar_security.authentication import (
+    AuthenticationMechanism,
+    AuthenticationPolicy,
+    CredentialSlot,
+    SecurityRuntimePlan,
+    required,
+)
 
 __all__ = ("SecurityConfig",)
 
@@ -20,6 +26,7 @@ class SecurityConfig(Generic[UserT]):
 
     slots: Sequence[CredentialSlot[Any]] = ()
     mechanisms: Sequence[AuthenticationMechanism[Any, Any, UserT]] = ()
+    default_policy: AuthenticationPolicy = field(default_factory=required)
     require_default: bool = False
     session_backend: BaseSessionBackend[Any] | None = None
     plan_lookup: Callable[[Scope], SecurityRuntimePlan] | None = None
