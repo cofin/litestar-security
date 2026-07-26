@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pytest
-from litestar import Litestar, Request, Response, get
+from litestar import Controller, Litestar, Request, Response, Router, WebSocket, get, websocket
 from litestar.config.app import AppConfig
 from litestar.enums import ScopeType
 from litestar.exceptions import NotAuthorizedException, ServiceUnavailableException
@@ -30,8 +30,17 @@ from litestar_security.authentication import (
     SecurityRuntimeConfig,
     SecurityRuntimePlan,
     VerificationUnavailable,
+    public,
+    security,
 )
-from litestar_security.context import AuthenticationEvidence, Principal, SecurityContext
+from litestar_security.context import (
+    AuthenticationEvidence,
+    AuthorizationSnapshot,
+    NullSessionHandle,
+    Principal,
+    SecurityContext,
+)
+from litestar_security.guards import requires_scope
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -473,6 +482,66 @@ def test_anonymous_dependency_injection_is_typed() -> None:
         response = client.get("/")
 
     assert response.json() == {"anonymous": True, "typed_context": True}
+
+
+def test_native_guard_layers_remain_cumulative_for_http_and_websocket_with_child_policy() -> None:
+    events: list[str] = []
+
+    def probe(name: str) -> Callable[[ASGIConnection, object], None]:
+        def guard(_connection: ASGIConnection, _handler: object) -> None:
+            events.append(name)
+
+        return guard
+
+    class GuardedController(Controller):
+        path = "/guarded"
+        guards: ClassVar = [probe("controller")]
+
+        @get("/http", guards=[probe("handler")], opt=security(public()))
+        async def http_handler(self) -> dict[str, bool]:
+            return {"ok": True}
+
+        @websocket("/ws", guards=[probe("handler")], opt=security(public()))
+        async def websocket_handler(self, socket: WebSocket) -> None:
+            await socket.accept()
+            await socket.send_text("ok")
+            await socket.close()
+
+    app = Litestar(
+        route_handlers=[Router(path="/api", route_handlers=[GuardedController], guards=[probe("router")])],
+        guards=[probe("app")],
+        plugins=[SecurityPlugin()],
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/guarded/http")
+        http_events = tuple(events)
+        events.clear()
+        with client.websocket_connect("/api/guarded/ws") as socket:
+            websocket_message = socket.receive_text()
+        websocket_events = tuple(events)
+
+    assert response.status_code == 200
+    assert websocket_message == "ok"
+    assert http_events == websocket_events == ("app", "router", "controller", "handler")
+
+
+@pytest.mark.parametrize("connection_type", [Request, WebSocket])
+def test_authorization_guard_has_identical_http_and_websocket_decisions(connection_type: object) -> None:
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(_message: Message) -> None:
+        return None
+
+    scope = _scope("http" if connection_type is Request else "websocket")
+    scope["user"] = Principal[object](id="user-1")
+    scope["auth"] = SecurityContext(
+        session=NullSessionHandle(), authorization=AuthorizationSnapshot(scopes={"reports:read"})
+    )
+    connection = connection_type(scope=scope, receive=receive, send=send)  # type: ignore[operator]
+
+    requires_scope("reports:read")(connection, _RouteHandler())  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

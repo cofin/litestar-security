@@ -1,7 +1,6 @@
 """Compile route security policy for runtime and native OpenAPI projection."""
 
 # The compiler is the sole package-internal consumer of the closed policy AST.
-# ruff: noqa: PLC2701
 
 from dataclasses import dataclass, field
 from itertools import combinations
@@ -31,22 +30,13 @@ class PolicyCompiler(Generic[UserT]):
 
     registry: AuthenticationRegistry[UserT]
     _cache: dict[tuple[AuthenticationPolicy, bool | None], SecurityRuntimePlan] = field(
-        init=False,
-        default_factory=lambda: dict[tuple[AuthenticationPolicy, bool | None], SecurityRuntimePlan](),
-        repr=False,
+        init=False, default_factory=dict[tuple[AuthenticationPolicy, bool | None], SecurityRuntimePlan], repr=False
     )
     _canonical_plans: dict[SecurityRuntimePlan, SecurityRuntimePlan] = field(
-        init=False,
-        default_factory=lambda: dict[SecurityRuntimePlan, SecurityRuntimePlan](),
-        repr=False,
+        init=False, default_factory=dict[SecurityRuntimePlan, SecurityRuntimePlan], repr=False
     )
 
-    def compile(
-        self,
-        policy: AuthenticationPolicy,
-        *,
-        csrf_required: bool | None = None,
-    ) -> SecurityRuntimePlan:
+    def compile(self, policy: AuthenticationPolicy, *, csrf_required: bool | None = None) -> SecurityRuntimePlan:
         """Return the identity-stable plan for a normalized policy."""
         key = (policy, csrf_required)
         if cached := self._cache.get(key):
@@ -56,12 +46,7 @@ class PolicyCompiler(Generic[UserT]):
         self._cache[key] = plan
         return plan
 
-    def _compile(
-        self,
-        policy: AuthenticationPolicy,
-        *,
-        csrf_required: bool | None,
-    ) -> SecurityRuntimePlan:
+    def _compile(self, policy: AuthenticationPolicy, *, csrf_required: bool | None) -> SecurityRuntimePlan:
         if isinstance(policy, _PublicPolicy):
             return SecurityRuntimePlan(authenticate=False, csrf_required=csrf_required)
         if isinstance(policy, _OptionalPolicy):
