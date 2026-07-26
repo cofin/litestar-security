@@ -1,14 +1,22 @@
 """Typed authentication contracts and deterministic mechanism registration."""
 
 from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Generic, Protocol, TypeAlias, TypeVar
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast
 
 from litestar.connection import ASGIConnection
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
 
-from litestar_security.context import AuthenticationEvidence, AuthorizationSnapshot, CredentialRestrictions, Principal
+from litestar_security.context import (
+    AuthenticationEvidence,
+    AuthorizationSnapshot,
+    CredentialRestrictions,
+    Principal,
+    SecurityContext,
+    SessionHandle,
+)
 
 __all__ = (
     "Authenticated",
@@ -33,6 +41,9 @@ _ClaimsT = TypeVar("_ClaimsT")
 _UserT = TypeVar("_UserT")
 _RequestCredentialT_contra = TypeVar("_RequestCredentialT_contra", contravariant=True)
 _ResolverClaimsT_contra = TypeVar("_ResolverClaimsT_contra", contravariant=True)
+
+_AUTHENTICATION_REQUIRED = "Authentication required"
+_AUTHENTICATION_UNAVAILABLE = "Authentication service unavailable"
 
 
 def _normalize_name(value: str, label: str) -> str:
@@ -226,3 +237,191 @@ class AuthenticationRegistry(Generic[UserT]):
     def get_mechanism_for_slot(self, name: str) -> AuthenticationMechanism[Any, Any, UserT] | None:
         """Look up the sole mechanism owning a normalized slot."""
         return self._mechanisms_by_slot.get(_normalize_name(name, "Credential slot name"))
+
+    def evaluator(self) -> "_AuthenticationEvaluator[UserT]":
+        """Create a stateless evaluator bound to this compiled registry."""
+        return _AuthenticationEvaluator(self)
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedAuthentication(Generic[UserT]):
+    name: str
+    outcome: Authenticated[Any]
+    principal: Principal[UserT]
+
+
+class _AuthenticationEvaluator(Generic[UserT]):
+    """Evaluate every presented configured credential in deterministic phases."""
+
+    __slots__ = ("registry",)
+
+    def __init__(self, registry: AuthenticationRegistry[UserT]) -> None:
+        self.registry = registry
+
+    async def evaluate(
+        self,
+        connection: ASGIConnection[Any, Any, Any, Any],
+        session: SessionHandle,
+        *,
+        required: bool,
+        participant_names: AbstractSet[str] | None = None,
+    ) -> tuple[Principal[UserT], SecurityContext]:
+        """Evaluate one authenticating request without leaking credential details."""
+        participants = self._participant_names(participant_names)
+        extracted = self._extract(connection)
+        outcomes, invalid = await self._authenticate(extracted, connection)
+        self._raise_terminal(outcomes, invalid=invalid)
+        resolved = await self._resolve(outcomes)
+
+        if required and not any(result.name in participants for result in resolved):
+            raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+        if not resolved:
+            return Principal[UserT].anonymous(), SecurityContext(session=session)
+
+        principal = resolved[0].principal
+        if any(result.principal.id != principal.id for result in resolved[1:]):
+            raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+
+        authenticated = tuple(result.outcome for result in resolved)
+        authorization = _apply_restrictions(
+            _merge_authorization(authenticated),
+            _intersect_restrictions(authenticated),
+        )
+        return principal, SecurityContext(
+            session=session,
+            evidence=tuple(outcome.evidence for outcome in authenticated),
+            authorization=authorization,
+        )
+
+    def _participant_names(self, participant_names: AbstractSet[str] | None) -> frozenset[str]:
+        if participant_names is None:
+            return frozenset(self.registry.default_mechanism_names)
+        return frozenset(_normalize_name(name, "Authentication participant") for name in participant_names)
+
+    def _extract(
+        self, connection: ASGIConnection[Any, Any, Any, Any]
+    ) -> tuple[tuple[str, CredentialExtraction[Any]], ...]:
+        return tuple(
+            (slot_name, self.registry.get_slot(slot_name).extract(connection))
+            for slot_name in self.registry.slot_names
+        )
+
+    async def _authenticate(
+        self,
+        extracted: Sequence[tuple[str, CredentialExtraction[Any]]],
+        connection: ASGIConnection[Any, Any, Any, Any],
+    ) -> tuple[list[tuple[str, AuthenticationOutcome[Any]]], bool]:
+        invalid = any(isinstance(extraction, InvalidCredentials) for _, extraction in extracted)
+        outcomes: list[tuple[str, AuthenticationOutcome[Any]]] = []
+        for slot_name, extraction in extracted:
+            if not isinstance(extraction, PresentedCredential):
+                continue
+            mechanism = self.registry.get_mechanism_for_slot(slot_name)
+            if mechanism is None:
+                invalid = True
+                continue
+            outcome = await mechanism.authenticator.authenticate(extraction.value, connection)
+            name = _normalize_name(mechanism.authenticator.name, "Authentication mechanism name")
+            if isinstance(outcome, NoCredentials):
+                invalid = True
+            else:
+                outcomes.append((name, outcome))
+        return outcomes, invalid
+
+    @staticmethod
+    def _raise_terminal(outcomes: Sequence[tuple[str, AuthenticationOutcome[Any]]], *, invalid: bool) -> None:
+        if any(isinstance(outcome, VerificationUnavailable) for _, outcome in outcomes):
+            raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
+        if invalid or any(isinstance(outcome, InvalidCredentials) for _, outcome in outcomes):
+            raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+
+    async def _resolve(
+        self, outcomes: Sequence[tuple[str, AuthenticationOutcome[Any]]]
+    ) -> list[_ResolvedAuthentication[UserT]]:
+        resolved: list[_ResolvedAuthentication[UserT]] = []
+        for name, outcome in outcomes:
+            authenticated = cast("Authenticated[Any]", outcome)
+            mechanism = self.registry.get_mechanism(name)
+            principal = await mechanism.resolver.resolve(authenticated.claims)
+            if not principal.is_authenticated:
+                raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+            resolved.append(_ResolvedAuthentication(name=name, outcome=authenticated, principal=principal))
+        return resolved
+
+
+def _merge_authorization(outcomes: Sequence[Authenticated[Any]]) -> AuthorizationSnapshot:
+    scopes: set[str] = set()
+    roles: set[str] = set()
+    capabilities: set[str] = set()
+    team_roles: dict[str, set[str]] = {}
+    tenant_ids: set[str] = set()
+    attributes: dict[str, object] = {}
+    for outcome in outcomes:
+        scopes.update(outcome.grants.scopes)
+        roles.update(outcome.grants.roles)
+        capabilities.update(outcome.grants.capabilities)
+        for team_id, grants in outcome.grants.team_roles.items():
+            team_roles.setdefault(team_id, set()).update(grants)
+        tenant_ids.update(outcome.grants.tenant_ids)
+        attributes.update(outcome.grants.attributes)
+    return AuthorizationSnapshot(
+        scopes=frozenset(scopes),
+        roles=frozenset(roles),
+        capabilities=frozenset(capabilities),
+        team_roles={team_id: frozenset(grants) for team_id, grants in team_roles.items()},
+        tenant_ids=frozenset(tenant_ids),
+        attributes=attributes,
+    )
+
+
+def _intersect_restrictions(outcomes: Sequence[Authenticated[Any]]) -> CredentialRestrictions:
+    return CredentialRestrictions(
+        scopes=_intersect_dimension(outcomes, "scopes"),
+        roles=_intersect_dimension(outcomes, "roles"),
+        capabilities=_intersect_dimension(outcomes, "capabilities"),
+        team_ids=_intersect_dimension(outcomes, "team_ids"),
+        tenant_ids=_intersect_dimension(outcomes, "tenant_ids"),
+    )
+
+
+def _intersect_dimension(
+    outcomes: Sequence[Authenticated[Any]],
+    name: str,
+) -> frozenset[str] | None:
+    bounds = tuple(
+        value
+        for outcome in outcomes
+        if (value := getattr(outcome.restrictions, name)) is not None
+    )
+    if not bounds:
+        return None
+    intersection = set(bounds[0])
+    for bound in bounds[1:]:
+        intersection.intersection_update(bound)
+    return frozenset(intersection)
+
+
+def _apply_restrictions(
+    grants: AuthorizationSnapshot,
+    restrictions: CredentialRestrictions,
+) -> AuthorizationSnapshot:
+    return AuthorizationSnapshot(
+        scopes=grants.scopes if restrictions.scopes is None else grants.scopes & restrictions.scopes,
+        roles=grants.roles if restrictions.roles is None else grants.roles & restrictions.roles,
+        capabilities=(
+            grants.capabilities
+            if restrictions.capabilities is None
+            else grants.capabilities & restrictions.capabilities
+        ),
+        team_roles=(
+            grants.team_roles
+            if restrictions.team_ids is None
+            else {team_id: roles for team_id, roles in grants.team_roles.items() if team_id in restrictions.team_ids}
+        ),
+        tenant_ids=(
+            grants.tenant_ids
+            if restrictions.tenant_ids is None
+            else grants.tenant_ids & restrictions.tenant_ids
+        ),
+        attributes=grants.attributes,
+    )
