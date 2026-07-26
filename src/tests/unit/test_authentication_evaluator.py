@@ -6,16 +6,24 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from litestar.exceptions import NotAuthorizedException, ServiceUnavailableException
+from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
 
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
+    AuthenticationPolicy,
     AuthenticationRegistry,
     InvalidCredentials,
     NoCredentials,
     PresentedCredential,
     VerificationUnavailable,
+    all_of,
+    any_of,
+    at_least,
+    mechanism,
+    optional,
+    public,
+    required,
 )
 from litestar_security.context import (
     AuthenticationEvidence,
@@ -24,6 +32,7 @@ from litestar_security.context import (
     NullSessionHandle,
     Principal,
 )
+from litestar_security.openapi import PolicyCompiler
 
 if TYPE_CHECKING:
     from litestar.connection import ASGIConnection
@@ -48,14 +57,15 @@ class _Slot:
 
 
 class _Authenticator:
-    participates_by_default = True
-
-    def __init__(self, name: str, slot: str, outcome: object, events: list[str]) -> None:
+    def __init__(
+        self, name: str, slot: str, outcome: object, events: list[str], *, participates_by_default: bool = True
+    ) -> None:
         self.name = name
         self.slot = slot
         self.outcome = outcome
         self.events = events
         self.calls = 0
+        self.participates_by_default = participates_by_default
 
     async def authenticate(self, _credential: str, _connection: object) -> object:
         self.calls += 1
@@ -113,6 +123,125 @@ def _evaluator(
         )
     registry = AuthenticationRegistry(slots=slots, mechanisms=mechanisms)  # type: ignore[arg-type]
     return registry.evaluator(), slots, authenticators, resolvers
+
+
+def _policy_evaluator(
+    presented: set[str], *, different_subject: str | None = None
+) -> tuple[_AuthenticationEvaluator[object], PolicyCompiler[object], list[_Slot]]:
+    events: list[str] = []
+    slots: list[_Slot] = []
+    mechanisms: list[AuthenticationMechanism[str, str, object]] = []
+    for name in ("a", "b", "c"):
+        slot = _Slot(f"slot-{name}", PresentedCredential(name) if name in presented else NoCredentials(), events)
+        authenticator = _Authenticator(
+            name, slot.name, _success(name, slot.name), events, participates_by_default=name != "c"
+        )
+        principal_id = "user-2" if name == different_subject else "user-1"
+        slots.append(slot)
+        mechanisms.append(
+            AuthenticationMechanism(
+                authenticator=authenticator,  # type: ignore[arg-type]
+                resolver=_Resolver(Principal(id=principal_id), name, events),
+            )
+        )
+    registry = AuthenticationRegistry(slots=slots, mechanisms=mechanisms)  # type: ignore[arg-type]
+    return registry.evaluator(), PolicyCompiler(registry), slots
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "case",
+    [
+        (required(), {"a"}, True, True),
+        (required(), {"c"}, False, False),
+        (any_of("a", "c"), {"c"}, True, True),
+        (any_of("a", "b"), {"c"}, False, False),
+        (all_of("a", "b"), {"a"}, False, False),
+        (all_of("a", "b"), {"a", "b"}, True, True),
+        (at_least(2, "a", "b", "c"), {"a", "c"}, True, True),
+        (at_least(2, "a", "b", "c"), {"a"}, False, False),
+        (optional(required("a")), set(), True, False),
+        (optional(required("a")), {"c"}, False, False),
+    ],
+)
+async def test_compiled_policy_runtime_truth_table(case: tuple[AuthenticationPolicy, set[str], bool, bool]) -> None:
+    policy, presented, accepted, authenticated = case
+    evaluator, compiler, slots = _policy_evaluator(presented)
+    plan = compiler.compile(policy)
+
+    if accepted:
+        principal, _ = await evaluator.evaluate(_CONNECTION, NullSessionHandle(), plan=plan)
+        assert principal.is_authenticated is authenticated
+    else:
+        with pytest.raises(NotAuthorizedException, match="Authentication required"):
+            await evaluator.evaluate(_CONNECTION, NullSessionHandle(), plan=plan)
+    assert [slot.calls for slot in slots] == [1, 1, 1]
+
+
+def test_policy_compiler_is_deterministic_cached_and_preserves_forced_csrf() -> None:
+    _, compiler, slots = _policy_evaluator(set())
+    policy = at_least(2, "c", "a", "b")
+
+    first = compiler.compile(policy)
+    second = compiler.compile(at_least(2, "b", "c", "a"))
+    third = compiler.compile(policy)
+    public_plan = compiler.compile(public(), csrf_required=True)
+
+    assert first is second is third
+    assert first.alternatives == (
+        (mechanism("a"), mechanism("b")),
+        (mechanism("a"), mechanism("c")),
+        (mechanism("b"), mechanism("c")),
+    )
+    assert not public_plan.authenticate
+    assert public_plan.csrf_required is True
+    assert [slot.calls for slot in slots] == [0, 0, 0]
+
+
+@pytest.mark.anyio
+async def test_public_compiled_plan_skips_all_credential_work() -> None:
+    evaluator, compiler, slots = _policy_evaluator({"a", "b", "c"})
+
+    principal, context = await evaluator.evaluate(_CONNECTION, NullSessionHandle(), plan=compiler.compile(public()))
+
+    assert not principal.is_authenticated
+    assert context.evidence == ()
+    assert [slot.calls for slot in slots] == [0, 0, 0]
+
+
+@pytest.mark.anyio
+async def test_nonqualifying_credentials_still_merge_or_reject_different_subjects() -> None:
+    evaluator, compiler, _ = _policy_evaluator({"a", "c"})
+
+    principal, context = await evaluator.evaluate(
+        _CONNECTION, NullSessionHandle(), plan=compiler.compile(required("a"))
+    )
+
+    assert principal.id == "user-1"
+    assert tuple(evidence.mechanism for evidence in context.evidence) == ("a", "c")
+
+    evaluator, compiler, _ = _policy_evaluator({"a", "c"}, different_subject="c")
+    with pytest.raises(NotAuthorizedException, match="Authentication required"):
+        await evaluator.evaluate(_CONNECTION, NullSessionHandle(), plan=compiler.compile(required("a")))
+
+
+@pytest.mark.parametrize(
+    ("policy", "match"),
+    [(required("missing"), "undefined authentication mechanism"), (required(), "default-participating")],
+)
+def test_policy_compiler_rejects_unresolvable_required_policy(policy: AuthenticationPolicy, match: str) -> None:
+    registry = AuthenticationRegistry[object]()
+
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        PolicyCompiler(registry).compile(policy)
+
+
+def test_policy_compiler_rejects_foreign_policy_subclasses() -> None:
+    class _ForeignPolicy(AuthenticationPolicy):
+        pass
+
+    with pytest.raises(ImproperlyConfiguredException, match="policy helper"):
+        PolicyCompiler(AuthenticationRegistry[object]()).compile(_ForeignPolicy())
 
 
 @pytest.mark.anyio

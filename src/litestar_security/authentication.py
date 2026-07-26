@@ -405,9 +405,20 @@ class SecurityRuntimePlan:
     authenticate: bool = True
     required: bool = False
     participant_names: frozenset[str] | None = None
+    alternatives: tuple[tuple[MechanismRequirement, ...], ...] = ()
+    allow_anonymous: bool = False
+    csrf_required: bool | None = None
 
     def __post_init__(self) -> None:
         """Freeze explicit participant names."""
+        alternatives = tuple(tuple(alternative) for alternative in self.alternatives)
+        object.__setattr__(self, "alternatives", alternatives)
+        if alternatives and self.participant_names is None:
+            object.__setattr__(
+                self,
+                "participant_names",
+                frozenset(requirement.name for alternative in alternatives for requirement in alternative),
+            )
         if self.participant_names is not None:
             object.__setattr__(
                 self,
@@ -478,9 +489,7 @@ class SecurityMiddleware(Generic[UserT]):
             connection = ASGIConnection[Any, Principal[UserT], SecurityContext, Any](
                 scope=scope, receive=receive, send=send
             )
-            principal, context = await self.evaluator.evaluate(
-                connection, session, required=plan.required, participant_names=plan.participant_names
-            )
+            principal, context = await self.evaluator.evaluate(connection, session, plan=plan)
             scope["user"] = principal
             scope["auth"] = context
         await self.app(scope, receive, send)
@@ -532,24 +541,38 @@ class _AuthenticationEvaluator(Generic[UserT]):
         connection: ASGIConnection[Any, Any, Any, Any],
         session: SessionHandle,
         *,
-        required: bool,
+        required: bool = False,
         participant_names: AbstractSet[str] | None = None,
+        plan: SecurityRuntimePlan | None = None,
     ) -> tuple[Principal[UserT], SecurityContext]:
         """Evaluate one authenticating request without leaking credential details."""
+        if plan is not None:
+            if not plan.authenticate:
+                return Principal[UserT].anonymous(), SecurityContext(session=session)
+            required = plan.required
+            participant_names = plan.participant_names
         participants = self._participant_names(participant_names)
         extracted = self._extract(connection)
         outcomes, invalid = await self._authenticate(extracted, connection)
         self._raise_terminal(outcomes, invalid=invalid)
         resolved = await self._resolve(outcomes)
 
-        if required and not any(result.name in participants for result in resolved):
+        principal = resolved[0].principal if resolved else Principal[UserT].anonymous()
+        if resolved and any(result.principal.id != principal.id for result in resolved[1:]):
+            raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+        if plan is not None and plan.alternatives:
+            successful = frozenset(result.name for result in resolved)
+            satisfied = any(
+                all(requirement.name in successful for requirement in alternative) for alternative in plan.alternatives
+            )
+            if not satisfied:
+                if plan.allow_anonymous and not resolved:
+                    return principal, SecurityContext(session=session)
+                raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+        elif required and not any(result.name in participants for result in resolved):
             raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
         if not resolved:
-            return Principal[UserT].anonymous(), SecurityContext(session=session)
-
-        principal = resolved[0].principal
-        if any(result.principal.id != principal.id for result in resolved[1:]):
-            raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+            return principal, SecurityContext(session=session)
 
         authenticated = tuple(result.outcome for result in resolved)
         authorization = _apply_restrictions(_merge_authorization(authenticated), _intersect_restrictions(authenticated))
