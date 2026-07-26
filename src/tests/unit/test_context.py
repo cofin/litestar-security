@@ -575,10 +575,11 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         assert import_module(dependency)
 
     providers = import_module("litestar_security.providers")
-    assert providers.__all__ == ()
-    for module_name in ("jwt", "jwks", "oidc"):
-        provider_module = import_module(f"litestar_security.providers.{module_name}")
-        assert provider_module.__all__ == ()
+    assert providers.__all__ == ("JSONValue", "JWTClaims", "JWTValidationConfig", "JWTVerifier")
+    jwt_module = import_module("litestar_security.providers.jwt")
+    assert jwt_module.__all__ == providers.__all__
+    for module_name in ("jwks", "oidc"):
+        assert import_module(f"litestar_security.providers.{module_name}").__all__ == ()
 
 
 def test_security_config_is_typed_and_slotted() -> None:
