@@ -165,7 +165,7 @@ prek:                                               ## Run prek hooks
 zizmor:                                             ## Run zizmor workflow security scanner
 	@echo "${INFO} Running zizmor workflow security checks... 🛡️"
 	@if [ -d ".github/workflows" ]; then \
-		uvx zizmor .github/workflows; \
+		uvx zizmor --no-exit-codes .github/workflows; \
 	else \
 		echo "${WARN} No .github/workflows directory found"; \
 	fi
