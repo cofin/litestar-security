@@ -1,5 +1,14 @@
 """Curated authentication provider contracts."""
 
+from litestar_security.providers.jwks import (
+    AsyncJWKSFetcher,
+    CachedJWKSProvider,
+    JWKSCacheEntry,
+    JWKSCachePolicy,
+    JWKSFetchRequest,
+    JWKSFetchResponse,
+    JWKSProvider,
+)
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
     BearerTokenSlot,
@@ -20,11 +29,18 @@ from litestar_security.providers.jwt import (
 from litestar_security.providers.oidc import DiscoveryPolicy, OIDCDiscoveryClient, OIDCDiscoveryError, OIDCMetadata
 
 __all__ = (
+    "AsyncJWKSFetcher",
     "BearerSlotSelector",
     "BearerTokenSlot",
+    "CachedJWKSProvider",
     "CompositeBearerConfig",
     "DiscoveryPolicy",
     "JSONValue",
+    "JWKSCacheEntry",
+    "JWKSCachePolicy",
+    "JWKSFetchRequest",
+    "JWKSFetchResponse",
+    "JWKSProvider",
     "JWTClaims",
     "JWTValidationConfig",
     "JWTVerifier",

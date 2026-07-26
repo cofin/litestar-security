@@ -576,11 +576,18 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
 
     providers = import_module("litestar_security.providers")
     assert providers.__all__ == (
+        "AsyncJWKSFetcher",
         "BearerSlotSelector",
         "BearerTokenSlot",
+        "CachedJWKSProvider",
         "CompositeBearerConfig",
         "DiscoveryPolicy",
         "JSONValue",
+        "JWKSCacheEntry",
+        "JWKSCachePolicy",
+        "JWKSFetchRequest",
+        "JWKSFetchResponse",
+        "JWKSProvider",
         "JWTClaims",
         "JWTValidationConfig",
         "JWTVerifier",
@@ -596,10 +603,19 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "build_access_token_claims",
         "build_local_jwks_handler",
     )
+    jwks_module = import_module("litestar_security.providers.jwks")
     jwt_module = import_module("litestar_security.providers.jwt")
     oidc_module = import_module("litestar_security.providers.oidc")
-    assert set(jwt_module.__all__).union(oidc_module.__all__) == set(providers.__all__)
-    assert import_module("litestar_security.providers.jwks").__all__ == ()
+    assert set(jwks_module.__all__).union(jwt_module.__all__, oidc_module.__all__) == set(providers.__all__)
+    assert jwks_module.__all__ == (
+        "AsyncJWKSFetcher",
+        "CachedJWKSProvider",
+        "JWKSCacheEntry",
+        "JWKSCachePolicy",
+        "JWKSFetchRequest",
+        "JWKSFetchResponse",
+        "JWKSProvider",
+    )
 
 
 def test_security_config_is_typed_and_slotted() -> None:
