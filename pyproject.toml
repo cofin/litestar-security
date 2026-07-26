@@ -28,6 +28,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
+  "argon2-cffi>=25.1,<26",
   "litestar>=2.24.0",
   "PyJWT[crypto]>=2.13",
 ]

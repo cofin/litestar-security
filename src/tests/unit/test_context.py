@@ -632,6 +632,62 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     )
 
 
+def test_accounts_package_declares_argon2_without_backend_dependencies() -> None:
+    declared = tuple(requirement.lower().replace(" ", "") for requirement in requires("litestar-security") or ())
+
+    assert any(
+        requirement.startswith("argon2-cffi") and ">=25.1" in requirement and "<26" in requirement
+        for requirement in declared
+    )
+    assert all(
+        not requirement.startswith(dependency)
+        for dependency in ("advanced-alchemy", "redis", "sqlalchemy", "sqlspec")
+        for requirement in declared
+    )
+    assert import_module("argon2")
+    accounts = import_module("litestar_security.accounts")
+    assert accounts.__all__ == (
+        "AccountLookup",
+        "ConsumeResult",
+        "ConsumeStatus",
+        "CreateSessionCommand",
+        "LocalAccount",
+        "LocalAccountCapabilities",
+        "LocalAuth",
+        "LocalAuthConfig",
+        "LocalAuthMode",
+        "LoginMethod",
+        "LoginMethodStore",
+        "NotificationCommand",
+        "PasswordChangeResult",
+        "PasswordChangeStatus",
+        "PasswordCredentialStore",
+        "PasswordResetResult",
+        "PasswordResetStatus",
+        "RecoveryTokenStore",
+        "RefreshRotationStatus",
+        "RefreshTokenFamilyStore",
+        "RegistrationCommand",
+        "RegistrationMode",
+        "RegistrationPolicy",
+        "RegistrationResult",
+        "RegistrationStatus",
+        "RegistrationStore",
+        "RevokeLoginMethodResult",
+        "RevokeLoginMethodStatus",
+        "RotateRefreshCommand",
+        "RotateRefreshResult",
+        "SecurityEpochStore",
+        "SecurityEvent",
+        "SessionAuthentication",
+        "SessionBindingConfig",
+        "SessionRecord",
+        "SessionRegistry",
+        "TokenIssue",
+        "VerificationTokenStore",
+    )
+
+
 def test_security_config_is_typed_and_slotted() -> None:
     config = litestar_security.SecurityConfig()
 
