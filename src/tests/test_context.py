@@ -38,11 +38,7 @@ def test_principal_supports_anonymous_user_and_service_states() -> None:
     service = Principal[object](id="service-1", display_name="Worker")
 
     assert (anonymous.id, anonymous.is_authenticated, anonymous.has_user) == (None, False, False)
-    assert (application_user.id, application_user.is_authenticated, application_user.has_user) == (
-        "user-1",
-        True,
-        True,
-    )
+    assert (application_user.id, application_user.is_authenticated, application_user.has_user) == ("user-1", True, True)
     assert (service.id, service.is_authenticated, service.has_user) == ("service-1", True, False)
 
 
@@ -103,16 +99,8 @@ def test_evidence_normalizes_utc_and_preserves_assurance_details() -> None:
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {
-            "mechanism": "",
-            "slot": "header",
-            "authenticated_at": datetime.now(timezone.utc),
-        },
-        {
-            "mechanism": "local",
-            "slot": " ",
-            "authenticated_at": datetime.now(timezone.utc),
-        },
+        {"mechanism": "", "slot": "header", "authenticated_at": datetime.now(timezone.utc)},
+        {"mechanism": "local", "slot": " ", "authenticated_at": datetime.now(timezone.utc)},
         {
             "mechanism": "local",
             "slot": "session",
@@ -124,24 +112,9 @@ def test_evidence_normalizes_utc_and_preserves_assurance_details() -> None:
             "authenticated_at": datetime.now(timezone.utc),
             "expires_at": datetime(2026, 7, 27),  # noqa: DTZ001
         },
-        {
-            "mechanism": "local",
-            "slot": "session",
-            "authenticated_at": datetime.now(timezone.utc),
-            "methods": {" "},
-        },
-        {
-            "mechanism": "local",
-            "slot": "session",
-            "authenticated_at": datetime.now(timezone.utc),
-            "traits": {""},
-        },
-        {
-            "mechanism": "local",
-            "slot": "session",
-            "authenticated_at": datetime.now(timezone.utc),
-            "amr": (" ",),
-        },
+        {"mechanism": "local", "slot": "session", "authenticated_at": datetime.now(timezone.utc), "methods": {" "}},
+        {"mechanism": "local", "slot": "session", "authenticated_at": datetime.now(timezone.utc), "traits": {""}},
+        {"mechanism": "local", "slot": "session", "authenticated_at": datetime.now(timezone.utc), "amr": (" ",)},
     ],
 )
 def test_evidence_rejects_blank_names_and_naive_timestamps(kwargs: dict[str, object]) -> None:
@@ -197,11 +170,7 @@ def test_authorization_snapshot_rejects_blank_values(kwargs: dict[str, object]) 
 
 def test_credential_restrictions_normalize_sets_and_preserve_empty() -> None:
     restrictions = CredentialRestrictions(
-        scopes={" read "},
-        roles=frozenset(),
-        capabilities=None,
-        team_ids={" team-1 "},
-        tenant_ids={"tenant-1"},
+        scopes={" read "}, roles=frozenset(), capabilities=None, team_ids={" team-1 "}, tenant_ids={"tenant-1"}
     )
 
     assert restrictions.scopes == frozenset({"read"})
@@ -212,14 +181,7 @@ def test_credential_restrictions_normalize_sets_and_preserve_empty() -> None:
 
 
 @pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"scopes": {" "}},
-        {"roles": {""}},
-        {"capabilities": {" "}},
-        {"team_ids": {""}},
-        {"tenant_ids": {" "}},
-    ],
+    "kwargs", [{"scopes": {" "}}, {"roles": {""}}, {"capabilities": {" "}}, {"team_ids": {""}}, {"tenant_ids": {" "}}]
 )
 def test_credential_restrictions_reject_blank_values(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="must not be blank"):
@@ -243,11 +205,7 @@ def test_security_context_derives_earliest_expiry_without_principal() -> None:
                 authenticated_at=authenticated_at,
                 expires_at=authenticated_at + timedelta(hours=1),
             ),
-            AuthenticationEvidence(
-                mechanism="api-key",
-                slot="x-api-key",
-                authenticated_at=authenticated_at,
-            ),
+            AuthenticationEvidence(mechanism="api-key", slot="x-api-key", authenticated_at=authenticated_at),
         ),
     )
 

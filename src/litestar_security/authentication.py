@@ -1,17 +1,17 @@
 """Typed authentication contracts and deterministic mechanism registration."""
 
-from __future__ import annotations
-
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeAlias, TypeVar, cast
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast
 
 from litestar.connection import ASGIConnection
 from litestar.enums import ScopeType
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
+from litestar.middleware import DefineMiddleware
 from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
+from litestar.types import ASGIApp, HTTPScope, Receive, Scope, Send
 
 from litestar_security.context import (
     AuthenticationEvidence,
@@ -23,10 +23,6 @@ from litestar_security.context import (
     SecurityContext,
     SessionHandle,
 )
-
-if TYPE_CHECKING:
-    from litestar.middleware import DefineMiddleware
-    from litestar.types import ASGIApp, HTTPScope, Receive, Scope, Send
 
 __all__ = (
     "Authenticated",
@@ -249,7 +245,7 @@ class AuthenticationRegistry(Generic[UserT]):
         """Look up the sole mechanism owning a normalized slot."""
         return self._mechanisms_by_slot.get(_normalize_name(name, "Credential slot name"))
 
-    def evaluator(self) -> _AuthenticationEvaluator[UserT]:
+    def evaluator(self) -> "_AuthenticationEvaluator[UserT]":
         """Create a stateless evaluator bound to this compiled registry."""
         return _AuthenticationEvaluator(self)
 

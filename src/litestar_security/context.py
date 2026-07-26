@@ -44,6 +44,7 @@ class SessionPersistenceUnavailableError(SessionUnavailableError):
         message = "WebSocket sessions cannot persist mutations"
         RuntimeError.__init__(self, message)
 
+
 @runtime_checkable
 class SessionHandle(Protocol):
     """Uniform access to an optional native Litestar session."""
@@ -213,9 +214,7 @@ class AuthenticationEvidence:
         object.__setattr__(self, "traits", _normalize_values(self.traits, "Authentication trait"))
         if self.acr is not None:
             object.__setattr__(self, "acr", _normalize_text(self.acr, "ACR"))
-        object.__setattr__(
-            self, "amr", tuple(_normalize_text(method, "AMR method") for method in self.amr)
-        )
+        object.__setattr__(self, "amr", tuple(_normalize_text(method, "AMR method") for method in self.amr))
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,9 +228,7 @@ class AuthorizationSnapshot:
         default_factory=lambda: cast("Mapping[str, frozenset[str]]", MappingProxyType({}))
     )
     tenant_ids: frozenset[str] = frozenset()
-    attributes: Mapping[str, object] = field(
-        default_factory=lambda: cast("Mapping[str, object]", MappingProxyType({}))
-    )
+    attributes: Mapping[str, object] = field(default_factory=lambda: cast("Mapping[str, object]", MappingProxyType({})))
 
     def __post_init__(self) -> None:
         """Defensively normalize and freeze authorization inputs."""
@@ -241,12 +238,10 @@ class AuthorizationSnapshot:
         object.__setattr__(
             self,
             "team_roles",
-            MappingProxyType(
-                {
-                    _normalize_text(team_id, "Team id"): _normalize_values(roles, "Team role")
-                    for team_id, roles in self.team_roles.items()
-                }
-            ),
+            MappingProxyType({
+                _normalize_text(team_id, "Team id"): _normalize_values(roles, "Team role")
+                for team_id, roles in self.team_roles.items()
+            }),
         )
         object.__setattr__(self, "tenant_ids", _normalize_values(self.tenant_ids, "Tenant id"))
         object.__setattr__(self, "attributes", MappingProxyType(dict(self.attributes)))
@@ -266,9 +261,7 @@ class CredentialRestrictions:
         """Normalize bounds while preserving unbounded versus empty."""
         object.__setattr__(self, "scopes", _normalize_optional_values(self.scopes, "Scope"))
         object.__setattr__(self, "roles", _normalize_optional_values(self.roles, "Role"))
-        object.__setattr__(
-            self, "capabilities", _normalize_optional_values(self.capabilities, "Capability")
-        )
+        object.__setattr__(self, "capabilities", _normalize_optional_values(self.capabilities, "Capability"))
         object.__setattr__(self, "team_ids", _normalize_optional_values(self.team_ids, "Team id"))
         object.__setattr__(self, "tenant_ids", _normalize_optional_values(self.tenant_ids, "Tenant id"))
 

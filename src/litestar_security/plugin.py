@@ -1,10 +1,10 @@
 """Litestar Security plugin integration."""
 
-from __future__ import annotations
+from collections.abc import Iterator, Mapping
+from typing import Any, Generic, TypeAlias, TypeVar, cast
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeAlias, TypeVar, cast
-
+from click import Group as ClickGroup
+from litestar.config.app import AppConfig
 from litestar.controller import Controller
 from litestar.di import NamedDependency, Provide
 from litestar.exceptions import ImproperlyConfiguredException
@@ -13,7 +13,7 @@ from litestar.middleware import DefineMiddleware
 from litestar.middleware.session.base import SessionMiddleware
 from litestar.plugins import CLIPlugin, InitPlugin
 from litestar.router import Router
-from litestar.types import Scope  # noqa: TC002 - Litestar resolves provider annotations at startup.
+from litestar.types import Scope
 
 from litestar_security.authentication import (
     AuthenticationRegistry,
@@ -23,12 +23,6 @@ from litestar_security.authentication import (
 )
 from litestar_security.config import SecurityConfig
 from litestar_security.context import Principal, SecurityContext
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-
-    from click import Group as ClickGroup
-    from litestar.config.app import AppConfig
 
 __all__ = ("CurrentUser", "PrincipalDependency", "SecurityContextDependency", "SecurityPlugin")
 

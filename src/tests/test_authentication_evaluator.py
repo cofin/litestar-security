@@ -90,14 +90,8 @@ def _success(
 
 
 def _evaluator(
-    definitions: list[tuple[str, object, object, Principal[object]]],
-    events: list[str],
-) -> tuple[
-    _AuthenticationEvaluator[object],
-    list[_Slot],
-    list[_Authenticator],
-    list[_Resolver],
-]:
+    definitions: list[tuple[str, object, object, Principal[object]]], events: list[str]
+) -> tuple[_AuthenticationEvaluator[object], list[_Slot], list[_Authenticator], list[_Resolver]]:
     slots: list[_Slot] = []
     authenticators: list[_Authenticator] = []
     resolvers: list[_Resolver] = []
@@ -249,14 +243,7 @@ async def test_different_subjects_reject_after_single_resolution_each() -> None:
 async def test_authenticated_outcome_cannot_resolve_to_anonymous() -> None:
     events: list[str] = []
     evaluator, _, _, resolvers = _evaluator(
-        [
-            (
-                "local",
-                PresentedCredential("token"),
-                _success("local", "slot-local"),
-                Principal[object].anonymous(),
-            )
-        ],
+        [("local", PresentedCredential("token"), _success("local", "slot-local"), Principal[object].anonymous())],
         events,
     )
 
@@ -270,29 +257,13 @@ async def test_authenticated_outcome_cannot_resolve_to_anonymous() -> None:
 async def test_explicit_participant_set_controls_required_satisfaction() -> None:
     events: list[str] = []
     evaluator, _, _, _ = _evaluator(
-        [
-            (
-                "local",
-                PresentedCredential("token"),
-                _success("local", "slot-local"),
-                Principal(id="user-1"),
-            )
-        ],
-        events,
+        [("local", PresentedCredential("token"), _success("local", "slot-local"), Principal(id="user-1"))], events
     )
 
     with pytest.raises(NotAuthorizedException, match="Authentication required"):
-        await evaluator.evaluate(
-            _CONNECTION,
-            NullSessionHandle(),
-            required=True,
-            participant_names={"other"},
-        )
+        await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True, participant_names={"other"})
     principal, _ = await evaluator.evaluate(
-        _CONNECTION,
-        NullSessionHandle(),
-        required=True,
-        participant_names={"local"},
+        _CONNECTION, NullSessionHandle(), required=True, participant_names={"local"}
     )
 
     assert principal.id == "user-1"
@@ -374,9 +345,7 @@ def _authorization_for_dimension(dimension: str) -> AuthorizationSnapshot:
     ],
 )
 async def test_restriction_intersection_truth_table(
-    dimension: str,
-    bounds: tuple[frozenset[str] | None, frozenset[str] | None],
-    expected: set[str],
+    dimension: str, bounds: tuple[frozenset[str] | None, frozenset[str] | None], expected: set[str]
 ) -> None:
     events: list[str] = []
     restrictions_a = CredentialRestrictions(**{dimension: bounds[0]})
@@ -386,12 +355,7 @@ async def test_restriction_intersection_truth_table(
             (
                 "a",
                 PresentedCredential("a"),
-                _success(
-                    "a",
-                    "slot-a",
-                    grants=_authorization_for_dimension(dimension),
-                    restrictions=restrictions_a,
-                ),
+                _success("a", "slot-a", grants=_authorization_for_dimension(dimension), restrictions=restrictions_a),
                 Principal(id="user-1"),
             ),
             (

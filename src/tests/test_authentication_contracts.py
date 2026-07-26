@@ -40,10 +40,7 @@ class _Resolver:
 
 
 def _mechanism(
-    name: str,
-    slot: str,
-    *,
-    participates_by_default: bool = True,
+    name: str, slot: str, *, participates_by_default: bool = True
 ) -> AuthenticationMechanism[str, str, object]:
     return AuthenticationMechanism(
         authenticator=_Authenticator(name, slot, participates_by_default=participates_by_default),  # type: ignore[arg-type]
@@ -53,9 +50,7 @@ def _mechanism(
 
 def test_outcomes_are_distinct_immutable_and_secret_safe() -> None:
     evidence = AuthenticationEvidence(
-        mechanism="local",
-        slot="authorization.bearer",
-        authenticated_at=datetime(2026, 7, 26, tzinfo=timezone.utc),
+        mechanism="local", slot="authorization.bearer", authenticated_at=datetime(2026, 7, 26, tzinfo=timezone.utc)
     )
     presented = PresentedCredential("secret-token")
     outcomes = (
@@ -101,9 +96,7 @@ def test_outcomes_are_distinct_immutable_and_secret_safe() -> None:
     ],
 )
 def test_registry_rejects_invalid_or_ambiguous_ownership(
-    slots: list[_Slot],
-    mechanisms: list[AuthenticationMechanism[str, str, object]],
-    match: str,
+    slots: list[_Slot], mechanisms: list[AuthenticationMechanism[str, str, object]], match: str
 ) -> None:
     with pytest.raises(ImproperlyConfiguredException, match=match):
         AuthenticationRegistry(slots=slots, mechanisms=mechanisms)  # type: ignore[arg-type]
@@ -160,7 +153,8 @@ async def test_composite_bearer_dispatcher_selects_only_one_verifier() -> None:
     )
 
     outcome = await registry.get_mechanism("bearer").authenticator.authenticate(
-        "local:user-1", None  # type: ignore[arg-type]
+        "local:user-1",
+        None,  # type: ignore[arg-type]
     )
 
     assert isinstance(outcome, Authenticated)

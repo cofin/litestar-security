@@ -1,17 +1,13 @@
 """Configuration for the Litestar Security plugin."""
 
-from __future__ import annotations
-
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
-if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+from litestar.middleware.session.base import BaseSessionBackend
+from litestar.types import Scope
 
-    from litestar.middleware.session.base import BaseSessionBackend
-    from litestar.types import Scope
-
-    from litestar_security.authentication import AuthenticationMechanism, CredentialSlot, SecurityRuntimePlan
+from litestar_security.authentication import AuthenticationMechanism, CredentialSlot, SecurityRuntimePlan
 
 __all__ = ("SecurityConfig",)
 
