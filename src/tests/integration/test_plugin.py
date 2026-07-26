@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import sys
+from copy import deepcopy
 from importlib.metadata import entry_points
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import click
 import pytest
@@ -19,8 +20,9 @@ from litestar.middleware.session.base import SessionMiddleware
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.controller import OpenAPIController
 from litestar.openapi.plugins import JsonRenderPlugin
+from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme
 from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
-from litestar.routes import ASGIRoute, HTTPRoute, WebSocketRoute
+from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 
 from litestar_security import SecurityConfig, SecurityPlugin
 from litestar_security._cli import register, security_group
@@ -30,6 +32,11 @@ from litestar_security.authentication import (
     AuthenticationPolicy,
     SecurityMiddlewareWrapper,
     SecurityRuntimePlan,
+    all_of,
+    any_of,
+    at_least,
+    mechanism,
+    optional,
     public,
     required,
     security,
@@ -66,19 +73,37 @@ class _CompilerResolver:
         raise AssertionError
 
 
-def _compiler_config(*, openapi_policy: AuthenticationPolicy | None = None) -> SecurityConfig[object]:
-    slots = tuple(_CompilerSlot(name=f"slot-{name}") for name in ("a", "b"))
+def _compiler_config(
+    *,
+    openapi_policy: AuthenticationPolicy | None = None,
+    names: tuple[str, ...] = ("a", "b"),
+    scheme_names: dict[str, str] | None = None,
+    scheme_types: dict[str, Literal["apiKey", "http", "mutualTLS", "oauth2", "openIdConnect"]] | None = None,
+    max_openapi_combinations: int = 32,
+) -> SecurityConfig[object]:
+    slots = tuple(_CompilerSlot(name=f"slot-{name}") for name in names)
     mechanisms = tuple(
         AuthenticationMechanism(
             authenticator=_CompilerAuthenticator(name=name, slot=f"slot-{name}"),  # type: ignore[arg-type]
             resolver=_CompilerResolver(),
+            scheme_name=(scheme_names or {}).get(name, name),
+            security_scheme=SecurityScheme(
+                type=(scheme_types or {}).get(name, "http"),
+                scheme="bearer" if (scheme_types or {}).get(name, "http") == "http" else None,
+                open_id_connect_url=(
+                    "https://issuer.example/.well-known/openid-configuration"
+                    if (scheme_types or {}).get(name) == "openIdConnect"
+                    else None
+                ),
+            ),
         )
-        for name in ("a", "b")
+        for name in names
     )
     return SecurityConfig(
         slots=slots,  # type: ignore[arg-type]
         mechanisms=mechanisms,
         openapi_policy=openapi_policy,
+        max_openapi_combinations=max_openapi_combinations,
     )
 
 
@@ -87,6 +112,12 @@ def _http_plan(app: Litestar, path: str, method: str = "GET") -> SecurityRuntime
         route_value for route_value in app.routes if isinstance(route_value, HTTPRoute) and route_value.path == path
     )
     return cast("SecurityRuntimePlan", route_value.route_handler_map[method][0].opt["litestar_security_plan"])
+
+
+def _operation_security(app: Litestar, path: str) -> list[dict[str, list[str]]] | None:
+    operation = app.openapi_schema.paths[path].get
+    assert operation is not None
+    return cast("list[dict[str, list[str]]] | None", operation.security)
 
 
 def test_plugin_constructs_default_config() -> None:
@@ -307,6 +338,246 @@ def test_openapi_routes_use_default_configured_and_custom_router_policy(
 
     assert plan.participant_names == expected_participants
     assert plan.authenticate is (expected_participants is not None)
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [
+        (public(), [{}]),
+        (required("a"), [{"a": []}]),
+        (any_of("a", "b"), [{"a": []}, {"b": []}]),
+        (all_of("a", "b"), [{"a": [], "b": []}]),
+        (optional(required("a")), [{}, {"a": []}]),
+        (at_least(2, "a", "b", "c"), [{"a": [], "b": []}, {"a": [], "c": []}, {"b": [], "c": []}]),
+        (required(mechanism("oidc", "reports:read")), [{"oidc": ["reports:read"]}]),
+    ],
+)
+def test_native_openapi_projection_matches_runtime_policy(
+    policy: AuthenticationPolicy, expected: list[dict[str, list[str]]]
+) -> None:
+    @get("/resource", opt=security(policy))
+    async def handler() -> None:
+        return None
+
+    config = _compiler_config(names=("a", "b", "c", "oidc"), scheme_types={"oidc": "openIdConnect"})
+    app = Litestar(
+        route_handlers=[handler],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0", render_plugins=[JsonRenderPlugin()]),
+        plugins=[SecurityPlugin(config)],
+    )
+    route_handler = next(
+        route_value.route_handler_map["GET"][0]
+        for route_value in app.routes
+        if isinstance(route_value, HTTPRoute) and route_value.path == "/resource"
+    )
+
+    assert route_handler.resolve_security() == expected
+    assert _operation_security(app, "/resource") == expected
+    assert [
+        tuple((requirement.name, requirement.scopes) for requirement in alternative)
+        for alternative in _http_plan(app, "/resource").alternatives
+    ] == [
+        tuple((name, tuple(scopes)) for name, scopes in alternative.items()) for alternative in expected if alternative
+    ]
+
+
+def test_openapi_scope_and_combination_limits_fail_with_route_context() -> None:
+    @get("/scoped", opt=security(required(mechanism("a", "read"))))
+    async def scoped_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"a.*scopes.*GET /scoped"):
+        Litestar(
+            route_handlers=[scoped_handler],
+            openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+            plugins=[SecurityPlugin(_compiler_config(names=("a",)))],
+        )
+
+    names = tuple(f"m{index}" for index in range(9))
+
+    @get("/threshold", opt=security(at_least(2, *names)))
+    async def threshold_handler() -> None:
+        return None
+
+    with pytest.raises(
+        ImproperlyConfiguredException, match=r"at_least\(2\).*9 participants.*36.*cap 32.*GET /threshold"
+    ):
+        Litestar(
+            route_handlers=[threshold_handler],
+            openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+            plugins=[SecurityPlugin(_compiler_config(names=names))],
+        )
+
+    @get("/threshold", opt=security(at_least(2, *names)))
+    async def threshold_success() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[threshold_success],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin(_compiler_config(names=names, max_openapi_combinations=36))],
+    )
+
+    assert len(cast("list[object]", _operation_security(app, "/threshold"))) == 36
+
+
+def test_openapi_component_contribution_preserves_callers_and_validates_duplicates() -> None:
+    scheme = SecurityScheme(type="http", scheme="bearer")
+    caller_components = Components(
+        responses={"Existing": OpenAPIResponse(description="Existing response")},
+        security_schemes={"foreign": SecurityScheme(type="mutualTLS"), "shared": scheme},
+    )
+    original_value = deepcopy(caller_components)
+    openapi_config = OpenAPIConfig(
+        title="Test", version="1.0", components=caller_components, render_plugins=[JsonRenderPlugin()]
+    )
+    app = Litestar(
+        route_handlers=[],
+        openapi_config=openapi_config,
+        plugins=[SecurityPlugin(_compiler_config(scheme_names={"a": "shared", "b": "shared"}))],
+    )
+
+    assert openapi_config.components is caller_components
+    assert caller_components == original_value
+    assert app.openapi_schema.components is not None
+    assert app.openapi_schema.components.responses == {"Existing": OpenAPIResponse(description="Existing response")}
+    assert app.openapi_schema.components.security_schemes == {
+        "foreign": SecurityScheme(type="mutualTLS"),
+        "shared": scheme,
+    }
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"Conflicting.*shared"):
+        Litestar(
+            route_handlers=[],
+            openapi_config=OpenAPIConfig(
+                title="Test",
+                version="1.0",
+                components=Components(
+                    security_schemes={
+                        "shared": SecurityScheme(type="apiKey", name="X-Key", security_scheme_in="header")
+                    }
+                ),
+            ),
+            plugins=[SecurityPlugin(_compiler_config(names=("a",), scheme_names={"a": "shared"}))],
+        )
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"Conflicting.*shared"):
+        Litestar(
+            route_handlers=[],
+            openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+            plugins=[
+                SecurityPlugin(
+                    _compiler_config(scheme_names={"a": "shared", "b": "shared"}, scheme_types={"b": "openIdConnect"})
+                )
+            ],
+        )
+
+
+def test_openapi_rejects_conflicting_shared_scheme_scopes_and_dynamic_native_security() -> None:
+    @get("/scopes", opt=security(all_of(mechanism("a", "one"), mechanism("b", "two"))))
+    async def scoped_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"conflicting scopes.*GET /scopes"):
+        Litestar(
+            route_handlers=[scoped_handler],
+            openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+            plugins=[
+                SecurityPlugin(
+                    _compiler_config(
+                        scheme_names={"a": "shared", "b": "shared"},
+                        scheme_types={"a": "openIdConnect", "b": "openIdConnect"},
+                    )
+                )
+            ],
+        )
+
+    plugin = SecurityPlugin()
+    app = Litestar(route_handlers=[], openapi_config=OpenAPIConfig(title="Test", version="1.0"), plugins=[plugin])
+
+    @get("/dynamic-native", security=[{"native": []}])
+    async def dynamic_native() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"Competing.*GET /dynamic-native"):
+        app.register(dynamic_native)
+
+
+@pytest.mark.parametrize("owner", ["application", "openapi", "router", "controller", "handler"])
+def test_competing_native_security_declarations_fail(owner: str) -> None:
+    native_security = [{"native": []}]
+
+    @get("/", security=native_security if owner == "handler" else None)
+    async def handler() -> None:
+        return None
+
+    route_handlers: list[Any]
+    if owner == "router":
+        route_handlers = [Router(path="/router", route_handlers=[handler], security=native_security)]
+    elif owner == "controller":
+
+        class NativeController(Controller):
+            path = "/controller"
+            security: ClassVar = native_security
+
+            @get("/")
+            async def owned(self) -> None:
+                return None
+
+        route_handlers = [NativeController]
+    else:
+        route_handlers = [handler]
+
+    openapi_config = OpenAPIConfig(
+        title="Test", version="1.0", security=native_security if owner == "openapi" else None
+    )
+    kwargs = {"security": native_security} if owner == "application" else {}
+
+    with pytest.raises(ImproperlyConfiguredException, match="competing"):
+        Litestar(route_handlers=route_handlers, openapi_config=openapi_config, plugins=[SecurityPlugin()], **kwargs)
+
+
+def test_memoized_native_security_is_replaced_and_openapi_disabled_needs_no_scheme() -> None:
+    class MemoizeSecurity(ReceiveRoutePlugin):
+        def receive_route(self, route_value: BaseRoute) -> None:
+            if isinstance(route_value, HTTPRoute):
+                for route_handler in route_value.route_handlers:
+                    route_handler.resolve_security()
+
+    @get("/memoized", opt=security(required("a")))
+    async def memoized_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[memoized_handler],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[MemoizeSecurity(), SecurityPlugin(_compiler_config(names=("a",)))],
+    )
+
+    assert _operation_security(app, "/memoized") == [{"a": []}]
+
+    slot = _CompilerSlot("slot-a")
+    mechanism_without_schema = AuthenticationMechanism(
+        authenticator=_CompilerAuthenticator("a", "slot-a"),  # type: ignore[arg-type]
+        resolver=_CompilerResolver(),
+    )
+    runtime_config = SecurityConfig(
+        slots=(slot,),  # type: ignore[arg-type]
+        mechanisms=(mechanism_without_schema,),
+    )
+
+    with pytest.raises(ImproperlyConfiguredException, match="a has no native OpenAPI security scheme"):
+        Litestar(route_handlers=[], plugins=[SecurityPlugin(runtime_config)])
+
+    @get("/memoized", opt=security(required("a")))
+    async def runtime_handler() -> None:
+        return None
+
+    runtime_only = Litestar(
+        route_handlers=[runtime_handler], openapi_config=None, plugins=[SecurityPlugin(runtime_config)]
+    )
+
+    assert _http_plan(runtime_only, "/memoized").participant_names == frozenset({"a"})
 
 
 def test_route_compiler_errors_include_method_and_path() -> None:

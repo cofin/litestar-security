@@ -7,6 +7,7 @@ from typing import cast
 
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException
+from litestar.openapi.spec import SecurityScheme
 
 from litestar_security.authentication import (
     Authenticated,
@@ -195,6 +196,24 @@ def test_required_without_arguments_is_the_implicit_secure_default() -> None:
     assert config.default_policy == required()
     assert config.default_policy != public()
     assert required() != required("session")
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"scheme_name": "bearer"}, {"security_scheme": SecurityScheme(type="http", scheme="bearer")}]
+)
+def test_authentication_mechanism_requires_complete_openapi_scheme_pair(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="configured together"):
+        AuthenticationMechanism(
+            authenticator=_Authenticator("a", "slot-a"),  # type: ignore[arg-type]
+            resolver=_Resolver(),
+            **kwargs,
+        )
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_security_config_requires_positive_openapi_combination_limit(limit: int) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match=r"max_openapi_combinations.*positive"):
+        SecurityConfig(max_openapi_combinations=limit)
 
 
 @pytest.mark.parametrize("case", [(None,), (True,), (False,)])

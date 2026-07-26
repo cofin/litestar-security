@@ -538,6 +538,7 @@ def test_security_config_is_typed_and_slotted() -> None:
         "mechanisms",
         "default_policy",
         "openapi_policy",
+        "max_openapi_combinations",
         "require_default",
         "session_backend",
         "plan_lookup",

@@ -2,14 +2,19 @@
 
 # The compiler is the sole package-internal consumer of the closed policy AST.
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from itertools import combinations
+from math import comb
+from types import MappingProxyType
 from typing import Generic, NoReturn, TypeVar, cast
+from warnings import catch_warnings, simplefilter
 
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar.exceptions import ImproperlyConfiguredException, LitestarDeprecationWarning
 from litestar.handlers.base import BaseRouteHandler
+from litestar.handlers.http_handlers import HTTPRouteHandler
 from litestar.openapi.config import OpenAPIConfig
+from litestar.openapi.spec import Components, Reference, SecurityRequirement, SecurityScheme
 from litestar.router import Router
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 
@@ -28,9 +33,10 @@ from litestar_security.authentication import (
     public,
 )
 
-__all__ = ("PolicyCompiler", "RouteCompiler")
+__all__ = ("OpenAPISchemeSet", "PolicyCompiler", "RouteCompiler", "prepare_openapi_config")
 
 UserT = TypeVar("UserT")
+_OPENAPI_SECURITY_OPT_KEY = "litestar_security_openapi_security"
 
 
 @dataclass(slots=True)
@@ -38,6 +44,7 @@ class PolicyCompiler(Generic[UserT]):
     """Compile and cache policy plans for one immutable mechanism registry."""
 
     registry: AuthenticationRegistry[UserT]
+    max_openapi_combinations: int = 32
     _cache: dict[tuple[AuthenticationPolicy, bool | None], SecurityRuntimePlan] = field(
         init=False, default_factory=dict[tuple[AuthenticationPolicy, bool | None], SecurityRuntimePlan], repr=False
     )
@@ -75,6 +82,13 @@ class PolicyCompiler(Generic[UserT]):
             alternatives = (requirements,)
         else:
             count = cast("int", expression.count)
+            combination_count = comb(len(requirements), count)
+            if combination_count > self.max_openapi_combinations:
+                message = (
+                    f"at_least({count}) over {len(requirements)} participants expands to {combination_count} "
+                    f"OpenAPI combinations, exceeding cap {self.max_openapi_combinations}"
+                )
+                raise ImproperlyConfiguredException(detail=message)
             alternatives = tuple(combinations(requirements, count))
         return SecurityRuntimePlan(
             authenticate=True,
@@ -99,6 +113,76 @@ class PolicyCompiler(Generic[UserT]):
         return tuple(by_name[name] for name in self.registry.mechanism_names if name in by_name)
 
 
+@dataclass(frozen=True, slots=True)
+class OpenAPISchemeSet:
+    """Validated native OpenAPI schemes indexed by authentication mechanism."""
+
+    by_mechanism: Mapping[str, tuple[str, SecurityScheme]]
+    unique_schemes: Mapping[str, SecurityScheme]
+
+    @classmethod
+    def from_registry(cls, registry: AuthenticationRegistry[object]) -> "OpenAPISchemeSet":
+        """Compile documentable schemes from one authentication registry."""
+        by_mechanism: dict[str, tuple[str, SecurityScheme]] = {}
+        unique_schemes: dict[str, SecurityScheme] = {}
+        for mechanism_name in registry.mechanism_names:
+            mechanism_value = registry.get_mechanism(mechanism_name)
+            scheme_name = mechanism_value.scheme_name
+            scheme = mechanism_value.security_scheme
+            if scheme_name is None or scheme is None:
+                message = f"Authentication mechanism {mechanism_name} has no native OpenAPI security scheme"
+                raise ImproperlyConfiguredException(detail=message)
+            if existing := unique_schemes.get(scheme_name):
+                if existing != scheme:
+                    message = f"Conflicting native OpenAPI security scheme: {scheme_name}"
+                    raise ImproperlyConfiguredException(detail=message)
+            else:
+                unique_schemes[scheme_name] = scheme
+            by_mechanism[mechanism_name] = (scheme_name, scheme)
+        return cls(by_mechanism=MappingProxyType(by_mechanism), unique_schemes=MappingProxyType(unique_schemes))
+
+    def project(self, plan: SecurityRuntimePlan) -> list[SecurityRequirement]:
+        """Project one runtime plan into native OpenAPI requirements."""
+        if not plan.authenticate:
+            return [{}]
+        projection: list[SecurityRequirement] = []
+        if plan.allow_anonymous:
+            projection.append({})
+        for alternative in plan.alternatives:
+            requirement: SecurityRequirement = {}
+            for participant in alternative:
+                scheme_name, scheme = self.by_mechanism[participant.name]
+                if participant.scopes and scheme.type not in {"oauth2", "openIdConnect"}:
+                    message = f"OpenAPI security scheme {scheme_name} does not support OAuth or OIDC scopes"
+                    raise ImproperlyConfiguredException(detail=message)
+                scopes = list(participant.scopes)
+                if scheme_name in requirement and requirement[scheme_name] != scopes:
+                    message = f"OpenAPI security scheme {scheme_name} has conflicting scopes in one requirement"
+                    raise ImproperlyConfiguredException(detail=message)
+                requirement[scheme_name] = scopes
+            projection.append(requirement)
+        return projection
+
+
+def prepare_openapi_config(config: OpenAPIConfig, schemes: OpenAPISchemeSet) -> OpenAPIConfig:
+    """Copy an OpenAPI config with a separate native scheme contribution."""
+    components = config.components if isinstance(config.components, list) else [config.components]
+    contribution: dict[str, SecurityScheme | Reference] = dict(schemes.unique_schemes)
+    for existing_components in components:
+        for name, existing in (existing_components.security_schemes or {}).items():
+            if name not in contribution:
+                continue
+            if contribution[name] != existing:
+                message = f"Conflicting native OpenAPI security scheme: {name}"
+                raise ImproperlyConfiguredException(detail=message)
+            contribution.pop(name)
+    if not contribution:
+        return config
+    with catch_warnings():
+        simplefilter("ignore", LitestarDeprecationWarning)
+        return replace(config, components=[*components, Components(security_schemes=contribution)])
+
+
 @dataclass(slots=True)
 class RouteCompiler(Generic[UserT]):
     """Compile one effective runtime plan for every registered Litestar handler."""
@@ -107,11 +191,18 @@ class RouteCompiler(Generic[UserT]):
     default_policy: AuthenticationPolicy
     openapi_policy: AuthenticationPolicy | None = None
     openapi_config: OpenAPIConfig | None = None
+    max_openapi_combinations: int = 32
     _policy_compiler: PolicyCompiler[UserT] = field(init=False, repr=False)
+    _schemes: OpenAPISchemeSet | None = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Create one per-registry policy compiler."""
-        self._policy_compiler = PolicyCompiler(self.registry)
+        self._policy_compiler = PolicyCompiler(self.registry, max_openapi_combinations=self.max_openapi_combinations)
+        self._schemes = (
+            OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", self.registry))
+            if self.openapi_config is not None
+            else None
+        )
 
     def receive_route(self, route: BaseRoute) -> None:
         """Compile and attach runtime plans for one registered native route."""
@@ -132,7 +223,7 @@ class RouteCompiler(Generic[UserT]):
             asgi_route, asgi_route.route_handler, self._default_plan(asgi_route, asgi_route.route_handler)
         )
 
-    def _compile_http_handler(self, route: HTTPRoute, route_handler: BaseRouteHandler) -> None:
+    def _compile_http_handler(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> None:
         if self._is_generated_options(route_handler):
             plan = self._compile_policy(route, route_handler, public())
         elif self._is_openapi_handler(route_handler):
@@ -143,6 +234,8 @@ class RouteCompiler(Generic[UserT]):
         else:
             plan = self._effective_plan(route, route_handler)
         self._attach_plan(route, route_handler, plan)
+        if self._schemes is not None:
+            self._attach_openapi_security(route, route_handler, plan)
 
     def _effective_plan(self, route: BaseRoute, route_handler: BaseRouteHandler) -> SecurityRuntimePlan:
         if declaration := self._resolved_declaration(route, route_handler):
@@ -208,6 +301,31 @@ class RouteCompiler(Generic[UserT]):
             if isinstance(layer, Router) and layer.path == base_path:
                 return True
         return False
+
+    def _attach_openapi_security(
+        self, route: HTTPRoute, route_handler: HTTPRouteHandler, plan: SecurityRuntimePlan
+    ) -> None:
+        schemes = cast("OpenAPISchemeSet", self._schemes)
+        try:
+            projection = schemes.project(plan)
+        except ImproperlyConfiguredException as exc:
+            self._raise_route_error(route, route_handler, exc.detail)
+        canonical = tuple(tuple((name, tuple(scopes)) for name, scopes in item.items()) for item in projection)
+        existing_canonical = route_handler.opt.get(_OPENAPI_SECURITY_OPT_KEY)
+        for layer in route_handler.ownership_layers:
+            native_security = getattr(layer, "security", None)
+            if not isinstance(native_security, Sequence) or isinstance(native_security, str) or not native_security:
+                continue
+            if (
+                layer is route_handler
+                and existing_canonical == canonical
+                and list(cast("Sequence[SecurityRequirement]", native_security)) == projection
+            ):
+                continue
+            self._raise_route_error(route, route_handler, "Competing native Litestar security declaration")
+        route_handler.security = projection
+        route_handler.resolve_security()[:] = projection
+        route_handler.opt[_OPENAPI_SECURITY_OPT_KEY] = canonical
 
     @staticmethod
     def _is_generated_options(route_handler: BaseRouteHandler) -> bool:

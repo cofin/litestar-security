@@ -573,7 +573,9 @@ def test_authenticated_dependency_injection_for_user_and_service_principals(
         return current_user.name
 
     with TestClient(
-        Litestar(route_handlers=[principal_handler, user_handler], plugins=[_identity_plugin(principal)])
+        Litestar(
+            route_handlers=[principal_handler, user_handler], openapi_config=None, plugins=[_identity_plugin(principal)]
+        )
     ) as client:
         principal_response = client.get("/principal")
         user_response = client.get("/user")

@@ -11,6 +11,7 @@ from litestar.enums import ScopeType
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
 from litestar.middleware import DefineMiddleware
 from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
+from litestar.openapi.spec import SecurityScheme
 from litestar.types import ASGIApp, HTTPScope, Receive, Scope, Send
 from typing_extensions import Self
 
@@ -294,6 +295,16 @@ class AuthenticationMechanism(Generic[CredentialT, ClaimsT, UserT]):
 
     authenticator: RequestAuthenticator[CredentialT, ClaimsT]
     resolver: IdentityResolver[ClaimsT, UserT]
+    scheme_name: str | None = None
+    security_scheme: SecurityScheme | None = field(default=None, hash=False)
+
+    def __post_init__(self) -> None:
+        """Validate the optional native OpenAPI scheme pair."""
+        if (self.scheme_name is None) is not (self.security_scheme is None):
+            message = "Authentication mechanism OpenAPI scheme name and definition must be configured together"
+            raise ImproperlyConfiguredException(detail=message)
+        if self.scheme_name is not None:
+            object.__setattr__(self, "scheme_name", _normalize_name(self.scheme_name, "OpenAPI security scheme name"))
 
 
 @dataclass(frozen=True, slots=True)

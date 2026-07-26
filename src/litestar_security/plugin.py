@@ -1,6 +1,6 @@
 """Litestar Security plugin integration."""
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, Generic, TypeAlias, TypeVar, cast
 
 from click import Group as ClickGroup
@@ -24,7 +24,7 @@ from litestar_security.authentication import (
 )
 from litestar_security.config import SecurityConfig
 from litestar_security.context import Principal, SecurityContext
-from litestar_security.openapi import RouteCompiler
+from litestar_security.openapi import OpenAPISchemeSet, RouteCompiler, prepare_openapi_config
 
 __all__ = ("CurrentUser", "PrincipalDependency", "SecurityContextDependency", "SecurityPlugin")
 
@@ -109,6 +109,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
         """Validate ownership and install one typed security runtime."""
         self._validate_dependency_map(app_config.dependencies, "application")
+        self._validate_native_security(app_config)
         for dependencies, owner in self._iter_owned_dependency_maps(app_config):
             self._validate_dependency_map(dependencies, owner)
 
@@ -125,12 +126,17 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             raise ImproperlyConfiguredException(detail=message)
 
         runtime, middleware = self._get_runtime(existing_session=bool(native_sessions))
+        openapi_config = app_config.openapi_config
+        if openapi_config is not None:
+            schemes = OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", runtime.registry))
+            app_config.openapi_config = openapi_config = prepare_openapi_config(openapi_config, schemes)
         if self._route_compiler is None:
             self._route_compiler = RouteCompiler(
                 registry=runtime.registry,
                 default_policy=self.config.default_policy,
                 openapi_policy=self.config.openapi_policy,
-                openapi_config=app_config.openapi_config,
+                openapi_config=openapi_config,
+                max_openapi_combinations=self.config.max_openapi_combinations,
             )
         app_config.dependencies.update(self._providers)
         for name, value in _SIGNATURE_NAMESPACE.items():
@@ -185,6 +191,21 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             if dependencies and name in dependencies and dependencies[name] is not self._providers[name]:
                 message = f"Reserved security dependency {name!r} collides at the {owner} ownership level"
                 raise ImproperlyConfiguredException(detail=message)
+
+    @staticmethod
+    def _validate_native_security(app_config: AppConfig) -> None:
+        if app_config.security:
+            message = "Application config contains competing native Litestar security declarations"
+            raise ImproperlyConfiguredException(detail=message)
+        if app_config.openapi_config is not None and app_config.openapi_config.security:
+            message = "OpenAPI config contains competing root native security declarations"
+            raise ImproperlyConfiguredException(detail=message)
+        for route_handler in app_config.route_handlers:
+            for layer in _iter_route_handler_layers(route_handler):
+                native_security = getattr(layer, "security", None)
+                if isinstance(native_security, Sequence) and not isinstance(native_security, str) and native_security:
+                    message = f"{_owner_name(layer).title()} contains competing native Litestar security declarations"
+                    raise ImproperlyConfiguredException(detail=message)
 
     @staticmethod
     def _is_native_session_middleware(middleware: object) -> bool:
