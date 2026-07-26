@@ -24,7 +24,7 @@ __all__ = (
     "SessionUnavailableError",
 )
 
-UserT = TypeVar("UserT") # ai: should this not just reuse what's in litestar?
+UserT = TypeVar("UserT")
 
 
 class SessionUnavailableError(RuntimeError):
@@ -43,38 +43,6 @@ class SessionPersistenceUnavailableError(SessionUnavailableError):
         """Initialize the stable public error."""
         message = "WebSocket sessions cannot persist mutations"
         RuntimeError.__init__(self, message)
-
-# ai: private functions should not be above public ones
-def _normalize_text(value: str, label: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        msg = f"{label} must not be blank"
-        raise ValueError(msg)
-    return normalized
-
-
-def _normalize_values(values: AbstractSet[str], label: str) -> frozenset[str]:
-    return frozenset(_normalize_text(value, label) for value in values)
-
-
-def _normalize_optional_values(values: AbstractSet[str] | None, label: str) -> frozenset[str] | None:
-    return None if values is None else _normalize_values(values, label)
-
-
-def _normalize_datetime(value: datetime, label: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        msg = f"{label} must be timezone-aware"
-        raise ValueError(msg)
-    return value.astimezone(timezone.utc)
-
-
-def _empty_team_roles() -> Mapping[str, frozenset[str]]:
-    return MappingProxyType({})
-
-
-def _empty_attributes() -> Mapping[str, object]:
-    return MappingProxyType({})
-
 
 @runtime_checkable
 class SessionHandle(Protocol):
@@ -257,9 +225,13 @@ class AuthorizationSnapshot:
     scopes: frozenset[str] = frozenset()
     roles: frozenset[str] = frozenset()
     capabilities: frozenset[str] = frozenset()
-    team_roles: Mapping[str, frozenset[str]] = field(default_factory=_empty_team_roles)
+    team_roles: Mapping[str, frozenset[str]] = field(
+        default_factory=lambda: cast("Mapping[str, frozenset[str]]", MappingProxyType({}))
+    )
     tenant_ids: frozenset[str] = frozenset()
-    attributes: Mapping[str, object] = field(default_factory=_empty_attributes)
+    attributes: Mapping[str, object] = field(
+        default_factory=lambda: cast("Mapping[str, object]", MappingProxyType({}))
+    )
 
     def __post_init__(self) -> None:
         """Defensively normalize and freeze authorization inputs."""
@@ -318,3 +290,26 @@ class SecurityContext:
         """Return the earliest bounded evidence expiry."""
         expirations = tuple(evidence.expires_at for evidence in self.evidence if evidence.expires_at is not None)
         return min(expirations) if expirations else None
+
+
+def _normalize_text(value: str, label: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        msg = f"{label} must not be blank"
+        raise ValueError(msg)
+    return normalized
+
+
+def _normalize_values(values: AbstractSet[str], label: str) -> frozenset[str]:
+    return frozenset(_normalize_text(value, label) for value in values)
+
+
+def _normalize_optional_values(values: AbstractSet[str] | None, label: str) -> frozenset[str] | None:
+    return None if values is None else _normalize_values(values, label)
+
+
+def _normalize_datetime(value: datetime, label: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        msg = f"{label} must be timezone-aware"
+        raise ValueError(msg)
+    return value.astimezone(timezone.utc)
