@@ -6,14 +6,17 @@ import json
 import re
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from functools import partial
+from secrets import token_urlsafe
 from types import MappingProxyType
-from typing import Any, Generic, Literal, NoReturn, Protocol, TypeAlias, TypeVar, cast
+from typing import Any, Generic, Literal, NoReturn, Protocol, TypeAlias, TypeVar, cast, runtime_checkable
 
 import jwt
-from anyio import to_thread
+from anyio import CapacityLimiter, to_thread
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from jwt import PyJWK
 from jwt.exceptions import PyJWTError
@@ -43,6 +46,12 @@ __all__ = (
     "JWTClaims",
     "JWTValidationConfig",
     "JWTVerifier",
+    "LocalKeyRing",
+    "SigningKey",
+    "TokenSigner",
+    "VerificationKey",
+    "VerificationKeySet",
+    "build_access_token_claims",
 )
 
 JSONValue: TypeAlias = bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"] | None
@@ -51,6 +60,7 @@ VerificationKeyInput: TypeAlias = bytes | str | PyJWK | Mapping[str, JSONValue]
 PreparedVerificationKey: TypeAlias = (
     bytes | str | PyJWK | rsa.RSAPublicKey | ec.EllipticCurvePublicKey | ed25519.Ed25519PublicKey
 )
+PreparedSigningKey: TypeAlias = bytes | rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey | ed25519.Ed25519PrivateKey
 ClaimsT = TypeVar("ClaimsT")
 UserT = TypeVar("UserT")
 
@@ -67,6 +77,8 @@ _MINIMUM_RSA_BITS = 2048
 _ASCII_CONTROL_LIMIT = 32
 _ASCII_DELETE = 127
 _BEARER_PREFIX_LENGTH = len(b"Bearer ")
+_LOCAL_ACCESS_REQUIRED_CLAIMS = frozenset({"iss", "sub", "aud", "exp", "iat", "client_id", "jti", "se"})
+_LOCAL_ACCESS_ALLOWED_CLAIMS = _LOCAL_ACCESS_REQUIRED_CLAIMS.union({"nbf", "scope"})
 _INVALID = InvalidCredentials()
 
 
@@ -134,6 +146,219 @@ class JWTValidationConfig:
         object.__setattr__(self, "token_types", token_types)
 
 
+@dataclass(frozen=True, slots=True)
+class SigningKey:
+    """One explicit local signing key and its public verification metadata."""
+
+    key_id: str
+    algorithm: JWTAlgorithm
+    private_key: bytes = field(repr=False)
+    public_jwk: Mapping[str, JSONValue] | None = None
+    _prepared_key: PreparedSigningKey = field(init=False, repr=False, compare=False)
+    _verification_key: bytes = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate key strength, purpose, and public/private correspondence."""
+        key_id = _strict_key_id(self.key_id)
+        prepared, verification_key = _prepare_signing_material(self.private_key, self.algorithm)
+        public_jwk = _prepare_public_jwk(self.public_jwk, prepared, self.algorithm, key_id)
+        object.__setattr__(self, "key_id", key_id)
+        object.__setattr__(self, "public_jwk", public_jwk)
+        object.__setattr__(self, "_prepared_key", prepared)
+        object.__setattr__(self, "_verification_key", verification_key)
+
+    def as_verification_key(self) -> "VerificationKey":
+        """Return the active key's verification-only representation."""
+        return VerificationKey(
+            key_id=self.key_id, algorithm=self.algorithm, key=self._verification_key, public_jwk=self.public_jwk
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationKey:
+    """One explicit verification-only key retained for local rotation."""
+
+    key_id: str
+    algorithm: JWTAlgorithm
+    key: bytes = field(repr=False)
+    public_jwk: Mapping[str, JSONValue] | None = None
+    _prepared_key: PreparedVerificationKey = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Reject private, weak, mismatched, or publication-unsafe material."""
+        key_id = _strict_key_id(self.key_id)
+        prepared = _prepare_retained_verification_key(self.key, self.algorithm)
+        public_jwk = _prepare_public_jwk(self.public_jwk, prepared, self.algorithm, key_id)
+        object.__setattr__(self, "key_id", key_id)
+        object.__setattr__(self, "public_jwk", public_jwk)
+        object.__setattr__(self, "_prepared_key", prepared)
+
+
+@runtime_checkable
+class TokenSigner(Protocol):
+    """Sign caller-built local claims without owning application persistence."""
+
+    async def sign(self, claims: Mapping[str, JSONValue], *, now: datetime) -> str:
+        """Return one compact signed access token."""
+        ...  # pragma: no cover
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationKeySet:
+    """One issuer's immutable verification-only keys for local or custom signers."""
+
+    issuer: str
+    keys: tuple[VerificationKey, ...]
+
+    def __post_init__(self) -> None:
+        """Normalize the issuer and reject empty or ambiguous key selection."""
+        issuer = _strict_identifier(self.issuer)
+        keys = tuple(self.keys)
+        if not keys:
+            _raise_config("Verification key set must contain at least one key")
+        key_ids = tuple(key.key_id for key in keys)
+        if len(frozenset(key_ids)) != len(key_ids):
+            _raise_config("Duplicate local key id")
+        object.__setattr__(self, "issuer", issuer)
+        object.__setattr__(self, "keys", keys)
+
+    def build_verifier(
+        self,
+        config: JWTValidationConfig,
+        *,
+        mechanism_name: str = "jwt",
+        slot_name: str = "authorization.bearer",
+        limiter: CapacityLimiter | None = None,
+    ) -> "JWTVerifier[JWTClaims]":
+        """Build one exact-kid verifier across this trusted key set."""
+        if config.issuer != self.issuer:
+            _raise_config("Verification key set issuer must match JWT validation config issuer")
+        mechanism_name = _strict_identifier(mechanism_name)
+        slot_name = _strict_identifier(slot_name)
+        verifiers: dict[tuple[str, str], PyJWTVerifier] = {}
+        for verification_key in self.keys:
+            if verification_key.algorithm not in config.algorithms:
+                continue
+            key_config = replace(config, algorithms=frozenset({verification_key.algorithm}))
+            verifiers[(verification_key.key_id, verification_key.algorithm)] = PyJWTVerifier(
+                config=key_config,
+                key=verification_key.key,
+                require_key_id=True,
+                mechanism_name=mechanism_name,
+                slot_name=slot_name,
+                limiter=limiter,
+            )
+        if not verifiers:
+            _raise_config("Verification key set has no key accepted by JWT validation config")
+        return _LocalKeyRingVerifier(config=config, verifiers=MappingProxyType(verifiers))
+
+
+@dataclass(frozen=True, slots=True)
+class LocalKeyRing:
+    """Immutable active and retained local key configuration."""
+
+    issuer: str
+    active_signing_key: SigningKey
+    verification_keys: tuple[VerificationKey, ...] = ()
+    _verification_key_set: VerificationKeySet = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Normalize the issuer and reject ambiguous rotation state."""
+        issuer = _strict_identifier(self.issuer)
+        verification_keys = tuple(self.verification_keys)
+        key_set = VerificationKeySet(
+            issuer=issuer, keys=(self.active_signing_key.as_verification_key(), *verification_keys)
+        )
+        object.__setattr__(self, "issuer", issuer)
+        object.__setattr__(self, "verification_keys", verification_keys)
+        object.__setattr__(self, "_verification_key_set", key_set)
+
+    @property
+    def all_verification_keys(self) -> tuple[VerificationKey, ...]:
+        """Return the active key followed by retained verification-only keys."""
+        return self._verification_key_set.keys
+
+    @property
+    def verification_key_set(self) -> VerificationKeySet:
+        """Return the public verification-only view used by local or custom signers."""
+        return self._verification_key_set
+
+    def build_signer(self, *, limiter: CapacityLimiter | None = None) -> TokenSigner:
+        """Build the local signer without generating or discovering key material."""
+        return _LocalJWTSigner(issuer=self.issuer, signing_key=self.active_signing_key, limiter=limiter)
+
+    def build_verifier(
+        self,
+        config: JWTValidationConfig,
+        *,
+        mechanism_name: str = "jwt",
+        slot_name: str = "authorization.bearer",
+        limiter: CapacityLimiter | None = None,
+    ) -> "JWTVerifier[JWTClaims]":
+        """Build one exact-kid verifier across the active and retained keys."""
+        if self.active_signing_key.algorithm not in config.algorithms:
+            _raise_config("Local key ring active signing algorithm must be accepted by JWT validation config")
+        return self._verification_key_set.build_verifier(
+            config, mechanism_name=mechanism_name, slot_name=slot_name, limiter=limiter
+        )
+
+
+def build_access_token_claims(  # noqa: PLR0913
+    *,
+    issuer: str,
+    audience: str,
+    subject: str,
+    client_id: str,
+    security_epoch: int,
+    now: datetime,
+    lifetime: timedelta,
+    scopes: AbstractSet[str] = frozenset(),
+    jti: str | None = None,
+    not_before: datetime | None = None,
+) -> Mapping[str, JSONValue]:
+    """Build minimal deterministic RFC 9068-style local access-token claims."""
+    issuer = _strict_identifier_value(issuer)
+    audience = _strict_identifier_value(audience)
+    subject = _strict_identifier_value(subject)
+    client_id = _strict_identifier_value(client_id)
+    epoch_value: object = security_epoch
+    if (
+        isinstance(epoch_value, bool)
+        or not isinstance(epoch_value, int)  # pyright: ignore[reportUnnecessaryIsInstance]
+        or epoch_value < 0
+    ):
+        _raise_value("Access-token security epoch must be a non-negative integer")
+    now = _aware_utc(now)
+    if lifetime <= timedelta(0):
+        _raise_value("Access-token lifetime must be positive")
+    expires_at = now + lifetime
+    issued_timestamp = int(now.timestamp())
+    expires_timestamp = int(expires_at.timestamp())
+    if expires_timestamp <= issued_timestamp:
+        _raise_value("Access-token lifetime must span at least one whole second")
+    if not_before is not None:
+        not_before = _aware_utc(not_before)
+        if not_before >= expires_at:
+            _raise_value("Access-token not-before must precede expiry")
+    token_id = _strict_identifier_value(jti if jti is not None else token_urlsafe(32))
+    normalized_scopes = frozenset(_strict_identifier_value(scope) for scope in scopes)
+    claims: dict[str, JSONValue] = {
+        "iss": issuer,
+        "sub": subject,
+        "aud": audience,
+        "exp": expires_timestamp,
+        "iat": issued_timestamp,
+        "client_id": client_id,
+        "jti": token_id,
+        "se": security_epoch,
+    }
+    if normalized_scopes:
+        claims["scope"] = " ".join(sorted(normalized_scopes))
+    if not_before is not None:
+        claims["nbf"] = int(not_before.timestamp())
+    return cast("Mapping[str, JSONValue]", MappingProxyType(claims))
+
+
 class JWTVerifier(Protocol, Generic[ClaimsT]):
     """Verify one compact JWT against a configured trust domain."""
 
@@ -189,6 +414,7 @@ class PyJWTVerifier:
     mechanism_name: str = "jwt"
     slot_name: str = "authorization.bearer"
     maximum_token_bytes: int = 16_384
+    limiter: CapacityLimiter | None = field(default=None, repr=False, compare=False)
     _prepared_keys: Mapping[str, PreparedVerificationKey] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -221,7 +447,7 @@ class PyJWTVerifier:
             return claims
         verify = partial(_verify_signature, token, self._prepared_keys[algorithm], algorithm)
         try:
-            await to_thread.run_sync(verify, abandon_on_cancel=True)
+            await to_thread.run_sync(verify, abandon_on_cancel=True, limiter=self.limiter)
         except (PyJWTError, TypeError, ValueError):
             return _INVALID
         except Exception:  # noqa: BLE001
@@ -232,6 +458,51 @@ class PyJWTVerifier:
                 mechanism=self.mechanism_name, slot=self.slot_name, authenticated_at=now, expires_at=claims.expires_at
             ),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _LocalJWTSigner:
+    issuer: str
+    signing_key: SigningKey = field(repr=False)
+    limiter: CapacityLimiter | None = field(default=None, repr=False, compare=False)
+
+    async def sign(self, claims: Mapping[str, JSONValue], *, now: datetime) -> str:
+        """Validate and sign one minimal local access token in a worker."""
+        normalized_now = _aware_utc(now)
+        payload = _validate_local_access_claims(claims, issuer=self.issuer, now=normalized_now)
+        sign = partial(
+            jwt.encode,
+            payload,
+            cast("Any", self.signing_key)._prepared_key,  # noqa: SLF001
+            algorithm=self.signing_key.algorithm,
+            headers={"kid": self.signing_key.key_id, "typ": "at+jwt"},
+        )
+        try:
+            token = await to_thread.run_sync(sign, abandon_on_cancel=True, limiter=self.limiter)
+        except Exception:  # noqa: BLE001
+            message = "Token signing unavailable"
+            raise RuntimeError(message) from None
+        return token
+
+
+@dataclass(slots=True)
+class _LocalKeyRingVerifier:
+    config: JWTValidationConfig
+    verifiers: Mapping[tuple[str, str], PyJWTVerifier] = field(repr=False)
+
+    async def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[JWTClaims]:
+        """Select only a configured local `(kid, alg)` tuple and verify once."""
+        route = parse_unverified_jwt_route(token)
+        if isinstance(route, InvalidCredentials):
+            return route
+        key_id = route.header.get("kid")
+        algorithm = route.header.get("alg")
+        if not isinstance(key_id, str) or not isinstance(algorithm, str):
+            return _INVALID
+        verifier = self.verifiers.get((key_id, algorithm))
+        if verifier is None:
+            return _INVALID
+        return await verifier.verify(token, now=now)
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,6 +898,201 @@ def _freeze_json(value: JSONValue) -> JSONValue:
     if isinstance(value, list):
         return cast("JSONValue", tuple(_freeze_json(item) for item in value))
     return value
+
+
+def _prepare_signing_material(private_key: bytes, algorithm: JWTAlgorithm) -> tuple[PreparedSigningKey, bytes]:
+    if algorithm not in _SUPPORTED_ALGORITHMS:
+        _raise_config(f"Unsupported local signing algorithm: {algorithm}")
+    try:
+        key_value: object = private_key
+        if not isinstance(key_value, bytes):  # pyright: ignore[reportUnnecessaryIsInstance]
+            _reject()
+        if algorithm == "HS256":
+            if len(key_value) < _MINIMUM_HMAC_BYTES:
+                _reject()
+            return key_value, key_value
+        loaded_key = serialization.load_pem_private_key(key_value, password=None)
+        prepared = _validate_prepared_signing_key(loaded_key, algorithm)
+        asymmetric_key = cast("rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey | ed25519.Ed25519PrivateKey", prepared)
+        verification_key = asymmetric_key.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+    except (TypeError, ValueError):
+        _raise_config(f"Invalid {algorithm} JWT signing key")
+    else:
+        return prepared, verification_key
+
+
+def _validate_prepared_signing_key(key: object, algorithm: JWTAlgorithm) -> PreparedSigningKey:
+    if algorithm == "RS256" and (not isinstance(key, rsa.RSAPrivateKey) or key.key_size < _MINIMUM_RSA_BITS):
+        _reject()
+    if algorithm == "ES256" and (
+        not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1)
+    ):
+        _reject()
+    if algorithm == "EdDSA" and not isinstance(key, ed25519.Ed25519PrivateKey):
+        _reject()
+    return cast("PreparedSigningKey", key)
+
+
+def _prepare_retained_verification_key(key: bytes, algorithm: JWTAlgorithm) -> PreparedVerificationKey:
+    if algorithm not in _SUPPORTED_ALGORITHMS:
+        _raise_config(f"Unsupported local verification algorithm: {algorithm}")
+    try:
+        key_value: object = key
+        if not isinstance(key_value, bytes):  # pyright: ignore[reportUnnecessaryIsInstance]
+            _reject()
+        if algorithm == "HS256":
+            if len(key_value) < _MINIMUM_HMAC_BYTES:
+                _reject()
+            return key_value
+        prepared = serialization.load_pem_public_key(key_value)
+        expected_type: type[object]
+        if algorithm == "RS256":
+            expected_type = rsa.RSAPublicKey
+        elif algorithm == "ES256":
+            expected_type = ec.EllipticCurvePublicKey
+        else:
+            expected_type = ed25519.Ed25519PublicKey
+        if not isinstance(prepared, expected_type):
+            _reject()
+        return _validate_prepared_key(prepared, algorithm)
+    except (TypeError, ValueError):
+        _raise_config(f"Invalid {algorithm} JWT verification key")
+
+
+def _prepare_public_jwk(
+    value: Mapping[str, JSONValue] | None,
+    key: PreparedSigningKey | PreparedVerificationKey,
+    algorithm: JWTAlgorithm,
+    key_id: str,
+) -> Mapping[str, JSONValue] | None:
+    if algorithm == "HS256":
+        if value is not None:
+            _raise_config("HS256 signing and verification keys cannot have a public JWK")
+        return None
+    public_key = _as_public_key(key)
+    if value is None:
+        raw = cast("dict[str, JSONValue]", jwt.get_algorithm_by_name(algorithm).to_jwk(public_key, as_dict=True))
+        raw.update({"alg": algorithm, "kid": key_id, "key_ops": ["verify"], "use": "sig"})
+    else:
+        raw = dict(value)
+        try:
+            _validate_public_jwk(raw, algorithm)
+            if raw.get("kid") not in {None, key_id}:
+                _reject()
+            jwk_key = _prepare_key(raw, algorithm)
+        except (ImproperlyConfiguredException, PyJWTError, TypeError, ValueError):
+            _raise_config(f"Invalid {algorithm} public JWK")
+        if _public_key_bytes(jwk_key) != _public_key_bytes(public_key):
+            _raise_config(f"{algorithm} public JWK does not correspond to key material")
+        raw["kid"] = key_id
+        raw["alg"] = algorithm
+        raw["use"] = "sig"
+        raw["key_ops"] = ["verify"]
+    return cast("Mapping[str, JSONValue]", _freeze_json(cast("JSONValue", raw)))
+
+
+def _as_public_key(
+    key: PreparedSigningKey | PreparedVerificationKey,
+) -> rsa.RSAPublicKey | ec.EllipticCurvePublicKey | ed25519.Ed25519PublicKey:
+    if isinstance(key, (rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey, ed25519.Ed25519PrivateKey)):
+        return key.public_key()
+    return cast("rsa.RSAPublicKey | ec.EllipticCurvePublicKey | ed25519.Ed25519PublicKey", key)
+
+
+def _public_key_bytes(key: object) -> bytes:
+    public_key = _as_public_key(cast("PreparedVerificationKey", key))
+    return public_key.public_bytes(
+        encoding=serialization.Encoding.DER, format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+
+
+def _validate_local_access_claims(
+    claims: Mapping[str, JSONValue], *, issuer: str, now: datetime
+) -> dict[str, JSONValue]:
+    payload = dict(claims)
+    if not _LOCAL_ACCESS_REQUIRED_CLAIMS.issubset(payload) or frozenset(payload).difference(
+        _LOCAL_ACCESS_ALLOWED_CLAIMS
+    ):
+        _raise_value("Invalid local access-token claims")
+    identifiers = (
+        payload.get("iss"),
+        payload.get("sub"),
+        payload.get("aud"),
+        payload.get("client_id"),
+        payload.get("jti"),
+    )
+    if (
+        any(not isinstance(value, str) or not _is_strict_identifier(value) for value in identifiers)
+        or payload.get("iss") != issuer
+    ):
+        _raise_value("Invalid local access-token claims")
+    issued_at = payload.get("iat")
+    expires_at = payload.get("exp")
+    security_epoch = payload.get("se")
+    if (
+        isinstance(issued_at, bool)
+        or not isinstance(issued_at, int)
+        or issued_at != int(now.timestamp())
+        or isinstance(expires_at, bool)
+        or not isinstance(expires_at, int)
+        or expires_at <= issued_at
+        or isinstance(security_epoch, bool)
+        or not isinstance(security_epoch, int)
+        or security_epoch < 0
+    ):
+        _raise_value("Invalid local access-token claims")
+    not_before = payload.get("nbf")
+    if not_before is not None and (
+        isinstance(not_before, bool) or not isinstance(not_before, int) or not_before >= expires_at
+    ):
+        _raise_value("Invalid local access-token claims")
+    scope = payload.get("scope")
+    if scope is not None and (
+        not isinstance(scope, str) or any(not _is_strict_identifier(value) for value in scope.split(" "))
+    ):
+        _raise_value("Invalid local access-token claims")
+    return payload
+
+
+def _aware_utc(value: datetime) -> datetime:
+    timestamp_value: object = value
+    if (
+        not isinstance(timestamp_value, datetime)  # pyright: ignore[reportUnnecessaryIsInstance]
+        or timestamp_value.tzinfo is None
+        or timestamp_value.utcoffset() is None
+    ):
+        _raise_value("Access-token timestamps must be timezone-aware")
+    return timestamp_value.astimezone(timezone.utc)
+
+
+def _strict_identifier_value(value: str) -> str:
+    identifier: object = value
+    if (
+        not isinstance(identifier, str)  # pyright: ignore[reportUnnecessaryIsInstance]
+        or not _is_strict_identifier(identifier)
+    ):
+        _raise_value("Access-token identifiers must be non-empty normalized strings")
+    return identifier
+
+
+def _strict_key_id(value: str) -> str:
+    key_id: object = value
+    if (
+        not isinstance(key_id, str)  # pyright: ignore[reportUnnecessaryIsInstance]
+        or not _is_strict_identifier(key_id)
+    ):
+        _raise_config("Local key id must be a non-empty normalized string")
+    return key_id
+
+
+def _reject() -> NoReturn:
+    raise ValueError
+
+
+def _raise_value(message: str) -> NoReturn:
+    raise ValueError(message)
 
 
 def _prepare_key(key: VerificationKeyInput, algorithm: JWTAlgorithm) -> PreparedVerificationKey:

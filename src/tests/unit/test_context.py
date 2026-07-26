@@ -583,6 +583,12 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "JWTClaims",
         "JWTValidationConfig",
         "JWTVerifier",
+        "LocalKeyRing",
+        "SigningKey",
+        "TokenSigner",
+        "VerificationKey",
+        "VerificationKeySet",
+        "build_access_token_claims",
     )
     jwt_module = import_module("litestar_security.providers.jwt")
     assert jwt_module.__all__ == providers.__all__
