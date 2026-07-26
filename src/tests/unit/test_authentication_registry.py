@@ -1,5 +1,6 @@
 """Unit tests for authentication outcomes and registry compilation."""
 
+import asyncio
 import base64
 import gzip
 import json
@@ -12,6 +13,8 @@ from typing import Any, cast
 import httpx
 import jwt
 import pytest
+from anyio import CancelScope, Event, create_task_group, fail_after, get_cancelled_exc_class
+from anyio.lowlevel import checkpoint
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from litestar.exceptions import ImproperlyConfiguredException
@@ -286,6 +289,51 @@ class _RecordingJWKSFetcher:
             message = "Unexpected JWKS fetch"
             raise AssertionError(message)
         response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response(request) if callable(response) else response
+
+
+class _BlockingJWKSFetcher:
+    def __init__(
+        self,
+        *responses: JWKSFetchResponse | Exception | Callable[[JWKSFetchRequest], JWKSFetchResponse],
+        immediate_calls: int = 0,
+        maximum_calls: int = 1,
+        issuers: tuple[str, ...] = (),
+    ) -> None:
+        self.responses = responses
+        self.immediate_calls = immediate_calls
+        self.maximum_calls = maximum_calls
+        self.requests: list[JWKSFetchRequest] = []
+        self.started = Event()
+        self.started_by_issuer = {issuer: Event() for issuer in issuers}
+        self.release = Event()
+        self.finished = Event()
+        self.active = 0
+        self.cancelled = 0
+
+    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+        self.requests.append(request)
+        call_number = len(self.requests)
+        if call_number > self.maximum_calls:
+            message = "Concurrent JWKS fetch escaped single-flight coordination"
+            raise AssertionError(message)
+        if call_number > self.immediate_calls:
+            self.active += 1
+            self.started.set()
+            if issuer_started := self.started_by_issuer.get(request.issuer):
+                issuer_started.set()
+            try:
+                await self.release.wait()
+            except get_cancelled_exc_class():
+                self.cancelled += 1
+                raise
+            finally:
+                self.active -= 1
+                if self.active == 0:
+                    self.finished.set()
+        response = self.responses[call_number - 1]
         if isinstance(response, Exception):
             raise response
         return response(request) if callable(response) else response
@@ -2687,6 +2735,7 @@ def test_jwks_public_cache_contracts_are_frozen_and_fetcher_is_runtime_checkable
     assert policy.unknown_kid_cooldown == timedelta(seconds=30)
     assert policy.stale_if_error == timedelta(0)
     assert policy.warm_on_startup is False
+    assert policy.maximum_unknown_keys == 1024
     assert default_response.body == b""
     assert default_response.headers == {}
     with pytest.raises(FrozenInstanceError):
@@ -2716,6 +2765,8 @@ def test_jwks_public_cache_contracts_are_frozen_and_fetcher_is_runtime_checkable
         {"maximum_keys": 0},
         {"maximum_keys": True},
         {"maximum_keys": 129},
+        {"maximum_unknown_keys": 0},
+        {"maximum_unknown_keys": True},
     ],
     ids=[
         "duration-type",
@@ -2734,6 +2785,8 @@ def test_jwks_public_cache_contracts_are_frozen_and_fetcher_is_runtime_checkable
         "keys-zero",
         "keys-bool",
         "keys-maximum",
+        "unknown-keys-zero",
+        "unknown-keys-bool",
     ],
 )
 def test_jwks_cache_policy_rejects_unsafe_bounds(kwargs: dict[str, object]) -> None:
@@ -2826,6 +2879,350 @@ async def test_jwks_cold_load_uses_default_ttl_and_fresh_hit_does_no_fetch(
         JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, etag=None),
         JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, etag='"generation-1"'),
     ]
+
+
+@pytest.mark.parametrize("cache_state", ["cold", "expired"])
+@pytest.mark.anyio
+async def test_jwks_concurrent_callers_share_one_refresh(
+    cache_state: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+) -> None:
+    expired = cache_state == "expired"
+    jwk = _verification_jwk(jwt_key_material)
+    response = _jwks_response(jwk, cache_control="max-age=30", etag='"generation-1"')
+    fetcher = _BlockingJWKSFetcher(
+        response, response, immediate_calls=1 if expired else 0, maximum_calls=2 if expired else 1
+    )
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
+    now = _JWT_NOW
+    if expired:
+        assert isinstance(await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=now), VerificationKey)
+        now += timedelta(seconds=30)
+    outcomes: list[object | None] = [None] * 100
+
+    async def select(index: int) -> None:
+        outcomes[index] = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=now)
+
+    async with create_task_group() as task_group:
+        for index in range(len(outcomes)):
+            task_group.start_soon(select, index)
+        await fetcher.started.wait()
+        await checkpoint()
+        fetcher.release.set()
+
+    expected_fetches = 2 if expired else 1
+    assert len(fetcher.requests) == expected_fetches
+    assert isinstance(outcomes[0], VerificationKey)
+    assert all(outcome is outcomes[0] for outcome in outcomes)
+
+
+@pytest.mark.anyio
+async def test_jwks_cancelling_one_waiter_preserves_shared_refresh(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    fetcher = _BlockingJWKSFetcher(_jwks_response(_verification_jwk(jwt_key_material), cache_control="max-age=60"))
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
+    cancelled_scope: list[CancelScope] = []
+    cancelled_outcomes: list[object] = []
+    survivor_outcomes: list[object] = []
+    survivor_started = Event()
+    cancelled_finished = Event()
+
+    async def cancelled_waiter() -> None:
+        try:
+            with CancelScope() as scope:
+                cancelled_scope.append(scope)
+                cancelled_outcomes.append(
+                    await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
+                )
+        finally:
+            cancelled_finished.set()
+
+    async def survivor() -> None:
+        survivor_started.set()
+        survivor_outcomes.append(await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW))
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(cancelled_waiter)
+        await fetcher.started.wait()
+        task_group.start_soon(survivor)
+        await survivor_started.wait()
+        await checkpoint()
+        cancelled_scope[0].cancel()
+        with fail_after(1):
+            await cancelled_finished.wait()
+        assert fetcher.active == 1
+        fetcher.release.set()
+
+    assert cancelled_outcomes == []
+    assert len(fetcher.requests) == 1
+    assert len(survivor_outcomes) == 1
+    assert isinstance(survivor_outcomes[0], VerificationKey)
+
+
+@pytest.mark.anyio
+async def test_jwks_independent_issuer_refreshes_proceed_concurrently(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    second_issuer = "https://issuer-two.example"
+    second_uri = f"{second_issuer}/jwks"
+    first = _verification_jwk(jwt_key_material, "EdDSA", "first")
+    second = _verification_jwk(jwt_key_material, "ES256", "second")
+
+    def respond(request: JWKSFetchRequest) -> JWKSFetchResponse:
+        return _jwks_response(first if request.issuer == _JWT_ISSUER else second, cache_control="max-age=60")
+
+    fetcher = _BlockingJWKSFetcher(respond, respond, maximum_calls=2, issuers=(_JWT_ISSUER, second_issuer))
+    provider = CachedJWKSProvider(
+        entries=(_jwks_entry(), _jwks_entry(second_issuer, second_uri, frozenset({"ES256"}))), fetcher=fetcher
+    )
+    outcomes: list[object] = []
+
+    async def select(issuer: str, uri: str, kid: str, algorithm: str) -> None:
+        outcomes.append(await provider.select_key(issuer, uri, kid, algorithm, now=_JWT_NOW))
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(select, _JWT_ISSUER, _JWKS_URI, "first", "EdDSA")
+        await fetcher.started_by_issuer[_JWT_ISSUER].wait()
+        task_group.start_soon(select, second_issuer, second_uri, "second", "ES256")
+        with fail_after(1):
+            await fetcher.started_by_issuer[second_issuer].wait()
+        fetcher.release.set()
+
+    assert len(fetcher.requests) == 2
+    assert {outcome.algorithm for outcome in outcomes if isinstance(outcome, VerificationKey)} == {"EdDSA", "ES256"}
+
+
+@pytest.mark.anyio
+async def test_jwks_fresh_unknown_key_forces_one_refresh_and_retries(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    known = _verification_jwk(jwt_key_material, key_id="known")
+    rotated = _verification_jwk(jwt_key_material, key_id="rotated")
+    fetcher = _RecordingJWKSFetcher(
+        _jwks_response(known, cache_control="max-age=60", etag='"generation-1"'),
+        _jwks_response(known, rotated, cache_control="max-age=60", etag='"generation-2"'),
+    )
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
+
+    assert isinstance(
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "known", "EdDSA", now=_JWT_NOW), VerificationKey
+    )
+    outcome = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "rotated", "EdDSA", now=_JWT_NOW + timedelta(seconds=1))
+
+    assert isinstance(outcome, VerificationKey)
+    assert outcome.key_id == "rotated"
+    assert len(fetcher.requests) == 2
+
+
+@pytest.mark.anyio
+async def test_jwks_unknown_selection_negative_cache_is_per_generation_tuple(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    known = _verification_jwk(jwt_key_material, key_id="shared")
+    fetcher = _RecordingJWKSFetcher(
+        _jwks_response(known, cache_control="max-age=60", etag='"generation-1"'),
+        JWKSFetchResponse(status_code=304, headers={"cache-control": "max-age=60"}),
+    )
+    provider = CachedJWKSProvider(entries=(_jwks_entry(algorithms=frozenset({"EdDSA", "ES256"})),), fetcher=fetcher)
+
+    assert isinstance(
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "shared", "EdDSA", now=_JWT_NOW), VerificationKey
+    )
+    first = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "shared", "ES256", now=_JWT_NOW + timedelta(seconds=1))
+    second = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "shared", "ES256", now=_JWT_NOW + timedelta(seconds=2))
+    valid_tuple = await provider.select_key(
+        _JWT_ISSUER, _JWKS_URI, "shared", "EdDSA", now=_JWT_NOW + timedelta(seconds=2)
+    )
+
+    assert isinstance(first, InvalidCredentials)
+    assert isinstance(second, InvalidCredentials)
+    assert isinstance(valid_tuple, VerificationKey)
+    assert len(fetcher.requests) == 2
+
+
+@pytest.mark.anyio
+async def test_jwks_expired_unknown_selection_is_cached_after_refresh(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    known = _verification_jwk(jwt_key_material, key_id="known")
+    fetcher = _RecordingJWKSFetcher(
+        _jwks_response(known, cache_control="max-age=30", etag='"generation-1"'),
+        JWKSFetchResponse(status_code=304, headers={"cache-control": "max-age=60"}),
+    )
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
+
+    assert isinstance(
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "known", "EdDSA", now=_JWT_NOW), VerificationKey
+    )
+    outcome = await provider.select_key(
+        _JWT_ISSUER, _JWKS_URI, "unknown", "EdDSA", now=_JWT_NOW + timedelta(seconds=30)
+    )
+    repeated = await provider.select_key(
+        _JWT_ISSUER, _JWKS_URI, "unknown", "EdDSA", now=_JWT_NOW + timedelta(seconds=31)
+    )
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert isinstance(repeated, InvalidCredentials)
+    assert len(fetcher.requests) == 2
+
+
+@pytest.mark.anyio
+async def test_jwks_failed_forced_refresh_is_generation_limited_and_prunes_expired_negative(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    known = _verification_jwk(jwt_key_material, key_id="known")
+    fetcher = _RecordingJWKSFetcher(
+        _jwks_response(known, cache_control="max-age=60", etag='"generation-1"'), OSError("temporary")
+    )
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
+
+    assert isinstance(
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "known", "EdDSA", now=_JWT_NOW), VerificationKey
+    )
+    failed = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "unknown", "EdDSA", now=_JWT_NOW + timedelta(seconds=1))
+    suppressed = await provider.select_key(
+        _JWT_ISSUER, _JWKS_URI, "unknown", "EdDSA", now=_JWT_NOW + timedelta(seconds=2)
+    )
+    after_cooldown = await provider.select_key(
+        _JWT_ISSUER, _JWKS_URI, "unknown", "EdDSA", now=_JWT_NOW + timedelta(seconds=32)
+    )
+
+    assert isinstance(failed, VerificationUnavailable)
+    assert isinstance(suppressed, InvalidCredentials)
+    assert isinstance(after_cooldown, InvalidCredentials)
+    assert len(fetcher.requests) == 2
+
+
+@pytest.mark.anyio
+async def test_jwks_generation_replacement_invalidates_unknown_key_negatives(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    known = _verification_jwk(jwt_key_material, key_id="known")
+    replacement = _verification_jwk(jwt_key_material, key_id="replacement")
+    formerly_unknown = _verification_jwk(jwt_key_material, key_id="absent")
+    fetcher = _RecordingJWKSFetcher(
+        _jwks_response(known, cache_control="max-age=30", etag='"generation-1"'),
+        JWKSFetchResponse(status_code=304, headers={"cache-control": "max-age=30"}),
+        _jwks_response(replacement, cache_control="max-age=30", etag='"generation-2"'),
+        _jwks_response(replacement, formerly_unknown, cache_control="max-age=30", etag='"generation-3"'),
+    )
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
+
+    assert isinstance(
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "known", "EdDSA", now=_JWT_NOW), VerificationKey
+    )
+    assert isinstance(
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "absent", "EdDSA", now=_JWT_NOW + timedelta(seconds=1)),
+        InvalidCredentials,
+    )
+    assert isinstance(
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "replacement", "EdDSA", now=_JWT_NOW + timedelta(seconds=31)),
+        VerificationKey,
+    )
+    outcome = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "absent", "EdDSA", now=_JWT_NOW + timedelta(seconds=32))
+
+    assert isinstance(outcome, VerificationKey)
+    assert len(fetcher.requests) == 4
+
+
+@pytest.mark.anyio
+async def test_jwks_unknown_key_negative_cache_is_bounded_lru(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    known = _verification_jwk(jwt_key_material, key_id="known")
+    not_modified = JWKSFetchResponse(status_code=304, headers={"cache-control": "max-age=60"})
+    fetcher = _RecordingJWKSFetcher(
+        _jwks_response(known, cache_control="max-age=60", etag='"generation-1"'), *(not_modified for _ in range(5))
+    )
+    provider = CachedJWKSProvider(
+        entries=(_jwks_entry(),), fetcher=fetcher, policy=JWKSCachePolicy(maximum_unknown_keys=3)
+    )
+
+    assert isinstance(
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "known", "EdDSA", now=_JWT_NOW), VerificationKey
+    )
+    for kid in ("unknown-a", "unknown-b", "unknown-c", "unknown-d"):
+        assert isinstance(
+            await provider.select_key(_JWT_ISSUER, _JWKS_URI, kid, "EdDSA", now=_JWT_NOW + timedelta(seconds=1)),
+            InvalidCredentials,
+        )
+    state = cast("Any", provider)._entries[(_JWT_ISSUER, _JWKS_URI)]  # noqa: SLF001
+    assert tuple((generation, kid, algorithm) for generation, kid, algorithm in state.negative) == (
+        (1, "unknown-b", "EdDSA"),
+        (1, "unknown-c", "EdDSA"),
+        (1, "unknown-d", "EdDSA"),
+    )
+    assert isinstance(
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "unknown-a", "EdDSA", now=_JWT_NOW + timedelta(seconds=2)),
+        InvalidCredentials,
+    )
+
+    assert len(state.negative) == 3
+    assert tuple(key[1] for key in state.negative) == ("unknown-c", "unknown-d", "unknown-a")
+    assert len(fetcher.requests) == 2
+
+
+@pytest.mark.anyio
+async def test_jwks_shared_refresh_failure_is_consistent_for_all_waiters(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    del jwt_key_material
+    fetcher = _BlockingJWKSFetcher(OSError("shared fetch detail"))
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
+    outcomes: list[object | None] = [None] * 100
+
+    async def select(index: int) -> None:
+        outcomes[index] = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
+
+    async with create_task_group() as task_group:
+        for index in range(len(outcomes)):
+            task_group.start_soon(select, index)
+        await fetcher.started.wait()
+        await checkpoint()
+        fetcher.release.set()
+
+    assert len(fetcher.requests) == 1
+    assert isinstance(outcomes[0], VerificationUnavailable)
+    assert all(outcome is outcomes[0] for outcome in outcomes)
+
+
+@pytest.mark.anyio
+async def test_jwks_pending_refresh_cancellation_is_sanitized() -> None:
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=_RecordingJWKSFetcher())
+    cancelled_task = asyncio.create_task(checkpoint())
+    cancelled_task.cancel()
+    await checkpoint()
+    state = cast("Any", provider)._entries[(_JWT_ISSUER, _JWKS_URI)]  # noqa: SLF001
+    state.refresh = SimpleNamespace(task=cancelled_task)
+
+    outcome = await cast("Any", provider)._refresh_singleflight(state, _JWT_NOW)  # noqa: SLF001
+
+    assert isinstance(outcome, VerificationUnavailable)
+    await provider.aclose()
+
+
+@pytest.mark.anyio
+async def test_jwks_close_cancels_and_awaits_live_refresh_tasks(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    fetcher = _BlockingJWKSFetcher(_jwks_response(_verification_jwk(jwt_key_material)))
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
+
+    async def select() -> None:
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(select)
+        await fetcher.started.wait()
+        task_group.start_soon(provider.aclose)
+        with fail_after(1):
+            await fetcher.finished.wait()
+
+    assert fetcher.active == 0
+    assert fetcher.cancelled == 1
+    assert isinstance(
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW), VerificationUnavailable
+    )
 
 
 @pytest.mark.parametrize(
@@ -3210,12 +3607,15 @@ async def test_jwks_warmup_is_explicit_complete_and_failure_aware(
     )
 
     outcome = await provider.warmup(now=_JWT_NOW)
+    repeated = outcome if failure else await provider.warmup(now=_JWT_NOW + timedelta(seconds=1))
 
     if not warm_on_startup:
         assert outcome is None
+        assert repeated is None
         assert fetcher.requests == []
     else:
         assert isinstance(outcome, VerificationUnavailable) if failure else outcome is None
+        assert isinstance(repeated, VerificationUnavailable) if failure else repeated is None
         assert tuple((request.issuer, request.jwks_uri) for request in fetcher.requests) == (
             (_JWT_ISSUER, _JWKS_URI),
             (second_issuer, second_uri),
@@ -3233,7 +3633,10 @@ async def test_jwks_close_is_idempotent_and_prevents_selection_fetch(
     await provider.aclose()
     outcome = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
     warmup = await provider.warmup(now=_JWT_NOW)
+    state = cast("Any", provider)._entries[(_JWT_ISSUER, _JWKS_URI)]  # noqa: SLF001
+    refresh = await cast("Any", provider)._refresh_singleflight(state, _JWT_NOW)  # noqa: SLF001
 
     assert isinstance(outcome, VerificationUnavailable)
     assert isinstance(warmup, VerificationUnavailable)
+    assert isinstance(refresh, VerificationUnavailable)
     assert fetcher.requests == []

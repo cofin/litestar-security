@@ -1,12 +1,15 @@
 """Remote JWKS fetching, caching, and atomic rotation."""
 
+import asyncio
 import json
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import NoReturn, Protocol, TypeAlias, cast, runtime_checkable
 
+from anyio import Lock
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from jwt import PyJWK
@@ -29,6 +32,7 @@ __all__ = (
 JWKSSelection: TypeAlias = VerificationKey | InvalidCredentials | VerificationUnavailable
 _SelectionKey: TypeAlias = tuple[str, str]
 _EntryKey: TypeAlias = tuple[str, str]
+_NegativeKey: TypeAlias = tuple[int, str, str]
 
 _DEFAULT_TTL = timedelta(minutes=15)
 _MINIMUM_TTL = timedelta(seconds=30)
@@ -36,6 +40,7 @@ _MAXIMUM_TTL = timedelta(hours=24)
 _UNKNOWN_KID_COOLDOWN = timedelta(seconds=30)
 _MAXIMUM_DOCUMENT_BYTES = 1_048_576
 _MAXIMUM_KEYS = 128
+_MAXIMUM_UNKNOWN_KEYS = 1_024
 _MAXIMUM_JSON_DEPTH = 64
 _MINIMUM_HTTP_STATUS = 100
 _MAXIMUM_HTTP_STATUS = 599
@@ -53,6 +58,10 @@ def _empty_headers() -> Mapping[str, str]:
     return _EMPTY_HEADERS
 
 
+def _negative_cache() -> OrderedDict[_NegativeKey, datetime]:
+    return OrderedDict()
+
+
 @dataclass(frozen=True, slots=True)
 class JWKSCachePolicy:
     """Local freshness and bounded-document policy for remote JWKS entries."""
@@ -65,6 +74,7 @@ class JWKSCachePolicy:
     warm_on_startup: bool = False
     maximum_document_bytes: int = _MAXIMUM_DOCUMENT_BYTES
     maximum_keys: int = _MAXIMUM_KEYS
+    maximum_unknown_keys: int = _MAXIMUM_UNKNOWN_KEYS
 
     def __post_init__(self) -> None:
         """Reject unsafe or contradictory cache bounds."""
@@ -98,8 +108,11 @@ class JWKSCachePolicy:
             or isinstance(self.maximum_keys, bool)
             or not isinstance(self.maximum_keys, int)  # pyright: ignore[reportUnnecessaryIsInstance]
             or not 1 <= self.maximum_keys <= _MAXIMUM_KEYS
+            or isinstance(self.maximum_unknown_keys, bool)
+            or not isinstance(self.maximum_unknown_keys, int)  # pyright: ignore[reportUnnecessaryIsInstance]
+            or not 1 <= self.maximum_unknown_keys <= _MAXIMUM_UNKNOWN_KEYS
         ):
-            _raise_config("JWKS document limits must be positive and bounded")
+            _raise_config("JWKS cache limits must be positive and bounded")
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,9 +202,19 @@ class _Snapshot:
 
 
 @dataclass(slots=True)
+class _Refresh:
+    forced_generation: int | None = None
+    task: asyncio.Task[_Snapshot | VerificationUnavailable] | None = None
+
+
+@dataclass(slots=True)
 class _EntryState:
     config: JWKSCacheEntry
     snapshot: _Snapshot | None = None
+    lock: Lock = field(default_factory=Lock)
+    refresh: _Refresh | None = None
+    forced_generation: int | None = None
+    negative: OrderedDict[_NegativeKey, datetime] = field(default_factory=_negative_cache)
 
 
 class CachedJWKSProvider:
@@ -242,15 +265,23 @@ class CachedJWKSProvider:
         selection = (kid, algorithm)
         snapshot = state.snapshot
         if snapshot is not None and normalized_now < snapshot.fresh_until:
-            return snapshot.keys.get(selection, _INVALID)
+            selected = snapshot.keys.get(selection)
+            return (
+                selected
+                if selected is not None
+                else await self._select_unknown(state, snapshot, selection, normalized_now)
+            )
 
-        refreshed = await self._refresh(state, normalized_now)
+        refreshed = await self._refresh_singleflight(state, normalized_now)
         if isinstance(refreshed, VerificationUnavailable):
             if snapshot is not None and normalized_now < snapshot.stale_until:
                 return snapshot.keys.get(selection, _UNAVAILABLE)
             selection_result: JWKSSelection = refreshed
         else:
-            selection_result = refreshed.keys.get(selection, _INVALID)
+            selected = refreshed.keys.get(selection)
+            if selected is None:
+                await self._remember_negative(state, refreshed.generation, selection, normalized_now)
+            selection_result = selected or _INVALID
         return selection_result
 
     async def warmup(self, *, now: datetime) -> VerificationUnavailable | None:
@@ -262,15 +293,116 @@ class CachedJWKSProvider:
             return None
         outcome: VerificationUnavailable | None = None
         for state in self._entries.values():
-            if isinstance(await self._refresh(state, normalized_now), VerificationUnavailable):
+            if isinstance(await self._refresh_singleflight(state, normalized_now), VerificationUnavailable):
                 outcome = _UNAVAILABLE
         return outcome
 
     async def aclose(self) -> None:
         """Close this provider idempotently without closing its caller-owned fetcher."""
         self._closed = True
+        refreshes: list[tuple[_EntryState, _Refresh]] = []
+        tasks: list[asyncio.Task[_Snapshot | VerificationUnavailable]] = []
+        for state in self._entries.values():
+            async with state.lock:
+                if state.refresh is not None:
+                    refresh = state.refresh
+                    task = refresh.task
+                    assert task is not None  # noqa: S101 - internal coordination invariant
+                    task.cancel()
+                    tasks.append(task)
+                    refreshes.append((state, refresh))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for state, _refresh in refreshes:
+            async with state.lock:
+                state.refresh = None
 
-    async def _refresh(self, state: _EntryState, now: datetime) -> _Snapshot | VerificationUnavailable:
+    async def _select_unknown(
+        self, state: _EntryState, snapshot: _Snapshot, selection: _SelectionKey, now: datetime
+    ) -> JWKSSelection:
+        if await self._negative_hit(state, snapshot.generation, selection, now):
+            return _INVALID
+        refreshed = await self._refresh_singleflight(state, now, forced_generation=snapshot.generation)
+        if isinstance(refreshed, VerificationUnavailable):
+            await self._remember_negative(state, snapshot.generation, selection, now)
+            return refreshed
+        selected = refreshed.keys.get(selection)
+        if selected is not None:
+            return selected
+        await self._remember_negative(state, refreshed.generation, selection, now)
+        return _INVALID
+
+    async def _refresh_singleflight(
+        self, state: _EntryState, now: datetime, *, forced_generation: int | None = None
+    ) -> _Snapshot | VerificationUnavailable:
+        candidate = _Refresh(forced_generation=forced_generation)
+        refresh, immediate = await self._coordinate_refresh(state, candidate, now, forced_generation)
+        if refresh is None:
+            return immediate
+        task = refresh.task
+        if task is None:  # pragma: no cover - assigned before coordination releases the entry lock
+            return _UNAVAILABLE
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled() or self._closed:
+                return _UNAVAILABLE
+            raise
+
+    async def _coordinate_refresh(
+        self, state: _EntryState, candidate: _Refresh, now: datetime, forced_generation: int | None
+    ) -> tuple[_Refresh | None, _Snapshot | VerificationUnavailable]:
+        refresh: _Refresh | None = None
+        immediate: _Snapshot | VerificationUnavailable = _UNAVAILABLE
+        async with state.lock:
+            current = state.snapshot
+            current_is_fresh = current is not None and now < current.fresh_until
+            forced_generation_changed = forced_generation is not None and (
+                current is None or current.generation != forced_generation
+            )
+            forced_generation_used = forced_generation is not None and state.forced_generation == forced_generation
+            if self._closed:
+                pass
+            elif (forced_generation is None and current_is_fresh) or forced_generation_changed:
+                immediate = current or _UNAVAILABLE
+            elif state.refresh is not None:
+                refresh = state.refresh
+            elif forced_generation_used:
+                immediate = current or _UNAVAILABLE
+            else:
+                if forced_generation is not None:
+                    state.forced_generation = forced_generation
+                state.refresh = candidate
+                candidate.task = asyncio.create_task(
+                    self._run_refresh(state, candidate, now), name="litestar-security-jwks-refresh"
+                )
+                refresh = candidate
+        return refresh, immediate
+
+    async def _run_refresh(
+        self, state: _EntryState, refresh: _Refresh, now: datetime
+    ) -> _Snapshot | VerificationUnavailable:
+        try:
+            result = await self._fetch_snapshot(state, now)
+        except asyncio.CancelledError:
+            result = _UNAVAILABLE
+        await self._publish_refresh(state, refresh, result)
+        return _UNAVAILABLE if self._closed else result
+
+    async def _publish_refresh(
+        self, state: _EntryState, refresh: _Refresh, result: _Snapshot | VerificationUnavailable
+    ) -> None:
+        async with state.lock:
+            current = state.snapshot
+            if isinstance(result, _Snapshot) and not self._closed:
+                state.snapshot = result
+                if refresh.forced_generation is not None:
+                    state.forced_generation = result.generation
+                if current is None or result.generation != current.generation:
+                    state.negative.clear()
+            state.refresh = None
+
+    async def _fetch_snapshot(self, state: _EntryState, now: datetime) -> _Snapshot | VerificationUnavailable:
         current = state.snapshot
         request = JWKSFetchRequest(
             issuer=state.config.issuer, jwks_uri=state.config.jwks_uri, etag=None if current is None else current.etag
@@ -307,8 +439,34 @@ class CachedJWKSProvider:
                 return _UNAVAILABLE
         except Exception:  # noqa: BLE001 - custom fetcher and parser failures are one sanitized operational outcome
             return _UNAVAILABLE
-        state.snapshot = snapshot
         return snapshot
+
+    async def _negative_hit(self, state: _EntryState, generation: int, selection: _SelectionKey, now: datetime) -> bool:
+        key = (generation, *selection)
+        async with state.lock:
+            self._prune_negative(state, generation, now)
+            expires_at = state.negative.get(key)
+            if expires_at is None:
+                return False
+            state.negative.move_to_end(key)
+            return True
+
+    async def _remember_negative(
+        self, state: _EntryState, generation: int, selection: _SelectionKey, now: datetime
+    ) -> None:
+        key = (generation, *selection)
+        async with state.lock:
+            self._prune_negative(state, generation, now)
+            state.negative[key] = now + self.policy.unknown_kid_cooldown
+            state.negative.move_to_end(key)
+            while len(state.negative) > self.policy.maximum_unknown_keys:
+                state.negative.popitem(last=False)
+
+    @staticmethod
+    def _prune_negative(state: _EntryState, generation: int, now: datetime) -> None:
+        stale = tuple(key for key, expires_at in state.negative.items() if key[0] != generation or expires_at <= now)
+        for key in stale:
+            del state.negative[key]
 
 
 def _freshness(headers: Mapping[str, str], policy: JWKSCachePolicy, now: datetime) -> tuple[datetime, datetime]:
