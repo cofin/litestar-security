@@ -6,7 +6,7 @@ repos:
     hooks:
       - id: no-future-annotations
         name: Disallow future annotations in package code
-        entry: python tools/scripts/no_future_annotations.py
+        entry: python tools/hooks/no_future_annotations.py
         language: python
         files: ^src/litestar_security/.*\.py$
 
