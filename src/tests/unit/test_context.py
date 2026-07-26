@@ -10,6 +10,8 @@ import pytest
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, PermissionDeniedException
 
 import litestar_security
+import litestar_security._openapi as openapi_module
+import litestar_security.authentication as authentication_module
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -41,15 +43,19 @@ _PUBLIC_API = (
     "AuthenticationEvidence",
     "AuthenticationMechanism",
     "AuthenticationOutcome",
+    "AuthenticationPolicy",
     "AuthenticationRegistry",
+    "AuthorizationPredicate",
     "AuthorizationSnapshot",
     "CredentialExtraction",
     "CredentialRestrictions",
     "CredentialSlot",
     "CurrentUser",
+    "ExternalCSRF",
     "IdentityResolver",
     "InvalidCredentials",
     "LitestarSessionHandle",
+    "MechanismRequirement",
     "NoCredentials",
     "NullSessionHandle",
     "PresentedCredential",
@@ -66,6 +72,24 @@ _PUBLIC_API = (
     "VerificationUnavailable",
     "__project__",
     "__version__",
+    "all_of",
+    "any_of",
+    "at_least",
+    "guard_all_of",
+    "guard_any_of",
+    "guard_at_least",
+    "guard_one_of",
+    "mechanism",
+    "optional",
+    "public",
+    "required",
+    "requires_authenticated",
+    "requires_capability",
+    "requires_role",
+    "requires_scope",
+    "requires_team_role",
+    "requires_tenant",
+    "security",
 )
 
 
@@ -528,6 +552,14 @@ def test_package_root_exports_only_foundational_contract() -> None:
         "_AuthenticationEvaluator",
     ):
         assert not hasattr(litestar_security, private_name)
+    assert not {
+        "OwnedSessionBackend",
+        "SecurityMiddleware",
+        "SecurityMiddlewareWrapper",
+        "SecurityRuntimeConfig",
+        "SecurityRuntimePlan",
+    }.intersection(authentication_module.__all__)
+    assert openapi_module.__all__ == ()
 
 
 def test_security_config_is_typed_and_slotted() -> None:
@@ -543,7 +575,6 @@ def test_security_config_is_typed_and_slotted() -> None:
         "external_csrf",
         "require_default",
         "session_backend",
-        "plan_lookup",
     )
     assert tuple(field.name for field in fields(config)) == expected_fields
     assert config.__slots__ == expected_fields

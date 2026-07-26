@@ -5,17 +5,27 @@ from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
     AuthenticationOutcome,
+    AuthenticationPolicy,
     AuthenticationRegistry,
     CredentialExtraction,
     CredentialSlot,
     IdentityResolver,
     InvalidCredentials,
+    MechanismRequirement,
     NoCredentials,
     PresentedCredential,
     RequestAuthenticator,
     VerificationUnavailable,
+    all_of,
+    any_of,
+    at_least,
+    mechanism,
+    optional,
+    public,
+    required,
+    security,
 )
-from litestar_security.config import SecurityConfig
+from litestar_security.config import ExternalCSRF, SecurityConfig
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -28,6 +38,19 @@ from litestar_security.context import (
     SessionPersistenceUnavailableError,
     SessionUnavailableError,
 )
+from litestar_security.guards import (
+    AuthorizationPredicate,
+    requires_authenticated,
+    requires_capability,
+    requires_role,
+    requires_scope,
+    requires_team_role,
+    requires_tenant,
+)
+from litestar_security.guards import all_of as guard_all_of
+from litestar_security.guards import any_of as guard_any_of
+from litestar_security.guards import at_least as guard_at_least
+from litestar_security.guards import one_of as guard_one_of
 from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency, SecurityPlugin
 
 __all__ = (
@@ -35,15 +58,19 @@ __all__ = (
     "AuthenticationEvidence",
     "AuthenticationMechanism",
     "AuthenticationOutcome",
+    "AuthenticationPolicy",
     "AuthenticationRegistry",
+    "AuthorizationPredicate",
     "AuthorizationSnapshot",
     "CredentialExtraction",
     "CredentialRestrictions",
     "CredentialSlot",
     "CurrentUser",
+    "ExternalCSRF",
     "IdentityResolver",
     "InvalidCredentials",
     "LitestarSessionHandle",
+    "MechanismRequirement",
     "NoCredentials",
     "NullSessionHandle",
     "PresentedCredential",
@@ -60,4 +87,22 @@ __all__ = (
     "VerificationUnavailable",
     "__project__",
     "__version__",
+    "all_of",
+    "any_of",
+    "at_least",
+    "guard_all_of",
+    "guard_any_of",
+    "guard_at_least",
+    "guard_one_of",
+    "mechanism",
+    "optional",
+    "public",
+    "required",
+    "requires_authenticated",
+    "requires_capability",
+    "requires_role",
+    "requires_scope",
+    "requires_team_role",
+    "requires_tenant",
+    "security",
 )

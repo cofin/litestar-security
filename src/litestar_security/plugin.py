@@ -16,6 +16,7 @@ from litestar.router import Router
 from litestar.routes import BaseRoute
 from litestar.types import Scope
 
+from litestar_security._openapi import OpenAPISchemeSet, RouteCompiler, prepare_openapi_config
 from litestar_security.authentication import (
     AuthenticationRegistry,
     OwnedSessionBackend,
@@ -24,7 +25,6 @@ from litestar_security.authentication import (
 )
 from litestar_security.config import SecurityConfig
 from litestar_security.context import Principal, SecurityContext
-from litestar_security.openapi import OpenAPISchemeSet, RouteCompiler, prepare_openapi_config
 
 __all__ = ("CurrentUser", "PrincipalDependency", "SecurityContextDependency", "SecurityPlugin")
 
@@ -186,9 +186,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 owned_session = OwnedSessionBackend(
                     middleware=DefineMiddleware(SessionMiddleware, backend=backend), backend=backend
                 )
-            self._runtime_config = SecurityRuntimeConfig(
-                registry=registry, owned_session_backend=owned_session, plan_lookup=self.config.plan_lookup
-            )
+            self._runtime_config = SecurityRuntimeConfig(registry=registry, owned_session_backend=owned_session)
             self._middleware = DefineMiddleware(SecurityMiddlewareWrapper, config=self._runtime_config)
         return self._runtime_config, cast("DefineMiddleware", self._middleware)
 

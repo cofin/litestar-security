@@ -7,15 +7,8 @@ from typing import Any, Generic, TypeVar
 from litestar.config.csrf import CSRFConfig
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.middleware.session.base import BaseSessionBackend
-from litestar.types import Scope
 
-from litestar_security.authentication import (
-    AuthenticationMechanism,
-    AuthenticationPolicy,
-    CredentialSlot,
-    SecurityRuntimePlan,
-    required,
-)
+from litestar_security.authentication import AuthenticationMechanism, AuthenticationPolicy, CredentialSlot, required
 
 __all__ = ("ExternalCSRF", "SecurityConfig")
 
@@ -51,7 +44,6 @@ class SecurityConfig(Generic[UserT]):
     external_csrf: ExternalCSRF | None = None
     require_default: bool = False
     session_backend: BaseSessionBackend[Any] | None = None
-    plan_lookup: Callable[[Scope], SecurityRuntimePlan] | None = None
 
     def __post_init__(self) -> None:
         """Freeze ordered authentication collections."""

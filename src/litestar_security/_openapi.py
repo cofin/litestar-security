@@ -34,7 +34,7 @@ from litestar_security.authentication import (
 )
 from litestar_security.config import ExternalCSRF
 
-__all__ = ("OpenAPISchemeSet", "PolicyCompiler", "RouteCompiler", "prepare_openapi_config")
+__all__ = ()
 
 UserT = TypeVar("UserT")
 _OPENAPI_SECURITY_OPT_KEY = "litestar_security_openapi_security"

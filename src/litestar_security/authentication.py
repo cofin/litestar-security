@@ -13,7 +13,7 @@ from litestar.middleware import DefineMiddleware
 from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
 from litestar.openapi.spec import SecurityScheme
 from litestar.types import ASGIApp, HTTPScope, Receive, Scope, Send
-from typing_extensions import Self
+from typing_extensions import Self, TypedDict
 
 from litestar_security.context import (
     AuthenticationEvidence,
@@ -38,13 +38,8 @@ __all__ = (
     "InvalidCredentials",
     "MechanismRequirement",
     "NoCredentials",
-    "OwnedSessionBackend",
     "PresentedCredential",
     "RequestAuthenticator",
-    "SecurityMiddleware",
-    "SecurityMiddlewareWrapper",
-    "SecurityRuntimeConfig",
-    "SecurityRuntimePlan",
     "VerificationUnavailable",
     "all_of",
     "any_of",
@@ -138,6 +133,10 @@ class _RouteSecurityDeclaration:
     csrf_required: bool | None = None
 
 
+class _SecurityMetadata(TypedDict):
+    litestar_security_policy: _RouteSecurityDeclaration
+
+
 def mechanism(name: str, *scopes: str) -> MechanismRequirement:
     """Select a named mechanism and its requested OAuth or OIDC scopes."""
     return MechanismRequirement(name=name, scopes=tuple(scopes))
@@ -186,10 +185,17 @@ def at_least(count: int, *requirements: str | MechanismRequirement) -> Authentic
     return _MechanismPolicy(operator="at_least", requirements=normalized, count=count)
 
 
-def security(policy: AuthenticationPolicy, *, csrf_required: bool | None = None) -> dict[str, object]:
-    """Return Litestar route metadata for one immutable security declaration."""
+def security(policy: AuthenticationPolicy, *, csrf_required: bool | None = None) -> _SecurityMetadata:
+    """Return typed Litestar metadata for one immutable security declaration.
+
+    Spread the result into a route handler decorator, or pass it as ``opt`` on
+    an application, router, or controller ownership layer.
+    """
     _validate_policy(policy)
-    return {_SECURITY_POLICY_OPT_KEY: _RouteSecurityDeclaration(policy=policy, csrf_required=csrf_required)}
+    return cast(
+        "_SecurityMetadata",
+        {_SECURITY_POLICY_OPT_KEY: _RouteSecurityDeclaration(policy=policy, csrf_required=csrf_required)},
+    )
 
 
 def _validate_policy(policy: object) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from copy import deepcopy
+from datetime import datetime, timezone
 from importlib.metadata import entry_points
 from secrets import token_hex
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
@@ -33,6 +34,9 @@ from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
     AuthenticationPolicy,
+    InvalidCredentials,
+    NoCredentials,
+    PresentedCredential,
     SecurityMiddlewareWrapper,
     SecurityRuntimePlan,
     all_of,
@@ -45,7 +49,7 @@ from litestar_security.authentication import (
     security,
 )
 from litestar_security.config import ExternalCSRF
-from litestar_security.context import Principal, SecurityContext
+from litestar_security.context import AuthenticationEvidence, Principal, SecurityContext
 from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency
 
 if TYPE_CHECKING:
@@ -57,8 +61,13 @@ class _CompilerSlot:
     def __init__(self, name: str) -> None:
         self.name = name
 
-    def extract(self, _connection: object) -> object:
-        raise AssertionError
+    def extract(self, connection: Any) -> object:
+        value = connection.headers.get(f"x-auth-{self.name.removeprefix('slot-')}")
+        if value is None:
+            return NoCredentials()
+        if value != "valid":
+            return InvalidCredentials()
+        return PresentedCredential("user")
 
 
 class _CompilerAuthenticator:
@@ -68,13 +77,18 @@ class _CompilerAuthenticator:
         self.name = name
         self.slot = slot
 
-    async def authenticate(self, _credential: object, _connection: object) -> Authenticated[str]:
-        raise AssertionError
+    async def authenticate(self, credential: object, _connection: object) -> Authenticated[str]:
+        return Authenticated(
+            claims=cast("str", credential),
+            evidence=AuthenticationEvidence(
+                mechanism=self.name, slot=self.slot, authenticated_at=datetime(2026, 7, 26, tzinfo=timezone.utc)
+            ),
+        )
 
 
 class _CompilerResolver:
-    async def resolve(self, _claims: str) -> Principal[object]:
-        raise AssertionError
+    async def resolve(self, claims: str) -> Principal[object]:
+        return Principal(id=claims)
 
 
 def _compiler_config(  # noqa: PLR0913
@@ -167,7 +181,7 @@ def test_plugin_is_an_init_and_cli_plugin() -> None:
 
 
 def test_plugin_receives_routes_and_attaches_public_runtime_plan() -> None:
-    @get("/", opt=security(public()))
+    @get("/", **security(public()))
     async def handler() -> None:
         return None
 
@@ -197,7 +211,7 @@ def test_route_policy_uses_native_nearest_owner_inheritance() -> None:
         async def owned(self) -> None:
             return None
 
-        @get("/handler", opt=security(required("a")))
+        @get("/handler", **security(required("a")))
         async def handler_override(self) -> None:
             return None
 
@@ -208,14 +222,17 @@ def test_route_policy_uses_native_nearest_owner_inheritance() -> None:
             PolicyController,
         ],
         opt=security(required("a")),
-        openapi_config=None,
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
         plugins=[SecurityPlugin(_compiler_config())],
     )
 
-    assert _http_plan(app, "/application").participant_names == frozenset({"a"})
-    assert _http_plan(app, "/router/owned").participant_names == frozenset({"b"})
-    assert _http_plan(app, "/controller/owned").participant_names == frozenset({"b"})
-    assert _http_plan(app, "/controller/handler").participant_names == frozenset({"a"})
+    expected_by_path = {"/application": "a", "/router/owned": "b", "/controller/owned": "b", "/controller/handler": "a"}
+    with TestClient(app) as client:
+        for path, mechanism_name in expected_by_path.items():
+            assert _http_plan(app, path).participant_names == frozenset({mechanism_name})
+            assert _operation_security(app, path) == [{mechanism_name: []}]
+            assert client.get(path, headers={f"x-auth-{mechanism_name}": "valid"}).status_code == 200
+            assert client.get(path).status_code == 401
 
 
 def test_http_methods_and_options_receive_distinct_compiled_plans() -> None:
@@ -366,19 +383,32 @@ def test_openapi_routes_use_default_configured_and_custom_router_policy(
 
 
 @pytest.mark.parametrize(
-    ("policy", "expected"),
+    ("policy", "expected", "accepted", "rejected"),
     [
-        (public(), [{}]),
-        (required("a"), [{"a": []}]),
-        (any_of("a", "b"), [{"a": []}, {"b": []}]),
-        (all_of("a", "b"), [{"a": [], "b": []}]),
-        (optional(required("a")), [{}, {"a": []}]),
-        (at_least(2, "a", "b", "c"), [{"a": [], "b": []}, {"a": [], "c": []}, {"b": [], "c": []}]),
-        (required(mechanism("oidc", "reports:read")), [{"oidc": ["reports:read"]}]),
+        (public(), [{}], (frozenset(), frozenset({"a"})), ()),
+        (required("a"), [{"a": []}], (frozenset({"a"}),), (frozenset(), frozenset({"b"}))),
+        (any_of("a", "b"), [{"a": []}, {"b": []}], (frozenset({"a"}), frozenset({"b"})), (frozenset(),)),
+        (all_of("a", "b"), [{"a": [], "b": []}], (frozenset({"a", "b"}),), (frozenset({"a"}), frozenset({"b"}))),
+        (optional(required("a")), [{}, {"a": []}], (frozenset(), frozenset({"a"})), (frozenset({"b"}),)),
+        (
+            at_least(2, "a", "b", "c"),
+            [{"a": [], "b": []}, {"a": [], "c": []}, {"b": [], "c": []}],
+            (frozenset({"a", "b"}), frozenset({"a", "c"}), frozenset({"b", "c"})),
+            (frozenset({"a"}),),
+        ),
+        (
+            required(mechanism("oidc", "reports:read")),
+            [{"oidc": ["reports:read"]}],
+            (frozenset({"oidc"}),),
+            (frozenset(),),
+        ),
     ],
 )
 def test_native_openapi_projection_matches_runtime_policy(
-    policy: AuthenticationPolicy, expected: list[dict[str, list[str]]]
+    policy: AuthenticationPolicy,
+    expected: list[dict[str, list[str]]],
+    accepted: tuple[frozenset[str], ...],
+    rejected: tuple[frozenset[str], ...],
 ) -> None:
     @get("/resource", opt=security(policy))
     async def handler() -> None:
@@ -404,6 +434,13 @@ def test_native_openapi_projection_matches_runtime_policy(
     ] == [
         tuple((name, tuple(scopes)) for name, scopes in alternative.items()) for alternative in expected if alternative
     ]
+    with TestClient(app) as client:
+        for names in accepted:
+            response = client.get("/resource", headers={f"x-auth-{name}": "valid" for name in names})
+            assert response.status_code == 200
+        for names in rejected:
+            response = client.get("/resource", headers={f"x-auth-{name}": "valid" for name in names})
+            assert response.status_code == 401
 
 
 def test_openapi_scope_and_combination_limits_fail_with_route_context() -> None:

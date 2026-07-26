@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
 
+from litestar_security._openapi import PolicyCompiler
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -32,7 +33,6 @@ from litestar_security.context import (
     NullSessionHandle,
     Principal,
 )
-from litestar_security.openapi import PolicyCompiler
 
 if TYPE_CHECKING:
     from litestar.connection import ASGIConnection
