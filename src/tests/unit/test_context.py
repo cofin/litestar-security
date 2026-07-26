@@ -4,6 +4,9 @@ import sys
 from dataclasses import FrozenInstanceError, fields
 from datetime import datetime, timedelta, timezone
 from functools import partial
+from importlib import import_module
+from importlib.metadata import requires
+from subprocess import run
 from types import SimpleNamespace
 
 import pytest
@@ -562,6 +565,22 @@ def test_package_root_exports_only_foundational_contract() -> None:
     assert openapi_module.__all__ == ()
 
 
+def test_provider_package_declares_crypto_dependency_without_duplicates() -> None:
+    declared = tuple(requirement.lower().replace(" ", "") for requirement in requires("litestar-security") or ())
+
+    assert any(requirement.startswith("pyjwt[crypto]") and ">=2.13" in requirement for requirement in declared)
+    assert all(not requirement.startswith("httpx") for requirement in declared)
+    assert all(not requirement.startswith("cryptography") for requirement in declared)
+    for dependency in ("cryptography", "jwt"):
+        assert import_module(dependency)
+
+    providers = import_module("litestar_security.providers")
+    assert providers.__all__ == ()
+    for module_name in ("jwt", "jwks", "oidc"):
+        provider_module = import_module(f"litestar_security.providers.{module_name}")
+        assert provider_module.__all__ == ()
+
+
 def test_security_config_is_typed_and_slotted() -> None:
     config = litestar_security.SecurityConfig()
 
@@ -582,7 +601,16 @@ def test_security_config_is_typed_and_slotted() -> None:
 
 
 def test_root_import_has_no_optional_integration_dependencies() -> None:
-    forbidden_roots = {"advanced_alchemy", "authlib", "cryptography", "jwt", "redis", "sqlalchemy", "sqlspec"}
+    script = """
+import sys
+import litestar_security
 
-    assert not {module_name for module_name in sys.modules if module_name.split(".", maxsplit=1)[0] in forbidden_roots}
-    assert not any(module_name.startswith("litestar_security.providers") for module_name in sys.modules)
+for module_name in sys.modules:
+    if module_name.startswith("litestar_security.providers") or module_name.split(".", maxsplit=1)[0] in {
+        "advanced_alchemy", "authlib", "cryptography", "jwt", "redis", "sqlalchemy", "sqlspec"
+    }:
+        print(module_name)
+"""
+    result = run([sys.executable, "-c", script], check=True, capture_output=True, text=True)  # noqa: S603
+
+    assert not result.stdout

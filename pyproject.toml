@@ -27,7 +27,10 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]
-dependencies = ["litestar>=2.24.0"]
+dependencies = [
+  "litestar>=2.24.0",
+  "PyJWT[crypto]>=2.13",
+]
 
 [project.urls]
 Issues = "https://github.com/cofin/litestar-security/issues"
