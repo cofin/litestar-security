@@ -11,8 +11,9 @@ from litestar.exceptions import ImproperlyConfiguredException
 from litestar.handlers.base import BaseRouteHandler
 from litestar.middleware import DefineMiddleware
 from litestar.middleware.session.base import SessionMiddleware
-from litestar.plugins import CLIPlugin, InitPlugin
+from litestar.plugins import CLIPlugin, InitPlugin, ReceiveRoutePlugin
 from litestar.router import Router
+from litestar.routes import BaseRoute
 from litestar.types import Scope
 
 from litestar_security.authentication import (
@@ -23,6 +24,7 @@ from litestar_security.authentication import (
 )
 from litestar_security.config import SecurityConfig
 from litestar_security.context import Principal, SecurityContext
+from litestar_security.openapi import RouteCompiler
 
 __all__ = ("CurrentUser", "PrincipalDependency", "SecurityContextDependency", "SecurityPlugin")
 
@@ -87,10 +89,10 @@ def _layer_dependencies(layer: object) -> Mapping[str, object] | None:
     return cast("Mapping[str, object]", dependencies) if isinstance(dependencies, Mapping) else None
 
 
-class SecurityPlugin(InitPlugin, CLIPlugin, Generic[UserT]):
+class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     """Expose the Litestar Security configuration and CLI integration points."""
 
-    __slots__ = ("_middleware", "_providers", "_runtime_config", "config")
+    __slots__ = ("_middleware", "_providers", "_route_compiler", "_runtime_config", "config")
 
     def __init__(self, config: SecurityConfig[UserT] | None = None) -> None:
         """Initialize the plugin."""
@@ -100,6 +102,7 @@ class SecurityPlugin(InitPlugin, CLIPlugin, Generic[UserT]):
             "security_context": Provide(_provide_security_context, sync_to_thread=False, use_cache=False),
             "current_user": Provide(_provide_current_user, sync_to_thread=False, use_cache=False),
         }
+        self._route_compiler: RouteCompiler[UserT] | None = None
         self._runtime_config: SecurityRuntimeConfig[UserT] | None = None
         self._middleware: DefineMiddleware | None = None
 
@@ -121,7 +124,14 @@ class SecurityPlugin(InitPlugin, CLIPlugin, Generic[UserT]):
             message = "Security config and application middleware both configure native Litestar session handling"
             raise ImproperlyConfiguredException(detail=message)
 
-        _, middleware = self._get_runtime(existing_session=bool(native_sessions))
+        runtime, middleware = self._get_runtime(existing_session=bool(native_sessions))
+        if self._route_compiler is None:
+            self._route_compiler = RouteCompiler(
+                registry=runtime.registry,
+                default_policy=self.config.default_policy,
+                openapi_policy=self.config.openapi_policy,
+                openapi_config=app_config.openapi_config,
+            )
         app_config.dependencies.update(self._providers)
         for name, value in _SIGNATURE_NAMESPACE.items():
             app_config.signature_namespace.setdefault(name, value)
@@ -139,6 +149,13 @@ class SecurityPlugin(InitPlugin, CLIPlugin, Generic[UserT]):
         insertion_index = native_sessions[0][0] + 1 if native_sessions else len(app_config.middleware)
         app_config.middleware.insert(insertion_index, middleware)
         return app_config
+
+    def receive_route(self, route: BaseRoute) -> None:
+        """Compile every initial or dynamically registered route."""
+        if self._route_compiler is None:
+            message = "Security route compiler is unavailable before application initialization"
+            raise ImproperlyConfiguredException(detail=message)
+        self._route_compiler.receive_route(route)
 
     def on_cli_init(self, cli: ClickGroup) -> None:
         """Attach the security command group to the Litestar CLI."""

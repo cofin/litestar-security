@@ -1,5 +1,7 @@
 """Integration tests for plugin ownership, session wiring, and CLI behavior."""
 
+from __future__ import annotations
+
 import sys
 from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -7,22 +9,84 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import click
 import pytest
 from click.testing import CliRunner
-from litestar import Controller, Litestar, Router, get
+from litestar import Controller, Litestar, Router, WebSocket, asgi, get, post, route, websocket
 from litestar.config.app import AppConfig
 from litestar.di import Provide
+from litestar.enums import HttpMethod
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.middleware import DefineMiddleware
 from litestar.middleware.session.base import SessionMiddleware
-from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin
+from litestar.openapi import OpenAPIConfig
+from litestar.openapi.controller import OpenAPIController
+from litestar.openapi.plugins import JsonRenderPlugin
+from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
+from litestar.routes import ASGIRoute, HTTPRoute, WebSocketRoute
 
 from litestar_security import SecurityConfig, SecurityPlugin
 from litestar_security._cli import register, security_group
-from litestar_security.authentication import SecurityMiddlewareWrapper
+from litestar_security.authentication import (
+    Authenticated,
+    AuthenticationMechanism,
+    AuthenticationPolicy,
+    SecurityMiddlewareWrapper,
+    SecurityRuntimePlan,
+    public,
+    required,
+    security,
+)
 from litestar_security.context import Principal, SecurityContext
 from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency
 
 if TYPE_CHECKING:
     from litestar.middleware.session.base import BaseSessionBackend
+    from litestar.types import Receive, Scope, Send
+
+
+class _CompilerSlot:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def extract(self, _connection: object) -> object:
+        raise AssertionError
+
+
+class _CompilerAuthenticator:
+    participates_by_default = True
+
+    def __init__(self, name: str, slot: str) -> None:
+        self.name = name
+        self.slot = slot
+
+    async def authenticate(self, _credential: object, _connection: object) -> Authenticated[str]:
+        raise AssertionError
+
+
+class _CompilerResolver:
+    async def resolve(self, _claims: str) -> Principal[object]:
+        raise AssertionError
+
+
+def _compiler_config(*, openapi_policy: AuthenticationPolicy | None = None) -> SecurityConfig[object]:
+    slots = tuple(_CompilerSlot(name=f"slot-{name}") for name in ("a", "b"))
+    mechanisms = tuple(
+        AuthenticationMechanism(
+            authenticator=_CompilerAuthenticator(name=name, slot=f"slot-{name}"),  # type: ignore[arg-type]
+            resolver=_CompilerResolver(),
+        )
+        for name in ("a", "b")
+    )
+    return SecurityConfig(
+        slots=slots,  # type: ignore[arg-type]
+        mechanisms=mechanisms,
+        openapi_policy=openapi_policy,
+    )
+
+
+def _http_plan(app: Litestar, path: str, method: str = "GET") -> SecurityRuntimePlan:
+    route_value = next(
+        route_value for route_value in app.routes if isinstance(route_value, HTTPRoute) and route_value.path == path
+    )
+    return cast("SecurityRuntimePlan", route_value.route_handler_map[method][0].opt["litestar_security_plan"])
 
 
 def test_plugin_constructs_default_config() -> None:
@@ -59,6 +123,254 @@ def test_plugin_is_an_init_and_cli_plugin() -> None:
     assert isinstance(plugin, CLIPlugin)
     assert isinstance(plugin, CLIPluginProtocol)
     assert any(registered is plugin for registered in app.plugins.cli)
+
+
+def test_plugin_receives_routes_and_attaches_public_runtime_plan() -> None:
+    @get("/", opt=security(public()))
+    async def handler() -> None:
+        return None
+
+    plugin = SecurityPlugin()
+    app = Litestar(route_handlers=[handler], openapi_config=None, plugins=[plugin])
+    route = next(route for route in app.routes if isinstance(route, HTTPRoute))
+    route_handler = route.route_handler_map["GET"][0]
+
+    assert isinstance(plugin, ReceiveRoutePlugin)
+    assert route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(authenticate=False)
+
+
+def test_route_policy_uses_native_nearest_owner_inheritance() -> None:
+    @get("/application")
+    async def application_handler() -> None:
+        return None
+
+    @get("/owned")
+    async def router_handler() -> None:
+        return None
+
+    class PolicyController(Controller):
+        path = "/controller"
+        opt: ClassVar = security(required("b"))
+
+        @get("/owned")
+        async def owned(self) -> None:
+            return None
+
+        @get("/handler", opt=security(required("a")))
+        async def handler_override(self) -> None:
+            return None
+
+    app = Litestar(
+        route_handlers=[
+            application_handler,
+            Router(path="/router", route_handlers=[router_handler], opt=security(required("b"))),
+            PolicyController,
+        ],
+        opt=security(required("a")),
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config())],
+    )
+
+    assert _http_plan(app, "/application").participant_names == frozenset({"a"})
+    assert _http_plan(app, "/router/owned").participant_names == frozenset({"b"})
+    assert _http_plan(app, "/controller/owned").participant_names == frozenset({"b"})
+    assert _http_plan(app, "/controller/handler").participant_names == frozenset({"a"})
+
+
+def test_http_methods_and_options_receive_distinct_compiled_plans() -> None:
+    @get("/resource", opt=security(public()))
+    async def read_resource() -> None:
+        return None
+
+    @post("/resource", opt=security(required("b"), csrf_required=True))
+    async def write_resource() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[read_resource, write_resource],
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config())],
+    )
+
+    assert not _http_plan(app, "/resource", "GET").authenticate
+    assert _http_plan(app, "/resource", "POST").participant_names == frozenset({"b"})
+    assert _http_plan(app, "/resource", "POST").csrf_required is True
+    assert not _http_plan(app, "/resource", "OPTIONS").authenticate
+    assert _http_plan(app, "/resource", "OPTIONS").csrf_required is None
+
+
+def test_websocket_compiles_runtime_only_and_explicit_asgi_policy_fails() -> None:
+    @websocket("/socket", opt=security(required("b")))
+    async def socket_handler(socket: WebSocket) -> None:
+        del socket
+
+    app = Litestar(route_handlers=[socket_handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+    socket_route = next(route_value for route_value in app.routes if isinstance(route_value, WebSocketRoute))
+
+    assert socket_route.route_handler.opt["litestar_security_plan"].participant_names == frozenset({"b"})
+    assert not hasattr(socket_route.route_handler, "security")
+
+    @asgi("/mount", opt=security(public()), copy_scope=True)
+    async def mounted_app(scope: Scope, receive: Receive, send: Send) -> None:
+        del scope, receive, send
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"Raw ASGI.*asgi /mount"):
+        Litestar(route_handlers=[mounted_app], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+
+
+def test_asgi_default_dynamic_registration_and_receive_route_are_idempotent() -> None:
+    @asgi("/mount", copy_scope=True)
+    async def mounted_app(scope: Scope, receive: Receive, send: Send) -> None:
+        del scope, receive, send
+
+    plugin = SecurityPlugin(_compiler_config())
+    app = Litestar(route_handlers=[mounted_app], openapi_config=None, plugins=[plugin])
+    mount_route = next(route_value for route_value in app.routes if isinstance(route_value, ASGIRoute))
+    mount_plan = mount_route.route_handler.opt["litestar_security_plan"]
+
+    @get("/dynamic", opt=security(required("b")))
+    async def dynamic_handler() -> None:
+        return None
+
+    app.register(dynamic_handler)
+    dynamic_plan = _http_plan(app, "/dynamic")
+    dynamic_route = next(
+        route_value
+        for route_value in app.routes
+        if isinstance(route_value, HTTPRoute) and route_value.path == "/dynamic"
+    )
+    plugin.receive_route(dynamic_route)
+
+    assert mount_plan.participant_names == frozenset({"a", "b"})
+    assert dynamic_plan.participant_names == frozenset({"b"})
+    assert _http_plan(app, "/dynamic") is dynamic_plan
+
+
+def test_generated_and_explicit_options_are_distinguished() -> None:
+    @post("/generated", opt=security(public(), csrf_required=True))
+    async def generated() -> None:
+        return None
+
+    @route("/explicit", http_method=HttpMethod.OPTIONS, opt=security(required("b")))
+    async def explicit() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[generated, explicit], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())]
+    )
+
+    assert not _http_plan(app, "/generated", "OPTIONS").authenticate
+    assert _http_plan(app, "/generated", "OPTIONS").csrf_required is None
+    assert _http_plan(app, "/explicit", "OPTIONS").participant_names == frozenset({"b"})
+
+
+@pytest.mark.parametrize(
+    ("openapi_config", "plugin_policy", "expected_path", "expected_participants"),
+    [
+        (OpenAPIConfig(title="Test", version="1.0"), None, "/schema/openapi.json", None),
+        (
+            OpenAPIConfig(title="Test", version="1.0", path="/docs"),
+            required("b"),
+            "/docs/openapi.json",
+            frozenset({"b"}),
+        ),
+        (
+            OpenAPIConfig(
+                title="Test",
+                version="1.0",
+                openapi_router=Router(path="/reference", route_handlers=[], opt=security(required("a"))),
+                render_plugins=[JsonRenderPlugin()],
+            ),
+            required("b"),
+            "/reference/openapi.json",
+            frozenset({"a"}),
+        ),
+    ],
+)
+def test_openapi_routes_use_default_configured_and_custom_router_policy(
+    openapi_config: OpenAPIConfig,
+    plugin_policy: AuthenticationPolicy | None,
+    expected_path: str,
+    expected_participants: frozenset[str] | None,
+) -> None:
+    @get("/application")
+    async def application_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[application_handler],
+        opt=security(required("a")),
+        openapi_config=openapi_config,
+        plugins=[SecurityPlugin(_compiler_config(openapi_policy=plugin_policy))],
+    )
+    plan = _http_plan(app, expected_path)
+
+    assert plan.participant_names == expected_participants
+    assert plan.authenticate is (expected_participants is not None)
+
+
+def test_route_compiler_errors_include_method_and_path() -> None:
+    @get("/missing", opt=security(required("missing")))
+    async def handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"GET /missing"):
+        Litestar(route_handlers=[handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+
+
+def test_route_compiler_rejects_invalid_metadata_and_conflicting_private_plan() -> None:
+    @get("/invalid", opt={"litestar_security_policy": object()})
+    async def invalid_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"Invalid.*GET /invalid"):
+        Litestar(route_handlers=[invalid_handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+
+    @get("/conflict", opt=security(public()))
+    async def conflict_handler() -> None:
+        return None
+
+    plugin = SecurityPlugin(_compiler_config())
+    app = Litestar(route_handlers=[conflict_handler], openapi_config=None, plugins=[plugin])
+    conflict_route = next(route_value for route_value in app.routes if isinstance(route_value, HTTPRoute))
+    conflict_route.route_handler_map["GET"][0].opt["litestar_security_plan"] = SecurityRuntimePlan(
+        authenticate=True, required=True
+    )
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"Conflicting.*GET /conflict"):
+        plugin.receive_route(conflict_route)
+
+
+def test_openapi_controller_and_invalid_custom_router_metadata_use_native_ownership() -> None:
+    class TestOpenAPIController(OpenAPIController):
+        path = "/legacy-docs"
+
+    with pytest.warns(DeprecationWarning, match="openapi_controller"):
+        openapi_config = OpenAPIConfig(
+            title="Test", version="1.0", openapi_controller=TestOpenAPIController, render_plugins=[]
+        )
+    app = Litestar(route_handlers=[], openapi_config=openapi_config, plugins=[SecurityPlugin(_compiler_config())])
+
+    assert not _http_plan(app, "/legacy-docs/openapi.json").authenticate
+
+    invalid_router = Router(path="/reference", route_handlers=[], opt={"litestar_security_policy": object()})
+    invalid_config = OpenAPIConfig(
+        title="Test", version="1.0", openapi_router=invalid_router, render_plugins=[JsonRenderPlugin()]
+    )
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"Invalid.*GET /reference"):
+        Litestar(route_handlers=[], openapi_config=invalid_config, plugins=[SecurityPlugin(_compiler_config())])
+
+
+def test_receive_route_before_application_initialization_fails() -> None:
+    @get("/")
+    async def handler() -> None:
+        return None
+
+    route_value = HTTPRoute(path="/", route_handlers=[handler])
+
+    with pytest.raises(ImproperlyConfiguredException, match="before application initialization"):
+        SecurityPlugin().receive_route(route_value)
 
 
 def test_plugin_traverses_constructed_controller_ownership_without_collisions() -> None:

@@ -533,7 +533,15 @@ def test_package_root_exports_only_foundational_contract() -> None:
 def test_security_config_is_typed_and_slotted() -> None:
     config = litestar_security.SecurityConfig()
 
-    expected_fields = ("slots", "mechanisms", "default_policy", "require_default", "session_backend", "plan_lookup")
+    expected_fields = (
+        "slots",
+        "mechanisms",
+        "default_policy",
+        "openapi_policy",
+        "require_default",
+        "session_backend",
+        "plan_lookup",
+    )
     assert tuple(field.name for field in fields(config)) == expected_fields
     assert config.__slots__ == expected_fields
     assert not hasattr(config, "__dict__")

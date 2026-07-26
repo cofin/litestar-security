@@ -27,6 +27,7 @@ class SecurityConfig(Generic[UserT]):
     slots: Sequence[CredentialSlot[Any]] = ()
     mechanisms: Sequence[AuthenticationMechanism[Any, Any, UserT]] = ()
     default_policy: AuthenticationPolicy = field(default_factory=required)
+    openapi_policy: AuthenticationPolicy | None = None
     require_default: bool = False
     session_backend: BaseSessionBackend[Any] | None = None
     plan_lookup: Callable[[Scope], SecurityRuntimePlan] | None = None
