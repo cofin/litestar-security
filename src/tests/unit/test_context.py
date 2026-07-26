@@ -579,12 +579,16 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "BearerSlotSelector",
         "BearerTokenSlot",
         "CompositeBearerConfig",
+        "DiscoveryPolicy",
         "JSONValue",
         "JWTClaims",
         "JWTValidationConfig",
         "JWTVerifier",
         "LocalJWKSConfig",
         "LocalKeyRing",
+        "OIDCDiscoveryClient",
+        "OIDCDiscoveryError",
+        "OIDCMetadata",
         "SigningKey",
         "TokenSigner",
         "VerificationKey",
@@ -593,9 +597,9 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "build_local_jwks_handler",
     )
     jwt_module = import_module("litestar_security.providers.jwt")
-    assert jwt_module.__all__ == providers.__all__
-    for module_name in ("jwks", "oidc"):
-        assert import_module(f"litestar_security.providers.{module_name}").__all__ == ()
+    oidc_module = import_module("litestar_security.providers.oidc")
+    assert set(jwt_module.__all__).union(oidc_module.__all__) == set(providers.__all__)
+    assert import_module("litestar_security.providers.jwks").__all__ == ()
 
 
 def test_security_config_is_typed_and_slotted() -> None:

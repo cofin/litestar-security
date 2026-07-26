@@ -17,17 +17,22 @@ from litestar_security.providers.jwt import (
     build_access_token_claims,
     build_local_jwks_handler,
 )
+from litestar_security.providers.oidc import DiscoveryPolicy, OIDCDiscoveryClient, OIDCDiscoveryError, OIDCMetadata
 
 __all__ = (
     "BearerSlotSelector",
     "BearerTokenSlot",
     "CompositeBearerConfig",
+    "DiscoveryPolicy",
     "JSONValue",
     "JWTClaims",
     "JWTValidationConfig",
     "JWTVerifier",
     "LocalJWKSConfig",
     "LocalKeyRing",
+    "OIDCDiscoveryClient",
+    "OIDCDiscoveryError",
+    "OIDCMetadata",
     "SigningKey",
     "TokenSigner",
     "VerificationKey",
