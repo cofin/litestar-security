@@ -1,15 +1,56 @@
-from dataclasses import FrozenInstanceError
+"""Unit tests for public context, session, and package contracts."""
+
+import sys
+from dataclasses import FrozenInstanceError, fields
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from litestar.exceptions import NotAuthorizedException
 
+import litestar_security
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
     CredentialRestrictions,
+    LitestarSessionHandle,
+    NullSessionHandle,
     Principal,
     SecurityContext,
+    SessionHandle,
+    SessionPersistenceUnavailableError,
+    SessionUnavailableError,
+)
+
+_PUBLIC_API = (
+    "Authenticated",
+    "AuthenticationEvidence",
+    "AuthenticationMechanism",
+    "AuthenticationOutcome",
+    "AuthenticationRegistry",
+    "AuthorizationSnapshot",
+    "CredentialExtraction",
+    "CredentialRestrictions",
+    "CredentialSlot",
+    "CurrentUser",
+    "IdentityResolver",
+    "InvalidCredentials",
+    "LitestarSessionHandle",
+    "NoCredentials",
+    "NullSessionHandle",
+    "PresentedCredential",
+    "Principal",
+    "PrincipalDependency",
+    "RequestAuthenticator",
+    "SecurityConfig",
+    "SecurityContext",
+    "SecurityContextDependency",
+    "SecurityPlugin",
+    "SessionHandle",
+    "SessionPersistenceUnavailableError",
+    "SessionUnavailableError",
+    "VerificationUnavailable",
+    "__project__",
+    "__version__",
 )
 
 
@@ -213,3 +254,109 @@ def test_security_context_derives_earliest_expiry_without_principal() -> None:
     assert not hasattr(context, "principal")
     with pytest.raises(FrozenInstanceError):
         context.evidence = ()  # type: ignore[misc]
+
+
+def test_native_http_session_supports_live_mapping_operations() -> None:
+    scope = {"type": "http", "session": {"existing": "value"}}
+    handle = LitestarSessionHandle(scope=scope)  # type: ignore[arg-type]
+
+    assert isinstance(handle, SessionHandle)
+    assert handle.is_available
+    assert handle.can_persist
+    assert handle.get("existing") == "value"
+    assert handle.get("missing", "default") == "default"
+
+    handle.set("new", 42)
+    assert handle.pop("new") == 42
+    assert handle.pop("missing", "default") == "default"
+
+    scope["session"] = {"value": "replacement"}
+    assert handle.get("value") == "replacement"
+    handle.clear()
+    assert scope["session"] == {}
+
+
+def test_anonymous_context_retains_existing_session(anonymous_principal: Principal[object]) -> None:
+    scope = {"type": "http", "session": {"cart": ["item-1"]}}
+    context = SecurityContext(
+        session=LitestarSessionHandle(scope=scope)  # type: ignore[arg-type]
+    )
+
+    assert not anonymous_principal.is_authenticated
+    assert context.session.get("cart") == ["item-1"]
+    assert scope["session"] == {"cart": ["item-1"]}
+
+
+def test_null_session_reads_defaults_and_rejects_mutations() -> None:
+    handle = NullSessionHandle()
+
+    assert isinstance(handle, SessionHandle)
+    assert not handle.is_available
+    assert not handle.can_persist
+    assert handle.get("missing") is None
+    assert handle.get("missing", "default") == "default"
+    assert handle.pop("missing", "default") == "default"
+    for mutation in (lambda: handle.set("key", "value"), handle.clear):
+        with pytest.raises(SessionUnavailableError, match="Session storage is unavailable"):
+            mutation()
+
+
+def test_native_handle_rejects_operations_when_session_disappears() -> None:
+    scope = {"type": "http", "session": {}}
+    handle = LitestarSessionHandle(scope=scope)  # type: ignore[arg-type]
+    del scope["session"]
+
+    assert not handle.is_available
+    assert not handle.can_persist
+    for operation in (
+        lambda: handle.get("missing"),
+        lambda: handle.set("key", "value"),
+        lambda: handle.pop("missing"),
+        handle.clear,
+    ):
+        with pytest.raises(SessionUnavailableError, match="Session storage is unavailable"):
+            operation()
+
+
+def test_websocket_native_session_is_read_only() -> None:
+    scope = {"type": "websocket", "session": {"existing": "value"}}
+    handle = LitestarSessionHandle(scope=scope)  # type: ignore[arg-type]
+
+    assert handle.is_available
+    assert not handle.can_persist
+    assert handle.get("existing") == "value"
+    for mutation in (lambda: handle.set("key", "value"), lambda: handle.pop("existing"), handle.clear):
+        with pytest.raises(SessionPersistenceUnavailableError, match="cannot persist"):
+            mutation()
+
+
+def test_package_root_exports_only_foundational_contract() -> None:
+    assert litestar_security.__all__ == _PUBLIC_API
+    assert all(hasattr(litestar_security, name) for name in _PUBLIC_API)
+    assert litestar_security.__project__ == "litestar-security"
+    assert litestar_security.__version__ == "0.1.0"
+    for private_name in (
+        "OwnedSessionBackend",
+        "SecurityMiddleware",
+        "SecurityMiddlewareWrapper",
+        "SecurityRuntimeConfig",
+        "SecurityRuntimePlan",
+        "_AuthenticationEvaluator",
+    ):
+        assert not hasattr(litestar_security, private_name)
+
+
+def test_security_config_is_typed_and_slotted() -> None:
+    config = litestar_security.SecurityConfig()
+
+    expected_fields = ("slots", "mechanisms", "require_default", "session_backend", "plan_lookup")
+    assert tuple(field.name for field in fields(config)) == expected_fields
+    assert config.__slots__ == expected_fields
+    assert not hasattr(config, "__dict__")
+
+
+def test_root_import_has_no_optional_integration_dependencies() -> None:
+    forbidden_roots = {"advanced_alchemy", "authlib", "cryptography", "jwt", "redis", "sqlalchemy", "sqlspec"}
+
+    assert not {module_name for module_name in sys.modules if module_name.split(".", maxsplit=1)[0] in forbidden_roots}
+    assert not any(module_name.startswith("litestar_security.providers") for module_name in sys.modules)

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, assert_type, cast
+from typing import TYPE_CHECKING, cast
+
+from typing_extensions import assert_type
 
 from litestar_security import (
     CurrentUser,
@@ -38,7 +40,7 @@ def narrow_current_user(current_user: CurrentUser[User], principal: Principal[Us
     assert_type(principal.user, User | None)
 
 
-anonymous: PrincipalDependency[User] = Principal.anonymous()
+anonymous: PrincipalDependency[User] = Principal[User].anonymous()
 no_session: SecurityContextDependency = SecurityContext(session=NullSessionHandle())
 native_scope = cast("Scope", {"type": "http", "session": {}})
 native_session: SecurityContextDependency = SecurityContext(session=LitestarSessionHandle(native_scope))

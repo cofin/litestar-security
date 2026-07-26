@@ -1,3 +1,5 @@
+"""Unit tests for authentication outcomes and registry compilation."""
+
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 

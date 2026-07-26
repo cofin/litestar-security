@@ -1,3 +1,5 @@
+"""Unit tests for strict authentication evaluation and authorization merging."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

@@ -1,3 +1,5 @@
+"""Integration tests for Litestar security middleware and dependency injection."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,15 +8,16 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from litestar import Litestar, Request, Response, get
+from litestar.config.app import AppConfig
 from litestar.enums import ScopeType
 from litestar.exceptions import NotAuthorizedException, ServiceUnavailableException
 from litestar.middleware import DefineMiddleware
 from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
 from litestar.middleware.session.base import BaseSessionBackend, SessionMiddleware
 from litestar.status_codes import HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAILABLE
-from litestar.testing import AsyncTestClient
+from litestar.testing import AsyncTestClient, TestClient
 
-from litestar_security import authentication
+from litestar_security import SecurityConfig, SecurityPlugin, authentication
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -35,6 +38,8 @@ if TYPE_CHECKING:
 
     from litestar.connection import ASGIConnection
     from litestar.types import ASGIApp, Message, Receive, Scope, Send
+
+    from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency
 
 _NOW = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -397,3 +402,114 @@ async def test_wrapper_runtime_order_and_native_boundary(monkeypatch: pytest.Mon
     ]
     assert builds == 1
     assert authentication._NATIVE_EXCEPTION_HANDLER is ExceptionHandlerMiddleware  # noqa: SLF001
+
+
+@dataclass(frozen=True)
+class _DependencyUser:
+    name: str
+
+
+class _DependencySlot:
+    name = "test"
+
+    def extract(self, _connection: ASGIConnection[Any, Any, Any, Any]) -> PresentedCredential[str]:
+        return PresentedCredential("credential")
+
+
+class _DependencyAuthenticator:
+    name = "test"
+    slot = "test"
+    participates_by_default = True
+
+    async def authenticate(
+        self, _credential: str, _connection: ASGIConnection[Any, Any, Any, Any]
+    ) -> Authenticated[str]:
+        return Authenticated(
+            claims="subject",
+            evidence=AuthenticationEvidence(mechanism=self.name, slot=self.slot, authenticated_at=_NOW),
+        )
+
+
+class _DependencyResolver:
+    def __init__(self, principal: Principal[_DependencyUser]) -> None:
+        self.principal = principal
+
+    async def resolve(self, _claims: str) -> Principal[_DependencyUser]:
+        return self.principal
+
+
+def _identity_plugin(principal: Principal[_DependencyUser]) -> SecurityPlugin[_DependencyUser]:
+    return SecurityPlugin(
+        SecurityConfig(
+            slots=(_DependencySlot(),),
+            mechanisms=(
+                AuthenticationMechanism(
+                    authenticator=_DependencyAuthenticator(), resolver=_DependencyResolver(principal)
+                ),
+            ),
+        )
+    )
+
+
+def test_dependency_providers_are_non_threaded_and_request_local(empty_security_config: SecurityConfig[object]) -> None:
+    app_config = SecurityPlugin(empty_security_config).on_app_init(AppConfig())
+
+    for provider in app_config.dependencies.values():
+        assert provider.sync_to_thread is False
+        assert provider.use_cache is False
+
+
+def test_anonymous_dependency_injection_is_typed() -> None:
+    @get("/")
+    async def handler(
+        principal: PrincipalDependency[_DependencyUser], security_context: SecurityContextDependency
+    ) -> dict[str, bool]:
+        return {
+            "anonymous": not principal.is_authenticated,
+            "typed_context": isinstance(security_context, SecurityContext),
+        }
+
+    with TestClient(Litestar(route_handlers=[handler], plugins=[SecurityPlugin()])) as client:
+        response = client.get("/")
+
+    assert response.json() == {"anonymous": True, "typed_context": True}
+
+
+@pytest.mark.parametrize(
+    ("principal", "expected_principal", "expected_user_status", "expected_user"),
+    [
+        (
+            Principal(id="user-1", user=_DependencyUser(name="Ada")),
+            {"id": "user-1", "has_user": True, "evidence": "test"},
+            200,
+            "Ada",
+        ),
+        (Principal(id="service-1"), {"id": "service-1", "has_user": False, "evidence": "test"}, 401, None),
+    ],
+)
+def test_authenticated_dependency_injection_for_user_and_service_principals(
+    principal: Principal[_DependencyUser],
+    expected_principal: dict[str, object],
+    expected_user_status: int,
+    expected_user: str | None,
+) -> None:
+    @get("/principal")
+    async def principal_handler(
+        principal: PrincipalDependency[_DependencyUser], security_context: SecurityContextDependency
+    ) -> dict[str, object]:
+        return {"id": principal.id, "has_user": principal.has_user, "evidence": security_context.evidence[0].mechanism}
+
+    @get("/user")
+    async def user_handler(current_user: CurrentUser[_DependencyUser]) -> str:
+        return current_user.name
+
+    with TestClient(
+        Litestar(route_handlers=[principal_handler, user_handler], plugins=[_identity_plugin(principal)])
+    ) as client:
+        principal_response = client.get("/principal")
+        user_response = client.get("/user")
+
+    assert principal_response.json() == expected_principal
+    assert user_response.status_code == expected_user_status
+    if expected_user is not None:
+        assert user_response.text == expected_user

@@ -1,7 +1,12 @@
+"""Integration tests for plugin ownership, session wiring, and CLI behavior."""
+
 import sys
+from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+import click
 import pytest
+from click.testing import CliRunner
 from litestar import Controller, Litestar, Router, get
 from litestar.config.app import AppConfig
 from litestar.di import Provide
@@ -11,6 +16,7 @@ from litestar.middleware.session.base import SessionMiddleware
 from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin
 
 from litestar_security import SecurityConfig, SecurityPlugin
+from litestar_security._cli import register, security_group
 from litestar_security.authentication import SecurityMiddlewareWrapper
 from litestar_security.context import Principal, SecurityContext
 from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency
@@ -247,3 +253,46 @@ def test_importing_plugin_does_not_import_private_cli() -> None:
     finally:
         if existing_module is not None:
             sys.modules["litestar_security._cli"] = existing_module
+
+
+def _root_group() -> click.Group:
+    return click.Group(name="litestar")
+
+
+def test_cli_entry_point_and_lazy_plugin_registration() -> None:
+    entry_point = next(
+        candidate for candidate in entry_points(group="litestar.commands") if candidate.name == "security"
+    )
+    cli = _root_group()
+
+    SecurityPlugin().on_cli_init(cli)
+
+    assert entry_point.load() is security_group
+    assert cli.commands["security"] is security_group
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (["security", "--help"], "Litestar Security operations."),
+        (["security", "--version"], "litestar-security, version 0.1.0"),
+    ],
+)
+def test_cli_output(arguments: list[str], expected: str) -> None:
+    cli = _root_group()
+    register(cli)
+
+    result = CliRunner().invoke(cli, arguments)
+
+    assert result.exit_code == 0
+    assert expected in result.output
+
+
+def test_cli_registration_is_idempotent() -> None:
+    cli = _root_group()
+
+    register(cli)
+    register(cli)
+    SecurityPlugin().on_cli_init(cli)
+
+    assert list(cli.commands) == ["security"]

@@ -5,7 +5,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import ClassVar, Generic, Protocol, TypeVar, cast, runtime_checkable
+from typing import Generic, Protocol, TypeVar, cast, runtime_checkable
 
 from litestar.enums import ScopeType
 from litestar.exceptions import NotAuthorizedException
@@ -124,8 +124,15 @@ class LitestarSessionHandle:
 class NullSessionHandle:
     """Stateless session capability for applications without sessions."""
 
-    is_available: ClassVar[bool] = False
-    can_persist: ClassVar[bool] = False
+    @property
+    def is_available(self) -> bool:
+        """Return that no native session is attached."""
+        return False
+
+    @property
+    def can_persist(self) -> bool:
+        """Return that no session mutations can persist."""
+        return False
 
     def get(self, key: str, default: object = None) -> object:
         """Return the caller's default."""
