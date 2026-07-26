@@ -36,6 +36,7 @@ def jwt_key_material() -> Mapping[str, tuple[bytes, bytes]]:
         "EdDSA": _pem_pair(ed25519.Ed25519PrivateKey.generate()),
         "ES256": _pem_pair(ec.generate_private_key(ec.SECP256R1())),
         "RS256": _pem_pair(rsa.generate_private_key(public_exponent=65537, key_size=2048)),
+        "RS256_ALT": _pem_pair(rsa.generate_private_key(public_exponent=65537, key_size=2048)),
         "HS256": (b"test-only-hs256-secret-material-32-bytes", b"test-only-hs256-secret-material-32-bytes"),
         "ES384": _pem_pair(ec.generate_private_key(ec.SECP384R1())),
         "RS1024": _pem_pair(

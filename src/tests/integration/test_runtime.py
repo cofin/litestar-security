@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+import jwt
 import pytest
 from litestar import Controller, Litestar, Request, Response, Router, WebSocket, get, websocket
 from litestar.config.app import AppConfig
@@ -41,6 +42,15 @@ from litestar_security.context import (
     SecurityContext,
 )
 from litestar_security.guards import requires_scope
+from litestar_security.providers.jwt import (
+    BearerSlotSelector,
+    BearerTokenSlot,
+    CompositeBearerConfig,
+    JWTClaims,
+    JWTValidationConfig,
+    JWTVerifier,
+    PyJWTVerifier,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -89,6 +99,20 @@ class _Authenticator:
 class _Resolver:
     async def resolve(self, claims: str) -> Principal[object]:
         return Principal(id=claims)
+
+
+class _JWTResolver:
+    async def resolve(self, claims: JWTClaims) -> Principal[object]:
+        return Principal(id=claims.subject)
+
+
+@dataclass(frozen=True)
+class _UnavailableJWTVerifier:
+    config: JWTValidationConfig
+
+    async def verify(self, _token: str, *, now: datetime) -> VerificationUnavailable:
+        del now
+        return VerificationUnavailable()
 
 
 @dataclass
@@ -484,6 +508,71 @@ def test_anonymous_dependency_injection_is_typed() -> None:
     assert response.json() == {"anonymous": True, "typed_context": True}
 
 
+def test_composite_bearer_runs_through_the_complete_litestar_runtime() -> None:
+    issuer = "https://runtime.example"
+    audience = "runtime-api"
+    now = datetime.now(timezone.utc)
+    verification_config = JWTValidationConfig(
+        issuer=issuer, audiences=frozenset({audience}), algorithms=frozenset({"HS256"})
+    )
+    signing_key = bytes(range(32))
+    claims = {
+        "iss": issuer,
+        "sub": "runtime-user",
+        "aud": audience,
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+        "iat": int(now.timestamp()),
+        "nbf": int((now - timedelta(seconds=1)).timestamp()),
+        "client_id": "runtime-client",
+        "jti": "runtime-token",
+    }
+    token = jwt.encode(claims, signing_key, algorithm="HS256", headers={"typ": "at+jwt"})
+    wrong_key_token = jwt.encode(claims, bytes(range(1, 33)), algorithm="HS256", headers={"typ": "at+jwt"})
+
+    def build_app(verifier: JWTVerifier[JWTClaims]) -> Litestar:
+        physical_slot, mechanism_value = CompositeBearerConfig(
+            mechanism_name="bearer",
+            slots=(
+                BearerTokenSlot(
+                    name="runtime",
+                    selector=BearerSlotSelector(issuers=frozenset({issuer}), audiences=frozenset({audience})),
+                    verifier=verifier,
+                ),
+            ),
+        ).build(_JWTResolver())
+
+        @get("/")
+        async def handler(request: Request) -> dict[str, object]:
+            return {
+                "id": request.user.id,
+                "mechanism": request.auth.evidence[0].mechanism,
+                "slot": request.auth.evidence[0].slot,
+            }
+
+        return Litestar(
+            route_handlers=[handler],
+            openapi_config=None,
+            plugins=[
+                SecurityPlugin(
+                    SecurityConfig(slots=(physical_slot,), mechanisms=(mechanism_value,))  # type: ignore[arg-type]
+                )
+            ],
+        )
+
+    verifier = PyJWTVerifier(config=verification_config, key=signing_key, require_key_id=False)
+    with TestClient(build_app(verifier)) as client:
+        authenticated = client.get("/", headers={"Authorization": f"Bearer {token}"})
+        invalid = client.get("/", headers={"Authorization": f"Bearer {wrong_key_token}"})
+
+    with TestClient(build_app(_UnavailableJWTVerifier(verification_config))) as client:
+        unavailable = client.get("/", headers={"Authorization": f"Bearer {token}"})
+
+    assert authenticated.status_code == 200
+    assert authenticated.json() == {"id": "runtime-user", "mechanism": "bearer", "slot": "runtime"}
+    assert invalid.status_code == HTTP_401_UNAUTHORIZED
+    assert unavailable.status_code == HTTP_503_SERVICE_UNAVAILABLE
+
+
 def test_native_guard_layers_remain_cumulative_for_http_and_websocket_with_child_policy() -> None:
     events: list[str] = []
 
@@ -535,7 +624,7 @@ def test_authorization_guard_has_identical_http_and_websocket_decisions(connecti
         return None
 
     scope = _scope("http" if connection_type is Request else "websocket")
-    scope["user"] = Principal[object](id="user-1")
+    scope["user"] = Principal(id="user-1")
     scope["auth"] = SecurityContext(
         session=NullSessionHandle(), authorization=AuthorizationSnapshot(scopes={"reports:read"})
     )

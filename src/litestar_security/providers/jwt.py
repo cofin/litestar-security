@@ -5,29 +5,45 @@ import binascii
 import json
 import re
 import unicodedata
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from types import MappingProxyType
-from typing import Generic, Literal, NoReturn, Protocol, TypeAlias, TypeVar, cast
+from typing import Any, Generic, Literal, NoReturn, Protocol, TypeAlias, TypeVar, cast
 
 import jwt
 from anyio import to_thread
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from jwt import PyJWK
 from jwt.exceptions import PyJWTError
+from litestar.connection import ASGIConnection
 from litestar.exceptions import ImproperlyConfiguredException
+from litestar.openapi.spec import SecurityScheme
 
 from litestar_security.authentication import (
     Authenticated,
+    AuthenticationMechanism,
     AuthenticationOutcome,
+    CredentialExtraction,
+    CredentialSlot,
+    IdentityResolver,
     InvalidCredentials,
+    NoCredentials,
+    PresentedCredential,
     VerificationUnavailable,
 )
 from litestar_security.context import AuthenticationEvidence
 
-__all__ = ("JSONValue", "JWTClaims", "JWTValidationConfig", "JWTVerifier")
+__all__ = (
+    "BearerSlotSelector",
+    "BearerTokenSlot",
+    "CompositeBearerConfig",
+    "JSONValue",
+    "JWTClaims",
+    "JWTValidationConfig",
+    "JWTVerifier",
+)
 
 JSONValue: TypeAlias = bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"] | None
 JWTAlgorithm: TypeAlias = Literal["EdDSA", "ES256", "RS256", "HS256"]
@@ -36,6 +52,7 @@ PreparedVerificationKey: TypeAlias = (
     bytes | str | PyJWK | rsa.RSAPublicKey | ec.EllipticCurvePublicKey | ed25519.Ed25519PublicKey
 )
 ClaimsT = TypeVar("ClaimsT")
+UserT = TypeVar("UserT")
 
 _SUPPORTED_ALGORITHMS = frozenset({"EdDSA", "ES256", "RS256", "HS256"})
 _ACCESS_TOKEN_TYPES = frozenset({"at+jwt", "application/at+jwt"})
@@ -47,6 +64,9 @@ _BASE64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _COMPACT_SEGMENT_COUNT = 3
 _MINIMUM_HMAC_BYTES = 32
 _MINIMUM_RSA_BITS = 2048
+_ASCII_CONTROL_LIMIT = 32
+_ASCII_DELETE = 127
+_BEARER_PREFIX_LENGTH = len(b"Bearer ")
 _INVALID = InvalidCredentials()
 
 
@@ -116,6 +136,8 @@ class JWTValidationConfig:
 
 class JWTVerifier(Protocol, Generic[ClaimsT]):
     """Verify one compact JWT against a configured trust domain."""
+
+    config: JWTValidationConfig
 
     async def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[ClaimsT]:
         """Return a structured authentication outcome."""
@@ -210,6 +232,194 @@ class PyJWTVerifier:
                 mechanism=self.mechanism_name, slot=self.slot_name, authenticated_at=now, expires_at=claims.expires_at
             ),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class BearerSlotSelector:
+    """Route unverified bearer metadata only to a configured trust domain."""
+
+    issuers: frozenset[str]
+    audiences: frozenset[str] = frozenset()
+    token_types: frozenset[str] = _ACCESS_TOKEN_TYPES
+
+    def __post_init__(self) -> None:
+        """Normalize immutable selector values without broadening trust."""
+        issuers = frozenset(_strict_identifier(issuer) for issuer in self.issuers)
+        audiences = frozenset(_strict_identifier(audience) for audience in self.audiences)
+        token_types = frozenset(_strict_identifier(token_type).lower() for token_type in self.token_types)
+        if not issuers:
+            _raise_config("Bearer selector issuers must not be empty")
+        if not token_types:
+            _raise_config("Bearer selector token types must not be empty")
+        object.__setattr__(self, "issuers", issuers)
+        object.__setattr__(self, "audiences", audiences)
+        object.__setattr__(self, "token_types", token_types)
+
+
+@dataclass(frozen=True, slots=True)
+class BearerTokenSlot:
+    """Bind one logical bearer routing selector to one verifier."""
+
+    name: str
+    selector: BearerSlotSelector
+    verifier: JWTVerifier[JWTClaims] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        """Validate logical naming and verifier trust compatibility."""
+        name = _strict_identifier(self.name)
+        verifier_config = getattr(self.verifier, "config", None)
+        if not isinstance(verifier_config, JWTValidationConfig):
+            _raise_config(f"Bearer slot {name} verifier must expose JWTValidationConfig")
+        selector = self.selector
+        if (
+            selector.issuers != frozenset({verifier_config.issuer})
+            or (selector.audiences and not selector.audiences.issubset(verifier_config.audiences))
+            or not selector.token_types.issubset(verifier_config.token_types)
+        ):
+            _raise_config(f"Bearer slot {name} selector does not match verifier validation config")
+        object.__setattr__(self, "name", name)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+@dataclass(frozen=True, slots=True)
+class CompositeBearerConfig:
+    """Own one bearer namespace and dispatch it to exactly one JWT verifier."""
+
+    mechanism_name: str
+    slots: tuple[BearerTokenSlot, ...]
+    maximum_token_bytes: int = 16_384
+
+    def __post_init__(self) -> None:
+        """Freeze slots and reject deterministic startup ambiguity."""
+        mechanism_name = _strict_identifier(self.mechanism_name)
+        slots = tuple(self.slots)
+        if not slots:
+            _raise_config("Composite bearer authentication requires at least one slot")
+        if self.maximum_token_bytes < 1:
+            _raise_config("Composite bearer maximum token bytes must be positive")
+        names: set[str] = set()
+        selectors: set[tuple[frozenset[str], frozenset[str], frozenset[str]]] = set()
+        for slot in slots:
+            if slot.name in names:
+                _raise_config(f"Duplicate bearer slot: {slot.name}")
+            names.add(slot.name)
+            selector = (slot.selector.issuers, slot.selector.audiences, slot.selector.token_types)
+            if selector in selectors:
+                _raise_config(f"Bearer slot {slot.name} has an identical selector")
+            selectors.add(selector)
+        object.__setattr__(self, "mechanism_name", mechanism_name)
+        object.__setattr__(self, "slots", slots)
+
+    def build(
+        self,
+        resolver: IdentityResolver[JWTClaims, UserT],
+        *,
+        clock: Callable[[], datetime] = _utc_now,
+        participates_by_default: bool = True,
+        scheme_name: str | None = None,
+    ) -> tuple[CredentialSlot[str], AuthenticationMechanism[str, JWTClaims, UserT]]:
+        """Build one physical slot and one native bearer mechanism."""
+        if not callable(clock):
+            _raise_config("Composite bearer clock must be callable")
+        credential_slot = _BearerCredentialSlot(maximum_token_bytes=self.maximum_token_bytes)
+        authenticator = _CompositeBearerAuthenticator(
+            config=self, clock=clock, participates_by_default=participates_by_default
+        )
+        mechanism: AuthenticationMechanism[str, JWTClaims, UserT] = AuthenticationMechanism(
+            authenticator=authenticator,
+            resolver=resolver,
+            scheme_name=self.mechanism_name if scheme_name is None else scheme_name,
+            security_scheme=SecurityScheme(type="http", scheme="bearer", bearer_format="JWT"),
+        )
+        return credential_slot, mechanism
+
+
+@dataclass(slots=True)
+class _BearerCredentialSlot:
+    maximum_token_bytes: int
+    name: str = field(default="authorization.bearer", init=False)
+
+    def extract(  # noqa: PLR0911
+        self, connection: ASGIConnection[Any, Any, Any, Any]
+    ) -> CredentialExtraction[str]:
+        """Extract one exact bearer credential from raw ASGI headers."""
+        authorization_values = tuple(
+            value for name, value in connection.scope["headers"] if name.lower() == b"authorization"
+        )
+        if not authorization_values:
+            return NoCredentials()
+        if len(authorization_values) != 1:
+            return InvalidCredentials()
+        raw_value = authorization_values[0]
+        if len(raw_value) > _BEARER_PREFIX_LENGTH + self.maximum_token_bytes:
+            return InvalidCredentials()
+        try:
+            value = raw_value.decode("ascii")
+        except (AttributeError, UnicodeDecodeError):
+            return InvalidCredentials()
+        if any(ord(character) < _ASCII_CONTROL_LIMIT or ord(character) == _ASCII_DELETE for character in value):
+            return InvalidCredentials()
+        scheme, separator, token = value.partition(" ")
+        if (
+            separator != " "
+            or scheme.lower() != "bearer"
+            or not token
+            or " " in token
+            or len(token.encode("ascii")) > self.maximum_token_bytes
+        ):
+            return InvalidCredentials()
+        return PresentedCredential(token)
+
+
+@dataclass(slots=True)
+class _CompositeBearerAuthenticator:
+    config: CompositeBearerConfig
+    clock: Callable[[], datetime] = field(repr=False, compare=False)
+    participates_by_default: bool = True
+    slot: str = field(default="authorization.bearer", init=False)
+    name: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Copy the compiled mechanism name onto the protocol surface."""
+        self.name = self.config.mechanism_name
+
+    async def authenticate(
+        self, credential: str, connection: ASGIConnection[Any, Any, Any, Any]
+    ) -> AuthenticationOutcome[JWTClaims]:
+        """Select one trust slot, verify once, and preserve structured failure."""
+        del connection
+        route = parse_unverified_jwt_route(credential, maximum_token_bytes=self.config.maximum_token_bytes)
+        if isinstance(route, InvalidCredentials):
+            return route
+        matches = tuple(slot for slot in self.config.slots if _selector_matches(slot.selector, route))
+        if len(matches) != 1:
+            return InvalidCredentials(code="unknown_or_ambiguous_bearer_slot")
+        selected = matches[0]
+        outcome = await selected.verifier.verify(credential, now=self.clock())
+        if isinstance(outcome, NoCredentials):
+            return InvalidCredentials()
+        if not isinstance(outcome, Authenticated):
+            return outcome
+        return replace(outcome, evidence=replace(outcome.evidence, mechanism=self.name, slot=selected.name))
+
+
+def _selector_matches(selector: BearerSlotSelector, route: UnverifiedJWTRoute) -> bool:
+    issuer = route.payload.get("iss")
+    token_type = route.header.get("typ")
+    audiences = _normalize_audiences(route.payload.get("aud"))
+    return (
+        isinstance(issuer, str)
+        and _is_strict_identifier(issuer)
+        and issuer in selector.issuers
+        and isinstance(token_type, str)
+        and _is_strict_identifier(token_type)
+        and token_type.lower() in selector.token_types
+        and audiences is not None
+        and (not selector.audiences or bool(audiences.intersection(selector.audiences)))
+    )
 
 
 def _verify_signature(token: str, key: PreparedVerificationKey, algorithm: str) -> None:

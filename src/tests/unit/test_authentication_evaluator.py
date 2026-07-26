@@ -230,7 +230,7 @@ async def test_nonqualifying_credentials_still_merge_or_reject_different_subject
     [(required("missing"), "undefined authentication mechanism"), (required(), "default-participating")],
 )
 def test_policy_compiler_rejects_unresolvable_required_policy(policy: AuthenticationPolicy, match: str) -> None:
-    registry = AuthenticationRegistry[object]()
+    registry: AuthenticationRegistry[object] = AuthenticationRegistry()
 
     with pytest.raises(ImproperlyConfiguredException, match=match):
         PolicyCompiler(registry).compile(policy)
@@ -241,7 +241,7 @@ def test_policy_compiler_rejects_foreign_policy_subclasses() -> None:
         pass
 
     with pytest.raises(ImproperlyConfiguredException, match="policy helper"):
-        PolicyCompiler(AuthenticationRegistry[object]()).compile(_ForeignPolicy())
+        PolicyCompiler(AuthenticationRegistry()).compile(_ForeignPolicy())
 
 
 @pytest.mark.anyio
@@ -265,7 +265,7 @@ async def test_no_credentials_required_rejects_and_optional_remains_anonymous() 
 @pytest.mark.anyio
 async def test_one_valid_credential_resolves_once() -> None:
     events: list[str] = []
-    principal = Principal[object](id="user-1")
+    principal = Principal(id="user-1")
     evaluator, slots, authenticators, resolvers = _evaluator(
         [("local", PresentedCredential("token"), _success("local", "slot-local"), principal)], events
     )
@@ -299,7 +299,10 @@ async def test_malformed_extraction_is_terminal() -> None:
 async def test_presented_slot_without_authenticator_is_terminal() -> None:
     events: list[str] = []
     slot = _Slot("unowned", PresentedCredential("token"), events)
-    registry = AuthenticationRegistry[object](slots=[slot], mechanisms=())  # type: ignore[list-item]
+    registry: AuthenticationRegistry[object] = AuthenticationRegistry(
+        slots=[slot],
+        mechanisms=(),  # type: ignore[list-item]
+    )
     evaluator = registry.evaluator()
 
     with pytest.raises(NotAuthorizedException, match="Authentication required"):

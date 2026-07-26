@@ -5,7 +5,8 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import jwt
 import pytest
@@ -34,8 +35,11 @@ from litestar_security.authentication import (
     security,
 )
 from litestar_security.config import ExternalCSRF, SecurityConfig
-from litestar_security.context import AuthenticationEvidence, Principal
+from litestar_security.context import AuthenticationEvidence, AuthorizationSnapshot, CredentialRestrictions, Principal
 from litestar_security.providers.jwt import (
+    BearerSlotSelector,
+    BearerTokenSlot,
+    CompositeBearerConfig,
     JWTClaims,
     JWTValidationConfig,
     PyJWTVerifier,
@@ -128,6 +132,25 @@ class _Authenticator:
 class _Resolver:
     async def resolve(self, claims: str) -> Principal[object]:
         return Principal(id=claims)
+
+
+class _RecordingJWTVerifier:
+    def __init__(self, outcome: object, config: JWTValidationConfig) -> None:
+        self.outcome = outcome
+        self.config = config
+        self.calls: list[tuple[str, datetime]] = []
+
+    async def verify(self, token: str, *, now: datetime) -> object:
+        self.calls.append((token, now))
+        return self.outcome
+
+
+def _recording_jwt_verifier(
+    outcome: object, *, issuer: str = _JWT_ISSUER, audiences: frozenset[str] = frozenset({_JWT_AUDIENCE})
+) -> _RecordingJWTVerifier:
+    return _RecordingJWTVerifier(
+        outcome, JWTValidationConfig(issuer=issuer, audiences=audiences, algorithms=frozenset({"HS256"}))
+    )
 
 
 def _mechanism(
@@ -355,6 +378,514 @@ async def test_composite_bearer_dispatcher_selects_only_one_verifier() -> None:
 
     assert isinstance(outcome, Authenticated)
     assert calls == [("local", "user-1")]
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected_type", "expected_value"),
+    [
+        ([], NoCredentials, None),
+        ([(b"authorization", b"Bearer compact.jwt.value")], PresentedCredential, "compact.jwt.value"),
+        ([(b"authorization", b"bEaReR compact.jwt.value")], PresentedCredential, "compact.jwt.value"),
+        (
+            [(b"authorization", b"Bearer one.two.three"), (b"Authorization", b"Bearer four.five.six")],
+            InvalidCredentials,
+            None,
+        ),
+        ([(b"authorization", b"")], InvalidCredentials, None),
+        ([(b"authorization", b"Basic credential")], InvalidCredentials, None),
+        ([(b"authorization", b" Bearer one.two.three")], InvalidCredentials, None),
+        ([(b"authorization", b"Bearer  one.two.three")], InvalidCredentials, None),
+        ([(b"authorization", b"Bearer\tone.two.three")], InvalidCredentials, None),
+        ([(b"authorization", b"Bearer one.two.three\x7f")], InvalidCredentials, None),
+        ([(b"authorization", b"Bearer \xff")], InvalidCredentials, None),
+    ],
+    ids=[
+        "absent",
+        "bearer",
+        "case-insensitive-scheme",
+        "duplicate",
+        "empty",
+        "wrong-scheme",
+        "leading-space",
+        "double-space",
+        "tab",
+        "control",
+        "non-ascii",
+    ],
+)
+def test_composite_bearer_extracts_the_raw_authorization_namespace_once(
+    headers: list[tuple[bytes, bytes]],
+    expected_type: type[NoCredentials] | type[PresentedCredential[object]] | type[InvalidCredentials],
+    expected_value: str | None,
+) -> None:
+    composite = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="local",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                verifier=_recording_jwt_verifier(InvalidCredentials()),  # type: ignore[arg-type]
+            ),
+        ),
+    )
+    physical_slot, _ = composite.build(_Resolver())
+
+    extraction = physical_slot.extract(SimpleNamespace(scope={"headers": headers}))  # type: ignore[arg-type]
+
+    assert isinstance(extraction, expected_type)
+    assert getattr(extraction, "value", None) == expected_value
+
+
+def test_composite_bearer_rejects_oversized_credentials_during_extraction() -> None:
+    composite = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="local",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                verifier=_recording_jwt_verifier(InvalidCredentials()),  # type: ignore[arg-type]
+            ),
+        ),
+        maximum_token_bytes=5,
+    )
+    physical_slot, _ = composite.build(_Resolver())
+
+    extraction = physical_slot.extract(
+        SimpleNamespace(scope={"headers": [(b"authorization", b"Bearer longer")]})  # type: ignore[arg-type]
+    )
+
+    assert extraction == InvalidCredentials()
+
+
+def _routing_token(*, issuer: str, audiences: str | list[str], token_type: str | None = None) -> str:
+    return _compact_jwt(
+        json.dumps({"alg": "RS256", "kid": "shared", "typ": token_type or "at+jwt"}, separators=(",", ":")).encode(),
+        json.dumps({"iss": issuer, "aud": audiences}, separators=(",", ":")).encode(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("issuer", "audience", "selected_name"),
+    [("https://local.example", "local-api", "local"), ("https://oidc.example", "oidc-api", "oidc")],
+)
+@pytest.mark.anyio
+async def test_composite_bearer_selects_exactly_one_trust_slot(issuer: str, audience: str, selected_name: str) -> None:
+    grants = AuthorizationSnapshot(
+        scopes=frozenset({"reports:read"}),
+        roles=frozenset({"analyst"}),
+        capabilities=frozenset({"reports"}),
+        team_roles={"team-1": frozenset({"viewer"})},
+        tenant_ids=frozenset({"tenant-1"}),
+        attributes={"region": "north"},
+    )
+    restrictions = CredentialRestrictions(
+        scopes=frozenset({"reports:read"}), roles=frozenset({"analyst"}), tenant_ids=frozenset({"tenant-1"})
+    )
+    authenticated = Authenticated(
+        claims="user-1",
+        evidence=AuthenticationEvidence(
+            mechanism="provider",
+            slot="provider-slot",
+            authenticated_at=_JWT_NOW,
+            expires_at=_JWT_NOW + timedelta(1),
+            methods=frozenset({"jwt"}),
+            traits=frozenset({"phishing-resistant"}),
+            acr="urn:example:acr:2",
+            amr=("pwd", "otp"),
+        ),
+        grants=grants,
+        restrictions=restrictions,
+    )
+    local = _recording_jwt_verifier(authenticated, issuer="https://local.example", audiences=frozenset({"local-api"}))
+    oidc = _recording_jwt_verifier(authenticated, issuer="https://oidc.example", audiences=frozenset({"oidc-api"}))
+    token = _routing_token(issuer=issuer, audiences=audience)
+    composite = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="local",
+                selector=BearerSlotSelector(
+                    issuers=frozenset({"https://local.example"}), audiences=frozenset({"local-api"})
+                ),
+                verifier=local,  # type: ignore[arg-type]
+            ),
+            BearerTokenSlot(
+                name="oidc",
+                selector=BearerSlotSelector(
+                    issuers=frozenset({"https://oidc.example"}), audiences=frozenset({"oidc-api"})
+                ),
+                verifier=oidc,  # type: ignore[arg-type]
+            ),
+        ),
+    )
+    _, mechanism_value = composite.build(_Resolver(), clock=lambda: _JWT_NOW)
+
+    outcome = await mechanism_value.authenticator.authenticate(token, SimpleNamespace())  # type: ignore[arg-type]
+
+    assert isinstance(outcome, Authenticated)
+    assert outcome.evidence.mechanism == "bearer"
+    assert outcome.evidence.slot == selected_name
+    assert outcome.evidence == AuthenticationEvidence(
+        mechanism="bearer",
+        slot=selected_name,
+        authenticated_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(1),
+        methods=frozenset({"jwt"}),
+        traits=frozenset({"phishing-resistant"}),
+        acr="urn:example:acr:2",
+        amr=("pwd", "otp"),
+    )
+    assert outcome.grants == grants
+    assert outcome.restrictions == restrictions
+    assert len(local.calls) + len(oidc.calls) == 1
+    assert (local.calls if selected_name == "local" else oidc.calls) == [(token, _JWT_NOW)]
+
+
+@pytest.mark.anyio
+async def test_composite_bearer_cryptographically_isolates_same_kid_trust_domains(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    local_signing_key, local_verification_key = jwt_key_material["RS256"]
+    oidc_signing_key, oidc_verification_key = jwt_key_material["RS256_ALT"]
+    profiles = (
+        ("local", "https://local.example", "local-api", local_signing_key, local_verification_key),
+        ("oidc", "https://oidc.example", "oidc-api", oidc_signing_key, oidc_verification_key),
+    )
+    slots = tuple(
+        BearerTokenSlot(
+            name=name,
+            selector=BearerSlotSelector(issuers=frozenset({issuer}), audiences=frozenset({audience})),
+            verifier=PyJWTVerifier(
+                config=JWTValidationConfig(
+                    issuer=issuer, audiences=frozenset({audience}), algorithms=frozenset({"RS256"})
+                ),
+                key=verification_key,
+                require_key_id=True,
+            ),
+        )
+        for name, issuer, audience, _signing_key, verification_key in profiles
+    )
+    _, mechanism_value = CompositeBearerConfig(mechanism_name="bearer", slots=slots).build(
+        _Resolver(), clock=lambda: _JWT_NOW
+    )
+
+    for name, issuer, audience, signing_key, _verification_key in profiles:
+        token = _encode_jwt(signing_key, "RS256", claims=_jwt_claims(iss=issuer, aud=audience))
+        outcome = await mechanism_value.authenticator.authenticate(token, SimpleNamespace())  # type: ignore[arg-type]
+
+        assert isinstance(outcome, Authenticated)
+        assert outcome.claims.issuer == issuer
+        assert outcome.evidence.slot == name
+
+    cross_domain_token = _encode_jwt(
+        local_signing_key, "RS256", claims=_jwt_claims(iss="https://oidc.example", aud="oidc-api")
+    )
+    cross_domain_outcome = await mechanism_value.authenticator.authenticate(
+        cross_domain_token,
+        SimpleNamespace(),  # type: ignore[arg-type]
+    )
+
+    assert cross_domain_outcome == InvalidCredentials()
+
+
+@pytest.mark.parametrize(
+    ("selectors", "audiences"),
+    [
+        (
+            (
+                BearerSlotSelector(issuers=frozenset({"https://issuer.example"}), audiences=frozenset({"one", "two"})),
+                BearerSlotSelector(issuers=frozenset({"https://issuer.example"}), audiences=frozenset({"one"})),
+            ),
+            "one",
+        ),
+        (
+            (
+                BearerSlotSelector(issuers=frozenset({"https://issuer.example"}), audiences=frozenset({"one"})),
+                BearerSlotSelector(issuers=frozenset({"https://issuer.example"}), audiences=frozenset({"two"})),
+            ),
+            ["one", "two"],
+        ),
+        (
+            (
+                BearerSlotSelector(issuers=frozenset({"https://one.example"})),
+                BearerSlotSelector(issuers=frozenset({"https://other.example"})),
+            ),
+            "unknown",
+        ),
+    ],
+    ids=["overlapping-audience-ambiguity", "multi-audience-ambiguity", "unknown"],
+)
+@pytest.mark.anyio
+async def test_composite_bearer_rejects_unknown_or_ambiguous_routes_without_verification(
+    selectors: tuple[BearerSlotSelector, BearerSlotSelector], audiences: str | list[str]
+) -> None:
+    verifiers = tuple(
+        _recording_jwt_verifier(
+            InvalidCredentials(),
+            issuer=next(iter(selector.issuers)),
+            audiences=selector.audiences
+            or (frozenset({audiences}) if isinstance(audiences, str) else frozenset(audiences)),
+        )
+        for selector in selectors
+    )
+    composite = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=tuple(
+            BearerTokenSlot(name=f"slot-{index}", selector=selector, verifier=verifiers[index])  # type: ignore[arg-type]
+            for index, selector in enumerate(selectors)
+        ),
+    )
+    _, mechanism_value = composite.build(_Resolver(), clock=lambda: _JWT_NOW)
+
+    outcome = await mechanism_value.authenticator.authenticate(
+        _routing_token(issuer="https://issuer.example", audiences=audiences),
+        SimpleNamespace(),  # type: ignore[arg-type]
+    )
+
+    assert outcome == InvalidCredentials(code="unknown_or_ambiguous_bearer_slot")
+    assert not verifiers[0].calls
+    assert not verifiers[1].calls
+
+
+@pytest.mark.parametrize(
+    ("verifier_outcome", "expected"),
+    [
+        (InvalidCredentials(code="provider_invalid"), InvalidCredentials(code="provider_invalid")),
+        (
+            VerificationUnavailable(code="provider_unavailable", retry_after=2),
+            VerificationUnavailable(code="provider_unavailable", retry_after=2),
+        ),
+        (NoCredentials(), InvalidCredentials()),
+    ],
+    ids=["invalid", "unavailable", "unexpected-no-credentials"],
+)
+@pytest.mark.anyio
+async def test_composite_bearer_preserves_selected_terminal_outcomes(
+    verifier_outcome: InvalidCredentials | VerificationUnavailable | NoCredentials,
+    expected: InvalidCredentials | VerificationUnavailable,
+) -> None:
+    verifier = _recording_jwt_verifier(verifier_outcome)
+    token = _routing_token(issuer=_JWT_ISSUER, audiences=_JWT_AUDIENCE)
+    composite = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="local",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                verifier=verifier,  # type: ignore[arg-type]
+            ),
+        ),
+    )
+    _, mechanism_value = composite.build(_Resolver(), clock=lambda: _JWT_NOW)
+
+    outcome = await mechanism_value.authenticator.authenticate(token, SimpleNamespace())  # type: ignore[arg-type]
+
+    assert outcome == expected
+    assert verifier.calls == [(token, _JWT_NOW)]
+
+
+@pytest.mark.anyio
+async def test_composite_bearer_rejects_malformed_routes_before_verification() -> None:
+    verifier = _recording_jwt_verifier(InvalidCredentials())
+    composite = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="local",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                verifier=verifier,  # type: ignore[arg-type]
+            ),
+        ),
+    )
+    _, mechanism_value = composite.build(_Resolver(), clock=lambda: _JWT_NOW)
+
+    outcome = await mechanism_value.authenticator.authenticate("malformed", SimpleNamespace())  # type: ignore[arg-type]
+
+    assert outcome == InvalidCredentials()
+    assert not verifier.calls
+
+
+@pytest.mark.anyio
+async def test_composite_bearer_uses_an_aware_utc_clock_by_default() -> None:
+    verifier = _recording_jwt_verifier(InvalidCredentials())
+    composite = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="local",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                verifier=verifier,  # type: ignore[arg-type]
+            ),
+        ),
+    )
+    _, mechanism_value = composite.build(_Resolver())
+
+    await mechanism_value.authenticator.authenticate(
+        _routing_token(issuer=_JWT_ISSUER, audiences=_JWT_AUDIENCE),
+        SimpleNamespace(),  # type: ignore[arg-type]
+    )
+
+    assert verifier.calls[0][1].tzinfo is timezone.utc
+
+
+def test_composite_bearer_builds_one_native_registry_mechanism() -> None:
+    composite = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="local",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                verifier=_recording_jwt_verifier(InvalidCredentials()),  # type: ignore[arg-type]
+            ),
+        ),
+    )
+
+    physical_slot, mechanism_value = composite.build(_Resolver())
+    registry = AuthenticationRegistry(slots=(physical_slot,), mechanisms=(mechanism_value,))  # type: ignore[arg-type]
+
+    assert registry.slot_names == ("authorization.bearer",)
+    assert registry.mechanism_names == ("bearer",)
+    assert mechanism_value.scheme_name == "bearer"
+    assert mechanism_value.security_scheme == SecurityScheme(type="http", scheme="bearer", bearer_format="JWT")
+
+
+@pytest.mark.anyio
+async def test_composite_bearer_never_retains_or_represents_the_raw_token() -> None:
+    verifier = _recording_jwt_verifier(InvalidCredentials())
+    composite = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="local",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                verifier=verifier,  # type: ignore[arg-type]
+            ),
+        ),
+    )
+    physical_slot, mechanism_value = composite.build(_Resolver(), clock=lambda: _JWT_NOW)
+    token = _routing_token(issuer=_JWT_ISSUER, audiences=_JWT_AUDIENCE)
+    extraction = physical_slot.extract(
+        SimpleNamespace(scope={"headers": [(b"authorization", f"Bearer {token}".encode())]})  # type: ignore[arg-type]
+    )
+    outcome = await mechanism_value.authenticator.authenticate(token, SimpleNamespace())  # type: ignore[arg-type]
+
+    assert isinstance(extraction, PresentedCredential)
+    assert outcome == InvalidCredentials()
+    assert all(
+        token not in repr(value)
+        for value in (composite, physical_slot, mechanism_value, mechanism_value.authenticator, extraction, outcome)
+    )
+
+
+@pytest.mark.parametrize(
+    ("factory", "match"),
+    [
+        (lambda: BearerSlotSelector(issuers=frozenset()), "issuer"),
+        (lambda: BearerSlotSelector(issuers=frozenset({_JWT_ISSUER}), token_types=frozenset()), "token types"),
+        (lambda: CompositeBearerConfig(mechanism_name="bearer", slots=()), "at least one"),
+        (
+            lambda: CompositeBearerConfig(
+                mechanism_name="bearer",
+                slots=(
+                    BearerTokenSlot(
+                        name="duplicate",
+                        selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                        verifier=_recording_jwt_verifier(InvalidCredentials()),  # type: ignore[arg-type]
+                    ),
+                    BearerTokenSlot(
+                        name="duplicate",
+                        selector=BearerSlotSelector(issuers=frozenset({"https://other.example"})),
+                        verifier=_recording_jwt_verifier(InvalidCredentials(), issuer="https://other.example"),  # type: ignore[arg-type]
+                    ),
+                ),
+            ),
+            "Duplicate bearer slot",
+        ),
+        (
+            lambda: CompositeBearerConfig(
+                mechanism_name="bearer",
+                slots=tuple(
+                    BearerTokenSlot(
+                        name=f"slot-{index}",
+                        selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                        verifier=_recording_jwt_verifier(InvalidCredentials()),  # type: ignore[arg-type]
+                    )
+                    for index in range(2)
+                ),
+            ),
+            "identical selector",
+        ),
+        (
+            lambda: CompositeBearerConfig(
+                mechanism_name="bearer",
+                slots=(
+                    BearerTokenSlot(
+                        name="local",
+                        selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                        verifier=_recording_jwt_verifier(InvalidCredentials()),  # type: ignore[arg-type]
+                    ),
+                ),
+                maximum_token_bytes=0,
+            ),
+            "maximum token bytes",
+        ),
+        (
+            lambda: BearerTokenSlot(
+                name="missing-config",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                verifier=cast("Any", SimpleNamespace()),
+            ),
+            "must expose JWTValidationConfig",
+        ),
+        (
+            lambda: BearerTokenSlot(
+                name="issuer-mismatch",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                verifier=_recording_jwt_verifier(InvalidCredentials(), issuer="https://other.example"),  # type: ignore[arg-type]
+            ),
+            "does not match verifier",
+        ),
+        (
+            lambda: BearerTokenSlot(
+                name="audience-mismatch",
+                selector=BearerSlotSelector(
+                    issuers=frozenset({_JWT_ISSUER}), audiences=frozenset({"another-audience"})
+                ),
+                verifier=_recording_jwt_verifier(InvalidCredentials()),  # type: ignore[arg-type]
+            ),
+            "does not match verifier",
+        ),
+        (
+            lambda: BearerTokenSlot(
+                name="type-mismatch",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER}), token_types=frozenset({"id+jwt"})),
+                verifier=_recording_jwt_verifier(InvalidCredentials()),  # type: ignore[arg-type]
+            ),
+            "does not match verifier",
+        ),
+    ],
+)
+def test_composite_bearer_configuration_rejects_ambiguous_or_unsafe_values(
+    factory: Callable[[], object], match: str
+) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        factory()
+
+
+def test_composite_bearer_requires_a_callable_clock() -> None:
+    composite = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="local",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                verifier=_recording_jwt_verifier(InvalidCredentials()),  # type: ignore[arg-type]
+            ),
+        ),
+    )
+
+    with pytest.raises(ImproperlyConfiguredException, match="clock must be callable"):
+        composite.build(_Resolver(), clock=None)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

@@ -51,6 +51,12 @@ from litestar_security.authentication import (
 from litestar_security.config import ExternalCSRF
 from litestar_security.context import AuthenticationEvidence, Principal, SecurityContext
 from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency
+from litestar_security.providers.jwt import (
+    BearerSlotSelector,
+    BearerTokenSlot,
+    CompositeBearerConfig,
+    JWTValidationConfig,
+)
 
 if TYPE_CHECKING:
     from litestar.middleware.session.base import BaseSessionBackend
@@ -533,6 +539,47 @@ def test_openapi_component_contribution_preserves_callers_and_validates_duplicat
                 )
             ],
         )
+
+
+def test_composite_bearer_contributes_one_native_openapi_scheme() -> None:
+    class _Verifier:
+        config = JWTValidationConfig(
+            issuer="https://issuer.example", audiences=frozenset({"api"}), algorithms=frozenset({"RS256"})
+        )
+
+        async def verify(self, _token: str, *, now: datetime) -> InvalidCredentials:
+            del now
+            return InvalidCredentials()
+
+    composite = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="oidc",
+                selector=BearerSlotSelector(
+                    issuers=frozenset({"https://issuer.example"}), audiences=frozenset({"api"})
+                ),
+                verifier=_Verifier(),
+            ),
+        ),
+    )
+    slot, bearer_mechanism = composite.build(_CompilerResolver())  # type: ignore[arg-type]
+
+    @get("/bearer", opt=security(required("bearer")))
+    async def bearer_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[bearer_handler],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin(SecurityConfig(slots=(slot,), mechanisms=(bearer_mechanism,)))],
+    )
+
+    assert app.openapi_schema.components is not None
+    assert app.openapi_schema.components.security_schemes == {
+        "bearer": SecurityScheme(type="http", scheme="bearer", bearer_format="JWT")
+    }
+    assert _operation_security(app, "/bearer") == [{"bearer": []}]
 
 
 def test_openapi_rejects_conflicting_shared_scheme_scopes_and_dynamic_native_security() -> None:

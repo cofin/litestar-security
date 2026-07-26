@@ -120,7 +120,7 @@ def _guard_connection(
     path_params: dict[str, object] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        user=Principal[object](id="user-1") if authenticated else Principal[object].anonymous(),
+        user=Principal(id="user-1") if authenticated else Principal.anonymous(),
         auth=SecurityContext(session=NullSessionHandle(), authorization=authorization or AuthorizationSnapshot()),
         path_params=path_params or {},
     )
@@ -131,7 +131,7 @@ def test_principal_supports_anonymous_user_and_service_states() -> None:
 
     anonymous = Principal[object].anonymous()
     application_user = Principal(id="user-1", display_name="User One", user=user)
-    service = Principal[object](id="service-1", display_name="Worker")
+    service = Principal(id="service-1", display_name="Worker")
 
     assert (anonymous.id, anonymous.is_authenticated, anonymous.has_user) == (None, False, False)
     assert (application_user.id, application_user.is_authenticated, application_user.has_user) == ("user-1", True, True)
@@ -142,7 +142,7 @@ def test_principal_require_user_preserves_identity_and_fails_generically() -> No
     user = object()
 
     assert Principal(id="user-1", user=user).require_user() is user
-    for principal in (Principal[object].anonymous(), Principal[object](id="service-1")):
+    for principal in (Principal.anonymous(), Principal(id="service-1")):
         with pytest.raises(NotAuthorizedException, match="Authentication required"):
             principal.require_user()
 
@@ -162,7 +162,7 @@ def test_principal_rejects_invalid_states(kwargs: dict[str, object], match: str)
 
 
 def test_principal_is_frozen_and_slotted() -> None:
-    principal = Principal[object](id="user-1")
+    principal = Principal(id="user-1")
 
     with pytest.raises(FrozenInstanceError):
         principal.id = "changed"  # type: ignore[misc]
@@ -575,7 +575,15 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         assert import_module(dependency)
 
     providers = import_module("litestar_security.providers")
-    assert providers.__all__ == ("JSONValue", "JWTClaims", "JWTValidationConfig", "JWTVerifier")
+    assert providers.__all__ == (
+        "BearerSlotSelector",
+        "BearerTokenSlot",
+        "CompositeBearerConfig",
+        "JSONValue",
+        "JWTClaims",
+        "JWTValidationConfig",
+        "JWTVerifier",
+    )
     jwt_module = import_module("litestar_security.providers.jwt")
     assert jwt_module.__all__ == providers.__all__
     for module_name in ("jwks", "oidc"):

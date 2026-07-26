@@ -1,5 +1,21 @@
 """Curated authentication provider contracts."""
 
-from litestar_security.providers.jwt import JSONValue, JWTClaims, JWTValidationConfig, JWTVerifier
+from litestar_security.providers.jwt import (
+    BearerSlotSelector,
+    BearerTokenSlot,
+    CompositeBearerConfig,
+    JSONValue,
+    JWTClaims,
+    JWTValidationConfig,
+    JWTVerifier,
+)
 
-__all__ = ("JSONValue", "JWTClaims", "JWTValidationConfig", "JWTVerifier")
+__all__ = (
+    "BearerSlotSelector",
+    "BearerTokenSlot",
+    "CompositeBearerConfig",
+    "JSONValue",
+    "JWTClaims",
+    "JWTValidationConfig",
+    "JWTVerifier",
+)
