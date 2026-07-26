@@ -28,7 +28,7 @@ from litestar_security.authentication import (
     required,
     security,
 )
-from litestar_security.config import SecurityConfig
+from litestar_security.config import ExternalCSRF, SecurityConfig
 from litestar_security.context import AuthenticationEvidence, Principal
 
 
@@ -208,6 +208,21 @@ def test_authentication_mechanism_requires_complete_openapi_scheme_pair(kwargs: 
             resolver=_Resolver(),
             **kwargs,
         )
+
+
+def test_authentication_mechanism_declares_session_capability() -> None:
+    mechanism_value = AuthenticationMechanism(
+        authenticator=_Authenticator("session", "session"),  # type: ignore[arg-type]
+        resolver=_Resolver(),
+        session_capable=True,
+    )
+
+    assert mechanism_value.session_capable is True
+
+
+def test_external_csrf_requires_a_named_integration() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="name must not be blank"):
+        ExternalCSRF(name=" ", validate=lambda _path, _method, _policy: True)
 
 
 @pytest.mark.parametrize("limit", [0, -1])

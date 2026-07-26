@@ -32,11 +32,14 @@ from litestar_security.authentication import (
     mechanism,
     public,
 )
+from litestar_security.config import ExternalCSRF
 
 __all__ = ("OpenAPISchemeSet", "PolicyCompiler", "RouteCompiler", "prepare_openapi_config")
 
 UserT = TypeVar("UserT")
 _OPENAPI_SECURITY_OPT_KEY = "litestar_security_openapi_security"
+_CSRF_COVERAGE_OPT_KEY = "litestar_security_csrf"
+_MISSING = object()
 
 
 @dataclass(slots=True)
@@ -192,6 +195,8 @@ class RouteCompiler(Generic[UserT]):
     openapi_policy: AuthenticationPolicy | None = None
     openapi_config: OpenAPIConfig | None = None
     max_openapi_combinations: int = 32
+    csrf_exclude_key: str | None = None
+    external_csrf: ExternalCSRF | None = None
     _policy_compiler: PolicyCompiler[UserT] = field(init=False, repr=False)
     _schemes: OpenAPISchemeSet | None = field(init=False, repr=False)
 
@@ -224,18 +229,105 @@ class RouteCompiler(Generic[UserT]):
         )
 
     def _compile_http_handler(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> None:
+        csrf_override: bool | None
         if self._is_generated_options(route_handler):
-            plan = self._compile_policy(route, route_handler, public())
+            policy = public()
+            csrf_override = False
         elif self._is_openapi_handler(route_handler):
             declaration = self._nearest_non_application_declaration(route, route_handler)
             policy = declaration.policy if declaration is not None else self.openapi_policy or public()
-            csrf_required = declaration.csrf_required if declaration is not None else None
-            plan = self._compile_policy(route, route_handler, policy, csrf_required=csrf_required)
+            csrf_override = declaration.csrf_required if declaration is not None else None
         else:
-            plan = self._effective_plan(route, route_handler)
+            declaration = self._resolved_declaration(route, route_handler)
+            if declaration is not None:
+                policy = declaration.policy
+                csrf_override = declaration.csrf_required
+            elif not self.registry.mechanism_names:
+                policy = public()
+                csrf_override = None
+            else:
+                policy = self.default_policy
+                csrf_override = None
+        plan = self._compile_http_policy(route, route_handler, policy, csrf_override=csrf_override)
+        plan = self._apply_csrf_enforcement(route, route_handler, policy, plan)
         self._attach_plan(route, route_handler, plan)
         if self._schemes is not None:
             self._attach_openapi_security(route, route_handler, plan)
+
+    def _compile_http_policy(
+        self,
+        route: HTTPRoute,
+        route_handler: HTTPRouteHandler,
+        policy: AuthenticationPolicy,
+        *,
+        csrf_override: bool | None,
+    ) -> SecurityRuntimePlan:
+        base_plan = self._compile_policy(route, route_handler, policy)
+        session_names = tuple(
+            name
+            for name in self.registry.mechanism_names
+            if self.registry.get_mechanism(name).session_capable
+            and any(requirement.name == name for alternative in base_plan.alternatives for requirement in alternative)
+        )
+        derived = bool(session_names)
+        if csrf_override is False and derived:
+            self._raise_route_error(
+                route, route_handler, f"csrf_required=False cannot exclude session-capable mechanism {session_names[0]}"
+            )
+        effective = derived if csrf_override is None else csrf_override
+        return self._compile_policy(route, route_handler, policy, csrf_required=effective)
+
+    def _apply_csrf_enforcement(
+        self, route: HTTPRoute, route_handler: HTTPRouteHandler, policy: AuthenticationPolicy, plan: SecurityRuntimePlan
+    ) -> SecurityRuntimePlan:
+        native = self.csrf_exclude_key is not None
+        desired_exclusion = not bool(plan.csrf_required)
+        self._validate_csrf_metadata(route, route_handler, desired_exclusion=desired_exclusion)
+        enforcement = self._resolve_csrf_enforcement(route, route_handler, plan, native=native)
+        compiled = replace(plan, csrf_enforcement=enforcement)
+        existing_plan = route_handler.opt.get(_RUNTIME_PLAN_OPT_KEY)
+        if existing_plan == compiled:
+            return cast("SecurityRuntimePlan", existing_plan)
+        if enforcement not in {None, "native"}:
+            self._validate_external_csrf(route, route_handler, policy)
+        if native:
+            if desired_exclusion:
+                route_handler.opt[cast("str", self.csrf_exclude_key)] = True
+            route_handler.opt[_CSRF_COVERAGE_OPT_KEY] = desired_exclusion
+        return compiled
+
+    def _validate_csrf_metadata(
+        self, route: HTTPRoute, route_handler: HTTPRouteHandler, *, desired_exclusion: bool
+    ) -> None:
+        marker = route_handler.opt.get(_CSRF_COVERAGE_OPT_KEY)
+        existing = (
+            route_handler.opt.get(self.csrf_exclude_key, _MISSING) if self.csrf_exclude_key is not None else _MISSING
+        )
+        if marker is None and existing is not _MISSING:
+            self._raise_route_error(route, route_handler, "Conflicting manual native CSRF exclusion metadata")
+        if marker is not None and marker != desired_exclusion:
+            self._raise_route_error(route, route_handler, "Conflicting compiled native CSRF coverage")
+
+    def _resolve_csrf_enforcement(
+        self, route: HTTPRoute, route_handler: HTTPRouteHandler, plan: SecurityRuntimePlan, *, native: bool
+    ) -> str | None:
+        if plan.csrf_required:
+            if native:
+                return "native"
+            if self.external_csrf is not None:
+                return self.external_csrf.name
+            self._raise_route_error(route, route_handler, "Route requires native CSRF or a named ExternalCSRF")
+        return None
+
+    def _validate_external_csrf(
+        self, route: HTTPRoute, route_handler: HTTPRouteHandler, policy: AuthenticationPolicy
+    ) -> None:
+        external = cast("ExternalCSRF", self.external_csrf)
+        for method in sorted(route_handler.http_methods):
+            if not external.validate(route.path, method, policy):
+                self._raise_route_error(
+                    route, route_handler, f"External CSRF integration {external.name} rejected coverage for {method}"
+                )
 
     def _effective_plan(self, route: BaseRoute, route_handler: BaseRouteHandler) -> SecurityRuntimePlan:
         if declaration := self._resolved_declaration(route, route_handler):
@@ -339,8 +431,10 @@ class RouteCompiler(Generic[UserT]):
     @staticmethod
     def _attach_plan(route: BaseRoute, route_handler: BaseRouteHandler, plan: SecurityRuntimePlan) -> None:
         existing = route_handler.opt.get(_RUNTIME_PLAN_OPT_KEY)
-        if existing is not None and existing != plan:
-            RouteCompiler._raise_route_error(route, route_handler, "Conflicting compiled security runtime plan")
+        if existing is not None:
+            if existing != plan:
+                RouteCompiler._raise_route_error(route, route_handler, "Conflicting compiled security runtime plan")
+            return
         route_handler.opt[_RUNTIME_PLAN_OPT_KEY] = plan
 
     @staticmethod

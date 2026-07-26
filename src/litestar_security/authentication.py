@@ -297,6 +297,7 @@ class AuthenticationMechanism(Generic[CredentialT, ClaimsT, UserT]):
     resolver: IdentityResolver[ClaimsT, UserT]
     scheme_name: str | None = None
     security_scheme: SecurityScheme | None = field(default=None, hash=False)
+    session_capable: bool = False
 
     def __post_init__(self) -> None:
         """Validate the optional native OpenAPI scheme pair."""
@@ -419,6 +420,7 @@ class SecurityRuntimePlan:
     alternatives: tuple[tuple[MechanismRequirement, ...], ...] = ()
     allow_anonymous: bool = False
     csrf_required: bool | None = None
+    csrf_enforcement: str | None = None
 
     def __post_init__(self) -> None:
         """Freeze explicit participant names."""

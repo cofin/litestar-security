@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from copy import deepcopy
 from importlib.metadata import entry_points
+from secrets import token_hex
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import click
@@ -12,6 +13,7 @@ import pytest
 from click.testing import CliRunner
 from litestar import Controller, Litestar, Router, WebSocket, asgi, get, post, route, websocket
 from litestar.config.app import AppConfig
+from litestar.config.csrf import CSRFConfig
 from litestar.di import Provide
 from litestar.enums import HttpMethod
 from litestar.exceptions import ImproperlyConfiguredException
@@ -23,6 +25,7 @@ from litestar.openapi.plugins import JsonRenderPlugin
 from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme
 from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
+from litestar.testing import TestClient
 
 from litestar_security import SecurityConfig, SecurityPlugin
 from litestar_security._cli import register, security_group
@@ -41,6 +44,7 @@ from litestar_security.authentication import (
     required,
     security,
 )
+from litestar_security.config import ExternalCSRF
 from litestar_security.context import Principal, SecurityContext
 from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency
 
@@ -73,13 +77,16 @@ class _CompilerResolver:
         raise AssertionError
 
 
-def _compiler_config(
+def _compiler_config(  # noqa: PLR0913
     *,
     openapi_policy: AuthenticationPolicy | None = None,
     names: tuple[str, ...] = ("a", "b"),
     scheme_names: dict[str, str] | None = None,
     scheme_types: dict[str, Literal["apiKey", "http", "mutualTLS", "oauth2", "openIdConnect"]] | None = None,
     max_openapi_combinations: int = 32,
+    session_names: frozenset[str] = frozenset(),
+    csrf_config: CSRFConfig | None = None,
+    external_csrf: ExternalCSRF | None = None,
 ) -> SecurityConfig[object]:
     slots = tuple(_CompilerSlot(name=f"slot-{name}") for name in names)
     mechanisms = tuple(
@@ -96,6 +103,7 @@ def _compiler_config(
                     else None
                 ),
             ),
+            session_capable=name in session_names,
         )
         for name in names
     )
@@ -104,6 +112,8 @@ def _compiler_config(
         mechanisms=mechanisms,
         openapi_policy=openapi_policy,
         max_openapi_combinations=max_openapi_combinations,
+        csrf_config=csrf_config,
+        external_csrf=external_csrf,
     )
 
 
@@ -167,7 +177,7 @@ def test_plugin_receives_routes_and_attaches_public_runtime_plan() -> None:
     route_handler = route.route_handler_map["GET"][0]
 
     assert isinstance(plugin, ReceiveRoutePlugin)
-    assert route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(authenticate=False)
+    assert route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(authenticate=False, csrf_required=False)
 
 
 def test_route_policy_uses_native_nearest_owner_inheritance() -> None:
@@ -219,6 +229,7 @@ def test_http_methods_and_options_receive_distinct_compiled_plans() -> None:
 
     app = Litestar(
         route_handlers=[read_resource, write_resource],
+        csrf_config=CSRFConfig(secret=token_hex()),
         openapi_config=None,
         plugins=[SecurityPlugin(_compiler_config())],
     )
@@ -227,7 +238,7 @@ def test_http_methods_and_options_receive_distinct_compiled_plans() -> None:
     assert _http_plan(app, "/resource", "POST").participant_names == frozenset({"b"})
     assert _http_plan(app, "/resource", "POST").csrf_required is True
     assert not _http_plan(app, "/resource", "OPTIONS").authenticate
-    assert _http_plan(app, "/resource", "OPTIONS").csrf_required is None
+    assert _http_plan(app, "/resource", "OPTIONS").csrf_required is False
 
 
 def test_websocket_compiles_runtime_only_and_explicit_asgi_policy_fails() -> None:
@@ -247,6 +258,17 @@ def test_websocket_compiles_runtime_only_and_explicit_asgi_policy_fails() -> Non
 
     with pytest.raises(ImproperlyConfiguredException, match=r"Raw ASGI.*asgi /mount"):
         Litestar(route_handlers=[mounted_app], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+
+    @websocket("/anonymous")
+    async def anonymous_socket(socket: WebSocket) -> None:
+        del socket
+
+    anonymous_app = Litestar(route_handlers=[anonymous_socket], openapi_config=None, plugins=[SecurityPlugin()])
+    anonymous_route = next(
+        route_value for route_value in anonymous_app.routes if isinstance(route_value, WebSocketRoute)
+    )
+
+    assert not anonymous_route.route_handler.opt["litestar_security_plan"].authenticate
 
 
 def test_asgi_default_dynamic_registration_and_receive_route_are_idempotent() -> None:
@@ -287,11 +309,14 @@ def test_generated_and_explicit_options_are_distinguished() -> None:
         return None
 
     app = Litestar(
-        route_handlers=[generated, explicit], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())]
+        route_handlers=[generated, explicit],
+        csrf_config=CSRFConfig(secret=token_hex()),
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config())],
     )
 
     assert not _http_plan(app, "/generated", "OPTIONS").authenticate
-    assert _http_plan(app, "/generated", "OPTIONS").csrf_required is None
+    assert _http_plan(app, "/generated", "OPTIONS").csrf_required is False
     assert _http_plan(app, "/explicit", "OPTIONS").participant_names == frozenset({"b"})
 
 
@@ -578,6 +603,172 @@ def test_memoized_native_security_is_replaced_and_openapi_disabled_needs_no_sche
     )
 
     assert _http_plan(runtime_only, "/memoized").participant_names == frozenset({"a"})
+
+
+def test_session_capable_routes_require_and_derive_declared_csrf_enforcement() -> None:
+    @post("/session", opt=security(required("session")))
+    async def session_handler() -> None:
+        return None
+
+    config = _compiler_config(names=("session",), session_names=frozenset({"session"}))
+    with pytest.raises(ImproperlyConfiguredException, match=r"requires native CSRF.*POST /session"):
+        Litestar(route_handlers=[session_handler], plugins=[SecurityPlugin(config)])
+
+    @post("/session", opt=security(any_of("session", "bearer")))
+    async def native_session_handler() -> None:
+        return None
+
+    @post("/bearer", opt=security(required("bearer"), csrf_required=False))
+    async def bearer_handler() -> None:
+        return None
+
+    csrf_config = CSRFConfig(secret=token_hex())
+    security_plugin = SecurityPlugin(
+        _compiler_config(names=("session", "bearer"), session_names=frozenset({"session"}))
+    )
+    app = Litestar(
+        route_handlers=[native_session_handler, bearer_handler], csrf_config=csrf_config, plugins=[security_plugin]
+    )
+    session_plan = _http_plan(app, "/session", "POST")
+    session_route = next(
+        route_value
+        for route_value in app.routes
+        if isinstance(route_value, HTTPRoute) and route_value.path == "/session"
+    )
+
+    assert session_plan.csrf_required is True
+    assert session_plan.csrf_enforcement == "native"
+    assert session_plan.participant_names == frozenset({"session", "bearer"})
+    assert csrf_config.exclude_from_csrf_key not in session_route.route_handler_map["POST"][0].opt
+    assert _http_plan(app, "/bearer", "POST").csrf_required is False
+    assert _http_plan(app, "/bearer", "POST").csrf_enforcement is None
+    bearer_route = next(
+        route_value
+        for route_value in app.routes
+        if isinstance(route_value, HTTPRoute) and route_value.path == "/bearer"
+    )
+    assert bearer_route.route_handler_map["POST"][0].opt[csrf_config.exclude_from_csrf_key] is True
+    assert session_route.route_handler_map["OPTIONS"][0].opt[csrf_config.exclude_from_csrf_key] is True
+
+    bearer_route.route_handler_map["POST"][0].opt["litestar_security_csrf"] = False
+    with pytest.raises(ImproperlyConfiguredException, match=r"Conflicting compiled native CSRF.*POST /bearer"):
+        security_plugin.receive_route(bearer_route)
+
+
+def test_csrf_config_ownership_and_false_override_are_strict() -> None:
+    configured_secret = token_hex()
+    configured = CSRFConfig(secret=configured_secret)
+    app_config = AppConfig(csrf_config=CSRFConfig(secret=configured_secret))
+
+    result = SecurityPlugin(SecurityConfig(csrf_config=configured)).on_app_init(app_config)
+
+    assert result.csrf_config is configured
+
+    with pytest.raises(ImproperlyConfiguredException, match="unequal native Litestar CSRF"):
+        SecurityPlugin(SecurityConfig(csrf_config=configured)).on_app_init(
+            AppConfig(csrf_config=CSRFConfig(secret=token_hex()))
+        )
+
+    @post("/unsafe", opt=security(required("session"), csrf_required=False))
+    async def unsafe_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"session-capable mechanism session.*POST /unsafe"):
+        Litestar(
+            route_handlers=[unsafe_handler],
+            csrf_config=configured,
+            plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+        )
+
+
+def test_external_csrf_validates_required_routes_and_installs_no_native_middleware() -> None:
+    calls: list[tuple[str, str, AuthenticationPolicy]] = []
+
+    def validate(path: str, method: str, policy: AuthenticationPolicy) -> bool:
+        calls.append((path, method, policy))
+        return True
+
+    external = ExternalCSRF(name="edge", validate=validate)
+
+    @post("/session", opt=security(required("session")))
+    async def session_handler() -> None:
+        return None
+
+    @post("/login", opt=security(public(), csrf_required=True))
+    async def login_handler() -> None:
+        return None
+
+    @post("/public", opt=security(public()))
+    async def public_handler() -> None:
+        return None
+
+    external_plugin = SecurityPlugin(
+        _compiler_config(names=("session",), session_names=frozenset({"session"}), external_csrf=external)
+    )
+    app = Litestar(route_handlers=[session_handler, login_handler, public_handler], plugins=[external_plugin])
+
+    assert app.csrf_config is None
+    assert {(path, method) for path, method, _ in calls} == {("/session", "POST"), ("/login", "POST")}
+    assert _http_plan(app, "/session", "POST").csrf_enforcement == "edge"
+    assert _http_plan(app, "/login", "POST").csrf_enforcement == "edge"
+    assert _http_plan(app, "/public", "POST").csrf_enforcement is None
+    public_route = next(
+        route_value
+        for route_value in app.routes
+        if isinstance(route_value, HTTPRoute) and route_value.path == "/public"
+    )
+    assert "exclude_from_csrf" not in public_route.route_handler_map["POST"][0].opt
+    session_route = next(
+        route_value
+        for route_value in app.routes
+        if isinstance(route_value, HTTPRoute) and route_value.path == "/session"
+    )
+    external_plugin.receive_route(session_route)
+    assert {(path, method) for path, method, _ in calls} == {("/session", "POST"), ("/login", "POST")}
+
+    rejecting = ExternalCSRF(name="rejecting-edge", validate=lambda _path, _method, _policy: False)
+
+    @post("/rejected", opt=security(public(), csrf_required=True))
+    async def rejected_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"rejecting-edge.*POST.*POST /rejected"):
+        Litestar(route_handlers=[rejected_handler], plugins=[SecurityPlugin(_compiler_config(external_csrf=rejecting))])
+
+
+@pytest.mark.parametrize("manual_exclusion", [False, None])
+def test_native_csrf_rejects_manual_exclusion_and_uses_litestar_cookie_header_flow(manual_exclusion: Any) -> None:
+    csrf_config = CSRFConfig(secret=token_hex())
+
+    @post("/manual", opt={**security(public()), csrf_config.exclude_from_csrf_key: manual_exclusion})
+    async def manual_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"manual native CSRF.*POST /manual"):
+        Litestar(route_handlers=[manual_handler], csrf_config=csrf_config, plugins=[SecurityPlugin()])
+
+    @get("/login", opt=security(public(), csrf_required=True))
+    async def login_form() -> str:
+        return "form"
+
+    @post("/login", opt=security(public(), csrf_required=True))
+    async def login_submit() -> str:
+        return "ok"
+
+    with TestClient(
+        Litestar(route_handlers=[login_form, login_submit], csrf_config=csrf_config, plugins=[SecurityPlugin()])
+    ) as client:
+        form_response = client.get("/login")
+        token = client.cookies[csrf_config.cookie_name]
+        missing_response = client.post("/login")
+        mismatch_response = client.post("/login", headers={csrf_config.header_name: "wrong"})
+        success_response = client.post("/login", headers={csrf_config.header_name: token})
+
+    assert form_response.status_code == 200
+    assert missing_response.status_code == 403
+    assert mismatch_response.status_code == 403
+    assert success_response.status_code == 201
+    assert success_response.text == "ok"
 
 
 def test_route_compiler_errors_include_method_and_path() -> None:

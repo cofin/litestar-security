@@ -125,6 +125,8 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             message = "Security config and application middleware both configure native Litestar session handling"
             raise ImproperlyConfiguredException(detail=message)
 
+        self._configure_csrf(app_config)
+
         runtime, middleware = self._get_runtime(existing_session=bool(native_sessions))
         openapi_config = app_config.openapi_config
         if openapi_config is not None:
@@ -137,6 +139,10 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 openapi_policy=self.config.openapi_policy,
                 openapi_config=openapi_config,
                 max_openapi_combinations=self.config.max_openapi_combinations,
+                csrf_exclude_key=(
+                    app_config.csrf_config.exclude_from_csrf_key if app_config.csrf_config is not None else None
+                ),
+                external_csrf=self.config.external_csrf,
             )
         app_config.dependencies.update(self._providers)
         for name, value in _SIGNATURE_NAMESPACE.items():
@@ -206,6 +212,14 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 if isinstance(native_security, Sequence) and not isinstance(native_security, str) and native_security:
                     message = f"{_owner_name(layer).title()} contains competing native Litestar security declarations"
                     raise ImproperlyConfiguredException(detail=message)
+
+    def _configure_csrf(self, app_config: AppConfig) -> None:
+        if self.config.csrf_config is None:
+            return
+        if app_config.csrf_config is not None and app_config.csrf_config != self.config.csrf_config:
+            message = "Security config and application configure unequal native Litestar CSRF settings"
+            raise ImproperlyConfiguredException(detail=message)
+        app_config.csrf_config = self.config.csrf_config
 
     @staticmethod
     def _is_native_session_middleware(middleware: object) -> bool:

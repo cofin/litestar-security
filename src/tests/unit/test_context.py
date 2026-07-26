@@ -539,6 +539,8 @@ def test_security_config_is_typed_and_slotted() -> None:
         "default_policy",
         "openapi_policy",
         "max_openapi_combinations",
+        "csrf_config",
+        "external_csrf",
         "require_default",
         "session_backend",
         "plan_lookup",
