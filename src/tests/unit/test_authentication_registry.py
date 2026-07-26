@@ -8,8 +8,10 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from math import inf, nan
+from pathlib import Path
 from threading import Event as ThreadEvent
 from threading import Lock as ThreadLock
+from time import perf_counter, perf_counter_ns, sleep
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -836,6 +838,206 @@ def _jwks_entry(
     issuer: str = _JWT_ISSUER, jwks_uri: str = _JWKS_URI, algorithms: frozenset[str] = frozenset({"EdDSA"})
 ) -> JWKSCacheEntry:
     return JWKSCacheEntry(issuer=issuer, jwks_uri=jwks_uri, algorithms=algorithms)
+
+
+def _jwks_performance_baseline() -> dict[str, Any]:
+    baseline_path = Path(__file__).parents[3] / "benchmarks" / "jwks-runtime-v1.json"
+    return cast("dict[str, Any]", json.loads(baseline_path.read_text(encoding="utf-8")))
+
+
+def _p95(values: list[float]) -> float:
+    return sorted(values)[max(0, (len(values) * 95 + 99) // 100 - 1)]
+
+
+@pytest.mark.performance
+def test_jwks_performance_baseline_has_relative_budget_schema() -> None:
+    baseline = _jwks_performance_baseline()
+
+    assert baseline["schema_version"] == 1
+    assert baseline["benchmark"] == "jwks-runtime-foundation"
+    assert baseline["interpretation"] == "relative regression gates; not absolute cross-machine claims"
+    assert baseline["budgets"] == {
+        "fresh_hit_p95_ratio": {"comparison": "fresh_selection_and_verify/direct_lookup_and_verify", "maximum": 1.2},
+        "sync_ticker_delay_p95_ms": {"comparison": "event_loop_tick_overshoot", "maximum": 10.0},
+    }
+    assert set(baseline["observed"]) == {"fresh_hit_p95_ratio", "sync_ticker_delay_p95_ms"}
+    assert all(baseline["observed"][name] <= budget["maximum"] for name, budget in baseline["budgets"].items())
+
+
+@pytest.mark.performance
+@pytest.mark.anyio
+async def test_jwks_performance_fresh_issuer_path_is_lock_and_fetch_free(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    second_issuer = "https://fresh.example"
+    second_uri = f"{second_issuer}/jwks"
+    first = _jwks_response(_verification_jwk(jwt_key_material, key_id="first"), cache_control="max-age=30")
+    second = _jwks_response(_verification_jwk(jwt_key_material, key_id="second"), cache_control="max-age=300")
+    fetcher = _BlockingJWKSFetcher(first, second, first, immediate_calls=2, maximum_calls=3)
+
+    class FailingLock:
+        async def __aenter__(self) -> None:
+            message = "fresh selection acquired the entry lock"
+            raise AssertionError(message)
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    provider = CachedJWKSProvider(entries=(_jwks_entry(), _jwks_entry(second_issuer, second_uri)), fetcher=fetcher)
+    await provider.select_key(_JWT_ISSUER, _JWKS_URI, "first", "EdDSA", now=_JWT_NOW)
+    await provider.select_key(second_issuer, second_uri, "second", "EdDSA", now=_JWT_NOW)
+    state = cast("Any", provider)._entries[(second_issuer, second_uri)]  # noqa: SLF001
+    state.lock = FailingLock()
+    fresh_result: list[object] = []
+
+    async def refresh_expired() -> None:
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "first", "EdDSA", now=_JWT_NOW + timedelta(seconds=30))
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(refresh_expired)
+        await fetcher.started.wait()
+        with fail_after(0.1):
+            fresh_result.append(
+                await provider.select_key(
+                    second_issuer, second_uri, "second", "EdDSA", now=_JWT_NOW + timedelta(seconds=30)
+                )
+            )
+        fetcher.release.set()
+
+    assert isinstance(fresh_result[0], VerificationKey)
+    assert len(fetcher.requests) == 3
+
+
+@pytest.mark.performance
+@pytest.mark.anyio
+async def test_jwks_performance_single_flight_and_cache_bounds(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    keys = tuple(_verification_jwk(jwt_key_material, key_id=f"known-{index}") for index in range(4))
+    response = _jwks_response(*keys, cache_control="max-age=60")
+    blocking_fetcher = _BlockingJWKSFetcher(response)
+    cold_provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=blocking_fetcher)
+    cold_results: list[object | None] = [None] * 100
+
+    async def select_cold(index: int) -> None:
+        cold_results[index] = await cold_provider.select_key(_JWT_ISSUER, _JWKS_URI, "known-0", "EdDSA", now=_JWT_NOW)
+
+    async with create_task_group() as task_group:
+        for index in range(len(cold_results)):
+            task_group.start_soon(select_cold, index)
+        await blocking_fetcher.started.wait()
+        await checkpoint()
+        blocking_fetcher.release.set()
+
+    policy = JWKSCachePolicy(maximum_keys=4, maximum_unknown_keys=64)
+    not_modified = JWKSFetchResponse(status_code=304, headers={"cache-control": "max-age=60"})
+    bounded_fetcher = _RecordingJWKSFetcher(response, not_modified)
+    bounded_provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=bounded_fetcher, policy=policy)
+    await bounded_provider.select_key(_JWT_ISSUER, _JWKS_URI, "known-0", "EdDSA", now=_JWT_NOW)
+    for _ in range(1_000):
+        await bounded_provider.select_key(
+            _JWT_ISSUER, _JWKS_URI, "repeated-unknown", "EdDSA", now=_JWT_NOW + timedelta(seconds=1)
+        )
+    for index in range(1_000):
+        await bounded_provider.select_key(
+            _JWT_ISSUER, _JWKS_URI, f"unknown-{index}", "EdDSA", now=_JWT_NOW + timedelta(seconds=1)
+        )
+    state = cast("Any", bounded_provider)._entries[(_JWT_ISSUER, _JWKS_URI)]  # noqa: SLF001
+
+    assert len(blocking_fetcher.requests) == 1
+    assert all(result is cold_results[0] for result in cold_results)
+    assert len(bounded_fetcher.requests) == 2
+    assert len(cast("Any", bounded_provider)._entries) == 1  # noqa: SLF001
+    assert len(state.snapshot.keys) <= policy.maximum_keys
+    assert len(state.negative) <= policy.maximum_unknown_keys
+
+
+@pytest.mark.performance
+@pytest.mark.anyio
+async def test_jwks_performance_fresh_hit_p95_is_relative_to_direct_verification(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    token = _encode_jwt(private_key, "EdDSA")
+    fetcher = _RecordingJWKSFetcher(_jwks_response(_verification_jwk(jwt_key_material), cache_control="max-age=300"))
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
+    selected = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
+    assert isinstance(selected, VerificationKey)
+    decode_options = {"verify_exp": False, "verify_iat": False, "verify_nbf": False}
+
+    def verify(key: bytes) -> None:
+        jwt.decode(token, key, algorithms=["EdDSA"], audience=_JWT_AUDIENCE, issuer=_JWT_ISSUER, options=decode_options)
+
+    for _ in range(20):
+        verify(selected.key)
+        await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
+
+    direct_samples: list[float] = []
+    fresh_samples: list[float] = []
+    direct = {("key-1", "EdDSA"): selected}
+    for index in range(300):
+        if index % 2:
+            started = perf_counter_ns()
+            fresh = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
+            assert isinstance(fresh, VerificationKey)
+            verify(fresh.key)
+            fresh_samples.append(float(perf_counter_ns() - started))
+        started = perf_counter_ns()
+        verify(direct[("key-1", "EdDSA")].key)
+        direct_samples.append(float(perf_counter_ns() - started))
+        if not index % 2:
+            started = perf_counter_ns()
+            fresh = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
+            assert isinstance(fresh, VerificationKey)
+            verify(fresh.key)
+            fresh_samples.append(float(perf_counter_ns() - started))
+
+    ratio = _p95(fresh_samples) / _p95(direct_samples)
+    maximum = _jwks_performance_baseline()["budgets"]["fresh_hit_p95_ratio"]["maximum"]
+
+    assert ratio <= maximum
+
+
+@pytest.mark.performance
+@pytest.mark.anyio
+async def test_jwks_performance_saturated_sync_verification_keeps_ticker_under_budget() -> None:
+    pending = 100
+    tick_overshoots_ms: list[float] = []
+
+    class SyncVerifier:
+        config = _jwt_config("EdDSA")
+
+        def verify(self, _token: str, *, now: datetime) -> InvalidCredentials:
+            assert now is _JWT_NOW
+            sleep(0.002)
+            return InvalidCredentials()
+
+    verifier = normalize_verifier(SyncVerifier(), worker_limits=WorkerLimits(crypto_tokens=2))
+
+    async def verify() -> None:
+        nonlocal pending
+        await verifier.verify("token", now=_JWT_NOW)
+        pending -= 1
+
+    async def ticker() -> None:
+        interval = 0.001
+        last_tick = perf_counter()
+        while pending:
+            await asyncio.sleep(interval)
+            tick = perf_counter()
+            tick_overshoots_ms.append(max(0.0, tick - last_tick - interval) * 1_000)
+            last_tick = tick
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(ticker)
+        for _ in range(pending):
+            task_group.start_soon(verify)
+
+    maximum = _jwks_performance_baseline()["budgets"]["sync_ticker_delay_p95_ms"]["maximum"]
+    observed_p95 = _p95(tick_overshoots_ms)
+
+    assert len(tick_overshoots_ms) >= 10
+    assert observed_p95 <= maximum
 
 
 def _mechanism(

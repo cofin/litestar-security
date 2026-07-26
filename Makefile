@@ -120,16 +120,22 @@ docs-linkcheck:                                     ## Validate documentation li
 .PHONY: test
 test:                                               ## Run the test suite
 	@echo "${INFO} Running test cases... 🧪"
-	@uv run pytest
+	@uv run pytest -m "not performance"
 	@echo "${OK} Tests complete 🧪"
 
 .PHONY: test-all
 test-all: test                                      ## Run all tests
 
+.PHONY: performance
+performance:                                        ## Run deterministic local performance regression gates
+	@echo "${INFO} Running performance regression gates... 📊"
+	@uv run pytest -m performance
+	@echo "${OK} Performance regression gates passed 📊"
+
 .PHONY: coverage
 coverage:                                           ## Run the test suite with branch coverage
 	@echo "${INFO} Running tests with coverage... 🧪"
-	@uv run pytest --cov=litestar_security --cov-branch --cov-report=term-missing
+	@uv run pytest -m "not performance" --cov=litestar_security --cov-branch --cov-report=term-missing
 	@echo "${OK} Coverage checks passed 📊"
 
 # -----------------------------------------------------------------------------
