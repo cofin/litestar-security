@@ -9,6 +9,7 @@ from importlib.metadata import entry_points
 from secrets import token_hex
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
+import anyio.lowlevel
 import click
 import pytest
 from click.testing import CliRunner
@@ -39,6 +40,7 @@ from litestar_security.authentication import (
     PresentedCredential,
     SecurityMiddlewareWrapper,
     SecurityRuntimePlan,
+    VerificationUnavailable,
     all_of,
     any_of,
     at_least,
@@ -1266,6 +1268,127 @@ def test_required_default_without_participants_fails_startup() -> None:
         ImproperlyConfiguredException, match=r"required default authentication plan.*participating mechanism"
     ):
         SecurityPlugin(SecurityConfig(require_default=True)).on_app_init(AppConfig())
+
+
+@pytest.mark.parametrize(
+    ("warmup_failure", "fails", "raises"),
+    [("fail_startup", False, False), ("fail_startup", True, True), ("lazy", True, False)],
+)
+def test_plugin_owns_jwks_warmup_and_shutdown_lifespan(
+    warmup_failure: Literal["fail_startup", "lazy"], *, fails: bool, raises: bool
+) -> None:
+    events: list[str] = []
+
+    class Provider:
+        async def select_key(
+            self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime
+        ) -> InvalidCredentials:
+            del issuer, jwks_uri, kid, algorithm, now
+            return InvalidCredentials()
+
+        async def warmup(self, *, now: datetime) -> VerificationUnavailable | None:
+            assert now.tzinfo is not None
+            events.append("warmup")
+            return VerificationUnavailable() if fails else None
+
+        async def aclose(self) -> None:
+            events.append("close")
+
+    app = Litestar(
+        [],
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(jwks_providers=(cast("Any", Provider()),), jwks_warmup_failure=warmup_failure)
+            )
+        ],
+    )
+
+    if raises:
+        with pytest.RaisesGroup(ImproperlyConfiguredException, flatten_subgroups=True), TestClient(app):
+            pass
+    else:
+        with TestClient(app):
+            assert events == ["warmup"]
+    assert events == ["warmup", "close"]
+
+
+def test_plugin_validates_and_registers_one_jwks_lifespan() -> None:
+    class Provider:
+        async def select_key(
+            self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime
+        ) -> InvalidCredentials:
+            del issuer, jwks_uri, kid, algorithm, now
+            return InvalidCredentials()
+
+        async def warmup(self, *, now: datetime) -> VerificationUnavailable | None:
+            del now
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+    plugin = SecurityPlugin(SecurityConfig(jwks_providers=(cast("Any", Provider()),)))
+    app_config = AppConfig()
+
+    plugin._configure_jwks_lifespan(app_config)  # noqa: SLF001
+    plugin._configure_jwks_lifespan(app_config)  # noqa: SLF001
+
+    assert len(app_config.lifespan) == 1
+    with pytest.raises(ImproperlyConfiguredException, match="must implement JWKSProvider"):
+        SecurityPlugin(SecurityConfig(jwks_providers=(cast("Any", object()),))).on_app_init(AppConfig())
+
+
+@pytest.mark.parametrize(
+    ("warmup_fails", "expected_error"),
+    [(False, "JWKS provider shutdown failed"), (True, "JWKS warmup failed during application startup")],
+)
+def test_plugin_awaits_all_jwks_closes_and_preserves_primary_failure(
+    *, warmup_fails: bool, expected_error: str
+) -> None:
+    events: list[str] = []
+
+    class Provider:
+        def __init__(self, name: str, *, close_fails: bool = False) -> None:
+            self.name = name
+            self.close_fails = close_fails
+
+        async def select_key(
+            self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime
+        ) -> InvalidCredentials:
+            del issuer, jwks_uri, kid, algorithm, now
+            return InvalidCredentials()
+
+        async def warmup(self, *, now: datetime) -> VerificationUnavailable | None:
+            del now
+            return VerificationUnavailable() if warmup_fails and self.name == "first" else None
+
+        async def aclose(self) -> None:
+            await anyio.lowlevel.checkpoint()
+            events.append(f"close-{self.name}")
+            if self.close_fails:
+                msg = "private close detail"
+                raise OSError(msg)
+
+    app = Litestar(
+        [],
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(
+                    jwks_providers=(cast("Any", Provider("first", close_fails=True)), cast("Any", Provider("second")))
+                )
+            )
+        ],
+    )
+
+    with (
+        pytest.RaisesGroup(
+            ImproperlyConfiguredException, flatten_subgroups=True, check=lambda error: expected_error in repr(error)
+        ),
+        TestClient(app),
+    ):
+        pass
+
+    assert events == ["close-first", "close-second"]
 
 
 def test_importing_plugin_does_not_import_private_cli() -> None:

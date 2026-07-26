@@ -7,13 +7,16 @@ import json
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
+from math import inf, nan
+from threading import Event as ThreadEvent
+from threading import Lock as ThreadLock
 from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
 import jwt
 import pytest
-from anyio import CancelScope, Event, create_task_group, fail_after, get_cancelled_exc_class
+from anyio import CancelScope, CapacityLimiter, Event, create_task_group, fail_after, get_cancelled_exc_class
 from anyio.lowlevel import checkpoint
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -51,6 +54,11 @@ from litestar_security.providers.jwks import (
     JWKSCachePolicy,
     JWKSFetchRequest,
     JWKSFetchResponse,
+    NoOpSecurityMetrics,
+    SecurityMetrics,
+    SyncJWKSFetcher,
+    WorkerLimits,
+    normalize_fetcher,
 )
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
@@ -61,11 +69,15 @@ from litestar_security.providers.jwt import (
     LocalKeyRing,
     PyJWTVerifier,
     SigningKey,
+    SyncJWTVerifier,
+    SyncTokenSigner,
     TokenSigner,
     UnverifiedJWTRoute,
     VerificationKey,
     VerificationKeySet,
     build_access_token_claims,
+    normalize_signer,
+    normalize_verifier,
     parse_unverified_jwt_route,
 )
 from litestar_security.providers.oidc import DiscoveryPolicy, OIDCDiscoveryClient, OIDCDiscoveryError, OIDCMetadata
@@ -78,6 +90,451 @@ _OIDC_ISSUER = "https://issuer.example/tenant"
 _OIDC_DISCOVERY_URL = f"{_OIDC_ISSUER}/.well-known/openid-configuration"
 _OIDC_PUBLIC_IP = "93.184.216.34"
 _JWKS_URI = f"{_JWT_ISSUER}/.well-known/jwks.json"
+
+
+def test_jwks_worker_and_metrics_contracts_are_safe_by_default() -> None:
+    limits = WorkerLimits()
+    metrics = NoOpSecurityMetrics()
+
+    assert limits.network_tokens == 8
+    assert limits.crypto_tokens == 32
+    assert limits.timeout == 10.0
+    assert limits.network_limiter.total_tokens == 8
+    assert limits.crypto_limiter.total_tokens == 32
+    assert limits.network_limiter is not limits.crypto_limiter
+    assert isinstance(metrics, SecurityMetrics)
+    metrics.increment("security.jwks.fresh_hit")
+    metrics.observe("security.jwks.fetch_duration", 0.1)
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"network_tokens": 0}, {"crypto_tokens": True}, {"timeout": 0}, {"timeout": inf}, {"timeout": nan}]
+)
+def test_jwks_worker_limits_reject_invalid_capacity(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ImproperlyConfiguredException):
+        WorkerLimits(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_jwks_fetcher_normalization_selects_async_or_bounded_sync_once() -> None:
+    response = JWKSFetchResponse(status_code=200, body=b'{"keys":[]}')
+    metrics: list[str] = []
+
+    class Metrics:
+        def increment(self, name: str, *, attributes: Mapping[str, str] = {}) -> None:
+            del attributes
+            metrics.append(name)
+
+        def observe(self, name: str, value: float, *, attributes: Mapping[str, str] = {}) -> None:
+            del name, value, attributes
+
+    class AsyncFetcher:
+        async def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+            return response
+
+    class SyncFetcher:
+        def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+            return response
+
+    request = JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
+    async_fetcher = AsyncFetcher()
+    normalized_async = normalize_fetcher(async_fetcher, limiter=CapacityLimiter(1))
+    normalized_sync = normalize_fetcher(SyncFetcher(), limiter=CapacityLimiter(2), metrics=Metrics())
+
+    assert normalized_async is async_fetcher
+    assert isinstance(normalized_sync, AsyncJWKSFetcher)
+    assert isinstance(SyncFetcher(), SyncJWKSFetcher)
+    assert await normalized_async.fetch(request) is response
+    assert await normalized_sync.fetch(request) is response
+    assert "security.worker.saturation" not in metrics
+
+
+def test_jwks_fetcher_normalization_rejects_invalid_configuration() -> None:
+    cases = (
+        (object(), 1.0, None, "must define fetch"),
+        (_RecordingJWKSFetcher(), 0.0, None, "timeout must be finite and positive"),
+        (_RecordingJWKSFetcher(), 1.0, object(), "must implement SecurityMetrics"),
+        (_RecordingJWKSFetcher(), 1.0, None, "limiter must have finite bounded capacity"),
+    )
+    for index, (fetcher, timeout, metrics, match) in enumerate(cases):
+        with pytest.raises(ImproperlyConfiguredException, match=match):
+            normalize_fetcher(  # type: ignore[arg-type]
+                fetcher,
+                limiter=CapacityLimiter(inf if index == 3 else 1),
+                timeout=timeout,
+                metrics=metrics,  # type: ignore[arg-type]
+            )
+
+
+@pytest.mark.anyio
+async def test_jwks_sync_fetcher_is_bounded_without_blocking_the_event_loop() -> None:
+    started = ThreadEvent()
+    release = ThreadEvent()
+    calls: list[JWKSFetchResponse] = []
+
+    class SyncFetcher:
+        def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+            started.set()
+            release.wait(timeout=1)
+            return JWKSFetchResponse(status_code=200, body=b'{"keys":[]}')
+
+    normalized = normalize_fetcher(SyncFetcher(), limiter=CapacityLimiter(1))
+    request = JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
+
+    async def fetch() -> None:
+        calls.append(await normalized.fetch(request))
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(fetch)
+        with fail_after(1):
+            while not started.is_set():
+                await checkpoint()
+        task_group.start_soon(fetch)
+        await checkpoint()
+        assert calls == []
+        release.set()
+
+    assert len(calls) == 2
+
+
+@pytest.mark.anyio
+async def test_sync_crypto_normalization_is_bounded_and_keeps_the_event_loop_live() -> None:  # noqa: C901, PLR0915
+    release = ThreadEvent()
+    saturated = ThreadEvent()
+    lock = ThreadLock()
+    active = 0
+    maximum_active = 0
+    outcomes: list[InvalidCredentials] = []
+    records: list[tuple[str, float | None]] = []
+    stop_ticker = Event()
+    ticker_count = 0
+
+    class Metrics:
+        def increment(self, name: str, *, attributes: Mapping[str, str] = {}) -> None:
+            del attributes
+            records.append((name, None))
+
+        def observe(self, name: str, value: float, *, attributes: Mapping[str, str] = {}) -> None:
+            del attributes
+            records.append((name, value))
+
+    class SyncVerifier:
+        config = _jwt_config("EdDSA")
+
+        def verify(self, _token: str, *, now: datetime) -> InvalidCredentials:
+            nonlocal active, maximum_active
+            assert now is _JWT_NOW
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+                if active == 2:
+                    saturated.set()
+            release.wait(timeout=1)
+            with lock:
+                active -= 1
+            return InvalidCredentials()
+
+    class AsyncVerifier:
+        config = _jwt_config("EdDSA")
+
+        async def verify(self, _token: str, *, now: datetime) -> InvalidCredentials:
+            assert now is _JWT_NOW
+            return InvalidCredentials()
+
+    class AsyncSigner:
+        async def sign(self, _claims: Mapping[str, object], *, now: datetime) -> str:
+            assert now is _JWT_NOW
+            return "async"
+
+    class SyncSigner:
+        def sign(self, _claims: Mapping[str, object], *, now: datetime) -> str:
+            assert now is _JWT_NOW
+            return "sync"
+
+    workers = WorkerLimits(crypto_tokens=2)
+    metrics = Metrics()
+    verifier = normalize_verifier(SyncVerifier(), worker_limits=workers, metrics=metrics)
+    async_verifier = AsyncVerifier()
+    async_signer = AsyncSigner()
+    normalized_async_signer = normalize_signer(async_signer, worker_limits=workers, metrics=metrics)
+    normalized_sync_signer = normalize_signer(SyncSigner(), worker_limits=workers, metrics=metrics)
+
+    async def verify() -> None:
+        outcomes.append(cast("InvalidCredentials", await verifier.verify("token", now=_JWT_NOW)))
+
+    async def ticker() -> None:
+        nonlocal ticker_count
+        while not stop_ticker.is_set():
+            ticker_count += 1
+            await checkpoint()
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(ticker)
+        for _ in range(2):
+            task_group.start_soon(verify)
+        with fail_after(1):
+            while not saturated.is_set():
+                await checkpoint()
+        for _ in range(98):
+            task_group.start_soon(verify)
+        with fail_after(1):
+            while not any(name == "security.worker.saturation" for name, _ in records):
+                await checkpoint()
+        observed_ticks = ticker_count
+        release.set()
+        with fail_after(1):
+            while len(outcomes) != 100:
+                await checkpoint()
+        stop_ticker.set()
+
+    assert observed_ticks > 0
+    assert maximum_active == 2
+    assert len(outcomes) == 100
+    assert isinstance(SyncVerifier(), SyncJWTVerifier)
+    assert isinstance(SyncSigner(), SyncTokenSigner)
+    assert normalize_verifier(async_verifier, worker_limits=workers, metrics=metrics) is async_verifier
+    assert normalized_async_signer is async_signer
+    assert await normalized_sync_signer.sign({}, now=_JWT_NOW) == "sync"
+    names = [name for name, _ in records]
+    assert {
+        "security.worker.saturation",
+        "security.worker.wait",
+        "security.worker.duration",
+        "security.jwt.verify_duration",
+        "security.jwt.sign_duration",
+    } <= set(names)
+    assert all(value is None or value >= 0 for _, value in records)
+
+
+@pytest.mark.anyio
+async def test_sync_crypto_timeout_is_sanitized() -> None:
+    release = ThreadEvent()
+
+    class SyncVerifier:
+        config = _jwt_config("EdDSA")
+
+        def verify(self, _token: str, *, now: datetime) -> InvalidCredentials:
+            del now
+            release.wait(timeout=1)
+            return InvalidCredentials()
+
+    class SyncSigner:
+        def sign(self, _claims: Mapping[str, object], *, now: datetime) -> str:
+            del now
+            release.wait(timeout=1)
+            return "token"
+
+    workers = WorkerLimits(crypto_tokens=1, timeout=0.01)
+    verifier = normalize_verifier(SyncVerifier(), worker_limits=workers)
+    signer = normalize_signer(SyncSigner(), worker_limits=workers)
+
+    outcome = await verifier.verify("token", now=_JWT_NOW)
+    with pytest.raises(RuntimeError, match="Token signing unavailable"):
+        await signer.sign({}, now=_JWT_NOW)
+    release.set()
+
+    assert isinstance(outcome, VerificationUnavailable)
+
+
+def test_crypto_worker_configuration_rejects_invalid_values(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    signing_key = SigningKey(key_id="active", algorithm="EdDSA", private_key=jwt_key_material["EdDSA"][0])
+    verification_key = VerificationKey(key_id="active", algorithm="EdDSA", key=jwt_key_material["EdDSA"][1])
+
+    class SyncSigner:
+        def sign(self, _claims: Mapping[str, object], *, now: datetime) -> str:
+            del now
+            return "token"
+
+    class SyncVerifier:
+        config = _jwt_config("EdDSA")
+
+        def verify(self, _token: str, *, now: datetime) -> InvalidCredentials:
+            del now
+            return InvalidCredentials()
+
+    cases = (
+        (lambda: normalize_signer(object()), "must define sign"),
+        (lambda: normalize_signer(SyncSigner(), worker_limits=object()), "worker limits must be WorkerLimits"),
+        (lambda: normalize_signer(SyncSigner(), metrics=object()), "metrics must implement SecurityMetrics"),
+        (lambda: normalize_verifier(object()), "must define verify"),
+        (lambda: normalize_verifier(SyncVerifier(), worker_limits=object()), "worker limits must be WorkerLimits"),
+        (
+            lambda: VerificationKeySet(issuer=_JWT_ISSUER, keys=(verification_key,)).build_verifier(
+                _jwt_config("EdDSA"),
+                worker_limits=object(),  # type: ignore[arg-type]
+            ),
+            "worker limits must be WorkerLimits",
+        ),
+        (
+            lambda: LocalKeyRing(
+                issuer=_JWT_ISSUER,
+                active_signing_key=signing_key,
+                worker_limits=object(),  # type: ignore[arg-type]
+            ),
+            "worker limits must be WorkerLimits",
+        ),
+        (
+            lambda: PyJWTVerifier(config=_jwt_config("EdDSA"), key=verification_key, limiter=CapacityLimiter(inf)),
+            "limiter must have finite bounded capacity",
+        ),
+        (
+            lambda: PyJWTVerifier(config=_jwt_config("EdDSA"), key=verification_key, worker_timeout=inf),
+            "timeout must be finite and positive",
+        ),
+        (
+            lambda: jwt_provider._LocalJWTSigner(  # noqa: SLF001
+                issuer=_JWT_ISSUER, signing_key=signing_key, worker_timeout=inf
+            ),
+            "timeout must be finite and positive",
+        ),
+    )
+    for factory, match in cases:
+        with pytest.raises(ImproperlyConfiguredException, match=match):
+            factory()
+
+
+@pytest.mark.anyio
+async def test_jwks_sync_fetcher_timeout_maps_to_unavailable(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    release = ThreadEvent()
+
+    class SyncFetcher:
+        def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+            release.wait(timeout=1)
+            return _jwks_response(_verification_jwk(jwt_key_material))
+
+    normalized = normalize_fetcher(SyncFetcher(), limiter=CapacityLimiter(1), timeout=0.01)
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=normalized)
+
+    outcome = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
+    release.set()
+
+    assert isinstance(outcome, VerificationUnavailable)
+
+
+@pytest.mark.anyio
+async def test_jwks_metrics_are_vendor_neutral_and_redacted(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    records: list[tuple[str, float | None, dict[str, str]]] = []
+
+    class Metrics:
+        def increment(self, name: str, *, attributes: Mapping[str, str] = {}) -> None:
+            records.append((name, None, dict(attributes)))
+
+        def observe(self, name: str, value: float, *, attributes: Mapping[str, str] = {}) -> None:
+            records.append((name, value, dict(attributes)))
+
+    known = _verification_jwk(jwt_key_material, key_id="known")
+    fetcher = _RecordingJWKSFetcher(_jwks_response(known, cache_control="max-age=60"), OSError("operational-detail"))
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher, metrics=Metrics())
+
+    await provider.select_key(_JWT_ISSUER, _JWKS_URI, "known", "EdDSA", now=_JWT_NOW)
+    await provider.select_key(_JWT_ISSUER, _JWKS_URI, "attacker-kid", "EdDSA", now=_JWT_NOW)
+    rendered = repr(records)
+
+    assert {"security.jwks.refresh_success", "security.jwks.unknown_key", "security.jwks.refresh_failure"} <= {
+        name for name, _, _ in records
+    }
+    assert all(value is None or value >= 0 for _, value, _ in records)
+    assert all(secret not in rendered for secret in (_JWT_ISSUER, _JWKS_URI, "attacker-kid", "operational-detail"))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"metrics": object()}, "must implement SecurityMetrics"),
+        ({"fetcher_owned": 1}, "ownership must be boolean"),
+        ({"worker_limits": object()}, "worker limits must be WorkerLimits"),
+    ],
+)
+def test_jwks_provider_rejects_invalid_runtime_configuration(kwargs: dict[str, object], match: str) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        CachedJWKSProvider(
+            entries=(_jwks_entry(),),
+            fetcher=_RecordingJWKSFetcher(),
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(("fetcher_owned", "expected_closes"), [(False, 0), (True, 1)])
+@pytest.mark.anyio
+async def test_jwks_provider_closes_only_owned_fetchers(
+    *, fetcher_owned: bool, expected_closes: int, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+) -> None:
+    class Fetcher:
+        def __init__(self) -> None:
+            self.closes = 0
+
+        async def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+            return _jwks_response(_verification_jwk(jwt_key_material))
+
+        async def aclose(self) -> None:
+            self.closes += 1
+
+    fetcher = Fetcher()
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher, fetcher_owned=fetcher_owned)
+
+    await provider.aclose()
+    await provider.aclose()
+
+    assert fetcher.closes == expected_closes
+
+
+@pytest.mark.anyio
+async def test_jwks_provider_closes_owned_sync_fetcher_in_worker() -> None:
+    class SyncFetcher:
+        def __init__(self) -> None:
+            self.closes = 0
+
+        def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+            return JWKSFetchResponse(status_code=200, body=b'{"keys":[]}')
+
+        def close(self) -> None:
+            self.closes += 1
+
+    source = SyncFetcher()
+    normalized = normalize_fetcher(source, limiter=CapacityLimiter(1))
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=normalized, fetcher_owned=True)
+
+    await provider.aclose()
+
+    assert source.closes == 1
+
+
+@pytest.mark.anyio
+async def test_jwks_provider_accepts_owned_sync_fetcher_without_close() -> None:
+    class SyncFetcher:
+        def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+            return JWKSFetchResponse(status_code=200, body=b'{"keys":[]}')
+
+    provider = CachedJWKSProvider(
+        entries=(_jwks_entry(),),
+        fetcher=normalize_fetcher(SyncFetcher(), limiter=CapacityLimiter(1)),
+        fetcher_owned=True,
+    )
+
+    await provider.aclose()
+
+
+@pytest.mark.parametrize("close_mode", ["absent", "sync"])
+@pytest.mark.anyio
+async def test_jwks_provider_accepts_owned_fetchers_without_async_close(close_mode: str) -> None:
+    class Fetcher:
+        async def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+            return JWKSFetchResponse(status_code=200, body=b'{"keys":[]}')
+
+    class SyncCloseFetcher(Fetcher):
+        def aclose(self) -> None:
+            return None
+
+    fetcher = Fetcher() if close_mode == "absent" else SyncCloseFetcher()
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher, fetcher_owned=True)
+
+    await provider.aclose()
 
 
 def _jwt_claims(**overrides: object) -> dict[str, object]:
@@ -1407,15 +1864,25 @@ async def test_local_signer_runs_crypto_in_a_worker_and_supports_custom_signers(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[dict[str, object]] = []
+    observations: list[str] = []
 
     async def run_sync(function: Callable[[], object], **kwargs: object) -> object:
         calls.append(kwargs)
         return function()
 
+    class Metrics:
+        def increment(self, name: str, *, attributes: Mapping[str, str] = {}) -> None:
+            del name, attributes
+
+        def observe(self, name: str, value: float, *, attributes: Mapping[str, str] = {}) -> None:
+            del value, attributes
+            observations.append(name)
+
     monkeypatch.setattr(jwt_provider.to_thread, "run_sync", run_sync)
     ring = LocalKeyRing(
         issuer=_JWT_ISSUER,
         active_signing_key=SigningKey(key_id="active", algorithm="EdDSA", private_key=jwt_key_material["EdDSA"][0]),
+        metrics=Metrics(),
     )
     claims = build_access_token_claims(
         issuer=_JWT_ISSUER,
@@ -1450,7 +1917,11 @@ async def test_local_signer_runs_crypto_in_a_worker_and_supports_custom_signers(
     )
 
     assert token.count(".") == 2
-    assert calls == [{"abandon_on_cancel": True, "limiter": None}]
+    assert len(calls) == 1
+    assert calls[0]["abandon_on_cancel"] is True
+    assert cast("CapacityLimiter", calls[0]["limiter"]).total_tokens == 32
+    assert isinstance(await ring.build_verifier(_jwt_config("EdDSA")).verify(token, now=_JWT_NOW), Authenticated)
+    assert {"security.jwt.sign_duration", "security.jwt.verify_duration"} <= set(observations)
     assert isinstance(custom_signer, TokenSigner)
     assert isinstance(
         await custom_keys.build_verifier(_jwt_config("EdDSA")).verify(custom_token, now=_JWT_NOW), Authenticated
@@ -3400,6 +3871,25 @@ async def test_jwks_stale_if_error_is_local_explicit_and_bounded(
 
     assert stale is original
     assert isinstance(expired, VerificationUnavailable)
+
+
+@pytest.mark.anyio
+async def test_jwks_stale_if_error_never_accepts_an_unknown_key(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    fetcher = _RecordingJWKSFetcher(
+        _jwks_response(_verification_jwk(jwt_key_material), cache_control="max-age=30"), OSError("temporary")
+    )
+    provider = CachedJWKSProvider(
+        entries=(_jwks_entry(),), fetcher=fetcher, policy=JWKSCachePolicy(stale_if_error=timedelta(seconds=60))
+    )
+
+    await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
+    outcome = await provider.select_key(
+        _JWT_ISSUER, _JWKS_URI, "unknown", "EdDSA", now=_JWT_NOW + timedelta(seconds=30)
+    )
+
+    assert isinstance(outcome, VerificationUnavailable)
 
 
 @pytest.mark.anyio

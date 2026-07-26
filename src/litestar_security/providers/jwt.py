@@ -8,15 +8,19 @@ import re
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from functools import partial
+from inspect import iscoroutinefunction
+from math import isfinite
 from secrets import token_urlsafe
+from time import perf_counter
 from types import MappingProxyType
 from typing import Any, Generic, Literal, NoReturn, Protocol, TypeAlias, TypedDict, TypeVar, cast, runtime_checkable
 
 import jwt
-from anyio import CapacityLimiter, to_thread
+from anyio import CapacityLimiter, fail_after, to_thread
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from jwt import PyJWK
@@ -45,6 +49,7 @@ from litestar_security.authentication import (
     public,
     security,
 )
+from litestar_security.config import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 from litestar_security.context import AuthenticationEvidence
 
 __all__ = (
@@ -58,11 +63,15 @@ __all__ = (
     "LocalJWKSConfig",
     "LocalKeyRing",
     "SigningKey",
+    "SyncJWTVerifier",
+    "SyncTokenSigner",
     "TokenSigner",
     "VerificationKey",
     "VerificationKeySet",
     "build_access_token_claims",
     "build_local_jwks_handler",
+    "normalize_signer",
+    "normalize_verifier",
 )
 
 JSONValue: TypeAlias = bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"] | None
@@ -74,6 +83,7 @@ PreparedVerificationKey: TypeAlias = (
 PreparedSigningKey: TypeAlias = bytes | rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey | ed25519.Ed25519PrivateKey
 ClaimsT = TypeVar("ClaimsT")
 UserT = TypeVar("UserT")
+ResultT = TypeVar("ResultT")
 
 _SUPPORTED_ALGORITHMS = frozenset({"EdDSA", "ES256", "RS256", "HS256"})
 _ACCESS_TOKEN_TYPES = frozenset({"at+jwt", "application/at+jwt"})
@@ -91,12 +101,58 @@ _BEARER_PREFIX_LENGTH = len(b"Bearer ")
 _LOCAL_ACCESS_REQUIRED_CLAIMS = frozenset({"iss", "sub", "aud", "exp", "iat", "client_id", "jti", "se"})
 _LOCAL_ACCESS_ALLOWED_CLAIMS = _LOCAL_ACCESS_REQUIRED_CLAIMS.union({"nbf", "scope"})
 _MAXIMUM_LOCAL_JWKS_CACHE_AGE = 86_400
+_MAXIMUM_WORKER_TOKENS = 1_024
 _PUBLIC_JWK_FIELDS = {
     "EdDSA": frozenset({"alg", "crv", "key_ops", "kid", "kty", "use", "x"}),
     "ES256": frozenset({"alg", "crv", "key_ops", "kid", "kty", "use", "x", "y"}),
     "RS256": frozenset({"alg", "e", "key_ops", "kid", "kty", "n", "use"}),
 }
 _INVALID = InvalidCredentials()
+
+
+def _metric_sink(metrics: SecurityMetrics | None) -> SecurityMetrics:
+    sink = NoOpSecurityMetrics() if metrics is None else metrics
+    if not callable(getattr(sink, "increment", None)) or not callable(getattr(sink, "observe", None)):
+        _raise_config("JWT metrics must implement SecurityMetrics")
+    return sink
+
+
+def _validate_limiter(limiter: object) -> CapacityLimiter:
+    total_tokens: object = getattr(limiter, "total_tokens", None)
+    if (
+        not isinstance(limiter, CapacityLimiter)
+        or not isinstance(total_tokens, int)
+        or isinstance(total_tokens, bool)
+        or not 1 <= total_tokens <= _MAXIMUM_WORKER_TOKENS
+    ):
+        _raise_config("JWT worker limiter must have finite bounded capacity")
+    return limiter
+
+
+async def _run_worker(
+    operation: Callable[[], ResultT],
+    *,
+    limiter: CapacityLimiter,
+    worker_timeout: float,
+    metrics: SecurityMetrics,
+    operation_metric: str,
+) -> ResultT:
+    if limiter.borrowed_tokens >= limiter.total_tokens:
+        _safe_increment(metrics, "security.worker.saturation")
+    queued_at = perf_counter()
+
+    def run() -> ResultT:
+        started = perf_counter()
+        _safe_observe(metrics, "security.worker.wait", started - queued_at)
+        try:
+            return operation()
+        finally:
+            elapsed = perf_counter() - started
+            _safe_observe(metrics, "security.worker.duration", elapsed)
+            _safe_observe(metrics, operation_metric, elapsed)
+
+    with fail_after(worker_timeout):
+        return await to_thread.run_sync(run, abandon_on_cancel=True, limiter=limiter)
 
 
 class _RSAPublicJWK(TypedDict):
@@ -255,6 +311,54 @@ class TokenSigner(Protocol):
         ...  # pragma: no cover
 
 
+@runtime_checkable
+class SyncTokenSigner(Protocol):
+    """Blocking custom signer normalized once into the crypto worker."""
+
+    def sign(self, claims: Mapping[str, JSONValue], *, now: datetime) -> str:
+        """Return one compact signed access token."""
+        ...  # pragma: no cover
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerTokenSigner:
+    sign_sync: Callable[..., str] = field(repr=False)
+    workers: WorkerLimits = field(repr=False)
+    metrics: SecurityMetrics = field(repr=False)
+
+    async def sign(self, claims: Mapping[str, JSONValue], *, now: datetime) -> str:
+        try:
+            return await _run_worker(
+                partial(self.sign_sync, claims, now=now),
+                limiter=self.workers.crypto_limiter,
+                worker_timeout=self.workers.timeout,
+                metrics=self.metrics,
+                operation_metric="security.jwt.sign_duration",
+            )
+        except Exception:  # noqa: BLE001
+            message = "Token signing unavailable"
+            raise RuntimeError(message) from None
+
+
+def normalize_signer(
+    signer: TokenSigner | SyncTokenSigner,
+    *,
+    worker_limits: WorkerLimits | None = None,
+    metrics: SecurityMetrics | None = None,
+) -> TokenSigner:
+    """Normalize one custom signer once without blocking the event loop."""
+    sign_method = getattr(signer, "sign", None)
+    if not callable(sign_method):
+        _raise_config("Token signer must define sign")
+    workers = WorkerLimits() if worker_limits is None else worker_limits
+    if not isinstance(workers, WorkerLimits):  # pyright: ignore[reportUnnecessaryIsInstance]
+        _raise_config("Token signer worker limits must be WorkerLimits")
+    sink = _metric_sink(metrics)
+    if iscoroutinefunction(sign_method):
+        return cast("TokenSigner", signer)
+    return _WorkerTokenSigner(sign_sync=cast("Callable[..., str]", sign_method), workers=workers, metrics=sink)
+
+
 @dataclass(frozen=True, slots=True)
 class VerificationKeySet:
     """One issuer's immutable verification-only keys for local or custom signers."""
@@ -280,13 +384,18 @@ class VerificationKeySet:
         *,
         mechanism_name: str = "jwt",
         slot_name: str = "authorization.bearer",
-        limiter: CapacityLimiter | None = None,
+        worker_limits: WorkerLimits | None = None,
+        metrics: SecurityMetrics | None = None,
     ) -> "JWTVerifier[JWTClaims]":
         """Build one exact-kid verifier across this trusted key set."""
         if config.issuer != self.issuer:
             _raise_config("Verification key set issuer must match JWT validation config issuer")
         mechanism_name = _strict_identifier(mechanism_name)
         slot_name = _strict_identifier(slot_name)
+        workers = WorkerLimits() if worker_limits is None else worker_limits
+        if not isinstance(workers, WorkerLimits):  # pyright: ignore[reportUnnecessaryIsInstance]
+            _raise_config("JWT verifier worker limits must be WorkerLimits")
+        sink = _metric_sink(metrics)
         verifiers: dict[tuple[str, str], PyJWTVerifier] = {}
         for verification_key in self.keys:
             if verification_key.algorithm not in config.algorithms:
@@ -298,7 +407,9 @@ class VerificationKeySet:
                 require_key_id=True,
                 mechanism_name=mechanism_name,
                 slot_name=slot_name,
-                limiter=limiter,
+                limiter=workers.crypto_limiter,
+                worker_timeout=workers.timeout,
+                metrics=sink,
             )
         if not verifiers:
             _raise_config("Verification key set has no key accepted by JWT validation config")
@@ -312,17 +423,23 @@ class LocalKeyRing:
     issuer: str
     active_signing_key: SigningKey
     verification_keys: tuple[VerificationKey, ...] = ()
+    worker_limits: WorkerLimits = field(default_factory=WorkerLimits, repr=False, compare=False)
+    metrics: SecurityMetrics = field(default_factory=NoOpSecurityMetrics, repr=False, compare=False)
     _verification_key_set: VerificationKeySet = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Normalize the issuer and reject ambiguous rotation state."""
         issuer = _strict_identifier(self.issuer)
         verification_keys = tuple(self.verification_keys)
+        if not isinstance(self.worker_limits, WorkerLimits):  # pyright: ignore[reportUnnecessaryIsInstance]
+            _raise_config("Local key ring worker limits must be WorkerLimits")
+        metrics = _metric_sink(self.metrics)
         key_set = VerificationKeySet(
             issuer=issuer, keys=(self.active_signing_key.as_verification_key(), *verification_keys)
         )
         object.__setattr__(self, "issuer", issuer)
         object.__setattr__(self, "verification_keys", verification_keys)
+        object.__setattr__(self, "metrics", metrics)
         object.__setattr__(self, "_verification_key_set", key_set)
 
     @property
@@ -335,23 +452,28 @@ class LocalKeyRing:
         """Return the public verification-only view used by local or custom signers."""
         return self._verification_key_set
 
-    def build_signer(self, *, limiter: CapacityLimiter | None = None) -> TokenSigner:
+    def build_signer(self) -> TokenSigner:
         """Build the local signer without generating or discovering key material."""
-        return _LocalJWTSigner(issuer=self.issuer, signing_key=self.active_signing_key, limiter=limiter)
+        return _LocalJWTSigner(
+            issuer=self.issuer,
+            signing_key=self.active_signing_key,
+            limiter=self.worker_limits.crypto_limiter,
+            worker_timeout=self.worker_limits.timeout,
+            metrics=self.metrics,
+        )
 
     def build_verifier(
-        self,
-        config: JWTValidationConfig,
-        *,
-        mechanism_name: str = "jwt",
-        slot_name: str = "authorization.bearer",
-        limiter: CapacityLimiter | None = None,
+        self, config: JWTValidationConfig, *, mechanism_name: str = "jwt", slot_name: str = "authorization.bearer"
     ) -> "JWTVerifier[JWTClaims]":
         """Build one exact-kid verifier across the active and retained keys."""
         if self.active_signing_key.algorithm not in config.algorithms:
             _raise_config("Local key ring active signing algorithm must be accepted by JWT validation config")
         return self._verification_key_set.build_verifier(
-            config, mechanism_name=mechanism_name, slot_name=slot_name, limiter=limiter
+            config,
+            mechanism_name=mechanism_name,
+            slot_name=slot_name,
+            worker_limits=self.worker_limits,
+            metrics=self.metrics,
         )
 
 
@@ -513,14 +635,77 @@ def build_access_token_claims(  # noqa: PLR0913
     return cast("Mapping[str, JSONValue]", MappingProxyType(claims))
 
 
+@runtime_checkable
 class JWTVerifier(Protocol, Generic[ClaimsT]):
     """Verify one compact JWT against a configured trust domain."""
 
-    config: JWTValidationConfig
+    @property
+    def config(self) -> JWTValidationConfig:
+        """Return the verifier's pinned trust profile."""
+        ...  # pragma: no cover
 
     async def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[ClaimsT]:
         """Return a structured authentication outcome."""
         ...  # pragma: no cover
+
+
+@runtime_checkable
+class SyncJWTVerifier(Protocol, Generic[ClaimsT]):
+    """Blocking custom verifier normalized once into the crypto worker."""
+
+    @property
+    def config(self) -> JWTValidationConfig:
+        """Return the verifier's pinned trust profile."""
+        ...  # pragma: no cover
+
+    def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[ClaimsT]:
+        """Return a structured authentication outcome."""
+        ...  # pragma: no cover
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerJWTVerifier(Generic[ClaimsT]):
+    config: JWTValidationConfig
+    verify_sync: Callable[..., AuthenticationOutcome[ClaimsT]] = field(repr=False)
+    workers: WorkerLimits = field(repr=False)
+    metrics: SecurityMetrics = field(repr=False)
+
+    async def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[ClaimsT]:
+        try:
+            return await _run_worker(
+                partial(self.verify_sync, token, now=now),
+                limiter=self.workers.crypto_limiter,
+                worker_timeout=self.workers.timeout,
+                metrics=self.metrics,
+                operation_metric="security.jwt.verify_duration",
+            )
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+
+
+def normalize_verifier(
+    verifier: JWTVerifier[ClaimsT] | SyncJWTVerifier[ClaimsT],
+    *,
+    worker_limits: WorkerLimits | None = None,
+    metrics: SecurityMetrics | None = None,
+) -> JWTVerifier[ClaimsT]:
+    """Normalize one custom verifier once without blocking the event loop."""
+    verify_method = getattr(verifier, "verify", None)
+    config = getattr(verifier, "config", None)
+    if not callable(verify_method) or not isinstance(config, JWTValidationConfig):
+        _raise_config("JWT verifier must define verify and JWTValidationConfig")
+    workers = WorkerLimits() if worker_limits is None else worker_limits
+    if not isinstance(workers, WorkerLimits):  # pyright: ignore[reportUnnecessaryIsInstance]
+        _raise_config("JWT verifier worker limits must be WorkerLimits")
+    sink = _metric_sink(metrics)
+    if iscoroutinefunction(verify_method):
+        return cast("JWTVerifier[ClaimsT]", verifier)
+    return _WorkerJWTVerifier(
+        config=config,
+        verify_sync=cast("Callable[..., AuthenticationOutcome[ClaimsT]]", verify_method),
+        workers=workers,
+        metrics=sink,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -569,12 +754,22 @@ class PyJWTVerifier:
     slot_name: str = "authorization.bearer"
     maximum_token_bytes: int = 16_384
     limiter: CapacityLimiter | None = field(default=None, repr=False, compare=False)
+    worker_timeout: float = field(default=10.0, repr=False, compare=False)
+    metrics: SecurityMetrics = field(default_factory=NoOpSecurityMetrics, repr=False, compare=False)
     _prepared_keys: Mapping[str, PreparedVerificationKey] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate and prepare fixed verification material once."""
         if self.maximum_token_bytes < 1:
             _raise_config("JWT maximum token bytes must be positive")
+        if (
+            self.worker_timeout.__class__ not in {int, float}
+            or not isfinite(self.worker_timeout)
+            or self.worker_timeout <= 0
+        ):
+            _raise_config("JWT worker timeout must be finite and positive")
+        limiter = WorkerLimits().crypto_limiter if self.limiter is None else _validate_limiter(self.limiter)
+        metrics = _metric_sink(self.metrics)
         mechanism_name = _strict_identifier(self.mechanism_name)
         slot_name = _strict_identifier(self.slot_name)
         prepared: dict[str, PreparedVerificationKey] = {}
@@ -582,6 +777,9 @@ class PyJWTVerifier:
             prepared[algorithm] = _prepare_key(self.key, cast("JWTAlgorithm", algorithm))
         object.__setattr__(self, "mechanism_name", mechanism_name)
         object.__setattr__(self, "slot_name", slot_name)
+        object.__setattr__(self, "limiter", limiter)
+        object.__setattr__(self, "worker_timeout", float(self.worker_timeout))
+        object.__setattr__(self, "metrics", metrics)
         object.__setattr__(self, "_prepared_keys", MappingProxyType(prepared))
 
     async def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[JWTClaims]:  # noqa: PLR0911
@@ -601,7 +799,13 @@ class PyJWTVerifier:
             return claims
         verify = partial(_verify_signature, token, self._prepared_keys[algorithm], algorithm)
         try:
-            await to_thread.run_sync(verify, abandon_on_cancel=True, limiter=self.limiter)
+            await _run_worker(
+                verify,
+                limiter=cast("CapacityLimiter", self.limiter),
+                worker_timeout=self.worker_timeout,
+                metrics=self.metrics,
+                operation_metric="security.jwt.verify_duration",
+            )
         except (PyJWTError, TypeError, ValueError):
             return _INVALID
         except Exception:  # noqa: BLE001
@@ -619,6 +823,20 @@ class _LocalJWTSigner:
     issuer: str
     signing_key: SigningKey = field(repr=False)
     limiter: CapacityLimiter | None = field(default=None, repr=False, compare=False)
+    worker_timeout: float = field(default=10.0, repr=False, compare=False)
+    metrics: SecurityMetrics = field(default_factory=NoOpSecurityMetrics, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        limiter = WorkerLimits().crypto_limiter if self.limiter is None else _validate_limiter(self.limiter)
+        if (
+            self.worker_timeout.__class__ not in {int, float}
+            or not isfinite(self.worker_timeout)
+            or self.worker_timeout <= 0
+        ):
+            _raise_config("JWT worker timeout must be finite and positive")
+        object.__setattr__(self, "limiter", limiter)
+        object.__setattr__(self, "worker_timeout", float(self.worker_timeout))
+        object.__setattr__(self, "metrics", _metric_sink(self.metrics))
 
     async def sign(self, claims: Mapping[str, JSONValue], *, now: datetime) -> str:
         """Validate and sign one minimal local access token in a worker."""
@@ -632,7 +850,13 @@ class _LocalJWTSigner:
             headers={"kid": self.signing_key.key_id, "typ": "at+jwt"},
         )
         try:
-            token = await to_thread.run_sync(sign, abandon_on_cancel=True, limiter=self.limiter)
+            token = await _run_worker(
+                sign,
+                limiter=cast("CapacityLimiter", self.limiter),
+                worker_timeout=self.worker_timeout,
+                metrics=self.metrics,
+                operation_metric="security.jwt.sign_duration",
+            )
         except Exception:  # noqa: BLE001
             message = "Token signing unavailable"
             raise RuntimeError(message) from None
@@ -1323,6 +1547,16 @@ def _is_strict_identifier(value: str) -> bool:
         and unicodedata.normalize("NFC", value) == value
         and all(not unicodedata.category(character).startswith("C") for character in value)
     )
+
+
+def _safe_increment(metrics: SecurityMetrics, name: str) -> None:
+    with suppress(Exception):  # observability must never alter authentication behavior
+        metrics.increment(name)
+
+
+def _safe_observe(metrics: SecurityMetrics, name: str, value: float) -> None:
+    with suppress(Exception):  # observability must never alter authentication behavior
+        metrics.observe(name, value)
 
 
 def _raise_config(message: str) -> NoReturn:

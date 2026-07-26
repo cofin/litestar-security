@@ -3,13 +3,17 @@
 import asyncio
 import json
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from inspect import isawaitable, iscoroutinefunction
+from math import isfinite
+from time import perf_counter
 from types import MappingProxyType
 from typing import NoReturn, Protocol, TypeAlias, cast, runtime_checkable
 
-from anyio import Lock
+from anyio import CapacityLimiter, Lock, fail_after, to_thread
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from jwt import PyJWK
@@ -17,6 +21,7 @@ from litestar.exceptions import ImproperlyConfiguredException
 from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
+from litestar_security.config import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 from litestar_security.providers.jwt import JSONValue, JWTAlgorithm, VerificationKey
 
 __all__ = (
@@ -27,6 +32,11 @@ __all__ = (
     "JWKSFetchRequest",
     "JWKSFetchResponse",
     "JWKSProvider",
+    "NoOpSecurityMetrics",
+    "SecurityMetrics",
+    "SyncJWKSFetcher",
+    "WorkerLimits",
+    "normalize_fetcher",
 )
 
 JWKSSelection: TypeAlias = VerificationKey | InvalidCredentials | VerificationUnavailable
@@ -41,6 +51,8 @@ _UNKNOWN_KID_COOLDOWN = timedelta(seconds=30)
 _MAXIMUM_DOCUMENT_BYTES = 1_048_576
 _MAXIMUM_KEYS = 128
 _MAXIMUM_UNKNOWN_KEYS = 1_024
+_DEFAULT_WORKER_TIMEOUT = 10.0
+_MAXIMUM_WORKER_TOKENS = 1_024
 _MAXIMUM_JSON_DEPTH = 64
 _MINIMUM_HTTP_STATUS = 100
 _MAXIMUM_HTTP_STATUS = 599
@@ -183,11 +195,95 @@ class AsyncJWKSFetcher(Protocol):
 
 
 @runtime_checkable
+class SyncJWKSFetcher(Protocol):
+    """Blocking transport boundary normalized once into a bounded worker."""
+
+    def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+        """Return one bounded response without following redirects."""
+        ...  # pragma: no cover
+
+
+@dataclass(slots=True)
+class _WorkerJWKSFetcher:
+    fetch_sync: Callable[[JWKSFetchRequest], JWKSFetchResponse] = field(repr=False)
+    limiter: CapacityLimiter = field(repr=False)
+    timeout: float = field(repr=False)
+    metrics: SecurityMetrics = field(repr=False)
+    source: object = field(repr=False)
+
+    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+        """Execute one blocking fetch without blocking the event loop."""
+        if self.limiter.borrowed_tokens >= self.limiter.total_tokens:
+            _safe_increment(self.metrics, "security.worker.saturation")
+        queued_at = perf_counter()
+
+        def fetch_sync() -> JWKSFetchResponse:
+            started = perf_counter()
+            _safe_observe(self.metrics, "security.worker.wait", started - queued_at)
+            try:
+                return self.fetch_sync(request)
+            finally:
+                _safe_observe(self.metrics, "security.worker.duration", perf_counter() - started)
+
+        with fail_after(self.timeout):
+            return await to_thread.run_sync(fetch_sync, abandon_on_cancel=True, limiter=self.limiter)
+
+    async def aclose(self) -> None:
+        """Close a blocking source when its provider explicitly owns it."""
+        close = getattr(self.source, "close", None)
+        if callable(close):
+            with fail_after(self.timeout):
+                await to_thread.run_sync(close, abandon_on_cancel=True, limiter=self.limiter)
+
+
+def normalize_fetcher(
+    fetcher: AsyncJWKSFetcher | SyncJWKSFetcher,
+    *,
+    limiter: CapacityLimiter,
+    timeout: float = _DEFAULT_WORKER_TIMEOUT,
+    metrics: SecurityMetrics | None = None,
+) -> AsyncJWKSFetcher:
+    """Normalize one custom transport once at configuration time."""
+    fetch_method = getattr(fetcher, "fetch", None)
+    if not callable(fetch_method):
+        _raise_config("JWKS fetcher must define fetch")
+    total_tokens: object = limiter.total_tokens
+    if (
+        not isinstance(total_tokens, int)
+        or isinstance(total_tokens, bool)
+        or not 1 <= total_tokens <= _MAXIMUM_WORKER_TOKENS
+    ):
+        _raise_config("JWKS worker limiter must have finite bounded capacity")
+    if timeout.__class__ not in {int, float} or not isfinite(timeout) or timeout <= 0:
+        _raise_config("JWKS worker timeout must be finite and positive")
+    metric_sink = NoOpSecurityMetrics() if metrics is None else metrics
+    if not callable(getattr(metric_sink, "increment", None)) or not callable(getattr(metric_sink, "observe", None)):
+        _raise_config("JWKS metrics must implement SecurityMetrics")
+    if iscoroutinefunction(fetch_method):
+        return cast("AsyncJWKSFetcher", fetcher)
+    return _WorkerJWKSFetcher(
+        fetch_sync=cast("Callable[[JWKSFetchRequest], JWKSFetchResponse]", fetch_method),
+        limiter=limiter,
+        timeout=float(timeout),
+        metrics=metric_sink,
+        source=fetcher,
+    )
+
+
+@runtime_checkable
 class JWKSProvider(Protocol):
     """Select remote verification keys without exposing cache internals."""
 
     async def select_key(self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime) -> JWKSSelection:
         """Return a key or one stable authentication outcome."""
+        ...  # pragma: no cover
+
+    async def warmup(self, *, now: datetime) -> VerificationUnavailable | None:
+        """Warm configured entries when enabled."""
+        ...  # pragma: no cover
+
+    async def aclose(self) -> None:
+        """Close owned runtime resources."""
         ...  # pragma: no cover
 
 
@@ -220,10 +316,17 @@ class _EntryState:
 class CachedJWKSProvider:
     """Configured remote-key cache with a lock-free immutable fresh path."""
 
-    __slots__ = ("_closed", "_entries", "_fetcher", "policy")
+    __slots__ = ("_closed", "_entries", "_fetcher", "_fetcher_closed", "_fetcher_owned", "_metrics", "policy")
 
-    def __init__(
-        self, entries: Sequence[JWKSCacheEntry], fetcher: AsyncJWKSFetcher, *, policy: JWKSCachePolicy | None = None
+    def __init__(  # noqa: PLR0913 - provider assembly keeps ownership, workers, policy, and metrics explicit
+        self,
+        entries: Sequence[JWKSCacheEntry],
+        fetcher: AsyncJWKSFetcher | SyncJWKSFetcher,
+        *,
+        policy: JWKSCachePolicy | None = None,
+        metrics: SecurityMetrics | None = None,
+        fetcher_owned: bool = False,
+        worker_limits: WorkerLimits | None = None,
     ) -> None:
         """Allocate every exact cache entry at startup."""
         states: dict[_EntryKey, _EntryState] = {}
@@ -239,13 +342,22 @@ class CachedJWKSProvider:
             states[key] = _EntryState(config=entry_value)
         if not states:
             _raise_config("JWKS provider requires at least one configured entry")
-        fetcher_value: object = fetcher
-        if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
-            fetcher_value, AsyncJWKSFetcher
-        ):
-            _raise_config("JWKS provider requires an async fetcher")
+        workers = WorkerLimits() if worker_limits is None else worker_limits
+        if not isinstance(workers, WorkerLimits):  # pyright: ignore[reportUnnecessaryIsInstance]
+            _raise_config("JWKS provider worker limits must be WorkerLimits")
+        metric_sink = NoOpSecurityMetrics() if metrics is None else metrics
+        if not callable(getattr(metric_sink, "increment", None)) or not callable(getattr(metric_sink, "observe", None)):
+            _raise_config("JWKS metrics must implement SecurityMetrics")
+        if not isinstance(fetcher_owned, bool):  # pyright: ignore[reportUnnecessaryIsInstance]
+            _raise_config("JWKS fetcher ownership must be boolean")
+        normalized_fetcher = normalize_fetcher(
+            fetcher, limiter=workers.network_limiter, timeout=workers.timeout, metrics=metric_sink
+        )
         self.policy = policy or JWKSCachePolicy()
-        self._fetcher = fetcher
+        self._fetcher = normalized_fetcher
+        self._fetcher_owned = fetcher_owned
+        self._fetcher_closed = False
+        self._metrics = metric_sink
         self._entries = MappingProxyType(states)
         self._closed = False
 
@@ -266,16 +378,22 @@ class CachedJWKSProvider:
         snapshot = state.snapshot
         if snapshot is not None and normalized_now < snapshot.fresh_until:
             selected = snapshot.keys.get(selection)
+            if selected is not None:
+                self._increment("security.jwks.fresh_hit")
             return (
                 selected
                 if selected is not None
                 else await self._select_unknown(state, snapshot, selection, normalized_now)
             )
 
+        self._increment("security.jwks.cold_miss" if snapshot is None else "security.jwks.expired")
         refreshed = await self._refresh_singleflight(state, normalized_now)
         if isinstance(refreshed, VerificationUnavailable):
             if snapshot is not None and normalized_now < snapshot.stale_until:
-                return snapshot.keys.get(selection, _UNAVAILABLE)
+                stale = snapshot.keys.get(selection, _UNAVAILABLE)
+                if isinstance(stale, VerificationKey):
+                    self._increment("security.jwks.stale_use")
+                return stale
             selection_result: JWKSSelection = refreshed
         else:
             selected = refreshed.keys.get(selection)
@@ -316,11 +434,20 @@ class CachedJWKSProvider:
         for state, _refresh in refreshes:
             async with state.lock:
                 state.refresh = None
+        if self._fetcher_owned and not self._fetcher_closed:
+            self._fetcher_closed = True
+            close = getattr(self._fetcher, "aclose", None)
+            if callable(close):
+                close_result = close()
+                if isawaitable(close_result):
+                    await close_result
 
     async def _select_unknown(
         self, state: _EntryState, snapshot: _Snapshot, selection: _SelectionKey, now: datetime
     ) -> JWKSSelection:
+        self._increment("security.jwks.unknown_key")
         if await self._negative_hit(state, snapshot.generation, selection, now):
+            self._increment("security.jwks.negative_hit")
             return _INVALID
         refreshed = await self._refresh_singleflight(state, now, forced_generation=snapshot.generation)
         if isinstance(refreshed, VerificationUnavailable):
@@ -343,6 +470,12 @@ class CachedJWKSProvider:
         if task is None:  # pragma: no cover - assigned before coordination releases the entry lock
             return _UNAVAILABLE
         try:
+            if refresh is not candidate:
+                started = perf_counter()
+                try:
+                    return await asyncio.shield(task)
+                finally:
+                    self._observe("security.jwks.single_flight_wait", perf_counter() - started)
             return await asyncio.shield(task)
         except asyncio.CancelledError:
             if task.cancelled() or self._closed:
@@ -386,6 +519,11 @@ class CachedJWKSProvider:
             result = await self._fetch_snapshot(state, now)
         except asyncio.CancelledError:
             result = _UNAVAILABLE
+        self._increment(
+            "security.jwks.refresh_failure"
+            if isinstance(result, VerificationUnavailable)
+            else "security.jwks.refresh_success"
+        )
         await self._publish_refresh(state, refresh, result)
         return _UNAVAILABLE if self._closed else result
 
@@ -400,6 +538,8 @@ class CachedJWKSProvider:
                     state.forced_generation = result.generation
                 if current is None or result.generation != current.generation:
                     state.negative.clear()
+                    if current is not None:
+                        self._increment("security.jwks.rotation")
             state.refresh = None
 
     async def _fetch_snapshot(self, state: _EntryState, now: datetime) -> _Snapshot | VerificationUnavailable:
@@ -408,13 +548,18 @@ class CachedJWKSProvider:
             issuer=state.config.issuer, jwks_uri=state.config.jwks_uri, etag=None if current is None else current.etag
         )
         try:
-            response_value = cast("object", await self._fetcher.fetch(request))
+            fetch_started = perf_counter()
+            try:
+                response_value = cast("object", await self._fetcher.fetch(request))
+            finally:
+                self._observe("security.jwks.fetch_duration", perf_counter() - fetch_started)
             if not isinstance(response_value, JWKSFetchResponse):
                 return _UNAVAILABLE
             response = response_value
             if response.status_code == HTTP_304_NOT_MODIFIED:
                 if current is None:
                     return _UNAVAILABLE
+                self._increment("security.jwks.not_modified")
                 fresh_until, stale_until = _freshness(response.headers, self.policy, now)
                 snapshot = _Snapshot(
                     keys=current.keys,
@@ -425,7 +570,14 @@ class CachedJWKSProvider:
                     source_uri=current.source_uri,
                 )
             elif response.status_code == HTTP_200_OK:
-                keys = _parse_document(response.body, state.config, self.policy)
+                parse_started = perf_counter()
+                try:
+                    keys = _parse_document(response.body, state.config, self.policy)
+                except Exception:
+                    self._increment("security.jwks.invalid_document")
+                    raise
+                finally:
+                    self._observe("security.jwks.parse_duration", perf_counter() - parse_started)
                 fresh_until, stale_until = _freshness(response.headers, self.policy, now)
                 snapshot = _Snapshot(
                     keys=keys,
@@ -440,6 +592,12 @@ class CachedJWKSProvider:
         except Exception:  # noqa: BLE001 - custom fetcher and parser failures are one sanitized operational outcome
             return _UNAVAILABLE
         return snapshot
+
+    def _increment(self, name: str) -> None:
+        _safe_increment(self._metrics, name)
+
+    def _observe(self, name: str, value: float) -> None:
+        _safe_observe(self._metrics, name, value)
 
     async def _negative_hit(self, state: _EntryState, generation: int, selection: _SelectionKey, now: datetime) -> bool:
         key = (generation, *selection)
@@ -611,6 +769,16 @@ def _valid_selection_value(value: object) -> bool:
         and value == value.strip()
         and not any(ord(character) < _ASCII_CONTROL_LIMIT or ord(character) == _ASCII_DELETE for character in value)
     )
+
+
+def _safe_increment(metrics: SecurityMetrics, name: str) -> None:
+    with suppress(Exception):  # observability must never alter authentication behavior
+        metrics.increment(name)
+
+
+def _safe_observe(metrics: SecurityMetrics, name: str, value: float) -> None:
+    with suppress(Exception):  # observability must never alter authentication behavior
+        metrics.observe(name, value)
 
 
 def _raise_config(detail: str) -> NoReturn:

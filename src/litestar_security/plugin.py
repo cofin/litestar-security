@@ -1,9 +1,14 @@
 """Litestar Security plugin integration."""
 
-from collections.abc import Iterator, Mapping, Sequence
+import asyncio
+import sys
+from collections.abc import AsyncGenerator, Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, Generic, TypeAlias, TypeVar, cast
 
 from click import Group as ClickGroup
+from litestar import Litestar
 from litestar.config.app import AppConfig
 from litestar.controller import Controller
 from litestar.di import NamedDependency, Provide
@@ -22,6 +27,7 @@ from litestar_security.authentication import (
     OwnedSessionBackend,
     SecurityMiddlewareWrapper,
     SecurityRuntimeConfig,
+    VerificationUnavailable,
 )
 from litestar_security.config import SecurityConfig
 from litestar_security.context import Principal, SecurityContext
@@ -92,7 +98,7 @@ def _layer_dependencies(layer: object) -> Mapping[str, object] | None:
 class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     """Expose the Litestar Security configuration and CLI integration points."""
 
-    __slots__ = ("_middleware", "_providers", "_route_compiler", "_runtime_config", "config")
+    __slots__ = ("_jwks_lifespan", "_middleware", "_providers", "_route_compiler", "_runtime_config", "config")
 
     def __init__(self, config: SecurityConfig[UserT] | None = None) -> None:
         """Initialize the plugin."""
@@ -105,10 +111,12 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._route_compiler: RouteCompiler[UserT] | None = None
         self._runtime_config: SecurityRuntimeConfig[UserT] | None = None
         self._middleware: DefineMiddleware | None = None
+        self._jwks_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
 
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
         """Validate ownership and install one typed security runtime."""
         self._configure_local_jwks(app_config)
+        self._configure_jwks_lifespan(app_config)
         self._validate_dependency_map(app_config.dependencies, "application")
         self._validate_native_security(app_config)
         for dependencies, owner in self._iter_owned_dependency_maps(app_config):
@@ -226,6 +234,45 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         from litestar_security.providers.jwt import build_local_jwks_handler  # noqa: PLC0415
 
         app_config.route_handlers.append(build_local_jwks_handler(self.config.local_jwks))
+
+    def _configure_jwks_lifespan(self, app_config: AppConfig) -> None:
+        if not self.config.jwks_providers:
+            return
+        from litestar_security.providers.jwks import JWKSProvider  # noqa: PLC0415
+
+        provider_values = cast("tuple[object, ...]", self.config.jwks_providers)
+        if not all(isinstance(provider, JWKSProvider) for provider in provider_values):
+            message = "JWKS lifespan providers must implement JWKSProvider"
+            raise ImproperlyConfiguredException(detail=message)
+        if self._jwks_lifespan is None:
+            providers = tuple(self.config.jwks_providers)
+            failure_mode = self.config.jwks_warmup_failure
+
+            @asynccontextmanager
+            async def jwks_lifespan(_app: Litestar) -> AsyncGenerator[None, None]:
+                try:
+                    for provider in providers:
+                        outcome = await provider.warmup(now=datetime.now(timezone.utc))
+                        if isinstance(outcome, VerificationUnavailable) and failure_mode == "fail_startup":
+                            message = "JWKS warmup failed during application startup"
+                            raise ImproperlyConfiguredException(detail=message)
+                    yield
+                finally:
+                    primary_error = sys.exc_info()[1]
+                    close_results = await asyncio.gather(
+                        *(provider.aclose() for provider in providers), return_exceptions=True
+                    )
+                    if primary_error is None and any(isinstance(result, BaseException) for result in close_results):
+                        message = "JWKS provider shutdown failed"
+                        raise ImproperlyConfiguredException(detail=message)
+
+            self._jwks_lifespan = jwks_lifespan
+        lifespan_handlers = cast(
+            "list[object]",
+            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType]
+        )
+        if self._jwks_lifespan not in lifespan_handlers:
+            lifespan_handlers.append(self._jwks_lifespan)
 
     @staticmethod
     def _is_native_session_middleware(middleware: object) -> bool:

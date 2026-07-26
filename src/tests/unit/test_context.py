@@ -593,15 +593,24 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "JWTVerifier",
         "LocalJWKSConfig",
         "LocalKeyRing",
+        "NoOpSecurityMetrics",
         "OIDCDiscoveryClient",
         "OIDCDiscoveryError",
         "OIDCMetadata",
+        "SecurityMetrics",
         "SigningKey",
+        "SyncJWKSFetcher",
+        "SyncJWTVerifier",
+        "SyncTokenSigner",
         "TokenSigner",
         "VerificationKey",
         "VerificationKeySet",
+        "WorkerLimits",
         "build_access_token_claims",
         "build_local_jwks_handler",
+        "normalize_fetcher",
+        "normalize_signer",
+        "normalize_verifier",
     )
     jwks_module = import_module("litestar_security.providers.jwks")
     jwt_module = import_module("litestar_security.providers.jwt")
@@ -615,6 +624,11 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "JWKSFetchRequest",
         "JWKSFetchResponse",
         "JWKSProvider",
+        "NoOpSecurityMetrics",
+        "SecurityMetrics",
+        "SyncJWKSFetcher",
+        "WorkerLimits",
+        "normalize_fetcher",
     )
 
 
@@ -632,10 +646,17 @@ def test_security_config_is_typed_and_slotted() -> None:
         "require_default",
         "session_backend",
         "local_jwks",
+        "jwks_providers",
+        "jwks_warmup_failure",
     )
     assert tuple(field.name for field in fields(config)) == expected_fields
     assert config.__slots__ == expected_fields
     assert not hasattr(config, "__dict__")
+
+
+def test_security_config_rejects_invalid_jwks_warmup_failure_mode() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="JWKS warmup failure mode"):
+        litestar_security.SecurityConfig(jwks_warmup_failure="invalid")  # type: ignore[arg-type]
 
 
 def test_root_import_has_no_optional_integration_dependencies() -> None:
