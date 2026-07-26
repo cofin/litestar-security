@@ -108,6 +108,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
 
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
         """Validate ownership and install one typed security runtime."""
+        self._configure_local_jwks(app_config)
         self._validate_dependency_map(app_config.dependencies, "application")
         self._validate_native_security(app_config)
         for dependencies, owner in self._iter_owned_dependency_maps(app_config):
@@ -218,6 +219,13 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             message = "Security config and application configure unequal native Litestar CSRF settings"
             raise ImproperlyConfiguredException(detail=message)
         app_config.csrf_config = self.config.csrf_config
+
+    def _configure_local_jwks(self, app_config: AppConfig) -> None:
+        if self.config.local_jwks is None:
+            return
+        from litestar_security.providers.jwt import build_local_jwks_handler  # noqa: PLC0415
+
+        app_config.route_handlers.append(build_local_jwks_handler(self.config.local_jwks))
 
     @staticmethod
     def _is_native_session_middleware(middleware: object) -> bool:

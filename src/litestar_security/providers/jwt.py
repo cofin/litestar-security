@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import hashlib
 import json
 import re
 import unicodedata
@@ -12,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from secrets import token_urlsafe
 from types import MappingProxyType
-from typing import Any, Generic, Literal, NoReturn, Protocol, TypeAlias, TypeVar, cast, runtime_checkable
+from typing import Any, Generic, Literal, NoReturn, Protocol, TypeAlias, TypedDict, TypeVar, cast, runtime_checkable
 
 import jwt
 from anyio import CapacityLimiter, to_thread
@@ -21,8 +22,14 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from jwt import PyJWK
 from jwt.exceptions import PyJWTError
 from litestar.connection import ASGIConnection
+from litestar.connection.request import Request
+from litestar.datastructures import ResponseHeader
 from litestar.exceptions import ImproperlyConfiguredException
+from litestar.handlers.http_handlers import HTTPRouteHandler, get
+from litestar.openapi.datastructures import ResponseSpec
 from litestar.openapi.spec import SecurityScheme
+from litestar.response import Response
+from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
 from litestar_security.authentication import (
     Authenticated,
@@ -35,6 +42,8 @@ from litestar_security.authentication import (
     NoCredentials,
     PresentedCredential,
     VerificationUnavailable,
+    public,
+    security,
 )
 from litestar_security.context import AuthenticationEvidence
 
@@ -46,12 +55,14 @@ __all__ = (
     "JWTClaims",
     "JWTValidationConfig",
     "JWTVerifier",
+    "LocalJWKSConfig",
     "LocalKeyRing",
     "SigningKey",
     "TokenSigner",
     "VerificationKey",
     "VerificationKeySet",
     "build_access_token_claims",
+    "build_local_jwks_handler",
 )
 
 JSONValue: TypeAlias = bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"] | None
@@ -79,7 +90,48 @@ _ASCII_DELETE = 127
 _BEARER_PREFIX_LENGTH = len(b"Bearer ")
 _LOCAL_ACCESS_REQUIRED_CLAIMS = frozenset({"iss", "sub", "aud", "exp", "iat", "client_id", "jti", "se"})
 _LOCAL_ACCESS_ALLOWED_CLAIMS = _LOCAL_ACCESS_REQUIRED_CLAIMS.union({"nbf", "scope"})
+_MAXIMUM_LOCAL_JWKS_CACHE_AGE = 86_400
+_PUBLIC_JWK_FIELDS = {
+    "EdDSA": frozenset({"alg", "crv", "key_ops", "kid", "kty", "use", "x"}),
+    "ES256": frozenset({"alg", "crv", "key_ops", "kid", "kty", "use", "x", "y"}),
+    "RS256": frozenset({"alg", "e", "key_ops", "kid", "kty", "n", "use"}),
+}
 _INVALID = InvalidCredentials()
+
+
+class _RSAPublicJWK(TypedDict):
+    alg: Literal["RS256"]
+    e: str
+    key_ops: list[Literal["verify"]]
+    kid: str
+    kty: Literal["RSA"]
+    n: str
+    use: Literal["sig"]
+
+
+class _ECPublicJWK(TypedDict):
+    alg: Literal["ES256"]
+    crv: Literal["P-256"]
+    key_ops: list[Literal["verify"]]
+    kid: str
+    kty: Literal["EC"]
+    use: Literal["sig"]
+    x: str
+    y: str
+
+
+class _OKPPublicJWK(TypedDict):
+    alg: Literal["EdDSA"]
+    crv: Literal["Ed25519"]
+    key_ops: list[Literal["verify"]]
+    kid: str
+    kty: Literal["OKP"]
+    use: Literal["sig"]
+    x: str
+
+
+class _LocalJWKSDocument(TypedDict):
+    keys: list[_RSAPublicJWK | _ECPublicJWK | _OKPPublicJWK]
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +353,108 @@ class LocalKeyRing:
         return self._verification_key_set.build_verifier(
             config, mechanism_name=mechanism_name, slot_name=slot_name, limiter=limiter
         )
+
+
+@dataclass(frozen=True, slots=True)
+class LocalJWKSConfig:
+    """Immutable public representation of one local verification-key generation."""
+
+    key_set: VerificationKeySet
+    route_prefix: str = "/auth"
+    cache_max_age: int = 300
+    document: Mapping[str, tuple[Mapping[str, JSONValue], ...]] = field(init=False)
+    canonical_bytes: bytes = field(init=False, repr=False)
+    etag: str = field(init=False)
+    path: str = field(init=False)
+    cache_control: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Validate publication settings and build the canonical response once."""
+        route_prefix = self.route_prefix.rstrip("/")
+        if (
+            not route_prefix.startswith("/")
+            or route_prefix == ""
+            or "//" in route_prefix
+            or any(value in route_prefix for value in ("\\", "{", "}", "?", "#"))
+            or any(segment in {".", ".."} for segment in route_prefix.split("/"))
+            or any(character.isspace() or ord(character) < _ASCII_CONTROL_LIMIT for character in route_prefix)
+        ):
+            _raise_config("local JWKS route_prefix must be a non-root absolute path")
+        if isinstance(self.cache_max_age, bool) or not 0 <= self.cache_max_age <= _MAXIMUM_LOCAL_JWKS_CACHE_AGE:
+            _raise_config(f"local JWKS cache_max_age must be between 0 and {_MAXIMUM_LOCAL_JWKS_CACHE_AGE}")
+
+        public_keys = tuple(
+            sorted(
+                (
+                    MappingProxyType({
+                        name: key.public_jwk[name]
+                        for name in _PUBLIC_JWK_FIELDS[key.algorithm]
+                        if name in key.public_jwk
+                    })
+                    for key in self.key_set.keys
+                    if key.algorithm != "HS256" and key.public_jwk is not None
+                ),
+                key=lambda value: cast("str", value["kid"]),
+            )
+        )
+        if not public_keys:
+            _raise_config("local JWKS publication requires at least one asymmetric verification key")
+        encoded_document = {"keys": [dict(key) for key in public_keys]}
+        canonical_bytes = json.dumps(
+            encoded_document, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+        ).encode()
+
+        object.__setattr__(self, "route_prefix", route_prefix)
+        object.__setattr__(self, "document", MappingProxyType({"keys": public_keys}))
+        object.__setattr__(self, "canonical_bytes", canonical_bytes)
+        object.__setattr__(self, "etag", f'"{hashlib.sha256(canonical_bytes).hexdigest()}"')
+        object.__setattr__(self, "path", f"{route_prefix}/.well-known/jwks.json")
+        object.__setattr__(self, "cache_control", f"public, max-age={self.cache_max_age}")
+
+
+def build_local_jwks_handler(config: LocalJWKSConfig) -> HTTPRouteHandler:
+    """Build one native public Litestar handler for immutable local JWKS bytes."""
+    headers = {"Cache-Control": config.cache_control, "ETag": config.etag}
+
+    @get(
+        config.path,
+        name="litestar_security_local_jwks",
+        operation_id="LitestarSecurityLocalJWKS",
+        media_type="application/jwk-set+json",
+        opt=security(public()),
+        response_headers=(
+            ResponseHeader(
+                name="Cache-Control",
+                documentation_only=True,
+                description="Public cache policy for this immutable key-set generation.",
+                required=True,
+            ),
+            ResponseHeader(
+                name="ETag",
+                documentation_only=True,
+                description="Strong entity tag for conditional key-set requests.",
+                required=True,
+            ),
+        ),
+        responses={
+            HTTP_304_NOT_MODIFIED: ResponseSpec(
+                data_container=None,
+                description="The client's entity tag already identifies the current key-set generation.",
+            )
+        },
+        summary="Local JSON Web Key Set",
+    )
+    async def local_jwks(request: Request[Any, Any, Any]) -> Response[_LocalJWKSDocument]:
+        if _if_none_match(request.headers.get("if-none-match"), config.etag):
+            return Response(cast("_LocalJWKSDocument", b""), headers=headers, status_code=HTTP_304_NOT_MODIFIED)
+        return Response(
+            cast("_LocalJWKSDocument", config.canonical_bytes),
+            headers=headers,
+            media_type="application/jwk-set+json",
+            status_code=HTTP_200_OK,
+        )
+
+    return local_jwks
 
 
 def build_access_token_claims(  # noqa: PLR0913
@@ -1054,6 +1208,14 @@ def _validate_local_access_claims(
     ):
         _raise_value("Invalid local access-token claims")
     return payload
+
+
+def _if_none_match(value: str | None, etag: str) -> bool:
+    if value is None:
+        return False
+    return any(
+        candidate == "*" or candidate.removeprefix("W/") == etag for candidate in map(str.strip, value.split(","))
+    )
 
 
 def _aware_utc(value: datetime) -> datetime:

@@ -56,9 +56,15 @@ from litestar_security.providers.jwt import (
     BearerTokenSlot,
     CompositeBearerConfig,
     JWTValidationConfig,
+    LocalJWKSConfig,
+    LocalKeyRing,
+    SigningKey,
+    VerificationKey,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from litestar.middleware.session.base import BaseSessionBackend
     from litestar.types import Receive, Scope, Send
 
@@ -160,6 +166,166 @@ def test_plugin_preserves_supplied_config_by_identity() -> None:
     config = SecurityConfig()
 
     assert SecurityPlugin(config).config is config
+
+
+def test_plugin_publishes_canonical_public_local_jwks(jwt_key_material: Mapping[str, tuple[bytes, bytes]]) -> None:
+    ed_private, _ed_public = jwt_key_material["EdDSA"]
+    _es_private, es_public = jwt_key_material["ES256"]
+    generated = SigningKey(key_id="z-active", algorithm="EdDSA", private_key=ed_private)
+    supplied_jwk = {
+        **dict(cast("Mapping[str, object]", generated.public_jwk)),
+        "internal_path": "/run/secrets/signing.pem",
+        "x5c": ["untrusted-certificate"],
+        "x5u": "https://untrusted.example/certificate",
+    }
+    ring = LocalKeyRing(
+        issuer="https://issuer.example",
+        active_signing_key=SigningKey(
+            key_id="z-active", algorithm="EdDSA", private_key=ed_private, public_jwk=cast("Any", supplied_jwk)
+        ),
+        verification_keys=(VerificationKey(key_id="a-retained", algorithm="ES256", key=es_public),),
+    )
+    jwks = LocalJWKSConfig(key_set=ring.verification_key_set)
+    security_config = _compiler_config()
+    security_config.local_jwks = jwks
+    app = Litestar(
+        route_handlers=[],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin(security_config)],
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/auth/.well-known/jwks.json")
+        conditional_responses = tuple(
+            client.get("/auth/.well-known/jwks.json", headers={"If-None-Match": value})
+            for value in (
+                response.headers["etag"],
+                f"W/{response.headers['etag']}",
+                f'"other", {response.headers["etag"]}',
+                "*",
+            )
+        )
+        modified = client.get("/auth/.well-known/jwks.json", headers={"If-None-Match": '"other"'})
+
+    assert response.status_code == 200
+    assert response.content == jwks.canonical_bytes
+    assert response.json()["keys"] == sorted(response.json()["keys"], key=lambda key: key["kid"])
+    assert response.headers["cache-control"] == "public, max-age=300"
+    assert response.headers["content-type"] == "application/jwk-set+json"
+    assert response.headers["etag"] == jwks.etag
+    assert modified.status_code == 200
+    for not_modified in conditional_responses:
+        assert not_modified.status_code == 304
+        assert not not_modified.content
+        assert not_modified.headers["cache-control"] == response.headers["cache-control"]
+        assert not_modified.headers["etag"] == response.headers["etag"]
+    assert _http_plan(app, "/auth/.well-known/jwks.json") == SecurityRuntimePlan(
+        authenticate=False, csrf_required=False
+    )
+    assert _operation_security(app, "/auth/.well-known/jwks.json") == [{}]
+    assert not {
+        "d",
+        "dp",
+        "dq",
+        "internal_path",
+        "k",
+        "oth",
+        "p",
+        "q",
+        "qi",
+        "x5c",
+        "x5t",
+        "x5t#S256",
+        "x5u",
+    }.intersection(key_name for key in response.json()["keys"] for key_name in key)
+    assert ed_private not in response.content
+    operation = app.openapi_schema.paths["/auth/.well-known/jwks.json"].get
+    assert operation is not None
+    assert operation.responses is not None
+    success = operation.responses["200"]
+    not_modified_schema = operation.responses["304"]
+    assert success.content is not None
+    assert tuple(success.content) == ("application/jwk-set+json",)
+    assert success.headers is not None
+    assert {"Cache-Control", "ETag"}.issubset(success.headers)
+    assert not_modified_schema.content is None
+
+
+def test_local_jwks_rotation_replaces_cached_representation(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    ed_private, _ed_public = jwt_key_material["EdDSA"]
+    es_private, _es_public = jwt_key_material["ES256"]
+    old_ring = LocalKeyRing(
+        issuer="https://issuer.example",
+        active_signing_key=SigningKey(key_id="old", algorithm="EdDSA", private_key=ed_private),
+    )
+    new_ring = LocalKeyRing(
+        issuer="https://issuer.example",
+        active_signing_key=SigningKey(key_id="new", algorithm="ES256", private_key=es_private),
+        verification_keys=(old_ring.active_signing_key.as_verification_key(),),
+    )
+    old = LocalJWKSConfig(key_set=old_ring.verification_key_set, route_prefix="/identity/", cache_max_age=0)
+    rotated = LocalJWKSConfig(key_set=new_ring.verification_key_set, route_prefix="/identity", cache_max_age=60)
+
+    def fetch(config: LocalJWKSConfig) -> Any:
+        app = Litestar(
+            route_handlers=[], openapi_config=None, plugins=[SecurityPlugin(SecurityConfig(local_jwks=config))]
+        )
+        with TestClient(app) as client:
+            return client.get("/identity/.well-known/jwks.json")
+
+    old_response = fetch(old)
+    rotated_response = fetch(rotated)
+
+    assert old.path == rotated.path == "/identity/.well-known/jwks.json"
+    assert old.etag != rotated.etag
+    assert old.canonical_bytes != rotated.canonical_bytes
+    assert old_response.content == old.canonical_bytes
+    assert old_response.headers["cache-control"] == "public, max-age=0"
+    assert rotated_response.content == rotated.canonical_bytes
+    assert rotated_response.headers["cache-control"] == "public, max-age=60"
+    assert [key["kid"] for key in rotated.document["keys"]] == ["new", "old"]
+
+
+@pytest.mark.parametrize(
+    ("case", "match"),
+    [
+        ("hmac-only", "asymmetric"),
+        ("negative-max-age", "cache_max_age"),
+        ("excessive-max-age", "cache_max_age"),
+        ("boolean-max-age", "cache_max_age"),
+        ("relative-prefix", "route_prefix"),
+        ("root-prefix", "route_prefix"),
+        ("parameter-prefix", "route_prefix"),
+        ("dot-prefix", "route_prefix"),
+    ],
+)
+def test_local_jwks_rejects_unsafe_publication_configuration(
+    case: str, match: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+) -> None:
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    signing_key = SigningKey(key_id="active", algorithm="EdDSA", private_key=private_key)
+    key_set = LocalKeyRing(issuer="https://issuer.example", active_signing_key=signing_key).verification_key_set
+    if case == "hmac-only":
+        secret, _ = jwt_key_material["HS256"]
+        key_set = LocalKeyRing(
+            issuer="https://issuer.example",
+            active_signing_key=SigningKey(key_id="hmac", algorithm="HS256", private_key=secret),
+        ).verification_key_set
+
+    invalid_options: dict[str, Any] = {
+        "negative-max-age": {"cache_max_age": -1},
+        "excessive-max-age": {"cache_max_age": 86_401},
+        "boolean-max-age": {"cache_max_age": bool(1)},
+        "relative-prefix": {"route_prefix": "auth"},
+        "root-prefix": {"route_prefix": "/"},
+        "parameter-prefix": {"route_prefix": "/auth/{tenant}"},
+        "dot-prefix": {"route_prefix": "/auth/../identity"},
+    }.get(case, {})
+
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        LocalJWKSConfig(key_set=key_set, **invalid_options)
 
 
 def test_config_freezes_authentication_collections() -> None:

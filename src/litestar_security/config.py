@@ -2,13 +2,18 @@
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from litestar.config.csrf import CSRFConfig
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.middleware.session.base import BaseSessionBackend
 
 from litestar_security.authentication import AuthenticationMechanism, AuthenticationPolicy, CredentialSlot, required
+
+if TYPE_CHECKING:
+    from litestar_security.providers.jwt import LocalJWKSConfig
+else:
+    LocalJWKSConfig = Any
 
 __all__ = ("ExternalCSRF", "SecurityConfig")
 
@@ -44,6 +49,7 @@ class SecurityConfig(Generic[UserT]):
     external_csrf: ExternalCSRF | None = None
     require_default: bool = False
     session_backend: BaseSessionBackend[Any] | None = None
+    local_jwks: "LocalJWKSConfig | None" = None
 
     def __post_init__(self) -> None:
         """Freeze ordered authentication collections."""

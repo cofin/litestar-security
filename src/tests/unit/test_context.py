@@ -583,12 +583,14 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "JWTClaims",
         "JWTValidationConfig",
         "JWTVerifier",
+        "LocalJWKSConfig",
         "LocalKeyRing",
         "SigningKey",
         "TokenSigner",
         "VerificationKey",
         "VerificationKeySet",
         "build_access_token_claims",
+        "build_local_jwks_handler",
     )
     jwt_module = import_module("litestar_security.providers.jwt")
     assert jwt_module.__all__ == providers.__all__
@@ -609,6 +611,7 @@ def test_security_config_is_typed_and_slotted() -> None:
         "external_csrf",
         "require_default",
         "session_backend",
+        "local_jwks",
     )
     assert tuple(field.name for field in fields(config)) == expected_fields
     assert config.__slots__ == expected_fields
