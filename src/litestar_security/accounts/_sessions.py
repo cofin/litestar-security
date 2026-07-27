@@ -35,6 +35,13 @@ from litestar_security.accounts._internal import (
     valid_identifier,
     valid_security_epoch,
 )
+from litestar_security.accounts._operations import (
+    OUTCOME_CREATED,
+    OUTCOME_REVOKED,
+    SESSION_LOGOUT,
+    SESSION_REBIND,
+    SESSION_REVOKE,
+)
 from litestar_security.authentication import (
     Authenticated,
     InvalidCredentials,
@@ -491,8 +498,8 @@ class NativeSessionAuth(Generic[UserT]):
             prior = self._decode_authentication(session.get(_SESSION_AUTHENTICATION_KEY))
             event = self._event(
                 occurred_at,
-                operation="local.session.rebind" if prior is not None else "local.session.create",
-                outcome="created",
+                operation=SESSION_REBIND if prior is not None else "local.session.create",
+                outcome=OUTCOME_CREATED,
                 account_id=account.account_id,
             )
             record = (
@@ -538,8 +545,8 @@ class NativeSessionAuth(Generic[UserT]):
                     authentication.session_id,
                     event=self._event(
                         occurred_at,
-                        operation="local.session.logout",
-                        outcome="revoked",
+                        operation=SESSION_LOGOUT,
+                        outcome=OUTCOME_REVOKED,
                         account_id=authentication.account_id,
                     ),
                 )
@@ -567,7 +574,7 @@ class NativeSessionAuth(Generic[UserT]):
                 account_id,
                 session_id,
                 event=self._event(
-                    occurred_at, operation="local.session.revoke", outcome="revoked", account_id=account_id
+                    occurred_at, operation=SESSION_REVOKE, outcome=OUTCOME_REVOKED, account_id=account_id
                 ),
             )
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome

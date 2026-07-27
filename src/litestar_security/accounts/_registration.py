@@ -8,8 +8,18 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts._internal import aware_utc_time, new_event_id, strict_text, utc_now
+from litestar_security.accounts._operations import (
+    OUTCOME_CREATED,
+    OUTCOME_ISSUED,
+    OUTCOME_VERIFIED,
+    REGISTRATION,
+    VERIFICATION_CONSUME,
+    VERIFICATION_ISSUE,
+    VERIFICATION_RESEND,
+)
 from litestar_security.accounts._passwords import PasswordHasher, PasswordPolicy, PasswordPolicyResult
 from litestar_security.accounts._purpose_tokens import PurposeTokenCodec, PurposeTokenDelivery, RegistrationCommand
+from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, validate_rate_limits
 from litestar_security.accounts._records import (
     ConsumeResult,
     ConsumeStatus,
@@ -58,9 +68,11 @@ class RegistrationService(Generic[UserT]):
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
     normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
     event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
+    rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate the selected registration policy and injected boundaries."""
+        validate_rate_limits(self.rate_limits, name="Registration service")
         accounts_value: object = object.__getattribute__(self, "accounts")
         hasher_value: object = object.__getattribute__(self, "hasher")
         tokens_value: object = object.__getattribute__(self, "tokens")
@@ -86,7 +98,7 @@ class RegistrationService(Generic[UserT]):
             name="Registration service",
         )
 
-    async def register(  # noqa: PLR0911 - preserve explicit sanitized outcomes at each security boundary
+    async def register(  # noqa: PLR0911, PLR0913 - one named input per registration policy input; explicit outcomes
         self,
         identifier: str,
         password: str,
@@ -94,8 +106,14 @@ class RegistrationService(Generic[UserT]):
         display_name: str | None = None,
         invitation_token: str | None = None,
         now: datetime | None = None,
+        client_key: str | None = None,
     ) -> (
-        LifecycleAccepted | InvalidInvitation | InvalidLifecycleRequest | PasswordPolicyResult | VerificationUnavailable
+        LifecycleAccepted
+        | InvalidInvitation
+        | InvalidLifecycleRequest
+        | PasswordPolicyResult
+        | RateLimited
+        | VerificationUnavailable
     ):
         """Hash and pass one complete candidate registration to the atomic store."""
         try:
@@ -105,6 +123,9 @@ class RegistrationService(Generic[UserT]):
             return InvalidLifecycleRequest()
         if not strict_text(normalized_identifier):
             return InvalidLifecycleRequest()
+        limited = await self._check_rate_limit(normalized_identifier, client_key)
+        if limited is not None:
+            return limited
         try:
             password_result = self.password_policy.check(password, normalized_identifier=normalized_identifier)
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
@@ -120,7 +141,7 @@ class RegistrationService(Generic[UserT]):
         try:
             password_hash = await self.hasher.hash(password)
             verification = self._verification_plan(normalized_identifier, occurred_at)
-            event = lifecycle_event(self.event_ids, occurred_at, operation="local.registration", outcome="created")
+            event = lifecycle_event(self.event_ids, occurred_at, operation=REGISTRATION, outcome=OUTCOME_CREATED)
             result = await self.accounts.register(
                 RegistrationCommand(normalized_identifier=normalized_identifier, display_name=display_name),
                 password_hash,
@@ -134,6 +155,14 @@ class RegistrationService(Generic[UserT]):
         if result.status is RegistrationStatus.INVALID_INVITATION:
             return InvalidInvitation()
         return LifecycleAccepted()
+
+    async def _check_rate_limit(
+        self, normalized_identifier: str, client_key: str | None
+    ) -> "RateLimited | VerificationUnavailable | None":
+        rate_limits = self.rate_limits
+        if rate_limits is None:
+            return None
+        return await rate_limits.check(REGISTRATION, client_key=client_key, identifier=normalized_identifier)
 
     def _verification_plan(self, destination: str, occurred_at: datetime) -> PurposeTokenDelivery | None:
         if not self.registration.require_verification:
@@ -162,9 +191,11 @@ class VerificationTokenService(Generic[UserT]):
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
     normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
     event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
+    rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate lookup, atomic token store, and deterministic hooks."""
+        validate_rate_limits(self.rate_limits, name="Verification token service")
         if not isinstance(object.__getattribute__(self, "accounts"), AccountLookup):
             msg = "Verification token accounts must implement AccountLookup"
             raise ImproperlyConfiguredException(detail=msg)
@@ -184,8 +215,18 @@ class VerificationTokenService(Generic[UserT]):
             name="Verification token service",
         )
 
-    async def resend(self, identifier: str, *, now: datetime | None = None) -> LifecycleAccepted:
-        """Always return the shared response after one token-HMAC work class."""
+    async def resend(
+        self, identifier: str, *, now: datetime | None = None, client_key: str | None = None
+    ) -> LifecycleAccepted | RateLimited | VerificationUnavailable:
+        """Always return the shared response after one token-HMAC work class.
+
+        Denial is safe to report here even though every other outcome is
+        deliberately identical: the budget is consumed for unknown identifiers
+        too, so being limited reveals nothing about whether an account exists.
+        """
+        limited = await self._check_rate_limit(identifier, client_key)
+        if limited is not None:
+            return limited
         try:
             occurred_at = aware_utc_time(self.clock() if now is None else now)
             normalized_identifier = self.normalizer(identifier)
@@ -207,8 +248,8 @@ class VerificationTokenService(Generic[UserT]):
                     event=lifecycle_event(
                         self.event_ids,
                         occurred_at,
-                        operation="local.verification.issue",
-                        outcome="issued",
+                        operation=VERIFICATION_ISSUE,
+                        outcome=OUTCOME_ISSUED,
                         account_id=account.account_id,
                     ),
                 )
@@ -228,8 +269,20 @@ class VerificationTokenService(Generic[UserT]):
                 proof.digest,
                 now=occurred_at,
                 event=lifecycle_event(
-                    self.event_ids, occurred_at, operation="local.verification.consume", outcome="verified"
+                    self.event_ids, occurred_at, operation=VERIFICATION_CONSUME, outcome=OUTCOME_VERIFIED
                 ),
             )
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
+
+    async def _check_rate_limit(
+        self, identifier: str, client_key: str | None
+    ) -> "RateLimited | VerificationUnavailable | None":
+        rate_limits = self.rate_limits
+        if rate_limits is None:
+            return None
+        try:
+            normalized_identifier = self.normalizer(identifier) or None
+        except Exception:  # noqa: BLE001 - a failed normalizer still consumes the client budget
+            normalized_identifier = None
+        return await rate_limits.check(VERIFICATION_RESEND, client_key=client_key, identifier=normalized_identifier)

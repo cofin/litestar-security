@@ -9,10 +9,13 @@ from importlib import import_module
 from importlib.metadata import requires
 from subprocess import run
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, PermissionDeniedException
+from litestar.stores.memory import MemoryStore
+from litestar.stores.registry import StoreRegistry
 
 import litestar_security
 import litestar_security._openapi as openapi_module
@@ -791,6 +794,8 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
     assert import_module("argon2")
     accounts = import_module("litestar_security.accounts")
     assert accounts.__all__ == (
+        "DEFAULT_RATE_LIMIT_POLICIES",
+        "RATE_LIMIT_STORE_NAME",
         "REFRESH_RESPONSE_HEADERS",
         "AccountLookup",
         "Argon2PasswordHasher",
@@ -851,6 +856,12 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "PurposeTokenDelivery",
         "PurposeTokenGenerationError",
         "PurposeTokenProof",
+        "RateLimitDecision",
+        "RateLimitGuard",
+        "RateLimitPolicy",
+        "RateLimitRequest",
+        "RateLimited",
+        "RateLimiter",
         "RecoveryTokenService",
         "RecoveryTokenStore",
         "RefreshFamilyContext",
@@ -887,13 +898,16 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "SessionRecord",
         "SessionRegistry",
         "SessionSummary",
+        "StoreRateLimiter",
         "TokenIssue",
         "TokenPurpose",
+        "UnlimitedRateLimiter",
         "VerificationTokenService",
         "VerificationTokenStore",
         "build_local_auth_routes",
         "normalize_identifier",
         "requires_local_bearer",
+        "trusted_client_key",
     )
 
 
@@ -2450,3 +2464,51 @@ for module_name in sys.modules:
     result = run([sys.executable, "-c", script], check=True, capture_output=True, text=True)  # noqa: S603
 
     assert not result.stdout
+
+
+def _local_auth_rate_limit_config(**kwargs: Any) -> "accounts_module.LocalAuthConfig[Any]":
+    return accounts_module.LocalAuth.session(
+        accounts=_structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES)),
+        secrets=_local_auth_secrets(),
+        csrf=litestar_security.ExternalCSRF("application", lambda _method, _path, _policy: True),
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"events": object()}, "events must implement SecurityEventSink"),
+        ({"client_key": object()}, "client key extractor must be callable"),
+        ({"rate_limiter": object()}, "rate limiter must implement RateLimiter"),
+    ],
+)
+def test_local_auth_config_validates_limiting_and_audit_options(kwargs: dict[str, Any], match: str) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        _local_auth_rate_limit_config(**kwargs)
+
+
+def test_local_auth_binds_the_bundled_limiter_store_once_and_leaves_custom_limiters_alone() -> None:
+    config = _local_auth_rate_limit_config()
+    registry = StoreRegistry()
+    config.bind_rate_limit_store(registry)
+    limiter = cast("Any", config.rate_limiter)
+    bound = limiter.store
+
+    assert bound is registry.get(accounts_module.RATE_LIMIT_STORE_NAME)
+    config.bind_rate_limit_store(StoreRegistry({accounts_module.RATE_LIMIT_STORE_NAME: MemoryStore()}))
+    assert limiter.store is bound
+
+    custom = _local_auth_rate_limit_config(rate_limiter=accounts_module.UnlimitedRateLimiter())
+    custom.bind_rate_limit_store(registry)
+    assert isinstance(custom.rate_limiter, accounts_module.UnlimitedRateLimiter)
+
+
+def test_local_auth_rate_limit_pepper_is_derived_and_domain_separated() -> None:
+    secrets = accounts_module.LocalAuthSecrets.session(purpose_token_pepper=b"p" * 32)
+    other = accounts_module.LocalAuthSecrets.session(purpose_token_pepper=b"q" * 32)
+
+    assert len(secrets.rate_limit_pepper) == 32
+    assert secrets.rate_limit_pepper != secrets.purpose_tokens.pepper
+    assert secrets.rate_limit_pepper != other.rate_limit_pepper

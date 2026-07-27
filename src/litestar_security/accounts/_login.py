@@ -8,7 +8,17 @@ from typing import TYPE_CHECKING, Generic, TypeVar, cast
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts._internal import aware_utc_time, new_event_id, utc_now
+from litestar_security.accounts._operations import (
+    LOGIN,
+    OUTCOME_ATTEMPTED,
+    OUTCOME_MALFORMED_HASH,
+    OUTCOME_UPDATED,
+    OUTCOME_VERIFIED,
+    PASSWORD_REHASH,
+    PASSWORD_VERIFY,
+)
 from litestar_security.accounts._passwords import PasswordHasher
+from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
     LocalAccount,
     NoOpSecurityEventSink,
@@ -16,6 +26,7 @@ from litestar_security.accounts._records import (
     PasswordVerificationStatus,
     SecurityEvent,
     SecurityEventSink,
+    emit_security_event,
     normalize_identifier,
 )
 from litestar_security.accounts._stores import AccountLookup, PasswordCredentialStore
@@ -115,7 +126,7 @@ class PasswordReauthenticationService:
 
     async def _rehash(self, account_id: str, expected_hash: str, replacement_hash: str, occurred_at: datetime) -> bool:
         try:
-            event = self._event(account_id, occurred_at, operation="local.password.rehash", outcome="updated")
+            event = self._event(account_id, occurred_at, operation=PASSWORD_REHASH, outcome=OUTCOME_UPDATED)
             replaced: object = await self.accounts.compare_and_replace_password(
                 account_id, expected_hash, replacement_hash, event=event
             )
@@ -138,11 +149,11 @@ class PasswordReauthenticationService:
 
     async def _emit_malformed(self, account_id: str, occurred_at: datetime) -> None:
         try:
-            await self.events.emit(
-                self._event(account_id, occurred_at, operation="local.password.verify", outcome="malformed_hash")
-            )
-        except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
-            _LOGGER.error("Security event sink failed")  # noqa: TRY400 - omit untrusted exception details
+            event = self._event(account_id, occurred_at, operation=PASSWORD_VERIFY, outcome=OUTCOME_MALFORMED_HASH)
+        except ValueError:
+            _LOGGER.error("Security event could not be built for %s", PASSWORD_VERIFY)  # noqa: TRY400 - omit details
+            return
+        await emit_security_event(self.events, event)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,13 +163,19 @@ class PasswordLoginService(Generic[UserT]):
     accounts: AccountLookup[UserT] = field(repr=False)
     hasher: PasswordHasher = field(repr=False)
     normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
+    rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
+    clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
+    events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
+    event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
     _reauthentication: PasswordReauthenticationService = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Validate the minimal lookup and password capabilities once."""
+        """Validate the minimal lookup, password, limiting, and audit capabilities once."""
         accounts_value: object = object.__getattribute__(self, "accounts")
         hasher_value: object = object.__getattribute__(self, "hasher")
         normalizer_value: object = object.__getattribute__(self, "normalizer")
+        rate_limits_value: object = object.__getattribute__(self, "rate_limits")
+        events_value: object = object.__getattribute__(self, "events")
         if not isinstance(accounts_value, AccountLookup) or not isinstance(accounts_value, PasswordCredentialStore):
             msg = "Password login accounts must implement AccountLookup and PasswordCredentialStore"
             raise ImproperlyConfiguredException(detail=msg)
@@ -168,34 +185,49 @@ class PasswordLoginService(Generic[UserT]):
         if not callable(normalizer_value):
             msg = "Password login normalizer must be callable"
             raise ImproperlyConfiguredException(detail=msg)
+        if rate_limits_value is not None and rate_limits_value.__class__ is not RateLimitGuard:
+            msg = "Password login rate limits must be a RateLimitGuard"
+            raise ImproperlyConfiguredException(detail=msg)
+        if not isinstance(events_value, SecurityEventSink):
+            msg = "Password login events must implement SecurityEventSink"
+            raise ImproperlyConfiguredException(detail=msg)
+        clock_value: object = object.__getattribute__(self, "clock")
+        event_ids_value: object = object.__getattribute__(self, "event_ids")
+        if not callable(clock_value) or not callable(event_ids_value):
+            msg = "Password login clock and event id factory must be callable"
+            raise ImproperlyConfiguredException(detail=msg)
         object.__setattr__(
             self,
             "_reauthentication",
             PasswordReauthenticationService(
-                accounts=cast("PasswordCredentialStore", accounts_value), hasher=self.hasher
+                accounts=cast("PasswordCredentialStore", accounts_value),
+                hasher=self.hasher,
+                clock=self.clock,
+                events=self.events,
+                event_ids=self.event_ids,
             ),
         )
 
     async def authenticate(
-        self, identifier: str, password: str, *, now: datetime | None = None
-    ) -> LocalAccount[UserT] | InvalidCredentials | VerificationUnavailable:
-        """Return an active verified account after lookup and constant password work."""
-        account: LocalAccount[UserT] | None = None
+        self, identifier: str, password: str, *, now: datetime | None = None, client_key: str | None = None
+    ) -> LocalAccount[UserT] | RateLimited | InvalidCredentials | VerificationUnavailable:
+        """Return an active verified account after limiting, lookup, and constant password work."""
+        normalized_identifier = ""
         lookup_unavailable = False
         try:
             normalized_identifier = self.normalizer(identifier)
-            if normalized_identifier:
-                account = await self.accounts.find_for_login(normalized_identifier)
         except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
             lookup_unavailable = True
+        limited = await self._check_rate_limit(client_key, normalized_identifier)
+        if limited is not None:
+            return limited
+        account, lookup_unavailable = await self._find_account(normalized_identifier, unavailable=lookup_unavailable)
         if account is None:
-            try:
-                await self.hasher.verify(None, password)
-            except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
-                return VerificationUnavailable()
-            return VerificationUnavailable() if lookup_unavailable else InvalidCredentials()
+            return await self._absent_account_outcome(password, unavailable=lookup_unavailable)
         password_result = await self._reauthentication.verify(account.account_id, password, now=now)
         if not isinstance(password_result, PasswordReauthenticationProof):
+            if isinstance(password_result, InvalidCredentials):
+                await self._emit_decision(account.account_id, OUTCOME_ATTEMPTED)
             return password_result
         if (
             not account.active
@@ -203,5 +235,54 @@ class PasswordLoginService(Generic[UserT]):
             or password_result.account_id != account.account_id
             or password_result.security_epoch != account.security_epoch
         ):
+            await self._emit_decision(account.account_id, OUTCOME_ATTEMPTED)
             return InvalidCredentials()
+        await self._emit_decision(account.account_id, OUTCOME_VERIFIED)
         return account
+
+    async def _find_account(
+        self, normalized_identifier: str, *, unavailable: bool
+    ) -> "tuple[LocalAccount[UserT] | None, bool]":
+        if unavailable or not normalized_identifier:
+            return None, unavailable
+        try:
+            return await self.accounts.find_for_login(normalized_identifier), False
+        except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
+            return None, True
+
+    async def _absent_account_outcome(
+        self, password: str, *, unavailable: bool
+    ) -> "InvalidCredentials | VerificationUnavailable":
+        # Hash against nothing anyway: skipping the work here would make a missing
+        # account measurably faster to probe than a present one.
+        try:
+            await self.hasher.verify(None, password)
+        except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
+            return VerificationUnavailable()
+        if unavailable:
+            return VerificationUnavailable()
+        await self._emit_decision(None, OUTCOME_ATTEMPTED)
+        return InvalidCredentials()
+
+    async def _check_rate_limit(
+        self, client_key: str | None, normalized_identifier: str
+    ) -> "RateLimited | VerificationUnavailable | None":
+        rate_limits = self.rate_limits
+        if rate_limits is None:
+            return None
+        return await rate_limits.check(LOGIN, client_key=client_key, identifier=normalized_identifier or None)
+
+    async def _emit_decision(self, account_id: str | None, outcome: str) -> None:
+        try:
+            event = SecurityEvent(
+                event_id=self.event_ids(),
+                occurred_at=aware_utc_time(self.clock()),
+                operation=LOGIN,
+                outcome=outcome,
+                account_id=account_id,
+                mechanism="password",
+            )
+        except Exception:  # noqa: BLE001 - a failed clock or id factory cannot change a settled decision
+            _LOGGER.error("Security event could not be built for %s", LOGIN)  # noqa: TRY400 - omit untrusted details
+            return
+        await emit_security_event(self.events, event)

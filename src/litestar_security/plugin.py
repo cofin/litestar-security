@@ -73,6 +73,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         "_local_auth_route_handlers",
         "_middleware",
         "_providers",
+        "_rate_limit_lifespan",
         "_route_compiler",
         "_runtime_config",
         "config",
@@ -91,10 +92,12 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._middleware: DefineMiddleware | None = None
         self._jwks_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
         self._local_auth_route_handlers: tuple[Router, ...] | None = None
+        self._rate_limit_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
 
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
         """Validate ownership and install one typed security runtime."""
         self._configure_local_auth()
+        self._configure_local_auth_rate_limits(app_config)
         self._configure_local_auth_routes(app_config)
         self._configure_local_jwks(app_config)
         self._configure_jwks_lifespan(app_config)
@@ -329,6 +332,27 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 message = "Local and security external CSRF settings must be equal"
                 raise ImproperlyConfiguredException(detail=message)
             self.config.external_csrf = local_csrf
+
+    def _configure_local_auth_rate_limits(self, app_config: AppConfig) -> None:
+        local_auth = self.config.local_auth
+        if local_auth is None:
+            return
+        if self._rate_limit_lifespan is None:
+            # The bundled limiter names a store rather than holding one, so the
+            # application can point that name at a shared backend. The registry only
+            # exists once the app is built, which is why this binds at startup.
+            @asynccontextmanager
+            async def rate_limit_lifespan(app: Litestar) -> AsyncGenerator[None, None]:
+                local_auth.bind_rate_limit_store(app.stores)
+                yield
+
+            self._rate_limit_lifespan = rate_limit_lifespan
+        lifespan_handlers = cast(
+            "list[object]",
+            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType] - third-party callable is untyped at this boundary
+        )
+        if self._rate_limit_lifespan not in lifespan_handlers:
+            lifespan_handlers.append(self._rate_limit_lifespan)
 
     def _configure_local_auth_routes(self, app_config: AppConfig) -> None:
         local_auth = self.config.local_auth

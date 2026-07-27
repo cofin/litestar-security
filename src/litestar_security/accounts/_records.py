@@ -4,6 +4,7 @@ from collections.abc import Mapping  # noqa: TC003 - Litestar resolves public an
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+from logging import getLogger
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, runtime_checkable
 from unicodedata import normalize
@@ -46,6 +47,7 @@ __all__ = (
 UserT = TypeVar("UserT")
 _EMPTY_CORRELATION: "Mapping[str, str]" = MappingProxyType({})
 _DEFAULT_REAUTHENTICATION_TTL = timedelta(minutes=5)
+_LOGGER = getLogger(__name__)
 
 
 class LocalAuthMode(str, Enum):
@@ -361,6 +363,21 @@ def normalize_identifier(value: str) -> str:
         msg = "Identifier normalization requires text"
         raise ValueError(msg)
     return normalize("NFKC", value).strip().casefold()
+
+
+async def emit_security_event(sink: SecurityEventSink, event: SecurityEvent) -> None:
+    """Offer one observational event to an application sink without letting it fail.
+
+    Observational events report a decision that has already been made. A sink
+    that raises must not change that decision or surface its exception to the
+    caller, so the failure is logged without the untrusted detail and dropped.
+    Durable mutation events do not come through here: those are passed into the
+    atomic store operation itself, so a rejected event fails the mutation.
+    """
+    try:
+        await sink.emit(event)
+    except Exception:  # noqa: BLE001 - a failed observational sink cannot change a settled decision
+        _LOGGER.error("Security event sink failed for %s", event.operation)  # noqa: TRY400 - omit untrusted details
 
 
 def lifecycle_event(

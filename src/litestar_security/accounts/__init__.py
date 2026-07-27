@@ -15,7 +15,13 @@ from litestar_security.accounts._passwords import (
     PasswordPolicyResult,
     PasswordVerificationResult,
 )
-from litestar_security.accounts._profiles import LocalAuth, LocalAuthConfig, LocalAuthSecrets, LocalAuthServices
+from litestar_security.accounts._profiles import (
+    LocalAuth,
+    LocalAuthConfig,
+    LocalAuthSecrets,
+    LocalAuthServices,
+    trusted_client_key,
+)
 from litestar_security.accounts._purpose_tokens import (
     NotificationCommand,
     PendingTokenIssue,
@@ -25,6 +31,18 @@ from litestar_security.accounts._purpose_tokens import (
     PurposeTokenProof,
     RegistrationCommand,
     TokenIssue,
+)
+from litestar_security.accounts._rate_limits import (
+    DEFAULT_RATE_LIMIT_POLICIES,
+    RATE_LIMIT_STORE_NAME,
+    RateLimitDecision,
+    RateLimited,
+    RateLimiter,
+    RateLimitGuard,
+    RateLimitPolicy,
+    RateLimitRequest,
+    StoreRateLimiter,
+    UnlimitedRateLimiter,
 )
 from litestar_security.accounts._receipts import (
     RefreshReceiptContext,
@@ -118,6 +136,8 @@ from litestar_security.accounts._stores import (
 )
 
 __all__ = (
+    "DEFAULT_RATE_LIMIT_POLICIES",
+    "RATE_LIMIT_STORE_NAME",
     "REFRESH_RESPONSE_HEADERS",
     "AccountLookup",
     "Argon2PasswordHasher",
@@ -178,6 +198,12 @@ __all__ = (
     "PurposeTokenDelivery",
     "PurposeTokenGenerationError",
     "PurposeTokenProof",
+    "RateLimitDecision",
+    "RateLimitGuard",
+    "RateLimitPolicy",
+    "RateLimitRequest",
+    "RateLimited",
+    "RateLimiter",
     "RecoveryTokenService",
     "RecoveryTokenStore",
     "RefreshFamilyContext",
@@ -214,11 +240,14 @@ __all__ = (
     "SessionRecord",
     "SessionRegistry",
     "SessionSummary",
+    "StoreRateLimiter",
     "TokenIssue",
     "TokenPurpose",
+    "UnlimitedRateLimiter",
     "VerificationTokenService",
     "VerificationTokenStore",
     "build_local_auth_routes",
     "normalize_identifier",
     "requires_local_bearer",
+    "trusted_client_key",
 )

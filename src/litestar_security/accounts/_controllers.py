@@ -15,10 +15,12 @@ from litestar.status_codes import (
     HTTP_202_ACCEPTED,
     HTTP_400_BAD_REQUEST,
     HTTP_401_UNAUTHORIZED,
+    HTTP_429_TOO_MANY_REQUESTS,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
 from litestar_security.accounts._profiles import LocalAuthConfig, LocalAuthServices
+from litestar_security.accounts._rate_limits import RateLimited
 from litestar_security.accounts._records import (
     ConsumeResult,
     ConsumeStatus,
@@ -53,6 +55,7 @@ __all__ = ("build_local_auth_routes", "requires_local_bearer")
 
 _LOCAL_BAD_REQUEST_RESPONSES = {
     HTTP_400_BAD_REQUEST: ResponseSpec(LocalRouteResponse, description="The lifecycle request is invalid."),
+    HTTP_429_TOO_MANY_REQUESTS: ResponseSpec(LocalRouteResponse, description="The operation exceeded its rate limit."),
     HTTP_503_SERVICE_UNAVAILABLE: ResponseSpec(
         LocalRouteResponse, description="The authentication service is unavailable."
     ),
@@ -113,6 +116,13 @@ def _route_response(content: LocalRouteResponse, *, status_code: int) -> Respons
 
 
 def _route_error(outcome: object, *, credentials: bool = False) -> Response[Any]:
+    if isinstance(outcome, RateLimited):
+        response = _route_response(
+            LocalRouteResponse(detail="Too many requests."), status_code=HTTP_429_TOO_MANY_REQUESTS
+        )
+        if outcome.retry_after is not None:
+            response.headers["Retry-After"] = str(outcome.retry_after)
+        return response
     if isinstance(outcome, VerificationUnavailable):
         return _route_response(
             LocalRouteResponse(detail="Authentication service is unavailable."),
@@ -248,10 +258,13 @@ class _LocalTokenController(Controller):
         **security(public(), csrf_required=False),
     )
     async def login(
-        self, data: JSONBody[LocalCredentials], local_auth_services: _LocalAuthServicesDependency
+        self,
+        data: JSONBody[LocalCredentials],
+        request: Request[Any, Any, Any],
+        local_auth_services: _LocalAuthServicesDependency,
     ) -> Response[RefreshTokenResponse | LocalRouteResponse]:
         """Authenticate a password and issue a local access/refresh pair."""
-        result = await local_auth_services.token_login(data)
+        result = await local_auth_services.token_login(request, data)
         if not isinstance(result, RefreshTokenResponse):
             return _route_error(result)
         return Response(content=result, status_code=HTTP_200_OK)
@@ -266,6 +279,7 @@ class _LocalTokenController(Controller):
     async def refresh(
         self,
         data: JSONBody[LocalTokenRequest],
+        request: Request[Any, Any, Any],
         local_auth_services: _LocalAuthServicesDependency,
         idempotency_key: Annotated[str | None, HeaderParameter(name="Idempotency-Key")] = None,
     ) -> Response[RefreshTokenResponse | LocalRouteResponse]:
@@ -273,7 +287,9 @@ class _LocalTokenController(Controller):
         refresh_tokens = local_auth_services.refresh_tokens
         if refresh_tokens is None:
             return _route_error(VerificationUnavailable())
-        result = await refresh_tokens.rotate(data.token, idempotency_key=idempotency_key)
+        result = await refresh_tokens.rotate(
+            data.token, idempotency_key=idempotency_key, client_key=local_auth_services.client_key_for(request)
+        )
         if not isinstance(result, RefreshTokenResponse):
             return _route_error(result)
         return Response(content=result, status_code=HTTP_200_OK)
@@ -307,12 +323,25 @@ class _LocalLifecycleController(Controller):
     path = "/"
     tags = ("Local authentication",)
 
-    @post("/password/recovery", name="local.password.recovery", status_code=HTTP_202_ACCEPTED, **security(public()))
+    @post(
+        "/password/recovery",
+        name="local.password.recovery",
+        status_code=HTTP_202_ACCEPTED,
+        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        **security(public()),
+    )
     async def recovery(
-        self, data: JSONBody[LocalIdentifierRequest], local_auth_services: _LocalAuthServicesDependency
-    ) -> Response[LifecycleAccepted]:
+        self,
+        data: JSONBody[LocalIdentifierRequest],
+        request: Request[Any, Any, Any],
+        local_auth_services: _LocalAuthServicesDependency,
+    ) -> Response[LifecycleAccepted | LocalRouteResponse]:
         """Return the common recovery-request response for every identifier."""
-        result = await local_auth_services.recovery.request(data.identifier)
+        result = await local_auth_services.recovery.request(
+            data.identifier, client_key=local_auth_services.client_key_for(request)
+        )
+        if not isinstance(result, LifecycleAccepted):
+            return _route_error(result)
         return Response(content=result, status_code=HTTP_202_ACCEPTED)
 
     @post(
@@ -323,20 +352,38 @@ class _LocalLifecycleController(Controller):
         **security(public()),
     )
     async def reset(
-        self, data: JSONBody[LocalPasswordResetRequest], local_auth_services: _LocalAuthServicesDependency
+        self,
+        data: JSONBody[LocalPasswordResetRequest],
+        request: Request[Any, Any, Any],
+        local_auth_services: _LocalAuthServicesDependency,
     ) -> Response[LocalRouteResponse]:
         """Consume one recovery token and replace its account password."""
-        result = await local_auth_services.recovery.reset(data.token, data.password)
+        result = await local_auth_services.recovery.reset(
+            data.token, data.password, client_key=local_auth_services.client_key_for(request)
+        )
         if isinstance(result, PasswordResetResult) and result.status is PasswordResetStatus.RESET:
             return _route_response(LocalRouteResponse(detail="Password reset complete."), status_code=HTTP_200_OK)
         return _route_error(result)
 
-    @post("/verification", name="local.verification.resend", status_code=HTTP_202_ACCEPTED, **security(public()))
+    @post(
+        "/verification",
+        name="local.verification.resend",
+        status_code=HTTP_202_ACCEPTED,
+        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        **security(public()),
+    )
     async def verification(
-        self, data: JSONBody[LocalIdentifierRequest], local_auth_services: _LocalAuthServicesDependency
-    ) -> Response[LifecycleAccepted]:
+        self,
+        data: JSONBody[LocalIdentifierRequest],
+        request: Request[Any, Any, Any],
+        local_auth_services: _LocalAuthServicesDependency,
+    ) -> Response[LifecycleAccepted | LocalRouteResponse]:
         """Return the common verification-request response for every identifier."""
-        result = await local_auth_services.verification.resend(data.identifier)
+        result = await local_auth_services.verification.resend(
+            data.identifier, client_key=local_auth_services.client_key_for(request)
+        )
+        if not isinstance(result, LifecycleAccepted):
+            return _route_error(result)
         return Response(content=result, status_code=HTTP_202_ACCEPTED)
 
     @post(
@@ -368,14 +415,21 @@ class _LocalRegistrationController(Controller):
         **security(public()),
     )
     async def register(
-        self, data: JSONBody[LocalRegistrationRequest], local_auth_services: _LocalAuthServicesDependency
+        self,
+        data: JSONBody[LocalRegistrationRequest],
+        request: Request[Any, Any, Any],
+        local_auth_services: _LocalAuthServicesDependency,
     ) -> Response[LifecycleAccepted | LocalRouteResponse]:
         """Apply the configured public registration policy."""
         registration = local_auth_services.registration
         if registration is None:
             return _route_error(InvalidLifecycleRequest())
         result = await registration.register(
-            data.identifier, data.password, display_name=data.display_name, invitation_token=None
+            data.identifier,
+            data.password,
+            display_name=data.display_name,
+            invitation_token=None,
+            client_key=local_auth_services.client_key_for(request),
         )
         if isinstance(result, LifecycleAccepted):
             return Response(content=result, status_code=HTTP_202_ACCEPTED)
@@ -394,14 +448,21 @@ class _LocalInvitationRegistrationController(Controller):
         **security(public()),
     )
     async def register(
-        self, data: JSONBody[LocalInvitationRegistrationRequest], local_auth_services: _LocalAuthServicesDependency
+        self,
+        data: JSONBody[LocalInvitationRegistrationRequest],
+        request: Request[Any, Any, Any],
+        local_auth_services: _LocalAuthServicesDependency,
     ) -> Response[LifecycleAccepted | LocalRouteResponse]:
         """Apply the configured invite-only registration policy."""
         registration = local_auth_services.registration
         if registration is None:
             return _route_error(InvalidLifecycleRequest())
         result = await registration.register(
-            data.identifier, data.password, display_name=data.display_name, invitation_token=data.invitation_token
+            data.identifier,
+            data.password,
+            display_name=data.display_name,
+            invitation_token=data.invitation_token,
+            client_key=local_auth_services.client_key_for(request),
         )
         if isinstance(result, LifecycleAccepted):
             return Response(content=result, status_code=HTTP_202_ACCEPTED)

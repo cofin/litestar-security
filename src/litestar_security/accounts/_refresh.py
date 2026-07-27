@@ -25,6 +25,17 @@ from litestar_security.accounts._internal import (
     valid_identifier,
     valid_security_epoch,
 )
+from litestar_security.accounts._operations import (
+    OUTCOME_ATTEMPTED,
+    OUTCOME_CREATED,
+    OUTCOME_REVOKED,
+    REFRESH_CREATE,
+    REFRESH_PREPARE,
+    REFRESH_RECEIPT,
+    REFRESH_REVOKE,
+    REFRESH_ROTATE,
+)
+from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, validate_rate_limits
 from litestar_security.accounts._receipts import RefreshReceiptContext, RefreshReceiptReplay, RefreshReceiptSealer
 from litestar_security.accounts._refresh_tokens import (
     RefreshFamilyContext,
@@ -281,9 +292,11 @@ class RefreshTokenService(Generic[UserT]):
     clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
     family_ids: Callable[[], str] = field(default=_new_refresh_family_id, repr=False, compare=False)
     event_ids: Callable[[], str] = field(default=_new_refresh_event_id, repr=False, compare=False)
+    rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate structural ports, lifetimes, and customization hooks."""
+        validate_rate_limits(self.rate_limits, name="Refresh token service")
         accounts_value = object.__getattribute__(self, "accounts")
         access_tokens_value = object.__getattribute__(self, "access_tokens")
         if not callable(getattr(accounts_value, "get_by_id", None)) or not callable(
@@ -375,8 +388,8 @@ class RefreshTokenService(Generic[UserT]):
                 command,
                 event=self._event(
                     issued_at,
-                    operation="local.refresh.create",
-                    outcome="created",
+                    operation=REFRESH_CREATE,
+                    outcome=OUTCOME_CREATED,
                     account_id=account_value.account_id,
                     family_id=family_id,
                 ),
@@ -390,12 +403,26 @@ class RefreshTokenService(Generic[UserT]):
         )
 
     async def rotate(  # noqa: C901, PLR0911, PLR0912 - security state machine remains explicit
-        self, refresh_token: str, *, idempotency_key: str | None = None, now: datetime | None = None
-    ) -> RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
-        """Return exactly the store-accepted sealed response or one safe failure."""
+        self,
+        refresh_token: str,
+        *,
+        idempotency_key: str | None = None,
+        now: datetime | None = None,
+        client_key: str | None = None,
+    ) -> RefreshTokenResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
+        """Return exactly the store-accepted sealed response or one safe failure.
+
+        Only the client bucket applies: the presented value is a refresh token,
+        and digesting it into a bucket key would let a limiter backend become a
+        record of which tokens were attempted.
+        """
         from litestar_security.accounts._access_tokens import LocalAccessToken  # noqa: PLC0415 - breaks an import cycle
         from litestar_security.accounts._records import LocalAccount  # noqa: PLC0415 - breaks an import cycle
 
+        if self.rate_limits is not None:
+            limited = await self.rate_limits.check(REFRESH_ROTATE, client_key=client_key)
+            if limited is not None:
+                return limited
         proof = self.codec.verify(refresh_token)
         if not isinstance(proof, RefreshTokenProof):
             return proof
@@ -414,7 +441,7 @@ class RefreshTokenService(Generic[UserT]):
                 idempotency_digest,
                 now=rotated_at,
                 event=self._event(
-                    rotated_at, operation="local.refresh.prepare", outcome="attempted", account_id=None, family_id=None
+                    rotated_at, operation=REFRESH_PREPARE, outcome=OUTCOME_ATTEMPTED, account_id=None, family_id=None
                 ),
             )
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
@@ -491,8 +518,8 @@ class RefreshTokenService(Generic[UserT]):
                 now=rotated_at,
                 event=self._event(
                     rotated_at,
-                    operation="local.refresh.rotate",
-                    outcome="attempted",
+                    operation=REFRESH_ROTATE,
+                    outcome=OUTCOME_ATTEMPTED,
                     account_id=prepared.account_id,
                     family_id=prepared.family_id,
                 ),
@@ -525,7 +552,7 @@ class RefreshTokenService(Generic[UserT]):
                 proof.token_id,
                 proof.digest,
                 event=self._event(
-                    occurred_at, operation="local.refresh.revoke", outcome="revoked", account_id=None, family_id=None
+                    occurred_at, operation=REFRESH_REVOKE, outcome=OUTCOME_REVOKED, account_id=None, family_id=None
                 ),
             )
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
@@ -547,8 +574,8 @@ class RefreshTokenService(Generic[UserT]):
                 proof.digest,
                 event=self._event(
                     occurred_at,
-                    operation="local.refresh.revoke",
-                    outcome="revoked",
+                    operation=REFRESH_REVOKE,
+                    outcome=OUTCOME_REVOKED,
                     account_id=account_id,
                     family_id=None,
                 ),
@@ -587,8 +614,8 @@ class RefreshTokenService(Generic[UserT]):
                 context.family_id,
                 event=self._event(
                     occurred_at,
-                    operation="local.refresh.receipt",
-                    outcome="revoked",
+                    operation=REFRESH_RECEIPT,
+                    outcome=OUTCOME_REVOKED,
                     account_id=context.account_id,
                     family_id=context.family_id,
                 ),

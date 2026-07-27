@@ -1,11 +1,16 @@
 """Explicit session, token, and hybrid local-authentication profiles."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Generic, TypeVar, cast
+from hashlib import sha256
+from hmac import digest as hmac_digest
+from logging import getLogger
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from litestar import Request, Router
 from litestar.config.csrf import CSRFConfig
+from litestar.connection import ASGIConnection
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts._access_tokens import (
@@ -17,15 +22,18 @@ from litestar_security.accounts._access_tokens import (
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._passwords import Argon2PasswordHasher, PasswordHasher, PasswordPolicyResult
 from litestar_security.accounts._purpose_tokens import PurposeTokenCodec
+from litestar_security.accounts._rate_limits import RateLimited, RateLimiter, RateLimitGuard, StoreRateLimiter
 from litestar_security.accounts._receipts import RefreshReceiptKey, RefreshReceiptSealer
 from litestar_security.accounts._records import (
     InvalidLifecycleRequest,
     LocalAccount,
     LocalAuthMode,
+    NoOpSecurityEventSink,
     PasswordChangeResult,
     PasswordChangeStatus,
     PasswordReauthenticationProof,
     RegistrationMode,
+    SecurityEventSink,
 )
 from litestar_security.accounts._recovery import PasswordChangeService, RecoveryTokenService
 from litestar_security.accounts._refresh import RefreshTokenFamilyStore, RefreshTokenService
@@ -54,13 +62,37 @@ from litestar_security.authentication import InvalidCredentials, VerificationUna
 from litestar_security.config import ExternalCSRF
 from litestar_security.providers.jwt import BearerSlotSelector, BearerTokenSlot, JWTValidationConfig, LocalKeyRing
 
-__all__ = ("LocalAuth", "LocalAuthConfig", "LocalAuthSecrets", "LocalAuthServices")
+if TYPE_CHECKING:
+    from litestar.stores.registry import StoreRegistry
+
+__all__ = ("LocalAuth", "LocalAuthConfig", "LocalAuthSecrets", "LocalAuthServices", "trusted_client_key")
 
 UserT = TypeVar("UserT")
 _ASCII_CONTROL_LIMIT = 32
 _DEFAULT_ACCESS_TOKEN_LIFETIME = timedelta(minutes=10)
 _DEFAULT_LOCAL_CLIENT_ID = "local"
 _DISABLED_REGISTRATION = RegistrationPolicy.disabled()
+_RATE_LIMIT_PEPPER_LABEL = b"litestar-security/rate-limit/pepper"
+_LOGGER = getLogger(__name__)
+
+
+def trusted_client_key(connection: "ASGIConnection[Any, Any, Any, Any]") -> str | None:
+    """Return the peer address, without trusting any forwarding header.
+
+    This deliberately matches Litestar's own default: ``X-Forwarded-For`` and
+    friends are attacker-controlled unless a proxy you operate rewrote them, so
+    an application behind a proxy must replace this with an extractor that knows
+    which hops it trusts. Returning ``None`` disables the client bucket and
+    leaves the identifier bucket in force.
+
+    Args:
+        connection: The connection the attempt arrived on.
+
+    Returns:
+        The peer host, or ``None`` when the connection reports no client.
+    """
+    client = connection.client
+    return client.host if client is not None else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +102,7 @@ class LocalAuthSecrets:
     purpose_tokens: PurposeTokenCodec = field(repr=False)
     refresh_codec: RefreshTokenCodec | None = field(default=None, repr=False)
     refresh_receipts: RefreshReceiptSealer | None = field(default=None, repr=False)
+    rate_limit_pepper: bytes = field(init=False, repr=False, compare=False)
 
     @classmethod
     def session(cls, *, purpose_token_pepper: bytes) -> "LocalAuthSecrets":
@@ -112,6 +145,12 @@ class LocalAuthSecrets:
         if has_refresh_receipts and self.refresh_receipts.__class__ is not RefreshReceiptSealer:
             msg = "Local authentication refresh receipts must be a RefreshReceiptSealer"
             raise ImproperlyConfiguredException(detail=msg)
+        # Derived rather than configured: rate-limit buckets need a stable secret, and
+        # asking for a second pepper would make the common setup harder without making
+        # it safer. Domain separation keeps this value unusable as a purpose-token key.
+        object.__setattr__(
+            self, "rate_limit_pepper", hmac_digest(self.purpose_tokens.pepper, _RATE_LIMIT_PEPPER_LABEL, sha256)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,12 +166,29 @@ class LocalAuthServices(Generic[UserT]):
     registration: RegistrationService[UserT] | None = field(default=None, repr=False)
     session_auth: NativeSessionAuth[UserT] | None = field(default=None, repr=False)
     refresh_tokens: RefreshTokenService[UserT] | None = field(default=None, repr=False)
+    client_key: "Callable[[ASGIConnection[Any, Any, Any, Any]], str | None]" = field(
+        default=trusted_client_key, repr=False, compare=False
+    )
+
+    def client_key_for(self, connection: "ASGIConnection[Any, Any, Any, Any]") -> str | None:
+        """Return the trusted client bucket key, or ``None`` when it cannot be derived.
+
+        A failing extractor degrades to identifier-only limiting rather than
+        failing the request, because the subject bucket still bounds the attempt.
+        """
+        try:
+            return self.client_key(connection)
+        except Exception:  # noqa: BLE001 - application-supplied code may raise anything; degrade, do not fail
+            _LOGGER.error("Local authentication client key extractor failed")  # noqa: TRY400 - omit untrusted details
+            return None
 
     async def session_login(
         self, request: Request[Any, Any, Any], credentials: LocalCredentials
-    ) -> LocalAccountResponse | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccountResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Authenticate a password and establish fixation-safe session state."""
-        account = await self.password_login.authenticate(credentials.identifier, credentials.password)
+        account = await self.password_login.authenticate(
+            credentials.identifier, credentials.password, client_key=self.client_key_for(request)
+        )
         if not isinstance(account, LocalAccount):
             return account
         session_auth = self.session_auth
@@ -144,10 +200,12 @@ class LocalAuthServices(Generic[UserT]):
         return LocalAccountResponse(account_id=account.account_id, display_name=account.display_name)
 
     async def token_login(
-        self, credentials: LocalCredentials
-    ) -> RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+        self, request: Request[Any, Any, Any], credentials: LocalCredentials
+    ) -> RefreshTokenResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Authenticate a password and issue one access/refresh pair."""
-        account = await self.password_login.authenticate(credentials.identifier, credentials.password)
+        account = await self.password_login.authenticate(
+            credentials.identifier, credentials.password, client_key=self.client_key_for(request)
+        )
         if not isinstance(account, LocalAccount):
             return account
         refresh_tokens = self.refresh_tokens
@@ -237,6 +295,12 @@ class LocalAuthConfig(Generic[UserT]):
     access_token_lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME
     password_hasher: PasswordHasher = field(default_factory=Argon2PasswordHasher, repr=False, compare=False)
     session_auth: NativeSessionAuth[UserT] | None = field(default=None, repr=False, compare=False)
+    rate_limiter: RateLimiter | None = field(default=None, repr=False, compare=False)
+    events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
+    client_key: "Callable[[ASGIConnection[Any, Any, Any, Any]], str | None]" = field(
+        default=trusted_client_key, repr=False, compare=False
+    )
+    rate_limits: RateLimitGuard = field(init=False, repr=False, compare=False)
     password_login: PasswordLoginService[UserT] = field(init=False, repr=False, compare=False)
     access_token_issuer: LocalAccessTokenIssuer[UserT] | None = field(
         init=False, default=None, repr=False, compare=False
@@ -301,8 +365,13 @@ class LocalAuthConfig(Generic[UserT]):
             object.__setattr__(self, "token_audience", audience)
             object.__setattr__(self, "token_client_id", client_id)
         self._validate_capabilities()
+        self._configure_rate_limits()
         object.__setattr__(
-            self, "password_login", PasswordLoginService(accounts=self.accounts, hasher=self.password_hasher)
+            self,
+            "password_login",
+            PasswordLoginService(
+                accounts=self.accounts, hasher=self.password_hasher, rate_limits=self.rate_limits, events=self.events
+            ),
         )
         self._configure_session_auth()
         self._configure_token_auth()
@@ -327,6 +396,40 @@ class LocalAuthConfig(Generic[UserT]):
         elif id(session_auth.accounts) != id(self.accounts) or session_auth.binding is not binding:
             msg = "Custom native session authentication must share the configured accounts and binding"
             raise ImproperlyConfiguredException(detail=msg)
+
+    def _configure_rate_limits(self) -> None:
+        events_value: object = object.__getattribute__(self, "events")
+        if not isinstance(events_value, SecurityEventSink):
+            msg = "Local authentication events must implement SecurityEventSink"
+            raise ImproperlyConfiguredException(detail=msg)
+        if not callable(object.__getattribute__(self, "client_key")):
+            msg = "Local authentication client key extractor must be callable"
+            raise ImproperlyConfiguredException(detail=msg)
+        limiter_value: object = object.__getattribute__(self, "rate_limiter")
+        if limiter_value is None:
+            # On by default: these routes are unauthenticated and run Argon2, so an
+            # unlimited default would ship the amplification surface switched on.
+            limiter_value = StoreRateLimiter()
+        elif not isinstance(limiter_value, RateLimiter):
+            msg = "Local authentication rate limiter must implement RateLimiter"
+            raise ImproperlyConfiguredException(detail=msg)
+        limiter = limiter_value
+        object.__setattr__(self, "rate_limiter", limiter)
+        object.__setattr__(
+            self,
+            "rate_limits",
+            RateLimitGuard(limiter=limiter, pepper=self.secrets.rate_limit_pepper, events=self.events),
+        )
+
+    def bind_rate_limit_store(self, stores: "StoreRegistry") -> None:
+        """Resolve the bundled limiter's store from the application registry.
+
+        Called once during startup. A limiter the application supplied owns its own
+        backend and is left alone.
+        """
+        limiter = self.rate_limiter
+        if isinstance(limiter, StoreRateLimiter) and limiter.store is None:
+            limiter.bind(stores.get(limiter.store_name))
 
     def _validate_capabilities(self) -> None:
         required: list[type[Any]] = [
@@ -402,12 +505,17 @@ class LocalAuthConfig(Generic[UserT]):
             if self.mode in {LocalAuthMode.TOKENS, LocalAuthMode.HYBRID}
             else None
         )
-        password_reauthentication = PasswordReauthenticationService(accounts=self.accounts, hasher=self.password_hasher)
+        password_reauthentication = PasswordReauthenticationService(
+            accounts=self.accounts, hasher=self.password_hasher, events=self.events
+        )
         password_change = PasswordChangeService(
             accounts=self.accounts, hasher=self.password_hasher, sessions=session_registry, refresh_tokens=refresh_store
         )
         verification = VerificationTokenService(
-            accounts=self.accounts, store=self.accounts, tokens=self.secrets.purpose_tokens
+            accounts=self.accounts,
+            store=self.accounts,
+            tokens=self.secrets.purpose_tokens,
+            rate_limits=self.rate_limits,
         )
         recovery = RecoveryTokenService(
             accounts=self.accounts,
@@ -416,6 +524,7 @@ class LocalAuthConfig(Generic[UserT]):
             hasher=self.password_hasher,
             sessions=session_registry,
             refresh_tokens=refresh_store,
+            rate_limits=self.rate_limits,
         )
         registration = (
             RegistrationService(
@@ -423,6 +532,7 @@ class LocalAuthConfig(Generic[UserT]):
                 hasher=self.password_hasher,
                 tokens=self.secrets.purpose_tokens,
                 registration=self.registration,
+                rate_limits=self.rate_limits,
             )
             if self.registration.mode is not RegistrationMode.DISABLED
             else None
@@ -446,6 +556,7 @@ class LocalAuthConfig(Generic[UserT]):
                 codec=refresh_codec,
                 receipts=refresh_receipts,
                 access_tokens=access_token_issuer,
+                rate_limits=self.rate_limits,
             )
         object.__setattr__(
             self,
@@ -460,6 +571,7 @@ class LocalAuthConfig(Generic[UserT]):
                 registration=registration,
                 session_auth=self.session_auth,
                 refresh_tokens=refresh_tokens,
+                client_key=self.client_key,
             ),
         )
 
@@ -490,6 +602,9 @@ class LocalAuth:
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
         register_routes: bool = True,
+        rate_limiter: RateLimiter | None = None,
+        events: SecurityEventSink | None = None,
+        client_key: Callable[[ASGIConnection[Any, Any, Any, Any]], str | None] = trusted_client_key,
     ) -> "LocalAuthConfig[UserT]":
         """Select native-session local authentication."""
         return LocalAuthConfig(
@@ -503,6 +618,9 @@ class LocalAuth:
             registration=registration,
             route_prefix=route_prefix,
             register_routes=register_routes,
+            rate_limiter=rate_limiter,
+            events=NoOpSecurityEventSink() if events is None else events,
+            client_key=client_key,
         )
 
     @classmethod
@@ -519,6 +637,9 @@ class LocalAuth:
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
         register_routes: bool = True,
+        rate_limiter: RateLimiter | None = None,
+        events: SecurityEventSink | None = None,
+        client_key: Callable[[ASGIConnection[Any, Any, Any, Any]], str | None] = trusted_client_key,
     ) -> "LocalAuthConfig[UserT]":
         """Select bearer access/refresh-token local authentication."""
         return LocalAuthConfig(
@@ -537,6 +658,9 @@ class LocalAuth:
             registration=registration,
             route_prefix=route_prefix,
             register_routes=register_routes,
+            rate_limiter=rate_limiter,
+            events=NoOpSecurityEventSink() if events is None else events,
+            client_key=client_key,
         )
 
     @classmethod
@@ -556,6 +680,9 @@ class LocalAuth:
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
         register_routes: bool = True,
+        rate_limiter: RateLimiter | None = None,
+        events: SecurityEventSink | None = None,
+        client_key: Callable[[ASGIConnection[Any, Any, Any, Any]], str | None] = trusted_client_key,
     ) -> "LocalAuthConfig[UserT]":
         """Select distinct native-session and bearer-token local transports."""
         return LocalAuthConfig(
@@ -577,4 +704,7 @@ class LocalAuth:
             registration=registration,
             route_prefix=route_prefix,
             register_routes=register_routes,
+            rate_limiter=rate_limiter,
+            events=NoOpSecurityEventSink() if events is None else events,
+            client_key=client_key,
         )

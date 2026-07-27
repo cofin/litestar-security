@@ -30,9 +30,11 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from litestar.connection import ASGIConnection
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
 from litestar.openapi.spec import SecurityScheme
+from litestar.stores.memory import MemoryStore
 
 import litestar_security.accounts as accounts_module
 import litestar_security.accounts._controllers as controllers_module
+import litestar_security.accounts._rate_limits as rate_limits_module
 import litestar_security.accounts._sessions as sessions_module
 from litestar_security.authentication import (
     Authenticated,
@@ -5041,7 +5043,7 @@ async def test_password_reauthentication_logs_blank_event_ids_without_changing_d
     outcome = await service.verify("account-1", "presented secret", now=_JWT_NOW)
 
     assert isinstance(outcome, InvalidCredentials)
-    assert "Security event sink failed" in caplog.text
+    assert "Security event could not be built for local.password.verify" in caplog.text
 
 
 @pytest.mark.anyio
@@ -8488,6 +8490,7 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
             accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2),
             accounts_module.InvalidLifecycleRequest(),
         ),
+        client_key_for=lambda _connection: "1.2.3.4",
     )
     request = cast("Any", SimpleNamespace())
 
@@ -8512,14 +8515,14 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
     services.session_auth = session_routes
 
     token_login = cast("Any", controllers_module._LocalTokenController.login.fn)  # noqa: SLF001
-    assert (await token_login(None, credentials, services)).status_code == 200
-    assert (await token_login(None, credentials, services)).status_code == 400
+    assert (await token_login(None, credentials, request, services)).status_code == 200
+    assert (await token_login(None, credentials, request, services)).status_code == 400
     refresh = cast("Any", controllers_module._LocalTokenController.refresh.fn)  # noqa: SLF001
-    assert (await refresh(None, token_request, services, "AAAAAAAAAAAAAAAAAAAAAA")).status_code == 200
-    assert (await refresh(None, token_request, services, None)).status_code == 400
+    assert (await refresh(None, token_request, request, services, "AAAAAAAAAAAAAAAAAAAAAA")).status_code == 200
+    assert (await refresh(None, token_request, request, services, None)).status_code == 400
     refresh_tokens = services.refresh_tokens
     services.refresh_tokens = None
-    assert (await refresh(None, token_request, services, None)).status_code == 503
+    assert (await refresh(None, token_request, request, services, None)).status_code == 503
     services.refresh_tokens = refresh_tokens
     revoke = cast("Any", controllers_module._LocalTokenController.revoke.fn)  # noqa: SLF001
     assert (await revoke(None, token_request, principal, services)).status_code == 200
@@ -8528,15 +8531,15 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
 
     lifecycle = controllers_module._LocalLifecycleController  # noqa: SLF001
     identifier = accounts_module.LocalIdentifierRequest(identifier="user@example.com")
-    assert (await cast("Any", lifecycle.recovery.fn)(None, identifier, services)).status_code == 202
+    assert (await cast("Any", lifecycle.recovery.fn)(None, identifier, request, services)).status_code == 202
     reset = cast("Any", lifecycle.reset.fn)
     reset_request = accounts_module.LocalPasswordResetRequest(
         token=token,
         password="new-password",  # noqa: S106 - request DTO fixture
     )
-    assert (await reset(None, reset_request, services)).status_code == 200
-    assert (await reset(None, reset_request, services)).status_code == 400
-    assert (await cast("Any", lifecycle.verification.fn)(None, identifier, services)).status_code == 202
+    assert (await reset(None, reset_request, request, services)).status_code == 200
+    assert (await reset(None, reset_request, request, services)).status_code == 400
+    assert (await cast("Any", lifecycle.verification.fn)(None, identifier, request, services)).status_code == 202
     confirm = cast("Any", lifecycle.confirm_verification.fn)
     assert (await confirm(None, token_request, services)).status_code == 200
     assert (await confirm(None, token_request, services)).status_code == 400
@@ -8546,10 +8549,10 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         identifier="user@example.com",
         password="password",  # noqa: S106 - request DTO fixture
     )
-    assert (await register(None, registration, services)).status_code == 202
-    assert (await register(None, registration, services)).status_code == 400
+    assert (await register(None, registration, request, services)).status_code == 202
+    assert (await register(None, registration, request, services)).status_code == 400
     services.registration = None
-    assert (await register(None, registration, services)).status_code == 400
+    assert (await register(None, registration, request, services)).status_code == 400
     services.registration = SimpleNamespace(
         register=AsyncOutcome(accounts_module.LifecycleAccepted(), accounts_module.InvalidInvitation())
     )
@@ -8562,10 +8565,10 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         password="password",  # noqa: S106 - request DTO fixture
         invitation_token="invite-secret",  # noqa: S106 - request DTO fixture
     )
-    assert (await invite_register(None, invitation, services)).status_code == 202
-    assert (await invite_register(None, invitation, services)).status_code == 400
+    assert (await invite_register(None, invitation, request, services)).status_code == 202
+    assert (await invite_register(None, invitation, request, services)).status_code == 400
     services.registration = None
-    assert (await invite_register(None, invitation, services)).status_code == 400
+    assert (await invite_register(None, invitation, request, services)).status_code == 400
 
     session_change = cast("Any", controllers_module._LocalSessionPasswordController.change.fn)  # noqa: SLF001
     assert (await session_change(None, password_request, request, principal, services)).status_code == 200
@@ -8670,11 +8673,11 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
     assert isinstance(await no_session.session_login(request, credentials), VerificationUnavailable)
 
     services.password_login.authenticate.outcomes.extend((InvalidCredentials(), account))
-    assert isinstance(await services.token_login(credentials), InvalidCredentials)
-    assert await services.token_login(credentials) == refresh_response
+    assert isinstance(await services.token_login(request, credentials), InvalidCredentials)
+    assert await services.token_login(request, credentials) == refresh_response
     no_refresh = replace(services, refresh_tokens=None)
     no_refresh.password_login.authenticate.outcomes.append(account)
-    assert isinstance(await no_refresh.token_login(credentials), VerificationUnavailable)
+    assert isinstance(await no_refresh.token_login(request, credentials), VerificationUnavailable)
 
     assert isinstance(
         await services.change_session_password(request, "account-1", password_request), InvalidCredentials
@@ -8741,3 +8744,519 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
 def test_refresh_codec_rejects_runtime_non_text_token() -> None:
     codec = accounts_module.RefreshTokenCodec(pepper=b"p" * 32)
     assert isinstance(codec.verify(object()), InvalidCredentials)  # type: ignore[arg-type]
+
+
+class _CollectingSink:
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def emit(self, event: Any) -> None:
+        self.events.append(event)
+
+
+class _FailingSink:
+    async def emit(self, event: Any) -> None:
+        del event
+        msg = "sink down"
+        raise RuntimeError(msg)
+
+
+class _ScriptedLimiter:
+    def __init__(self, *decisions: object) -> None:
+        self.decisions = list(decisions)
+        self.requests: list[Any] = []
+
+    async def acquire(self, request: Any) -> Any:
+        self.requests.append(request)
+        return self.decisions.pop(0) if len(self.decisions) > 1 else self.decisions[0]
+
+
+class _RaisingLimiter:
+    async def acquire(self, request: Any) -> Any:
+        del request
+        msg = "limiter down"
+        raise RuntimeError(msg)
+
+
+def _guard(limiter: object, **kwargs: Any) -> Any:
+    kwargs.setdefault("pepper", b"p" * 32)
+    return accounts_module.RateLimitGuard(limiter=cast("Any", limiter), **kwargs)
+
+
+def _memory_limiter(**kwargs: Any) -> Any:
+    return accounts_module.StoreRateLimiter(store=MemoryStore(), **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("limit", "window"),
+    [
+        (0, timedelta(minutes=1)),
+        (True, timedelta(minutes=1)),
+        (10_000_000, timedelta(minutes=1)),
+        (10, timedelta(0)),
+        (10, timedelta(days=2)),
+        (10, timedelta(seconds=1, microseconds=1)),
+        (10, cast("Any", 60)),
+    ],
+)
+def test_rate_limit_policy_rejects_unbounded_budgets(limit: object, window: object) -> None:
+    with pytest.raises(ImproperlyConfiguredException):
+        accounts_module.RateLimitPolicy(limit=cast("Any", limit), window=cast("Any", window))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"operation": " "},
+        {"operation": "local.login", "client_key": " "},
+        {"operation": "local.login", "subject_digest": "x" * 513},
+        {"operation": "local.login", "cost": 0},
+        {"operation": "local.login", "cost": True},
+    ],
+)
+def test_rate_limit_request_rejects_unbounded_bucket_keys(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="Rate limit"):
+        accounts_module.RateLimitRequest(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"allowed": cast("Any", 1)},
+        {"allowed": False, "retry_after": 0},
+        {"allowed": False, "retry_after": cast("Any", "5")},
+        {"allowed": True, "retry_after": 5},
+    ],
+)
+def test_rate_limit_decision_requires_a_retry_hint_only_on_denial(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match=r"(?i)rate limit"):
+        accounts_module.RateLimitDecision(**kwargs)
+
+
+@pytest.mark.anyio
+async def test_unlimited_rate_limiter_allows_every_attempt() -> None:
+    decision = await accounts_module.UnlimitedRateLimiter().acquire(
+        accounts_module.RateLimitRequest(operation="local.login")
+    )
+    assert decision == accounts_module.RateLimitDecision(allowed=True)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"store_name": " "},
+        {"store": cast("Any", object())},
+        {"clock": cast("Any", object())},
+        {"policies": {" ": accounts_module.RateLimitPolicy(limit=1, window=timedelta(minutes=1))}},
+        {"policies": {"local.login": cast("Any", object())}},
+    ],
+)
+def test_store_rate_limiter_validates_its_configuration(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ImproperlyConfiguredException):
+        accounts_module.StoreRateLimiter(**kwargs)
+
+
+def test_store_rate_limiter_binds_only_a_native_store() -> None:
+    limiter = accounts_module.StoreRateLimiter()
+    with pytest.raises(ImproperlyConfiguredException):
+        limiter.bind(cast("Any", object()))
+    assert limiter.store is None
+
+
+@pytest.mark.anyio
+async def test_store_rate_limiter_allows_unconfigured_operations_and_fails_closed_without_a_store() -> None:
+    limiter = _memory_limiter()
+    assert await limiter.acquire(accounts_module.RateLimitRequest(operation="local.unbudgeted")) == (
+        accounts_module.RateLimitDecision(allowed=True)
+    )
+    unbound = accounts_module.StoreRateLimiter()
+    with pytest.raises(RuntimeError, match="store has not been resolved"):
+        await unbound.acquire(accounts_module.RateLimitRequest(operation="local.login", client_key="1.1.1.1"))
+
+
+@pytest.mark.anyio
+async def test_store_rate_limiter_denies_after_the_window_budget_and_recovers_next_window() -> None:
+    moment = [datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)]
+    limiter = _memory_limiter(clock=lambda: moment[0])
+    request = accounts_module.RateLimitRequest(operation="local.login", client_key="1.1.1.1")
+    decisions = [await limiter.acquire(request) for _ in range(11)]
+
+    assert [decision.allowed for decision in decisions] == [True] * 10 + [False]
+    assert decisions[-1].retry_after == 300
+
+    moment[0] = moment[0] + timedelta(minutes=5)
+    assert (await limiter.acquire(request)).allowed
+
+
+@pytest.mark.anyio
+async def test_store_rate_limiter_fails_closed_on_an_unreadable_counter() -> None:
+    store = MemoryStore()
+    limiter = accounts_module.StoreRateLimiter(store=store)
+    request = accounts_module.RateLimitRequest(operation="local.login", client_key="1.1.1.1")
+    await limiter.acquire(request)
+    key = next(iter(store._store))  # noqa: SLF001 - assert the stored counter shape directly
+    await store.set(key, b"not-a-number")
+
+    with pytest.raises(RuntimeError, match="counter is unreadable"):
+        await limiter.acquire(request)
+
+
+@pytest.mark.anyio
+async def test_store_rate_limiter_denies_when_either_bucket_is_exhausted() -> None:
+    limiter = _memory_limiter()
+    for _ in range(10):
+        await limiter.acquire(accounts_module.RateLimitRequest(operation="local.login", client_key="shared"))
+
+    fresh_subject = accounts_module.RateLimitRequest(
+        operation="local.login", client_key="shared", subject_digest="unused-digest"
+    )
+    decision = await limiter.acquire(fresh_subject)
+
+    assert not decision.allowed
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"limiter": cast("Any", object())},
+        {"pepper": b"short"},
+        {"events": cast("Any", object())},
+        {"clock": cast("Any", object())},
+        {"event_ids": cast("Any", object())},
+    ],
+)
+def test_rate_limit_guard_validates_its_ports(kwargs: dict[str, Any]) -> None:
+    base: dict[str, Any] = {"limiter": accounts_module.UnlimitedRateLimiter(), "pepper": b"p" * 32}
+    with pytest.raises(ImproperlyConfiguredException):
+        accounts_module.RateLimitGuard(**{**base, **kwargs})
+
+
+def test_rate_limit_guard_digests_never_carry_the_identifier() -> None:
+    guard = _guard(accounts_module.UnlimitedRateLimiter())
+
+    digest = guard.subject_digest("user@example.com")
+
+    assert "user@example.com" not in digest
+    assert digest == guard.subject_digest("user@example.com")
+    assert digest != guard.subject_digest("other@example.com")
+    assert digest != _guard(accounts_module.UnlimitedRateLimiter(), pepper=b"q" * 32).subject_digest("user@example.com")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("limiter", [_RaisingLimiter(), _ScriptedLimiter(cast("Any", object()))])
+async def test_rate_limit_guard_fails_closed_when_the_limiter_is_unusable(limiter: object) -> None:
+    outcome = await _guard(limiter).check("local.login", client_key="1.1.1.1")
+
+    assert isinstance(outcome, VerificationUnavailable)
+
+
+@pytest.mark.anyio
+async def test_rate_limit_guard_reports_denials_and_emits_one_account_free_event() -> None:
+    sink = _CollectingSink()
+    guard = _guard(
+        _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=False, retry_after=42)),
+        events=sink,
+        event_ids=lambda: "event-1",
+    )
+
+    outcome = await guard.check("local.login", client_key="1.1.1.1", identifier="user@example.com")
+
+    assert outcome == accounts_module.RateLimited(retry_after=42)
+    assert [(event.operation, event.outcome, event.account_id) for event in sink.events] == [
+        ("local.login", "rate_limited", None)
+    ]
+
+
+@pytest.mark.anyio
+async def test_rate_limit_guard_allows_and_passes_a_digested_subject() -> None:
+    limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=True))
+    guard = _guard(limiter)
+
+    assert await guard.check("local.login", client_key="1.1.1.1", identifier="user@example.com") is None
+    assert limiter.requests[0].subject_digest == guard.subject_digest("user@example.com")
+    assert limiter.requests[0].client_key == "1.1.1.1"
+
+
+@pytest.mark.anyio
+async def test_rate_limit_guard_logs_unbuildable_denial_events_without_changing_the_denial(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    guard = _guard(
+        _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=False, retry_after=1)),
+        clock=cast("Any", lambda: None),
+    )
+
+    outcome = await guard.check("local.login", client_key="1.1.1.1")
+
+    assert outcome == accounts_module.RateLimited(retry_after=1)
+    assert "Rate limit event could not be built" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_rate_limit_guard_survives_a_failing_denial_sink(caplog: pytest.LogCaptureFixture) -> None:
+    guard = _guard(
+        _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=False, retry_after=1)), events=_FailingSink()
+    )
+
+    outcome = await guard.check("local.login", client_key="1.1.1.1")
+
+    assert outcome == accounts_module.RateLimited(retry_after=1)
+    assert "Security event sink failed for local.login" in caplog.text
+
+
+def test_validate_rate_limits_rejects_a_foreign_guard() -> None:
+    rate_limits_module.validate_rate_limits(None, name="Service")
+    with pytest.raises(ImproperlyConfiguredException, match="Service rate limits"):
+        rate_limits_module.validate_rate_limits(object(), name="Service")
+
+
+def _raising_normalizer(_identifier: str) -> str:
+    msg = "normalizer down"
+    raise RuntimeError(msg)
+
+
+def _denying_guard(**kwargs: Any) -> Any:
+    return _guard(_ScriptedLimiter(accounts_module.RateLimitDecision(allowed=False, retry_after=7)), **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"rate_limits": cast("Any", object())},
+        {"events": cast("Any", object())},
+        {"clock": cast("Any", object())},
+        {"event_ids": cast("Any", object())},
+    ],
+)
+def test_password_login_service_validates_limiting_and_audit_ports(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ImproperlyConfiguredException):
+        accounts_module.PasswordLoginService(
+            accounts=_LocalAccessStore(_local_access_account()), hasher=_PasswordHasher(), **kwargs
+        )
+
+
+@pytest.mark.anyio
+async def test_password_login_is_limited_before_any_password_work() -> None:
+    hasher = _PasswordHasher()
+    service = accounts_module.PasswordLoginService(
+        accounts=_LocalAccessStore(_local_access_account()), hasher=hasher, rate_limits=_denying_guard()
+    )
+
+    outcome = await service.authenticate("user@example.com", "secret", client_key="1.1.1.1", now=_JWT_NOW)
+
+    assert outcome == accounts_module.RateLimited(retry_after=7)
+    assert hasher.calls == []
+
+
+@pytest.mark.anyio
+async def test_password_login_still_consumes_a_budget_for_an_unnormalizable_identifier() -> None:
+    limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=True))
+    service = accounts_module.PasswordLoginService(
+        accounts=_LocalAccessStore(_local_access_account()),
+        hasher=_PasswordHasher(),
+        normalizer=cast("Any", _raising_normalizer),
+        rate_limits=_guard(limiter),
+    )
+
+    outcome = await service.authenticate("user@example.com", "secret", client_key="1.1.1.1", now=_JWT_NOW)
+
+    assert isinstance(outcome, VerificationUnavailable)
+    assert limiter.requests[0].subject_digest is None
+    assert limiter.requests[0].client_key == "1.1.1.1"
+
+
+@pytest.mark.anyio
+async def test_password_login_logs_unbuildable_decision_events_without_changing_the_decision(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = accounts_module.PasswordLoginService(
+        accounts=_LocalAccessStore(None), hasher=_PasswordHasher(), clock=cast("Any", lambda: None)
+    )
+
+    outcome = await service.authenticate("missing@example.com", "secret", now=_JWT_NOW)
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert "Security event could not be built for local.login" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_password_login_emits_one_decision_event_per_outcome() -> None:
+    sink = _CollectingSink()
+    service = accounts_module.PasswordLoginService(
+        accounts=_LocalAccessStore(_local_access_account()),
+        hasher=_PasswordHasher(
+            accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.VERIFIED)
+        ),
+        events=sink,
+        event_ids=lambda: "event-1",
+    )
+    denied = accounts_module.PasswordLoginService(
+        accounts=_LocalAccessStore(None), hasher=_PasswordHasher(), events=sink, event_ids=lambda: "event-2"
+    )
+
+    await service.authenticate("user@example.com", "correct horse battery staple", now=_JWT_NOW)
+    await denied.authenticate("missing@example.com", "correct horse battery staple", now=_JWT_NOW)
+
+    assert [event.outcome for event in sink.events] == ["verified", "attempted"]
+
+
+@pytest.mark.anyio
+async def test_registration_is_limited_before_hashing() -> None:
+    hasher = _PasswordHasher()
+    service = accounts_module.RegistrationService(
+        accounts=_LifecycleStore(),
+        hasher=hasher,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        registration=accounts_module.RegistrationPolicy.public(),
+        rate_limits=_denying_guard(),
+    )
+
+    outcome = await service.register("user@example.com", "correct horse battery staple", now=_JWT_NOW)
+
+    assert outcome == accounts_module.RateLimited(retry_after=7)
+    assert hasher.hash_calls == []
+
+
+@pytest.mark.anyio
+async def test_verification_resend_is_limited_and_reports_a_denial() -> None:
+    store = _LifecycleStore()
+    service = accounts_module.VerificationTokenService(
+        accounts=store,
+        store=store,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        rate_limits=_denying_guard(),
+    )
+
+    assert await service.resend("user@example.com", now=_JWT_NOW) == accounts_module.RateLimited(retry_after=7)
+
+
+@pytest.mark.anyio
+async def test_verification_resend_consumes_a_budget_for_an_unnormalizable_identifier() -> None:
+    limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=True))
+    store = _LifecycleStore()
+    service = accounts_module.VerificationTokenService(
+        accounts=store,
+        store=store,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        normalizer=cast("Any", _raising_normalizer),
+        rate_limits=_guard(limiter),
+    )
+
+    assert isinstance(await service.resend("user@example.com", now=_JWT_NOW), accounts_module.LifecycleAccepted)
+    assert limiter.requests[0].subject_digest is None
+
+
+@pytest.mark.anyio
+async def test_recovery_request_and_reset_are_limited() -> None:
+    store = _LifecycleStore()
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+    service = accounts_module.RecoveryTokenService(
+        accounts=store, store=store, tokens=codec, hasher=_PasswordHasher(), rate_limits=_denying_guard()
+    )
+
+    assert await service.request("user@example.com", now=_JWT_NOW) == accounts_module.RateLimited(retry_after=7)
+    reset = await service.reset("rc_token.secret", "correct horse battery staple", now=_JWT_NOW)
+    assert reset == accounts_module.RateLimited(retry_after=7)
+
+
+@pytest.mark.anyio
+async def test_recovery_request_consumes_a_budget_for_an_unnormalizable_identifier() -> None:
+    limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=True))
+    store = _LifecycleStore()
+    service = accounts_module.RecoveryTokenService(
+        accounts=store,
+        store=store,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        hasher=_PasswordHasher(),
+        normalizer=cast("Any", _raising_normalizer),
+        rate_limits=_guard(limiter),
+    )
+
+    assert isinstance(await service.request("user@example.com", now=_JWT_NOW), accounts_module.LifecycleAccepted)
+    assert limiter.requests[0].subject_digest is None
+
+
+@pytest.mark.anyio
+async def test_recovery_reset_buckets_only_the_client_never_the_token() -> None:
+    limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=True))
+    store = _LifecycleStore()
+    service = accounts_module.RecoveryTokenService(
+        accounts=store,
+        store=store,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        hasher=_PasswordHasher(),
+        rate_limits=_guard(limiter),
+    )
+
+    await service.reset("rc_token.secret", "correct horse battery staple", client_key="1.1.1.1", now=_JWT_NOW)
+
+    assert limiter.requests[0].subject_digest is None
+    assert limiter.requests[0].client_key == "1.1.1.1"
+
+
+@pytest.mark.anyio
+async def test_password_login_emits_an_attempt_event_for_a_known_account_with_a_wrong_password() -> None:
+    sink = _CollectingSink()
+    service = accounts_module.PasswordLoginService(
+        accounts=_LocalAccessStore(_local_access_account()),
+        hasher=_PasswordHasher(
+            accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.INVALID)
+        ),
+        events=sink,
+        event_ids=lambda: "event-1",
+    )
+
+    outcome = await service.authenticate("user@example.com", "wrong", now=_JWT_NOW)
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert [(event.outcome, event.account_id) for event in sink.events] == [("attempted", "account-1")]
+
+
+@pytest.mark.anyio
+async def test_refresh_rotation_is_limited_by_client_only() -> None:
+    limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=False, retry_after=7))
+    service, _store, _accounts, _account = _refresh_service()
+    limited = replace(service, rate_limits=_guard(limiter))
+
+    outcome = await limited.rotate("rt_token.secret", client_key="1.1.1.1", now=_JWT_NOW)
+
+    assert outcome == accounts_module.RateLimited(retry_after=7)
+    assert limiter.requests[0].subject_digest is None
+    assert limiter.requests[0].operation == "local.refresh.rotate"
+
+
+def test_route_errors_map_denials_to_429_with_a_retry_hint() -> None:
+    limited = controllers_module._route_error(accounts_module.RateLimited(retry_after=42))  # noqa: SLF001
+    unhinted = controllers_module._route_error(accounts_module.RateLimited())  # noqa: SLF001
+
+    assert limited.status_code == 429
+    assert limited.headers["Retry-After"] == "42"
+    assert unhinted.status_code == 429
+    assert "Retry-After" not in unhinted.headers
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("handler_name", ["recovery", "verification"])
+async def test_generated_lifecycle_handlers_report_denials_instead_of_the_shared_accepted_response(
+    handler_name: str,
+) -> None:
+    limited = accounts_module.RateLimited(retry_after=7)
+
+    async def deny(*_args: object, **_kwargs: object) -> object:
+        return limited
+
+    services = cast(
+        "Any",
+        SimpleNamespace(
+            recovery=SimpleNamespace(request=deny),
+            verification=SimpleNamespace(resend=deny),
+            client_key_for=lambda _connection: "1.1.1.1",
+        ),
+    )
+    handler = cast("Any", getattr(controllers_module._LocalLifecycleController, handler_name).fn)  # noqa: SLF001
+    identifier = accounts_module.LocalIdentifierRequest(identifier="user@example.com")
+
+    response = await handler(None, identifier, cast("Any", SimpleNamespace()), services)
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "7"

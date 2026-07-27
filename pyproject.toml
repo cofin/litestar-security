@@ -204,6 +204,9 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "docs/conf.py" = ["A001", "INP001"]
+# Every value in this module is an audit event name. S105 fires on each PASSWORD_*
+# constant because the name looks credential-bearing, but the module holds no secrets.
+"src/litestar_security/accounts/_operations.py" = ["S105"]
 "src/tests/**/*.py" = ["ANN", "D", "PLR2004", "S101"]
 "tools/**/*.py" = ["T201"]
 

@@ -16,8 +16,26 @@ from litestar_security.accounts._internal import (
     utc_now,
     valid_security_epoch,
 )
+from litestar_security.accounts._operations import (
+    OUTCOME_CHANGED,
+    OUTCOME_ISSUED,
+    OUTCOME_REBOUND,
+    OUTCOME_RESET,
+    OUTCOME_REVOKED,
+    PASSWORD_CHANGE,
+    PASSWORD_FORCE_RESET,
+    PASSWORD_REFRESH_REVOKE,
+    PASSWORD_RESET,
+    PASSWORD_SESSION_REBIND,
+    PASSWORD_SESSION_REVOKE_OTHERS,
+    RECOVERY,
+    RECOVERY_CONSUME,
+    RECOVERY_ISSUE,
+    SESSION_REVOKE_ALL_SUFFIX,
+)
 from litestar_security.accounts._passwords import PasswordHasher, PasswordPolicy, PasswordPolicyResult
 from litestar_security.accounts._purpose_tokens import PurposeTokenCodec, approved_return_url
+from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, validate_rate_limits
 from litestar_security.accounts._records import (
     InvalidLifecycleRequest,
     LifecycleAccepted,
@@ -139,7 +157,7 @@ class PasswordChangeService:
             replacement_session=replacement_session,
             compromise=compromise,
             occurred_at=occurred_at,
-            operation="local.password.change",
+            operation=PASSWORD_CHANGE,
         )
 
     async def force_reset(
@@ -165,7 +183,7 @@ class PasswordChangeService:
             replacement_session=None,
             compromise=True,
             occurred_at=occurred_at,
-            operation="local.password.force_reset",
+            operation=PASSWORD_FORCE_RESET,
         )
 
     async def _replace(  # noqa: PLR0911, PLR0913 - preserve explicit sanitized outcomes at each security boundary
@@ -208,7 +226,7 @@ class PasswordChangeService:
                 password_hash,
                 expected_epoch=expected_epoch,
                 event=lifecycle_event(
-                    self.event_ids, occurred_at, operation=operation, outcome="changed", account_id=account_id
+                    self.event_ids, occurred_at, operation=operation, outcome=OUTCOME_CHANGED, account_id=account_id
                 ),
             )
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
@@ -289,8 +307,8 @@ class PasswordChangeService:
                     event=lifecycle_event(
                         self.event_ids,
                         occurred_at,
-                        operation="local.password.refresh_revoke",
-                        outcome="revoked",
+                        operation=PASSWORD_REFRESH_REVOKE,
+                        outcome=OUTCOME_REVOKED,
                         account_id=account_id,
                     ),
                 )
@@ -308,8 +326,8 @@ class PasswordChangeService:
                 event=lifecycle_event(
                     self.event_ids,
                     occurred_at,
-                    operation="local.password.session_revoke_others",
-                    outcome="revoked",
+                    operation=PASSWORD_SESSION_REVOKE_OTHERS,
+                    outcome=OUTCOME_REVOKED,
                     account_id=account_id,
                 ),
             )
@@ -322,8 +340,8 @@ class PasswordChangeService:
                 event=lifecycle_event(
                     self.event_ids,
                     occurred_at,
-                    operation="local.password.session_rebind",
-                    outcome="rebound",
+                    operation=PASSWORD_SESSION_REBIND,
+                    outcome=OUTCOME_REBOUND,
                     account_id=account_id,
                 ),
             )
@@ -348,9 +366,11 @@ class RecoveryTokenService(Generic[UserT]):
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
     normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
     event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
+    rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate lookup, atomic recovery store, and deterministic hooks."""
+        validate_rate_limits(self.rate_limits, name="Recovery token service")
         if not isinstance(object.__getattribute__(self, "accounts"), AccountLookup):
             msg = "Recovery token accounts must implement AccountLookup"
             raise ImproperlyConfiguredException(detail=msg)
@@ -384,8 +404,18 @@ class RecoveryTokenService(Generic[UserT]):
             name="Recovery token service",
         )
 
-    async def request(self, identifier: str, *, now: datetime | None = None) -> LifecycleAccepted:
-        """Always return the shared response after one token-HMAC work class."""
+    async def request(
+        self, identifier: str, *, now: datetime | None = None, client_key: str | None = None
+    ) -> LifecycleAccepted | RateLimited | VerificationUnavailable:
+        """Always return the shared response after one token-HMAC work class.
+
+        Denial is safe to report here even though every other outcome is
+        deliberately identical: the budget is consumed for unknown identifiers
+        too, so being limited reveals nothing about whether an account exists.
+        """
+        limited = await self._check_request_rate_limit(identifier, client_key)
+        if limited is not None:
+            return limited
         try:
             occurred_at = aware_utc_time(self.clock() if now is None else now)
             normalized_identifier = self.normalizer(identifier)
@@ -407,8 +437,8 @@ class RecoveryTokenService(Generic[UserT]):
                     event=lifecycle_event(
                         self.event_ids,
                         occurred_at,
-                        operation="local.recovery.issue",
-                        outcome="issued",
+                        operation=RECOVERY_ISSUE,
+                        outcome=OUTCOME_ISSUED,
                         account_id=account.account_id,
                     ),
                 )
@@ -417,9 +447,17 @@ class RecoveryTokenService(Generic[UserT]):
         return LifecycleAccepted()
 
     async def reset(
-        self, token: object, password: str, *, now: datetime | None = None
-    ) -> PasswordResetResult | PasswordPolicyResult | VerificationUnavailable:
-        """Apply policy and delegate token consumption and password replacement atomically."""
+        self, token: object, password: str, *, now: datetime | None = None, client_key: str | None = None
+    ) -> PasswordResetResult | PasswordPolicyResult | RateLimited | VerificationUnavailable:
+        """Apply policy and delegate token consumption and password replacement atomically.
+
+        Only the client bucket applies: the presented value is a recovery token,
+        and digesting it into a bucket key would let a limiter backend become a
+        record of which tokens were attempted.
+        """
+        limited = await self._check_reset_rate_limit(client_key)
+        if limited is not None:
+            return limited
         proof = self.tokens.proof(token, expected_purpose=TokenPurpose.RECOVERY)
         if proof is None:
             return PasswordResetResult(PasswordResetStatus.INVALID)
@@ -437,7 +475,7 @@ class RecoveryTokenService(Generic[UserT]):
                 proof.digest,
                 password_hash,
                 now=occurred_at,
-                event=lifecycle_event(self.event_ids, occurred_at, operation="local.recovery.consume", outcome="reset"),
+                event=lifecycle_event(self.event_ids, occurred_at, operation=RECOVERY_CONSUME, outcome=OUTCOME_RESET),
             )
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
@@ -449,9 +487,27 @@ class RecoveryTokenService(Generic[UserT]):
                     refresh_tokens=self.refresh_tokens,
                     occurred_at=occurred_at,
                     event_ids=self.event_ids,
-                    operation="local.recovery",
+                    operation=RECOVERY,
                 )
         return result
+
+    async def _check_request_rate_limit(
+        self, identifier: str, client_key: str | None
+    ) -> "RateLimited | VerificationUnavailable | None":
+        rate_limits = self.rate_limits
+        if rate_limits is None:
+            return None
+        try:
+            normalized_identifier = self.normalizer(identifier) or None
+        except Exception:  # noqa: BLE001 - a failed normalizer still consumes the client budget
+            normalized_identifier = None
+        return await rate_limits.check(RECOVERY, client_key=client_key, identifier=normalized_identifier)
+
+    async def _check_reset_rate_limit(self, client_key: str | None) -> "RateLimited | VerificationUnavailable | None":
+        rate_limits = self.rate_limits
+        if rate_limits is None:
+            return None
+        return await rate_limits.check(PASSWORD_RESET, client_key=client_key)
 
 
 def validate_lifecycle_configuration(  # noqa: PLR0913 - explicit configuration surface; every input is named
@@ -490,7 +546,7 @@ async def _revoke_all_sessions(
         await sessions.revoke_sessions_for_account(
             account_id,
             event=lifecycle_event(
-                event_ids, occurred_at, operation=operation, outcome="revoked", account_id=account_id
+                event_ids, occurred_at, operation=operation, outcome=OUTCOME_REVOKED, account_id=account_id
             ),
         )
     except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
@@ -508,7 +564,7 @@ async def _revoke_all_credentials(  # noqa: PLR0913 - explicit configuration sur
 ) -> None:
     if sessions is not None:
         await _revoke_all_sessions(
-            sessions, account_id, occurred_at, event_ids, operation=f"{operation}.session_revoke_all"
+            sessions, account_id, occurred_at, event_ids, operation=f"{operation}{SESSION_REVOKE_ALL_SUFFIX}"
         )
     if refresh_tokens is not None:
         try:
@@ -518,7 +574,7 @@ async def _revoke_all_credentials(  # noqa: PLR0913 - explicit configuration sur
                     event_ids,
                     occurred_at,
                     operation=f"{operation}.refresh_revoke",
-                    outcome="revoked",
+                    outcome=OUTCOME_REVOKED,
                     account_id=account_id,
                 ),
             )

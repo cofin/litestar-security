@@ -942,14 +942,14 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
         token_operation = app.openapi_schema.paths["/identity/token"].post
         revoke_operation = app.openapi_schema.paths["/identity/token/revoke"].post
         assert token_operation.security == [{}]
-        assert set(token_operation.responses) == {"200", "400", "503"}
+        assert set(token_operation.responses) == {"200", "400", "429", "503"}
         assert revoke_operation.security == [{"bearer": []}]
         assert set(revoke_operation.responses) == {"200", "400", "401", "503"}
     if mode in {"session", "hybrid"}:
         login_operation = app.openapi_schema.paths["/identity/login"].post
         logout_operation = app.openapi_schema.paths["/identity/logout"].post
         assert login_operation.security == [{}]
-        assert set(login_operation.responses) == {"200", "400", "503"}
+        assert set(login_operation.responses) == {"200", "400", "429", "503"}
         assert logout_operation.security == [{"LocalSession": []}]
         assert set(logout_operation.responses) == {"200", "401", "503"}
 
@@ -958,6 +958,9 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
     plugin._configure_local_auth_routes(app_config)  # noqa: SLF001
     plugin._configure_local_auth_routes(app_config)  # noqa: SLF001
     assert app_config.route_handlers == [local_auth.build_route_handlers()[0]]
+    plugin._configure_local_auth_rate_limits(app_config)  # noqa: SLF001
+    plugin._configure_local_auth_rate_limits(app_config)  # noqa: SLF001
+    assert len(app_config.lifespan) == 1
     provider = cast("Provide", local_auth.build_route_handlers()[0].dependencies["local_auth_services"])
     assert provider.dependency() is local_auth.services
 

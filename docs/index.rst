@@ -19,12 +19,19 @@ guards, local JWT signing, strict OIDC discovery, and bounded JWKS rotation.
    development-installation
    plugin-scaffold
    jwt-and-jwks
+   rate-limiting
    contributing
    reference
    changelog
 
 .. grid:: 1 1 2 2
    :gutter: 2
+
+   .. grid-item-card:: Rate limiting
+      :link: rate-limiting
+      :link-type: doc
+
+      Understand the default budgets and make them correct across worker processes.
 
    .. grid-item-card:: Introduction
       :link: introduction
