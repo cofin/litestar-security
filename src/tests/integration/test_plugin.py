@@ -1012,6 +1012,9 @@ def test_generated_local_routes_are_grouped_documented_and_uniquely_identified(
     schemas = app.openapi_schema.components.schemas if app.openapi_schema.components is not None else None
     assert schemas is not None
     documented = ("LocalCredentials", "LocalPasswordChangeRequest", "LocalSessionResponse", "LocalRouteResponse")
+    # LocalSessionResponse is only named when the nested annotation resolves, which a
+    # quoted reference does not do on Python 3.10.
+    assert set(documented) <= set(schemas)
     assert all(all(prop.description for prop in (schemas[name].properties or {}).values()) for name in documented)
 
     by_id = {operation.operation_id: operation for operation in generated}

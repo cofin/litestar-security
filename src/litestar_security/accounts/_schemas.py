@@ -125,4 +125,7 @@ class LocalSessionResponse:
 class LocalSessionListResponse:
     """Safe caller-owned session inventory."""
 
-    sessions: Annotated[tuple["LocalSessionResponse", ...], Parameter(description="The caller's own active sessions.")]
+    # Unquoted deliberately: the reference is backward, and on Python 3.10 a quoted
+    # forward reference nested in a subscript stays an unresolved string, which drops
+    # the element type from the generated schema.
+    sessions: Annotated[tuple[LocalSessionResponse, ...], Parameter(description="The caller's own active sessions.")]
