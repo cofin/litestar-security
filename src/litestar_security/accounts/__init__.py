@@ -7,6 +7,16 @@ from litestar_security.accounts._access_tokens import (
 )
 from litestar_security.accounts._controllers import LOCAL_AUTH_TAGS, build_local_auth_routes, requires_local_bearer
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
+from litestar_security.accounts._mfa import (
+    MFAService,
+    MFAStore,
+    PendingTOTPEnrollment,
+    ProtectedSecret,
+    SecretProtector,
+    TOTPEnrollment,
+    TOTPMethod,
+    TOTPPolicy,
+)
 from litestar_security.accounts._passwords import (
     Argon2PasswordHasher,
     PasswordHasher,
@@ -175,6 +185,8 @@ __all__ = (
     "LocalTokenRequest",
     "LoginMethod",
     "LoginMethodStore",
+    "MFAService",
+    "MFAStore",
     "NativeSessionAuth",
     "NativeSessionStore",
     "NoOpSecurityEventSink",
@@ -196,8 +208,10 @@ __all__ = (
     "PasswordResetStatus",
     "PasswordVerificationResult",
     "PasswordVerificationStatus",
+    "PendingTOTPEnrollment",
     "PendingTokenIssue",
     "PrepareRefreshResult",
+    "ProtectedSecret",
     "PurposeTokenCodec",
     "PurposeTokenDelivery",
     "PurposeTokenGenerationError",
@@ -233,6 +247,7 @@ __all__ = (
     "RevokeLoginMethodStatus",
     "RotateRefreshCommand",
     "RotateRefreshResult",
+    "SecretProtector",
     "SecurityEpochStore",
     "SecurityEpochValidator",
     "SecurityEvent",
@@ -245,6 +260,9 @@ __all__ = (
     "SessionRegistry",
     "SessionSummary",
     "StoreRateLimiter",
+    "TOTPEnrollment",
+    "TOTPMethod",
+    "TOTPPolicy",
     "TokenIssue",
     "TokenPurpose",
     "UnlimitedRateLimiter",

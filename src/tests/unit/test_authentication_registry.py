@@ -19,6 +19,7 @@ from typing import Any, cast
 
 import httpx
 import jwt
+import pyotp
 import pytest
 from anyio import CancelScope, CapacityLimiter, Event, create_task_group, fail_after, get_cancelled_exc_class, to_thread
 from anyio.lowlevel import checkpoint
@@ -113,6 +114,9 @@ _OIDC_ISSUER = "https://issuer.example/tenant"
 _OIDC_DISCOVERY_URL = f"{_OIDC_ISSUER}/.well-known/openid-configuration"
 _OIDC_PUBLIC_IP = "93.184.216.34"
 _JWKS_URI = f"{_JWT_ISSUER}/.well-known/jwks.json"
+_MFA_VECTOR_NOW = datetime.fromtimestamp(59, tz=timezone.utc)
+_MFA_ENCODED_SEED = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+_MFA_POLICY = accounts_module.TOTPPolicy()
 
 
 def test_jwks_worker_and_metrics_contracts_are_safe_by_default() -> None:
@@ -7142,6 +7146,237 @@ class _AccessSigner:
         if self.fail:
             raise OSError
         return self.token
+
+
+class _MFAProtector:
+    active_key_version = "test-key"
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.plaintexts: dict[bytes, bytes] = {}
+        self.associated_data: list[bytes] = []
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> accounts_module.ProtectedSecret:
+        if self.fail:
+            raise OSError
+        ciphertext = b"ciphertext-" + len(self.plaintexts).to_bytes(2, "big")
+        self.plaintexts[ciphertext] = secret
+        self.associated_data.append(associated_data)
+        return accounts_module.ProtectedSecret(ciphertext=ciphertext, key_version=self.active_key_version)
+
+    async def unprotect(self, protected: accounts_module.ProtectedSecret, *, associated_data: bytes) -> bytes:
+        if self.fail:
+            raise OSError
+        self.associated_data.append(associated_data)
+        return self.plaintexts[protected.ciphertext]
+
+
+class _MFAStore:
+    def __init__(self) -> None:
+        self.enrollments: dict[str, accounts_module.PendingTOTPEnrollment] = {}
+        self.methods: dict[str, accounts_module.TOTPMethod] = {}
+        self.lock = asyncio.Lock()
+        self.fail = False
+
+    async def create_totp_enrollment(self, enrollment: accounts_module.PendingTOTPEnrollment) -> None:
+        if self.fail:
+            raise OSError
+        self.enrollments[enrollment.enrollment_id] = enrollment
+
+    async def get_totp_enrollment(self, enrollment_id: str) -> accounts_module.PendingTOTPEnrollment | None:
+        if self.fail:
+            raise OSError
+        return self.enrollments.get(enrollment_id)
+
+    async def activate_totp(
+        self, account_id: str, enrollment_id: str, *, accepted_counter: int, now: datetime
+    ) -> accounts_module.TOTPMethod | None:
+        if self.fail:
+            raise OSError
+        async with self.lock:
+            enrollment = self.enrollments.pop(enrollment_id, None)
+            if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
+                return None
+            method = accounts_module.TOTPMethod(
+                method_id=enrollment.method_id,
+                account_id=account_id,
+                protected_secret=enrollment.protected_secret,
+                policy=enrollment.policy,
+                last_accepted_counter=accepted_counter,
+                created_at=now,
+            )
+            self.methods[method.method_id] = method
+            return method
+
+    async def get_totp_method(self, account_id: str, method_id: str) -> accounts_module.TOTPMethod | None:
+        if self.fail:
+            raise OSError
+        method = self.methods.get(method_id)
+        return method if method is not None and method.account_id == account_id else None
+
+    async def advance_totp_counter(self, method_id: str, *, accepted_counter: int, now: datetime) -> bool:
+        if self.fail:
+            raise OSError
+        async with self.lock:
+            method = self.methods.get(method_id)
+            if method is None or accepted_counter <= method.last_accepted_counter:
+                return False
+            self.methods[method_id] = replace(method, last_accepted_counter=accepted_counter, last_used_at=now)
+            return True
+
+
+def _mfa_service(
+    store: _MFAStore,
+    protector: _MFAProtector,
+    *,
+    policy: accounts_module.TOTPPolicy = _MFA_POLICY,
+    encoded_seed: str = _MFA_ENCODED_SEED,
+    now: datetime = _MFA_VECTOR_NOW,
+) -> accounts_module.MFAService:
+    identifiers = iter(("enrollment-1", "method-1"))
+    return accounts_module.MFAService(
+        store=store,
+        secret_protector=protector,
+        policy=policy,
+        issuer="Litestar Security",
+        clock=lambda: now,
+        secret_generator=lambda: encoded_seed,
+        identifiers=lambda: next(identifiers),
+    )
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "secret", "code"),
+    [
+        ("SHA1", "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", "94287082"),
+        ("SHA256", base64.b32encode(b"12345678901234567890123456789012").decode(), "46119246"),
+        (
+            "SHA512",
+            base64.b32encode(b"1234567890123456789012345678901234567890123456789012345678901234").decode(),
+            "90693936",
+        ),
+    ],
+)
+@pytest.mark.anyio
+async def test_totp_enrollment_uses_rfc_vectors_and_persists_only_protected_secret(
+    algorithm: str, secret: str, code: str
+) -> None:
+    store = _MFAStore()
+    protector = _MFAProtector()
+    service = _mfa_service(
+        store,
+        protector,
+        policy=accounts_module.TOTPPolicy(digits=8, algorithm=cast("Any", algorithm), allowed_drift_steps=0),
+        encoded_seed=secret,
+    )
+
+    enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
+
+    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    assert "secret=" in enrollment.provisioning_uri
+    assert secret not in repr(enrollment)
+    assert secret.encode() not in repr(store.enrollments).encode()
+    activated = await service.activate_totp("account-1", enrollment.enrollment_id, code)
+    assert isinstance(activated, accounts_module.TOTPMethod)
+    assert activated.last_accepted_counter == 1
+    assert b"account-1" in protector.associated_data[0]
+    assert b"method-1" in protector.associated_data[0]
+    assert b"totp" in protector.associated_data[0]
+    assert b"test-key" in protector.associated_data[0]
+
+
+@pytest.mark.anyio
+async def test_totp_counter_advance_allows_one_concurrent_use_and_rejects_replay() -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    store = _MFAStore()
+    protector = _MFAProtector()
+    service = _mfa_service(store, protector, now=now)
+    enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
+    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", interval=30).at(now)
+    assert isinstance(
+        await service.activate_totp("account-1", enrollment.enrollment_id, code), accounts_module.TOTPMethod
+    )
+    next_time = now + timedelta(seconds=30)
+    next_code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", interval=30).at(next_time)
+    service.clock = lambda: next_time
+    outcomes: list[object] = []
+
+    async def verify() -> None:
+        outcomes.append(await service.verify_totp("account-1", "method-1", next_code))
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(verify)
+        task_group.start_soon(verify)
+
+    assert sum(isinstance(outcome, AuthenticationEvidence) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, InvalidCredentials) for outcome in outcomes) == 1
+    assert isinstance(await service.verify_totp("account-1", "method-1", next_code), InvalidCredentials)
+
+
+@pytest.mark.parametrize(
+    ("policy_kwargs", "match"),
+    [
+        ({"digits": 7}, "digits"),
+        ({"period_seconds": 0}, "period"),
+        ({"algorithm": "MD5"}, "algorithm"),
+        ({"allowed_drift_steps": -1}, "drift"),
+        ({"enrollment_ttl": timedelta()}, "lifetime"),
+    ],
+)
+def test_totp_policy_rejects_unsupported_or_unbounded_profiles(policy_kwargs: dict[str, object], match: str) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        accounts_module.TOTPPolicy(**policy_kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_totp_drift_account_and_expiry_failures_are_generic() -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    store = _MFAStore()
+    protector = _MFAProtector()
+    service = _mfa_service(store, protector, now=now)
+    enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
+    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", interval=30).at(now)
+
+    assert isinstance(await service.activate_totp("account-2", enrollment.enrollment_id, code), InvalidCredentials)
+    service.clock = lambda: enrollment.expires_at
+    assert isinstance(await service.activate_totp("account-1", enrollment.enrollment_id, code), InvalidCredentials)
+
+    service = _mfa_service(store := _MFAStore(), protector := _MFAProtector(), now=now)
+    enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
+    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    future_code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", interval=30).at(now + timedelta(seconds=30))
+    activated = await service.activate_totp("account-1", enrollment.enrollment_id, future_code)
+    assert isinstance(activated, accounts_module.TOTPMethod)
+    service.clock = lambda: now + timedelta(seconds=60)
+    too_far_code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", interval=30).at(now + timedelta(seconds=120))
+    assert isinstance(await service.verify_totp("account-1", activated.method_id, too_far_code), InvalidCredentials)
+    assert isinstance(await service.verify_totp("account-2", activated.method_id, future_code), InvalidCredentials)
+
+
+@pytest.mark.parametrize("failure", ["protect", "store", "unprotect"])
+@pytest.mark.anyio
+async def test_totp_protector_and_store_failures_are_sanitized(failure: str) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    store = _MFAStore()
+    protector = _MFAProtector(fail=failure == "protect")
+    service = _mfa_service(store, protector, now=now)
+    if failure == "store":
+        store.fail = True
+
+    enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
+
+    if failure in {"protect", "store"}:
+        assert isinstance(enrollment, VerificationUnavailable)
+        assert "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" not in repr(enrollment)
+        return
+    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    protector.fail = True
+    code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", interval=30).at(now)
+    outcome = await service.activate_totp("account-1", enrollment.enrollment_id, code)
+    assert isinstance(outcome, VerificationUnavailable)
+    assert "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" not in repr(outcome)
 
 
 @pytest.mark.parametrize(
