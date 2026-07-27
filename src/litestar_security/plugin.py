@@ -95,7 +95,20 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._rate_limit_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
 
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
-        """Validate ownership and install one typed security runtime."""
+        """Validate ownership and install one typed security runtime.
+
+        Args:
+            app_config: The application configuration to extend.
+
+        Returns:
+            The same configuration, with the security middleware, dependencies,
+            generated routes, and OpenAPI contributions installed.
+
+        Raises:
+            ImproperlyConfiguredException: If the application already owns
+                something this plugin must own, such as a competing session
+                middleware, CSRF config, or reserved dependency name.
+        """
         self._configure_local_auth()
         self._configure_local_auth_rate_limits(app_config)
         self._configure_local_auth_routes(app_config)
@@ -163,14 +176,26 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         return app_config
 
     def receive_route(self, route: BaseRoute) -> None:
-        """Compile every initial or dynamically registered route."""
+        """Compile every initial or dynamically registered route.
+
+        Args:
+            route: The route Litestar just registered.
+
+        Raises:
+            ImproperlyConfiguredException: If called before application
+                initialization, or if the route's declared policy cannot compile.
+        """
         if self._route_compiler is None:
             message = "Security route compiler is unavailable before application initialization"
             raise ImproperlyConfiguredException(detail=message)
         self._route_compiler.receive_route(route)
 
     def on_cli_init(self, cli: ClickGroup) -> None:
-        """Attach the security command group to the Litestar CLI."""
+        """Attach the security command group to the Litestar CLI.
+
+        Args:
+            cli: The root Litestar CLI group.
+        """
         from litestar_security._cli import register  # noqa: PLC0415 - the CLI registrar loads only when the CLI runs
 
         register(cli)

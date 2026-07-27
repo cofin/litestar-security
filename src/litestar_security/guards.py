@@ -67,27 +67,66 @@ class AuthorizationPredicate:
 
 
 def requires_authenticated() -> AuthorizationPredicate:
-    """Require any authenticated principal."""
+    """Require any authenticated principal.
+
+    Returns:
+        A predicate satisfied by any non-anonymous principal.
+    """
     return _AuthenticatedPredicate()
 
 
 def requires_scope(scope: str) -> AuthorizationPredicate:
-    """Require one scope from the immutable authorization snapshot."""
+    """Require one scope from the immutable authorization snapshot.
+
+    Args:
+        scope: The scope name, normalized before comparison.
+
+    Returns:
+        A predicate satisfied when the principal holds the scope.
+    """
     return _GrantPredicate(kind="scope", value=_normalize_name(scope, "Scope"))
 
 
 def requires_role(role: str) -> AuthorizationPredicate:
-    """Require one role from the immutable authorization snapshot."""
+    """Require one role from the immutable authorization snapshot.
+
+    Args:
+        role: The role name, normalized before comparison.
+
+    Returns:
+        A predicate satisfied when the principal holds the role.
+    """
     return _GrantPredicate(kind="role", value=_normalize_name(role, "Role"))
 
 
 def requires_capability(capability: str) -> AuthorizationPredicate:
-    """Require one capability from the immutable authorization snapshot."""
+    """Require one capability from the immutable authorization snapshot.
+
+    Args:
+        capability: The capability name, normalized before comparison.
+
+    Returns:
+        A predicate satisfied when the principal holds the capability.
+    """
     return _GrantPredicate(kind="capability", value=_normalize_name(capability, "Capability"))
 
 
 def requires_team_role(*, team_parameter: str = "team_id", roles: Collection[str]) -> AuthorizationPredicate:
-    """Require one allowed role for the team selected by a parsed path parameter."""
+    """Require one allowed role for the team selected by a parsed path parameter.
+
+    The team is read from the parsed path parameter rather than the request body,
+    so the value the guard checks is the one the route will act on.
+
+    Args:
+        team_parameter: The path parameter naming the team.
+        roles: The roles that satisfy the guard, normalized before comparison.
+
+    Returns:
+        A predicate satisfied when the principal holds one of the roles in that team.
+
+    Raises:
+        ImproperlyConfiguredException: If no roles are supplied.
+    """
     normalized_roles = frozenset(_normalize_name(role, "Team role") for role in roles)
     if not normalized_roles:
         message = "Team-role guard requires at least one role"
@@ -98,27 +137,67 @@ def requires_team_role(*, team_parameter: str = "team_id", roles: Collection[str
 
 
 def requires_tenant(*, tenant_parameter: str = "tenant_id") -> AuthorizationPredicate:
-    """Require membership in the tenant selected by a parsed path parameter."""
+    """Require membership in the tenant selected by a parsed path parameter.
+
+    Args:
+        tenant_parameter: The path parameter naming the tenant.
+
+    Returns:
+        A predicate satisfied when the principal belongs to that tenant.
+    """
     return _TenantPredicate(tenant_parameter=_normalize_name(tenant_parameter, "Tenant path parameter"))
 
 
 def all_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
-    """Require every child predicate."""
+    """Require every child predicate.
+
+    Args:
+        *children: The predicates that must all be satisfied.
+
+    Returns:
+        The composed predicate.
+    """
     return _composite("all_of", children, count=len(children))
 
 
 def any_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
-    """Require at least one child predicate."""
+    """Require at least one child predicate.
+
+    Args:
+        *children: The predicates to draw from.
+
+    Returns:
+        The composed predicate.
+    """
     return _composite("any_of", children, count=1)
 
 
 def one_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
-    """Require exactly one child predicate."""
+    """Require exactly one child predicate.
+
+    Args:
+        *children: The predicates to draw from.
+
+    Returns:
+        The composed predicate, denying when more than one child is satisfied.
+    """
     return _composite("one_of", children, count=1)
 
 
 def at_least(count: int, *children: AuthorizationPredicate) -> AuthorizationPredicate:
-    """Require at least ``count`` child predicates."""
+    """Require at least ``count`` child predicates.
+
+    Args:
+        count: How many children must be satisfied.
+        *children: The predicates to draw from.
+
+    Returns:
+        The composed predicate.
+
+    Raises:
+        ImproperlyConfiguredException: If the count is not between one and the
+            number of children.
+    """
     if not 1 <= count <= len(children):
         message = f"at_least count must be between 1 and {len(children)}"
         raise ImproperlyConfiguredException(detail=message)

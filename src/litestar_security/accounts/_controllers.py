@@ -124,14 +124,34 @@ _LocalAuthServicesDependency = NamedDependency[SkipValidation[LocalAuthServices[
 
 
 def requires_local_bearer(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler) -> None:
-    """Require bearer evidence produced by the configured local JWT slot."""
+    """Require bearer evidence produced by the configured local JWT slot.
+
+    Args:
+        connection: The connection being authorized.
+        _: The route handler, unused.
+
+    Raises:
+        NotAuthorizedException: If the connection carries no local bearer evidence.
+    """
     context = connection.auth
     if not isinstance(context, SecurityContext) or not any(evidence.slot == "local" for evidence in context.evidence):
         raise NotAuthorizedException(detail="Authentication required")
 
 
 def build_local_auth_routes(config: LocalAuthConfig[Any]) -> Router:
-    """Build one native Litestar route tree for an explicit local-auth profile."""
+    """Build one native Litestar route tree for an explicit local-auth profile.
+
+    Which controllers are mounted follows the profile: session routes for a
+    session or hybrid profile, token routes for a token or hybrid profile, and a
+    registration route only when the policy allows one.
+
+    Args:
+        config: The configured profile the routes are built for.
+
+    Returns:
+        One router mounted at the profile's route prefix, with caching disabled
+        and the shared service graph provided as a dependency.
+    """
 
     def provide_local_auth_services() -> LocalAuthServices[Any]:
         return config.services

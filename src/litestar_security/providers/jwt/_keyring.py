@@ -80,7 +80,19 @@ class VerificationKeySet:
         worker_limits: WorkerLimits | None = None,
         metrics: SecurityMetrics | None = None,
     ) -> "JWTVerifier[JWTClaims]":
-        """Build one exact-kid verifier across this trusted key set."""
+        """Build one exact-kid verifier across this trusted key set.
+
+        Args:
+            config: The pinned trust profile. Its issuer must match this key set.
+            mechanism_name: The mechanism the verifier belongs to.
+            slot_name: The credential slot the verifier reads.
+            worker_limits: The shared crypto-worker budget verification runs inside.
+            metrics: The sink offered verification measurements.
+
+        Returns:
+            A verifier that selects keys by exact key identifier, never by a
+            claim read from the unverified token.
+        """
         if config.issuer != self.issuer:
             raise_config("Verification key set issuer must match JWT validation config issuer")
         mechanism_name = strict_identifier(mechanism_name)
@@ -146,7 +158,11 @@ class LocalKeyRing:
         return self._verification_key_set
 
     def build_signer(self) -> TokenSigner:
-        """Build the local signer without generating or discovering key material."""
+        """Build the local signer without generating or discovering key material.
+
+        Returns:
+            A signer bound to the configured active signing key.
+        """
         return _LocalJWTSigner(
             issuer=self.issuer,
             signing_key=self.active_signing_key,
@@ -158,7 +174,19 @@ class LocalKeyRing:
     def build_verifier(
         self, config: JWTValidationConfig, *, mechanism_name: str = "jwt", slot_name: str = "authorization.bearer"
     ) -> "JWTVerifier[JWTClaims]":
-        """Build one exact-kid verifier across the active and retained keys."""
+        """Build one exact-kid verifier across the active and retained keys.
+
+        Retained keys stay accepted so tokens signed before a rotation keep
+        verifying until they expire.
+
+        Args:
+            config: The pinned trust profile. Its issuer must match this key ring.
+            mechanism_name: The mechanism the verifier belongs to.
+            slot_name: The credential slot the verifier reads.
+
+        Returns:
+            A verifier that selects keys by exact key identifier.
+        """
         if self.active_signing_key.algorithm not in config.algorithms:
             raise_config("Local key ring active signing algorithm must be accepted by JWT validation config")
         return self._verification_key_set.build_verifier(
@@ -228,7 +256,14 @@ class LocalJWKSConfig:
 
 
 def build_local_jwks_handler(config: LocalJWKSConfig) -> HTTPRouteHandler:
-    """Build one native public Litestar handler for immutable local JWKS bytes."""
+    """Build one native public Litestar handler for immutable local JWKS bytes.
+
+    Args:
+        config: The publication settings and precomputed canonical response.
+
+    Returns:
+        A public handler serving the key set with a stable ETag and cache headers.
+    """
     headers = {"Cache-Control": config.cache_control, "ETag": config.etag}
 
     @get(

@@ -235,37 +235,120 @@ class RefreshTokenFamilyStore(Protocol):
     """Atomic strict refresh-family rotation and revocation boundary."""
 
     async def create_family(self, command: CreateRefreshFamilyCommand, *, event: "SecurityEvent") -> bool:
-        """Create one family only if its account epoch is still current, atomically."""
+        """Create one family only if its account epoch is still current, atomically.
+
+        Args:
+            command: The family identifier, account binding, epoch, and first token digest.
+            event: The audit event to commit with the family. Rejecting it must
+                fail the creation.
+
+        Returns:
+            ``True`` when the family was created, ``False`` when the account epoch
+            had already moved on.
+        """
         ...  # pragma: no cover
 
     async def prepare_rotation(
         self, proof: RefreshTokenProof, idempotency_digest: bytes | None, *, now: "datetime", event: "SecurityEvent"
     ) -> RefreshFamilyContext | RefreshReceiptReplay | PrepareRefreshResult:
-        """Atomically return active state, recover a receipt, or revoke and record consumed reuse."""
+        """Atomically return active state, recover a receipt, or revoke and record consumed reuse.
+
+        This is where reuse detection lives. A token that was already consumed
+        means the token leaked, so the whole family must be revoked in the same
+        operation that observes the reuse.
+
+        Args:
+            proof: The verified identifier and digest of the presented token.
+            idempotency_digest: The digest of the caller's ``Idempotency-Key``, or
+                ``None`` when the caller sent none.
+            now: The timestamp to evaluate expiry against.
+            event: The audit event to commit with the outcome. Rejecting it must
+                fail the preparation.
+
+        Returns:
+            The active family context to rotate from, a stored receipt when the
+            caller is retrying with a matching idempotency key, or a result
+            describing why rotation cannot proceed.
+        """
         ...  # pragma: no cover
 
     async def rotate(
         self, command: RotateRefreshCommand, *, now: "datetime", event: "SecurityEvent"
     ) -> RotateRefreshResult:
-        """Atomically revalidate context/current epoch and rotate or revoke."""
+        """Atomically revalidate context/current epoch and rotate or revoke.
+
+        Revalidate rather than trusting the prepared context: the epoch can move
+        between preparation and rotation.
+
+        Args:
+            command: The family, expected prior token, replacement digest, and receipt to store.
+            now: The commit timestamp.
+            event: The audit event to commit with the rotation. Rejecting it must
+                fail the rotation.
+
+        Returns:
+            The outcome, distinguishing a committed rotation from a revocation.
+        """
         ...  # pragma: no cover
 
     async def revoke_family(self, family_id: str, *, event: "SecurityEvent") -> bool:
-        """Revoke one refresh-token family."""
+        """Revoke one refresh-token family.
+
+        Args:
+            family_id: The family to revoke.
+            event: The audit event to commit with the revocation. Rejecting it
+                must fail the revocation.
+
+        Returns:
+            ``True`` when an active family was revoked.
+        """
         ...  # pragma: no cover
 
     async def revoke_token(self, token_id: str, token_digest: bytes, *, event: "SecurityEvent") -> bool:
-        """Revoke the family owning one exact presented token."""
+        """Revoke the family owning one exact presented token.
+
+        Args:
+            token_id: The identifier carried by the presented token.
+            token_digest: The digest that must match the stored one.
+            event: The audit event to commit with the revocation. Rejecting it
+                must fail the revocation.
+
+        Returns:
+            ``True`` when the digest matched and the family was revoked.
+        """
         ...  # pragma: no cover
 
     async def revoke_token_for_account(
         self, account_id: str, token_id: str, token_digest: bytes, *, event: "SecurityEvent"
     ) -> bool:
-        """Revoke one exact token only when its family belongs to the caller account."""
+        """Revoke one exact token only when its family belongs to the caller account.
+
+        Check ownership inside this operation. A caller must not be able to
+        revoke another account's token by presenting its identifier.
+
+        Args:
+            account_id: The authenticated caller's account.
+            token_id: The identifier carried by the presented token.
+            token_digest: The digest that must match the stored one.
+            event: The audit event to commit with the revocation. Rejecting it
+                must fail the revocation.
+
+        Returns:
+            ``True`` when the caller owned the family and it was revoked.
+        """
         ...  # pragma: no cover
 
     async def revoke_for_account(self, account_id: str, *, event: "SecurityEvent") -> int:
-        """Revoke every refresh family for an account."""
+        """Revoke every refresh family for an account.
+
+        Args:
+            account_id: The account whose families to revoke.
+            event: The audit event to commit with the revocations. Rejecting it
+                must fail them.
+
+        Returns:
+            The number of active families revoked.
+        """
         ...  # pragma: no cover
 
 
@@ -333,7 +416,17 @@ class RefreshTokenService(Generic[UserT]):
     async def issue(  # noqa: PLR0911 - preserve explicit sanitized outcomes
         self, account: "LocalAccount[UserT]", *, scopes: AbstractSet[str] = frozenset(), now: datetime | None = None
     ) -> RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
-        """Create the initial family before revealing either credential."""
+        """Create the initial family before revealing either credential.
+
+        Args:
+            account: The authenticated account to issue for. It must be active and verified.
+            scopes: The scopes to bind into the access token.
+            now: Override the clock, for tests and replayable issuance.
+
+        Returns:
+            The token pair, ``InvalidCredentials`` when the account may not be
+            issued for, or ``VerificationUnavailable`` when a dependency failed.
+        """
         from litestar_security.accounts._access_tokens import LocalAccessToken  # noqa: PLC0415 - breaks an import cycle
         from litestar_security.accounts._records import LocalAccount  # noqa: PLC0415 - breaks an import cycle
 
@@ -415,6 +508,19 @@ class RefreshTokenService(Generic[UserT]):
         Only the client bucket applies: the presented value is a refresh token,
         and digesting it into a bucket key would let a limiter backend become a
         record of which tokens were attempted.
+
+        Args:
+            refresh_token: The opaque token presented by the client.
+            idempotency_key: Replays a lost response instead of tripping reuse
+                detection, when it matches the key sent with the original request.
+            now: Override the clock, for tests and replayable rotation.
+            client_key: The caller identity for the rate-limit bucket, or ``None``
+                to skip client-keyed limiting.
+
+        Returns:
+            The rotated pair, ``RateLimited`` when the budget is spent,
+            ``InvalidCredentials`` when the token is rejected or was reused, or
+            ``VerificationUnavailable`` when a dependency failed.
         """
         from litestar_security.accounts._access_tokens import LocalAccessToken  # noqa: PLC0415 - breaks an import cycle
         from litestar_security.accounts._records import LocalAccount  # noqa: PLC0415 - breaks an import cycle
@@ -542,7 +648,16 @@ class RefreshTokenService(Generic[UserT]):
     async def revoke(
         self, refresh_token: str, *, now: datetime | None = None
     ) -> bool | InvalidCredentials | VerificationUnavailable:
-        """Revoke the family owning one exact presented opaque token."""
+        """Revoke the family owning one exact presented opaque token.
+
+        Args:
+            refresh_token: The opaque token whose family to revoke.
+            now: Override the clock, for tests and replayable revocation.
+
+        Returns:
+            Whether an active family was revoked, ``InvalidCredentials`` when the
+            token is rejected, or ``VerificationUnavailable`` when the store failed.
+        """
         proof = self.codec.verify(refresh_token)
         if not isinstance(proof, RefreshTokenProof):
             return proof
@@ -562,7 +677,19 @@ class RefreshTokenService(Generic[UserT]):
     async def revoke_for_account(
         self, account_id: str, refresh_token: str, *, now: datetime | None = None
     ) -> bool | InvalidCredentials | VerificationUnavailable:
-        """Revoke one caller-owned refresh family without exposing cross-account state."""
+        """Revoke one caller-owned refresh family without exposing cross-account state.
+
+        Args:
+            account_id: The authenticated caller's account.
+            refresh_token: The opaque token whose family to revoke.
+            now: Override the clock, for tests and replayable revocation.
+
+        Returns:
+            Whether an active family was revoked, ``InvalidCredentials`` when the
+            token is rejected, or ``VerificationUnavailable`` when the store failed.
+            A token owned by another account is reported as not revoked rather than
+            as a distinct failure.
+        """
         proof = self.codec.verify(refresh_token)
         if not strict_context_text(account_id) or not isinstance(proof, RefreshTokenProof):
             return InvalidCredentials()

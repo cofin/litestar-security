@@ -63,7 +63,16 @@ class PolicyCompiler(Generic[UserT]):
     )
 
     def compile(self, policy: AuthenticationPolicy, *, csrf_required: bool | None = None) -> SecurityRuntimePlan:
-        """Return the identity-stable plan for a normalized policy."""
+        """Return the identity-stable plan for a normalized policy.
+
+        Args:
+            policy: The policy to compile.
+            csrf_required: Override CSRF coverage, or ``None`` to derive it.
+
+        Returns:
+            The compiled plan. Equal policies share one object, so route lookup
+            can compare plans by identity.
+        """
         key = (policy, csrf_required)
         if cached := self._cache.get(key):
             return cached
@@ -132,7 +141,18 @@ class OpenAPISchemeSet:
 
     @classmethod
     def from_registry(cls, registry: AuthenticationRegistry[object]) -> "OpenAPISchemeSet":
-        """Compile documentable schemes from one authentication registry."""
+        """Compile documentable schemes from one authentication registry.
+
+        Args:
+            registry: The compiled authentication registry.
+
+        Returns:
+            The schemes indexed by mechanism and deduplicated by scheme name.
+
+        Raises:
+            ImproperlyConfiguredException: If a mechanism declares no scheme, or
+                two mechanisms declare conflicting definitions under one name.
+        """
         by_mechanism: dict[str, tuple[str, SecurityScheme]] = {}
         unique_schemes: dict[str, SecurityScheme] = {}
         for mechanism_name in registry.mechanism_names:
@@ -152,7 +172,19 @@ class OpenAPISchemeSet:
         return cls(by_mechanism=MappingProxyType(by_mechanism), unique_schemes=MappingProxyType(unique_schemes))
 
     def project(self, plan: SecurityRuntimePlan) -> list[SecurityRequirement]:
-        """Project one runtime plan into native OpenAPI requirements."""
+        """Project one runtime plan into native OpenAPI requirements.
+
+        Args:
+            plan: The compiled runtime plan.
+
+        Returns:
+            The security requirements for the operation. An empty requirement
+            represents anonymous access.
+
+        Raises:
+            ImproperlyConfiguredException: If a scheme is given scopes it cannot
+                express, or one requirement assigns conflicting scopes to a scheme.
+        """
         if not plan.authenticate:
             return [{}]
         projection: list[SecurityRequirement] = []
@@ -175,7 +207,20 @@ class OpenAPISchemeSet:
 
 
 def prepare_openapi_config(config: OpenAPIConfig, schemes: OpenAPISchemeSet) -> OpenAPIConfig:
-    """Copy an OpenAPI config with a separate native scheme contribution."""
+    """Copy an OpenAPI config with a separate native scheme contribution.
+
+    Args:
+        config: The application's OpenAPI configuration.
+        schemes: The schemes compiled from the authentication registry.
+
+    Returns:
+        The same object when nothing needs adding, otherwise a copy carrying the
+        contributed schemes in their own components entry.
+
+    Raises:
+        ImproperlyConfiguredException: If the application already declares a
+            scheme of the same name with a different definition.
+    """
     components = config.components if isinstance(config.components, list) else [config.components]
     contribution: dict[str, SecurityScheme | Reference] = dict(schemes.unique_schemes)
     for existing_components in components:
@@ -236,7 +281,16 @@ class RouteCompiler(Generic[UserT]):
         )
 
     def receive_route(self, route: BaseRoute) -> None:
-        """Compile and attach runtime plans for one registered native route."""
+        """Compile and attach runtime plans for one registered native route.
+
+        Args:
+            route: The route to compile.
+
+        Raises:
+            ImproperlyConfiguredException: If the route declares invalid policy
+                metadata, competes with a native security declaration, or requires
+                CSRF coverage the application has not configured.
+        """
         if isinstance(route, HTTPRoute):
             for route_handler in route.route_handlers:
                 self._compile_http_handler(route, route_handler)

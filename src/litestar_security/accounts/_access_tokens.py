@@ -108,7 +108,21 @@ class LocalAccessTokenIssuer(Generic[UserT]):
     async def issue(
         self, account: LocalAccount[UserT], *, scopes: "AbstractSet[str]" = frozenset(), now: datetime | None = None
     ) -> LocalAccessToken | InvalidCredentials | VerificationUnavailable:
-        """Issue one short-lived epoch-bound token without serializing application data."""
+        """Issue one short-lived epoch-bound token without serializing application data.
+
+        The token carries only server-owned claims. Application user data stays
+        out of it, so a leaked token reveals nothing beyond the account binding.
+
+        Args:
+            account: The authenticated account to issue for.
+            scopes: The scopes to record on the token.
+            now: Override the clock, for tests and replayable issuance.
+
+        Returns:
+            The signed token and its lifetime, ``InvalidCredentials`` when the
+            account may not be issued for, or ``VerificationUnavailable`` when
+            signing or an epoch read failed.
+        """
         account_value: object = account
         if (
             not isinstance(account_value, LocalAccount)  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
@@ -172,7 +186,15 @@ class LocalBearerIdentityResolver(Generic[UserT]):
         object.__setattr__(self, "_epochs", SecurityEpochValidator(store=cast("SecurityEpochStore", accounts_value)))
 
     async def resolve(self, claims: JWTClaims) -> Principal[UserT] | InvalidCredentials | VerificationUnavailable:
-        """Return a principal only for an active account at the exact current epoch."""
+        """Return a principal only for an active account at the exact current epoch.
+
+        Args:
+            claims: The verified claims from the local bearer token.
+
+        Returns:
+            The principal, ``InvalidCredentials`` when the account is inactive or
+            the epoch has moved on, or ``VerificationUnavailable`` when a lookup failed.
+        """
         epoch = claims.raw.get("se")
         if not valid_security_epoch(epoch):
             return InvalidCredentials()

@@ -127,7 +127,19 @@ class RefreshReceiptSealer:
         object.__setattr__(self, "_keys", MappingProxyType({key.key_id: key for key in keys}))
 
     def seal(self, response: RefreshTokenResponse, context: RefreshReceiptContext, *, expires_at: datetime) -> bytes:
-        """Seal one exact response and authenticate all replay decision fields."""
+        """Seal one exact response and authenticate all replay decision fields.
+
+        The replay decision fields are authenticated as associated data, so a
+        receipt cannot be moved to a different family or token.
+
+        Args:
+            response: The token pair to seal.
+            context: The family, token, and idempotency binding to authenticate.
+            expires_at: When the receipt stops being replayable.
+
+        Returns:
+            The sealed receipt bytes for the store to keep with the family.
+        """
         expiry = _receipt_expiry(expires_at)
         nonce = self.entropy(_RECEIPT_NONCE_BYTES)
         if nonce.__class__ is not bytes or len(nonce) != _RECEIPT_NONCE_BYTES:
@@ -157,7 +169,17 @@ class RefreshReceiptSealer:
     def unseal(  # noqa: PLR0911 - each malformed receipt boundary fails closed explicitly
         self, sealed_receipt: bytes, context: RefreshReceiptContext, *, now: datetime
     ) -> RefreshTokenResponse | InvalidCredentials:
-        """Recover one response only while its bound receipt and key remain valid."""
+        """Recover one response only while its bound receipt and key remain valid.
+
+        Args:
+            sealed_receipt: The stored receipt bytes.
+            context: The binding the receipt must authenticate against.
+            now: The timestamp to evaluate the receipt window against.
+
+        Returns:
+            The original token pair, or ``InvalidCredentials`` when the receipt is
+            expired, bound elsewhere, or sealed under a key no longer retained.
+        """
         try:
             current = aware_utc_time(now)
         except (AttributeError, ValueError):

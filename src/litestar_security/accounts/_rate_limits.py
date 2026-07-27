@@ -207,7 +207,18 @@ class RateLimiter(Protocol):
     """
 
     async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
-        """Consume one attempt's cost and report whether it may proceed."""
+        """Consume one attempt's cost and report whether it may proceed.
+
+        Args:
+            request: The operation, buckets, and cost to charge.
+
+        Returns:
+            The decision, carrying ``retry_after`` seconds when it denies.
+
+        Raises:
+            Exception: Any failure signals an outage. The caller fails closed and
+                answers ``503`` rather than letting the limit lapse.
+        """
         ...  # pragma: no cover
 
 
@@ -216,7 +227,14 @@ class UnlimitedRateLimiter:
     """Allow every attempt, for deployments that limit at the edge instead."""
 
     async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
-        """Allow one attempt without consuming any budget."""
+        """Allow one attempt without consuming any budget.
+
+        Args:
+            request: Ignored; nothing is counted.
+
+        Returns:
+            An allowing decision.
+        """
         del request
         return RateLimitDecision(allowed=True)
 
@@ -268,7 +286,15 @@ class StoreRateLimiter:
         self.policies = MappingProxyType(policies)
 
     def bind(self, store: Store) -> None:
-        """Attach the store resolved from the application registry at startup."""
+        """Attach the store resolved from the application registry at startup.
+
+        Args:
+            store: The store to count in. Point its registered name at a shared
+                backend to make counting correct across worker processes.
+
+        Raises:
+            ImproperlyConfiguredException: If the value is not a Litestar store.
+        """
         store_value: object = store
         if not isinstance(store_value, Store):  # pyright: ignore[reportUnnecessaryIsInstance] - runtime port
             msg = "Rate limit store must be a Litestar Store"
@@ -276,7 +302,23 @@ class StoreRateLimiter:
         self.store = store
 
     async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
-        """Consume one attempt from every configured bucket for the operation."""
+        """Consume one attempt from every configured bucket for the operation.
+
+        Counting is a read-modify-write cycle, because the native store contract
+        exposes no compare-and-increment, so concurrent attempts can undercount
+        slightly.
+
+        Args:
+            request: The operation, buckets, and cost to charge.
+
+        Returns:
+            The decision. An operation absent from the policy mapping is allowed.
+            When several buckets are exhausted, the longest wait is reported.
+
+        Raises:
+            RuntimeError: If the store has not been resolved, or a stored counter
+                cannot be read as an integer.
+        """
         policy = self.policies.get(request.operation)
         if policy is None:
             return RateLimitDecision(allowed=True)
@@ -361,7 +403,19 @@ class RateLimitGuard:
     async def check(
         self, operation: str, *, client_key: str | None = None, identifier: str | None = None
     ) -> "RateLimited | VerificationUnavailable | None":
-        """Consume one attempt, returning ``None`` when the caller may proceed."""
+        """Consume one attempt, returning ``None`` when the caller may proceed.
+
+        Args:
+            operation: The rate-limited operation name.
+            client_key: The caller identity for the client bucket, or ``None`` to skip it.
+            identifier: The submitted account identifier for the subject bucket, or
+                ``None`` to skip it. It is digested before it reaches the limiter.
+
+        Returns:
+            ``None`` when the attempt may proceed, ``RateLimited`` when the budget
+            is spent, or ``VerificationUnavailable`` when the limiter failed. A
+            limiter outage fails closed, so it can never silently remove the limit.
+        """
         try:
             request = RateLimitRequest(
                 operation=operation,
@@ -381,7 +435,15 @@ class RateLimitGuard:
         return RateLimited(retry_after=decision.retry_after)
 
     def subject_digest(self, identifier: str) -> str:
-        """Derive the stable peppered bucket digest for one normalized identifier."""
+        """Derive the stable peppered bucket digest for one normalized identifier.
+
+        Args:
+            identifier: The normalized account identifier.
+
+        Returns:
+            The hex digest used as a bucket key, so a limiter backend never stores
+            identifiers.
+        """
         return hmac_digest(self.pepper, _SUBJECT_DIGEST_LABEL + identifier.encode("utf-8"), sha256).hex()
 
     async def _emit_denial(self, operation: str) -> None:

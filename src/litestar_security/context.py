@@ -60,15 +60,36 @@ class SessionHandle(Protocol):
         ...  # pragma: no cover
 
     def get(self, key: str, default: object = None) -> object:
-        """Read a session value."""
+        """Read a session value.
+
+        Args:
+            key: The session key to read.
+            default: The value to return when the key is absent.
+
+        Returns:
+            The stored value, or ``default``.
+        """
         ...  # pragma: no cover
 
     def set(self, key: str, value: object) -> None:
-        """Store a session value."""
+        """Store a session value.
+
+        Args:
+            key: The session key to write.
+            value: The value to store.
+        """
         ...  # pragma: no cover
 
     def pop(self, key: str, default: object = None) -> object:
-        """Remove and return a session value."""
+        """Remove and return a session value.
+
+        Args:
+            key: The session key to remove.
+            default: The value to return when the key is absent.
+
+        Returns:
+            The removed value, or ``default``.
+        """
         ...  # pragma: no cover
 
     def clear(self) -> None:
@@ -104,15 +125,36 @@ class LitestarSessionHandle:
         return session
 
     def get(self, key: str, default: object = None) -> object:
-        """Read the current native session mapping."""
+        """Read the current native session mapping.
+
+        Args:
+            key: The session key to read.
+            default: The value to return when the key is absent.
+
+        Returns:
+            The stored value, or ``default``.
+        """
         return self._session().get(key, default)
 
     def set(self, key: str, value: object) -> None:
-        """Store a value when the native session can persist."""
+        """Store a value when the native session can persist.
+
+        Args:
+            key: The session key to write.
+            value: The value to store.
+        """
         self._writable_session()[key] = value
 
     def pop(self, key: str, default: object = None) -> object:
-        """Remove a value when the native session can persist."""
+        """Remove a value when the native session can persist.
+
+        Args:
+            key: The session key to remove.
+            default: The value to return when the key is absent.
+
+        Returns:
+            The removed value, or ``default``.
+        """
         return self._writable_session().pop(key, default)
 
     def clear(self) -> None:
@@ -135,17 +177,41 @@ class NullSessionHandle:
         return False
 
     def get(self, key: str, default: object = None) -> object:
-        """Return the caller's default."""
+        """Return the caller's default.
+
+        Args:
+            key: The session key to read.
+            default: The value to return when the key is absent.
+
+        Returns:
+            The stored value, or ``default``.
+        """
         del key
         return default
 
     def set(self, key: str, value: object) -> None:
-        """Reject writes when session storage is unavailable."""
+        """Reject writes when session storage is unavailable.
+
+        Args:
+            key: Ignored; no session is attached.
+            value: Ignored; no session is attached.
+
+        Raises:
+            SessionUnavailableError: Always, because no session is attached.
+        """
         del key, value
         raise SessionUnavailableError
 
     def pop(self, key: str, default: object = None) -> object:
-        """Return the caller's default without retaining state."""
+        """Return the caller's default without retaining state.
+
+        Args:
+            key: The session key to remove.
+            default: The value to return when the key is absent.
+
+        Returns:
+            The removed value, or ``default``.
+        """
         del key
         return default
 
@@ -175,7 +241,11 @@ class Principal(Generic[UserT]):
 
     @classmethod
     def anonymous(cls) -> "Principal[UserT]":
-        """Create an anonymous principal."""
+        """Create an anonymous principal.
+
+        Returns:
+            A principal with no identity, used before authentication runs.
+        """
         return cls(id=None)
 
     @property
@@ -189,7 +259,16 @@ class Principal(Generic[UserT]):
         return self.user is not None
 
     def require_user(self) -> UserT:
-        """Return the application user or fail without revealing actor state."""
+        """Return the application user or fail without revealing actor state.
+
+        Returns:
+            The attached application user.
+
+        Raises:
+            NotAuthorizedException: If no user is attached. The message never
+                distinguishes an anonymous caller from an authenticated one whose
+                user could not be loaded.
+        """
         if self.user is None:
             raise NotAuthorizedException(detail="Authentication required")
         return self.user

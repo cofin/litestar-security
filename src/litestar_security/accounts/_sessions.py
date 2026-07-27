@@ -334,37 +334,116 @@ class SessionRegistry(Protocol):
     """Atomic authenticated-session inventory and revocation boundary."""
 
     async def create(self, command: CreateSessionCommand, *, event: "SecurityEvent") -> SessionRecord:
-        """Create a registry record with its durable event."""
+        """Create a registry record with its durable event.
+
+        Args:
+            command: The session identifier, account binding, epoch, and lifetime to store.
+            event: The audit event to commit with the record. Rejecting it must
+                fail the creation.
+
+        Returns:
+            The stored record.
+        """
         ...  # pragma: no cover
 
     async def get(self, session_id: str) -> SessionRecord | None:
-        """Load one current session record."""
+        """Load one current session record.
+
+        Args:
+            session_id: The session to load.
+
+        Returns:
+            The record, or ``None`` when the session is absent, expired, or revoked.
+        """
         ...  # pragma: no cover
 
     async def list_for_account(self, account_id: str) -> "Sequence[SessionRecord]":
-        """List safe session metadata for one account."""
+        """List safe session metadata for one account.
+
+        Args:
+            account_id: The account whose sessions to list.
+
+        Returns:
+            The account's active session records, which may be empty.
+        """
         ...  # pragma: no cover
 
     async def touch(self, session_id: str, *, now: "datetime") -> SessionRecord | None:
-        """Apply the implementation's bounded last-seen write policy."""
+        """Apply the implementation's bounded last-seen write policy.
+
+        Called on every authenticated request, so throttling the write is the
+        implementation's decision rather than the caller's.
+
+        Args:
+            session_id: The session that was just used.
+            now: The observation timestamp.
+
+        Returns:
+            The current record, or ``None`` when the session is no longer valid.
+        """
         ...  # pragma: no cover
 
     async def revoke_session_for_account(self, account_id: str, session_id: str, *, event: "SecurityEvent") -> bool:
-        """Revoke one session only when atomically owned by the account."""
+        """Revoke one session only when atomically owned by the account.
+
+        Check ownership inside this operation. A caller must not be able to
+        revoke another account's session by naming its identifier.
+
+        Args:
+            account_id: The authenticated caller's account.
+            session_id: The session to revoke.
+            event: The audit event to commit with the revocation. Rejecting it
+                must fail the revocation.
+
+        Returns:
+            ``True`` when the caller owned an active session that was revoked.
+        """
         ...  # pragma: no cover
 
     async def revoke_sessions_for_account(self, account_id: str, *, event: "SecurityEvent") -> int:
-        """Revoke every authenticated session for an account."""
+        """Revoke every authenticated session for an account.
+
+        Args:
+            account_id: The account whose sessions to revoke.
+            event: The audit event to commit with the revocations. Rejecting it
+                must fail them.
+
+        Returns:
+            The number of active sessions revoked.
+        """
         ...  # pragma: no cover
 
     async def revoke_other_sessions(self, account_id: str, session_id: str, *, event: "SecurityEvent") -> int:
-        """Revoke all account sessions except the named current session."""
+        """Revoke all account sessions except the named current session.
+
+        Args:
+            account_id: The account whose sessions to revoke.
+            session_id: The one session to keep, normally the caller's own.
+            event: The audit event to commit with the revocations. Rejecting it
+                must fail them.
+
+        Returns:
+            The number of other active sessions revoked.
+        """
         ...  # pragma: no cover
 
     async def rebind(
         self, prior_session_id: str, command: CreateSessionCommand, *, event: "SecurityEvent"
     ) -> SessionRecord | None:
-        """Revoke a prior record and create its replacement atomically."""
+        """Revoke a prior record and create its replacement atomically.
+
+        Both halves commit together. A window in which neither or both sessions
+        are valid is what session fixation exploits.
+
+        Args:
+            prior_session_id: The session being replaced.
+            command: The replacement session to create.
+            event: The audit event to commit with the rebind. Rejecting it must
+                fail the rebind.
+
+        Returns:
+            The replacement record, or ``None`` when the prior session was already gone.
+        """
         ...  # pragma: no cover
 
 
@@ -373,11 +452,25 @@ class NativeSessionStore(SessionRegistry, Protocol[UserT]):
     """Combined account, epoch, and session capabilities for native authentication."""
 
     async def get_by_id(self, account_id: str) -> "LocalAccount[UserT] | None":
-        """Load one local account projection."""
+        """Load one local account projection.
+
+        Args:
+            account_id: The account named by the session.
+
+        Returns:
+            The account projection, or ``None`` when the account no longer exists.
+        """
         ...  # pragma: no cover
 
     async def current_epoch(self, account_id: str) -> int | None:
-        """Load the authoritative account security epoch."""
+        """Load the authoritative account security epoch.
+
+        Args:
+            account_id: The account whose epoch to read.
+
+        Returns:
+            The current epoch, or ``None`` when the account does not exist.
+        """
         ...  # pragma: no cover
 
 
@@ -410,7 +503,16 @@ class NativeSessionAuth(Generic[UserT]):
     def extract(
         self, connection: ASGIConnection[Any, Any, Any, Any]
     ) -> NoCredentials | PresentedCredential["_SessionCredential"] | InvalidCredentials:
-        """Extract the native authentication payload and independent binding proof once."""
+        """Extract the native authentication payload and independent binding proof once.
+
+        Args:
+            connection: The incoming connection.
+
+        Returns:
+            The presented session credential, ``NoCredentials`` when the connection
+            carries no session, or ``InvalidCredentials`` when what it carries is
+            malformed.
+        """
         session = self._session_mapping(connection.scope)
         payload = session.get(_SESSION_AUTHENTICATION_KEY) if session is not None else None
         raw_binding = connection.cookies.get(self.binding.cookie_name)
@@ -426,7 +528,16 @@ class NativeSessionAuth(Generic[UserT]):
     async def authenticate(
         self, credential: "_SessionCredential", connection: ASGIConnection[Any, Any, Any, Any]
     ) -> Authenticated["LocalAccount[UserT]"] | InvalidCredentials | VerificationUnavailable:
-        """Verify registry, binding, account, and exact epoch state."""
+        """Verify registry, binding, account, and exact epoch state.
+
+        Args:
+            credential: The session identifier and binding proof taken from the connection.
+            connection: The incoming connection.
+
+        Returns:
+            The authenticated account, ``InvalidCredentials`` when any check fails,
+            or ``VerificationUnavailable`` when a dependency failed.
+        """
         if credential.__class__ is not _SessionCredential:
             self._clear_local_state(connection.scope)
             return InvalidCredentials()
@@ -466,7 +577,14 @@ class NativeSessionAuth(Generic[UserT]):
         )
 
     async def resolve(self, claims: "LocalAccount[UserT]") -> Principal[UserT]:
-        """Resolve an already validated local account without another store call."""
+        """Resolve an already validated local account without another store call.
+
+        Args:
+            claims: The account projection produced by authentication.
+
+        Returns:
+            The principal for the request.
+        """
         return Principal(id=claims.account_id, display_name=claims.display_name, user=claims.user)
 
     async def establish(
@@ -477,7 +595,21 @@ class NativeSessionAuth(Generic[UserT]):
         display_metadata: Mapping[str, str] = _EMPTY_DISPLAY_METADATA,
         now: datetime | None = None,
     ) -> SessionAuthentication | VerificationUnavailable:
-        """Create or atomically rebind authenticated state and reveal one binding cookie."""
+        """Create or atomically rebind authenticated state and reveal one binding cookie.
+
+        A caller that already holds a session gets a new identifier rather than
+        keeping the one it arrived with, which is what defeats session fixation.
+
+        Args:
+            connection: The connection whose session state to write.
+            account: The authenticated account to bind the session to.
+            display_metadata: Application-supplied fields to show in the session list.
+            now: Override the clock, for tests and replayable establishment.
+
+        Returns:
+            The established session and its reveal-once binding token, or
+            ``VerificationUnavailable`` when a dependency failed.
+        """
         session = self._writable_http_session(connection.scope)
         if session is None or not self._valid_login_account(account):
             return VerificationUnavailable()
@@ -529,7 +661,16 @@ class NativeSessionAuth(Generic[UserT]):
     async def logout(
         self, connection: ASGIConnection[Any, Any, Any, Any], *, now: datetime | None = None
     ) -> bool | VerificationUnavailable:
-        """Clear local browser state and atomically revoke the current account-owned record."""
+        """Clear local browser state and atomically revoke the current account-owned record.
+
+        Args:
+            connection: The connection whose session state to clear.
+            now: Override the clock, for tests and replayable logout.
+
+        Returns:
+            Whether an active session was revoked, or ``VerificationUnavailable``
+            when a dependency failed.
+        """
         session = self._writable_http_session(connection.scope)
         if session is None:
             return VerificationUnavailable()
@@ -562,7 +703,19 @@ class NativeSessionAuth(Generic[UserT]):
         *,
         now: datetime | None = None,
     ) -> bool | VerificationUnavailable:
-        """Atomically revoke one caller-owned session and clear it when current."""
+        """Atomically revoke one caller-owned session and clear it when current.
+
+        Args:
+            connection: The connection whose session state to clear if it is the target.
+            account_id: The authenticated caller's account.
+            session_id: The session to revoke.
+            now: Override the clock, for tests and replayable revocation.
+
+        Returns:
+            Whether an active session was revoked, or ``VerificationUnavailable``
+            when a dependency failed. A session owned by another account is
+            reported as not revoked rather than as a distinct failure.
+        """
         session = self._writable_http_session(connection.scope)
         if session is None:
             return VerificationUnavailable()
@@ -590,7 +743,15 @@ class NativeSessionAuth(Generic[UserT]):
     async def list_sessions(
         self, account_id: str, *, current_session_id: str | None = None
     ) -> tuple[SessionSummary, ...]:
-        """Return only safe account-session inventory projections."""
+        """Return only safe account-session inventory projections.
+
+        Args:
+            account_id: The account whose sessions to list.
+            current_session_id: The caller's own session, flagged as current in the result.
+
+        Returns:
+            Summaries carrying no binding material, filtered to the named account.
+        """
         if not strict_text(account_id):
             return ()
         records = await self.accounts.list_for_account(account_id)
@@ -608,7 +769,15 @@ class NativeSessionAuth(Generic[UserT]):
         )
 
     def current_authentication(self, connection: ASGIConnection[Any, Any, Any, Any]) -> SessionAuthentication | None:
-        """Return the strictly decoded current local-session projection."""
+        """Return the strictly decoded current local-session projection.
+
+        Args:
+            connection: The connection to read session state from.
+
+        Returns:
+            The current session projection, or ``None`` when the connection carries
+            no session or a malformed one.
+        """
         session = self._session_mapping(connection.scope)
         return self._decode_authentication(session.get(_SESSION_AUTHENTICATION_KEY)) if session is not None else None
 
@@ -619,7 +788,21 @@ class NativeSessionAuth(Generic[UserT]):
         *,
         now: datetime | None = None,
     ) -> SessionRebindPlan | VerificationUnavailable:
-        """Prepare reveal-once browser material without mutating registry or session state."""
+        """Prepare reveal-once browser material without mutating registry or session state.
+
+        Preparation is deliberately separate from activation: the replacement
+        session must not exist until the password mutation it accompanies has
+        committed.
+
+        Args:
+            connection: The connection whose session is being replaced.
+            account: The account the replacement session will bind to.
+            now: Override the clock, for tests and replayable preparation.
+
+        Returns:
+            The plan to hand to :meth:`activate_password_rebind`, or
+            ``VerificationUnavailable`` when the caller has no usable session.
+        """
         session = self._writable_http_session(connection.scope)
         current = self.current_authentication(connection)
         if (
@@ -653,7 +836,16 @@ class NativeSessionAuth(Generic[UserT]):
     async def activate_password_rebind(
         self, connection: ASGIConnection[Any, Any, Any, Any], plan: SessionRebindPlan, security_epoch: int
     ) -> bool:
-        """Activate only a replacement record already accepted by the atomic password mutation."""
+        """Activate only a replacement record already accepted by the atomic password mutation.
+
+        Args:
+            connection: The connection whose session state to rewrite.
+            plan: The plan returned by :meth:`prepare_password_rebind`.
+            security_epoch: The epoch the password mutation committed at.
+
+        Returns:
+            ``True`` when the replacement session became the connection's session.
+        """
         session = self._writable_http_session(connection.scope)
         if session is None or plan.__class__ is not SessionRebindPlan or not valid_security_epoch(security_epoch):
             self._clear_local_state(connection.scope)

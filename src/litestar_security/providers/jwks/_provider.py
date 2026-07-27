@@ -59,11 +59,31 @@ class JWKSProvider(Protocol):
     """Select remote verification keys without exposing cache internals."""
 
     async def select_key(self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime) -> JWKSSelection:
-        """Return a key or one stable authentication outcome."""
+        """Return a key or one stable authentication outcome.
+
+        Args:
+            issuer: The token issuer, matched against configured trust anchors.
+            jwks_uri: The key set to select from.
+            kid: The exact key identifier named by the token header.
+            algorithm: The algorithm named by the token header.
+            now: The selection timestamp, used for freshness decisions.
+
+        Returns:
+            The verification key, ``InvalidCredentials`` when no configured key
+            matches, or ``VerificationUnavailable`` when keys could not be reached.
+        """
         ...  # pragma: no cover
 
     async def warmup(self, *, now: datetime) -> VerificationUnavailable | None:
-        """Warm configured entries when enabled."""
+        """Warm configured entries when enabled.
+
+        Args:
+            now: The warm-up timestamp.
+
+        Returns:
+            ``None`` when warming succeeded or is disabled, otherwise
+            ``VerificationUnavailable``.
+        """
         ...  # pragma: no cover
 
     async def aclose(self) -> None:
@@ -120,7 +140,23 @@ class CachedJWKSProvider:
         self._closed = False
 
     async def select_key(self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime) -> JWKSSelection:
-        """Read a fresh snapshot directly or refresh one exact entry."""
+        """Read a fresh snapshot directly or refresh one exact entry.
+
+        A fresh snapshot is read without locking. Only a refresh coordinates, and
+        the provider collapses concurrent refreshes of one entry into a single
+        fetch.
+
+        Args:
+            issuer: The token issuer, matched against configured trust anchors.
+            jwks_uri: The key set to select from.
+            kid: The exact key identifier named by the token header.
+            algorithm: The algorithm named by the token header.
+            now: The selection timestamp, used for freshness decisions.
+
+        Returns:
+            The verification key, ``InvalidCredentials`` when no configured key
+            matches, or ``VerificationUnavailable`` when keys could not be reached.
+        """
         if self._closed:
             return _UNAVAILABLE
         normalized_now = aware_utc(now)
@@ -161,7 +197,15 @@ class CachedJWKSProvider:
         return selection_result
 
     async def warmup(self, *, now: datetime) -> VerificationUnavailable | None:
-        """Eagerly populate configured entries when startup warming is enabled."""
+        """Eagerly populate configured entries when startup warming is enabled.
+
+        Args:
+            now: The warm-up timestamp.
+
+        Returns:
+            ``None`` when warming succeeded or is disabled, otherwise
+            ``VerificationUnavailable``.
+        """
         if self._closed:
             return _UNAVAILABLE
         normalized_now = aware_utc(now)

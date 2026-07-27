@@ -78,7 +78,15 @@ class PendingTokenIssue:
         _validate_pending_token_issue(self)
 
     def bind(self, account_id: str, *, security_epoch: int | None = None) -> "TokenIssue":
-        """Bind this material to an application-allocated account ID."""
+        """Bind this material to an application-allocated account ID.
+
+        Args:
+            account_id: The identifier the application allocated for the new account.
+            security_epoch: The epoch the account was created at.
+
+        Returns:
+            The bound issue, ready for the atomic store call.
+        """
         return TokenIssue(
             token_id=self.token_id,
             digest=self.digest,
@@ -179,7 +187,15 @@ class PurposeTokenDelivery:
         raise TypeError(message)
 
     def bind(self, account_id: str, *, security_epoch: int | None = None) -> tuple[TokenIssue, NotificationCommand]:
-        """Bind the storage material while preserving the codec-created notification."""
+        """Bind the storage material while preserving the codec-created notification.
+
+        Args:
+            account_id: The identifier the application allocated for the new account.
+            security_epoch: The epoch the account was created at.
+
+        Returns:
+            The bound issue and the notification to deliver.
+        """
         return self.issue.bind(account_id, security_epoch=security_epoch), self.notification
 
 
@@ -220,7 +236,23 @@ class PurposeTokenCodec:
         return_url: str | None = None,
         maximum_attempts: int = _DEFAULT_TOKEN_ATTEMPTS,
     ) -> PurposeTokenDelivery:
-        """Create one digest-bound issue whose raw token exists only in its notification."""
+        """Create one digest-bound issue whose raw token exists only in its notification.
+
+        The raw token appears only in the notification. Storage keeps its digest,
+        so a leaked database cannot be replayed against these routes.
+
+        Args:
+            purpose: The closed namespace the token is bound to.
+            now: The issue timestamp.
+            lifetime: How long the token stays valid.
+            template: The notification template the application renders.
+            destination: Where the notification is delivered.
+            return_url: An approved callback to embed, or ``None``.
+            maximum_attempts: How many consume attempts the store should allow.
+
+        Returns:
+            The storage issue paired with the notification carrying the raw token.
+        """
         if purpose.__class__ is not TokenPurpose:
             msg = "Purpose token namespace must be a TokenPurpose"
             raise ValueError(msg)
@@ -253,7 +285,18 @@ class PurposeTokenCodec:
         return delivery
 
     def proof(self, token: object, *, expected_purpose: TokenPurpose) -> PurposeTokenProof | None:
-        """Return a storage proof after one HMAC work class, or generic invalid."""
+        """Return a storage proof after one HMAC work class, or generic invalid.
+
+        Every rejection costs the same HMAC work, so timing does not separate a
+        malformed token from a well-formed one for another purpose.
+
+        Args:
+            token: The presented token, of any type.
+            expected_purpose: The namespace the token must be bound to.
+
+        Returns:
+            The storage-facing proof, or ``None`` for any rejection.
+        """
         if expected_purpose.__class__ is not TokenPurpose:
             msg = "Expected purpose token namespace must be a TokenPurpose"
             raise ValueError(msg)

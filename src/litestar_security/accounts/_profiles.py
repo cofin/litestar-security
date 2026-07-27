@@ -107,7 +107,15 @@ class LocalAuthSecrets:
 
     @classmethod
     def session(cls, *, purpose_token_pepper: bytes) -> "LocalAuthSecrets":
-        """Build the stable secrets required by session-only local authentication."""
+        """Build the stable secrets required by session-only local authentication.
+
+        Args:
+            purpose_token_pepper: The pepper for verification, recovery, and
+                invitation token digests. At least 32 bytes.
+
+        Returns:
+            Secrets sufficient for a session profile.
+        """
         return cls(purpose_tokens=PurposeTokenCodec(purpose_token_pepper))
 
     @classmethod
@@ -120,7 +128,20 @@ class LocalAuthSecrets:
         active_receipt_key: bytes,
         retained_receipt_keys: tuple[RefreshReceiptKey, ...] = (),
     ) -> "LocalAuthSecrets":
-        """Build the stable secrets required by token or hybrid local authentication."""
+        """Build the stable secrets required by token or hybrid local authentication.
+
+        Args:
+            purpose_token_pepper: The pepper for verification, recovery, and
+                invitation token digests. At least 32 bytes.
+            refresh_token_pepper: The pepper for refresh-token digests. At least 32 bytes.
+            active_receipt_key_id: The identifier of the key sealing new receipts.
+            active_receipt_key: The key sealing new receipts.
+            retained_receipt_keys: Superseded keys kept so receipts sealed before a
+                rotation can still be opened.
+
+        Returns:
+            Secrets sufficient for a token or hybrid profile.
+        """
         return cls(
             purpose_tokens=PurposeTokenCodec(purpose_token_pepper),
             refresh_codec=RefreshTokenCodec(refresh_token_pepper),
@@ -176,6 +197,12 @@ class LocalAuthServices(Generic[UserT]):
 
         A failing extractor degrades to identifier-only limiting rather than
         failing the request, because the subject bucket still bounds the attempt.
+
+        Args:
+            connection: The connection to derive the bucket key from.
+
+        Returns:
+            The client bucket key, or ``None`` to skip client-keyed limiting.
         """
         try:
             return self.client_key(connection)
@@ -186,7 +213,16 @@ class LocalAuthServices(Generic[UserT]):
     async def session_login(
         self, request: Request[Any, Any, Any], credentials: LocalCredentials
     ) -> LocalAccountResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
-        """Authenticate a password and establish fixation-safe session state."""
+        """Authenticate a password and establish fixation-safe session state.
+
+        Args:
+            request: The request whose session state to write.
+            credentials: The submitted identifier and password.
+
+        Returns:
+            The signed-in account projection, or a sanitized outcome. A rejected
+            identifier and a rejected password produce the same outcome.
+        """
         account = await self.password_login.authenticate(
             credentials.identifier, credentials.password, client_key=self.client_key_for(request)
         )
@@ -203,7 +239,16 @@ class LocalAuthServices(Generic[UserT]):
     async def token_login(
         self, request: Request[Any, Any, Any], credentials: LocalCredentials
     ) -> RefreshTokenResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
-        """Authenticate a password and issue one access/refresh pair."""
+        """Authenticate a password and issue one access/refresh pair.
+
+        Args:
+            request: The request, read only for the rate-limit client key.
+            credentials: The submitted identifier and password.
+
+        Returns:
+            The issued token pair, or a sanitized outcome. A rejected identifier
+            and a rejected password produce the same outcome.
+        """
         account = await self.password_login.authenticate(
             credentials.identifier, credentials.password, client_key=self.client_key_for(request)
         )
@@ -223,7 +268,18 @@ class LocalAuthServices(Generic[UserT]):
         | InvalidLifecycleRequest
         | VerificationUnavailable
     ):
-        """Change a password and atomically prepare the current session rebind."""
+        """Change a password and atomically prepare the current session rebind.
+
+        Args:
+            request: The request whose session is rebound on success.
+            account_id: The authenticated caller's account.
+            data: The current password, the replacement, and the compromise flag.
+
+        Returns:
+            The change outcome, a policy violation, or a sanitized failure. On
+            success the caller keeps a usable session and every other credential
+            for the account is invalidated.
+        """
         session_auth = self.session_auth
         if session_auth is None:
             return VerificationUnavailable()
@@ -271,7 +327,17 @@ class LocalAuthServices(Generic[UserT]):
         | InvalidLifecycleRequest
         | VerificationUnavailable
     ):
-        """Change a bearer-authenticated password and revoke local transports."""
+        """Change a bearer-authenticated password and revoke local transports.
+
+        Args:
+            account_id: The account named by the caller's access token.
+            data: The current password, the replacement, and the compromise flag.
+
+        Returns:
+            The change outcome, a policy violation, or a sanitized failure. On
+            success every credential for the account, including the caller's, is
+            invalidated.
+        """
         proof = await self.password_reauthentication.verify(account_id, data.current_password)
         if not isinstance(proof, PasswordReauthenticationProof):
             return proof
@@ -427,6 +493,10 @@ class LocalAuthConfig(Generic[UserT]):
 
         Called once during startup. A limiter the application supplied owns its own
         backend and is left alone.
+
+        Args:
+            stores: The application store registry. An unregistered limiter store
+                name yields Litestar's in-memory default.
         """
         limiter = self.rate_limiter
         if isinstance(limiter, StoreRateLimiter) and limiter.store is None:
@@ -577,7 +647,12 @@ class LocalAuthConfig(Generic[UserT]):
         )
 
     def build_route_handlers(self) -> tuple[Router, ...]:
-        """Build and cache the standard end-user route tree."""
+        """Build and cache the standard end-user route tree.
+
+        Returns:
+            One router, or an empty tuple when ``register_routes`` is ``False``.
+            The same object is returned on every call.
+        """
         if not self.register_routes:
             return ()
         if self._route_handlers is None:
@@ -587,7 +662,11 @@ class LocalAuthConfig(Generic[UserT]):
         return cast("tuple[Router, ...]", self._route_handlers)
 
     def openapi_tags(self) -> "tuple[Tag, ...]":
-        """Return the documented tag groups the generated routes are filed under."""
+        """Return the documented tag groups the generated routes are filed under.
+
+        Returns:
+            The tags, or an empty tuple when no routes are generated.
+        """
         if not self.register_routes:
             return ()
         from litestar_security.accounts._controllers import LOCAL_AUTH_TAGS  # noqa: PLC0415 - cycle break
@@ -615,7 +694,31 @@ class LocalAuth:
         events: SecurityEventSink | None = None,
         client_key: Callable[[ASGIConnection[Any, Any, Any, Any]], str | None] = trusted_client_key,
     ) -> "LocalAuthConfig[UserT]":
-        """Select native-session local authentication."""
+        """Select native-session local authentication.
+
+        Args:
+            csrf: Native CSRF configuration, or a named external integration.
+            binding: The proof-of-possession cookie configuration bound to each session.
+            session_auth: Override the bundled native session backend.
+            accounts: The application store implementing every local account capability.
+            secrets: The stable cryptographic inputs for purpose tokens and, in
+                token profiles, refresh tokens and receipts.
+            password_hasher: Override the Argon2 hasher, for example to tune its
+                cost parameters.
+            registration: The self-service registration policy. Registration is
+                disabled unless a policy allows it.
+            route_prefix: The path the generated route tree is mounted under.
+            register_routes: Build the services without generating routes when
+                ``False``, so an application can mount its own controllers.
+            rate_limiter: Override the bundled store-backed limiter, or pass
+                ``UnlimitedRateLimiter`` to limit only at the edge.
+            events: The sink offered every observational security event.
+            client_key: Derive the rate-limit client bucket from a connection. The
+                default trusts only the peer address, never a forwarding header.
+
+        Returns:
+            A configuration that generates session routes only.
+        """
         return LocalAuthConfig(
             mode=LocalAuthMode.SESSION,
             accounts=accounts,
@@ -650,7 +753,32 @@ class LocalAuth:
         events: SecurityEventSink | None = None,
         client_key: Callable[[ASGIConnection[Any, Any, Any, Any]], str | None] = trusted_client_key,
     ) -> "LocalAuthConfig[UserT]":
-        """Select bearer access/refresh-token local authentication."""
+        """Select bearer access/refresh-token local authentication.
+
+        Args:
+            key_ring: The signing keys and issuer for local access tokens.
+            token_audience: The audience claim local access tokens are issued for.
+            token_client_id: The client identifier recorded on issued tokens.
+            access_token_lifetime: How long an issued access token stays valid.
+            accounts: The application store implementing every local account capability.
+            secrets: The stable cryptographic inputs for purpose tokens and, in
+                token profiles, refresh tokens and receipts.
+            password_hasher: Override the Argon2 hasher, for example to tune its
+                cost parameters.
+            registration: The self-service registration policy. Registration is
+                disabled unless a policy allows it.
+            route_prefix: The path the generated route tree is mounted under.
+            register_routes: Build the services without generating routes when
+                ``False``, so an application can mount its own controllers.
+            rate_limiter: Override the bundled store-backed limiter, or pass
+                ``UnlimitedRateLimiter`` to limit only at the edge.
+            events: The sink offered every observational security event.
+            client_key: Derive the rate-limit client bucket from a connection. The
+                default trusts only the peer address, never a forwarding header.
+
+        Returns:
+            A configuration that generates token routes only.
+        """
         return LocalAuthConfig(
             mode=LocalAuthMode.TOKENS,
             accounts=accounts,
@@ -693,7 +821,37 @@ class LocalAuth:
         events: SecurityEventSink | None = None,
         client_key: Callable[[ASGIConnection[Any, Any, Any, Any]], str | None] = trusted_client_key,
     ) -> "LocalAuthConfig[UserT]":
-        """Select distinct native-session and bearer-token local transports."""
+        """Select distinct native-session and bearer-token local transports.
+
+        Args:
+            csrf: Native CSRF configuration, or a named external integration.
+            binding: The proof-of-possession cookie configuration bound to each session.
+            session_auth: Override the bundled native session backend.
+            key_ring: The signing keys and issuer for local access tokens.
+            token_audience: The audience claim local access tokens are issued for.
+            token_client_id: The client identifier recorded on issued tokens.
+            access_token_lifetime: How long an issued access token stays valid.
+            accounts: The application store implementing every local account capability.
+            secrets: The stable cryptographic inputs for purpose tokens and, in
+                token profiles, refresh tokens and receipts.
+            password_hasher: Override the Argon2 hasher, for example to tune its
+                cost parameters.
+            registration: The self-service registration policy. Registration is
+                disabled unless a policy allows it.
+            route_prefix: The path the generated route tree is mounted under.
+            register_routes: Build the services without generating routes when
+                ``False``, so an application can mount its own controllers.
+            rate_limiter: Override the bundled store-backed limiter, or pass
+                ``UnlimitedRateLimiter`` to limit only at the edge.
+            events: The sink offered every observational security event.
+            client_key: Derive the rate-limit client bucket from a connection. The
+                default trusts only the peer address, never a forwarding header.
+
+        Returns:
+            A configuration that generates both session and token routes. Password
+            change is served on ``/password/change`` for sessions and
+            ``/token/password/change`` for bearers.
+        """
         return LocalAuthConfig(
             mode=LocalAuthMode.HYBRID,
             accounts=accounts,

@@ -242,7 +242,15 @@ class SecurityEventSink(Protocol):
     """Application-owned sink for secret-free, non-transactional decisions."""
 
     async def emit(self, event: SecurityEvent) -> None:
-        """Record one sanitized security decision."""
+        """Record one sanitized security decision.
+
+        Events are secret-free by construction, so a sink may forward them
+        anywhere. Observational events cannot change the decision they describe;
+        raising from one is logged and dropped.
+
+        Args:
+            event: The event to record.
+        """
         ...  # pragma: no cover
 
 
@@ -251,7 +259,11 @@ class NoOpSecurityEventSink:
     """Accept security events when an application has not configured a sink."""
 
     async def emit(self, event: SecurityEvent) -> None:
-        """Discard one already-sanitized observational event."""
+        """Discard one already-sanitized observational event.
+
+        Args:
+            event: The event to discard.
+        """
         del event
 
 
@@ -358,7 +370,17 @@ class PasswordResetResult:
 
 
 def normalize_identifier(value: str) -> str:
-    """Apply the default compatibility, whitespace, and case normalization."""
+    """Apply the default compatibility, whitespace, and case normalization.
+
+    Args:
+        value: The submitted identifier.
+
+    Returns:
+        The NFKC-normalized, stripped, case-folded identifier.
+
+    Raises:
+        ValueError: If the value is not text.
+    """
     if value.__class__ is not str:
         msg = "Identifier normalization requires text"
         raise ValueError(msg)

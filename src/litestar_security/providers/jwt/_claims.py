@@ -224,7 +224,26 @@ def build_access_token_claims(  # noqa: PLR0913 - explicit configuration surface
     jti: str | None = None,
     not_before: datetime | None = None,
 ) -> Mapping[str, JSONValue]:
-    """Build minimal deterministic RFC 9068-style local access-token claims."""
+    """Build minimal deterministic RFC 9068-style local access-token claims.
+
+    The claim set is server-owned and minimal. Application data stays out of it,
+    so a leaked token reveals nothing beyond the account binding.
+
+    Args:
+        issuer: The ``iss`` claim.
+        audience: The ``aud`` claim.
+        subject: The ``sub`` claim, normally the account identifier.
+        client_id: The ``client_id`` claim.
+        security_epoch: The epoch the token is bound to, so a later change invalidates it.
+        now: The issue timestamp.
+        lifetime: How long the token stays valid.
+        scopes: The scopes to record.
+        jti: The token identifier, or ``None`` to omit it.
+        not_before: When the token becomes valid, or ``None`` to omit it.
+
+    Returns:
+        The claim set, ready to sign.
+    """
     issuer = strict_identifier_value(issuer)
     audience = strict_identifier_value(audience)
     subject = strict_identifier_value(subject)

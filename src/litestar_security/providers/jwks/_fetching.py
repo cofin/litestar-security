@@ -76,7 +76,17 @@ class AsyncJWKSFetcher(Protocol):
     """Async transport boundary for one exact configured JWKS source."""
 
     async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
-        """Return one bounded response without following redirects."""
+        """Return one bounded response without following redirects.
+
+        Redirects are not followed, because a redirect could move key fetching to
+        a host the operator never configured.
+
+        Args:
+            request: The configured source, conditional headers, and byte ceiling.
+
+        Returns:
+            The bounded response.
+        """
         ...  # pragma: no cover
 
 
@@ -85,7 +95,17 @@ class SyncJWKSFetcher(Protocol):
     """Blocking transport boundary normalized once into a bounded worker."""
 
     def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
-        """Return one bounded response without following redirects."""
+        """Return one bounded response without following redirects.
+
+        Redirects are not followed, because a redirect could move key fetching to
+        a host the operator never configured.
+
+        Args:
+            request: The configured source, conditional headers, and byte ceiling.
+
+        Returns:
+            The bounded response.
+        """
         ...  # pragma: no cover
 
 
@@ -96,7 +116,18 @@ def normalize_fetcher(
     timeout: float = _DEFAULT_WORKER_TIMEOUT,
     metrics: SecurityMetrics | None = None,
 ) -> AsyncJWKSFetcher:
-    """Normalize one custom transport once at configuration time."""
+    """Normalize one custom transport once at configuration time.
+
+    Args:
+        fetcher: The application's transport, blocking or async.
+        limiter: The capacity limiter a blocking transport runs inside.
+        timeout: How long one blocking fetch may occupy a worker.
+        metrics: The sink offered fetch measurements.
+
+    Returns:
+        An async fetcher. A blocking transport is wrapped so it never occupies
+        the event loop.
+    """
     fetch_method = getattr(fetcher, "fetch", None)
     if not callable(fetch_method):
         raise_config("JWKS fetcher must define fetch")

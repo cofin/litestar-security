@@ -68,7 +68,11 @@ class SigningKey:
         object.__setattr__(self, "_verification_key", verification_key)
 
     def as_verification_key(self) -> "VerificationKey":
-        """Return the active key's verification-only representation."""
+        """Return the active key's verification-only representation.
+
+        Returns:
+            The public half, carrying no private key material.
+        """
         return VerificationKey(
             key_id=self.key_id, algorithm=self.algorithm, key=self._verification_key, public_jwk=self.public_jwk
         )

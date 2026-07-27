@@ -94,7 +94,16 @@ class PasswordPolicy:
             raise ImproperlyConfiguredException(detail=msg)
 
     def check(self, password: str, *, normalized_identifier: str | None = None) -> PasswordPolicyResult:
-        """Evaluate one candidate without retaining or rendering it."""
+        """Evaluate one candidate without retaining or rendering it.
+
+        Args:
+            password: The candidate password.
+            normalized_identifier: The account identifier, rejected as a password.
+
+        Returns:
+            The violations found, which is empty when the candidate is acceptable.
+            Violation names never echo the candidate back.
+        """
         if password.__class__ is not str:
             return PasswordPolicyResult(frozenset({PasswordPolicyViolation.INVALID_TEXT}))
         violations = _password_shape_violations(password, self)
@@ -148,11 +157,30 @@ class PasswordHasher(Protocol):
     """Async password hashing boundary suitable for custom implementations."""
 
     async def hash(self, password: str) -> str:
-        """Return one encoded password hash."""
+        """Return one encoded password hash.
+
+        Args:
+            password: The password to hash.
+
+        Returns:
+            The encoded hash, including its algorithm parameters and salt.
+        """
         ...  # pragma: no cover
 
     async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationResult:
-        """Verify one password with constant work for absent credentials."""
+        """Verify one password with constant work for absent credentials.
+
+        Spend the same work on a malformed or absent hash as on a real one, so
+        response timing does not reveal whether an account exists.
+
+        Args:
+            encoded_hash: The stored hash to verify against.
+            password: The submitted password.
+
+        Returns:
+            The sanitized decision, carrying a replacement hash only when the
+            password matched and the stored parameters are outdated.
+        """
         ...  # pragma: no cover
 
 
@@ -196,7 +224,20 @@ class Argon2PasswordHasher:
         hash_len: int = 32,
         worker_limits: WorkerLimits | None = None,
     ) -> "Argon2PasswordHasher":
-        """Create a strengthened policy while generating its dummy in a worker."""
+        """Create a strengthened policy while generating its dummy in a worker.
+
+        Args:
+            memory_cost: Argon2 memory cost in kibibytes.
+            time_cost: Argon2 iteration count.
+            parallelism: Argon2 lanes.
+            salt_len: Salt length in bytes.
+            hash_len: Derived hash length in bytes.
+            worker_limits: The shared crypto-worker budget hashing runs inside.
+
+        Returns:
+            A hasher whose dummy hash matches its own parameters, so verifying an
+            absent account costs the same as verifying a real one.
+        """
         workers = WorkerLimits() if worker_limits is None else worker_limits
         _validate_argon2_configuration(
             memory_cost=memory_cost,
@@ -229,12 +270,28 @@ class Argon2PasswordHasher:
         )
 
     async def hash(self, password: str) -> str:
-        """Hash one bounded UTF-8 password in the dedicated crypto worker."""
+        """Hash one bounded UTF-8 password in the dedicated crypto worker.
+
+        Args:
+            password: The password to hash.
+
+        Returns:
+            The encoded Argon2id hash.
+        """
         password_bytes = _password_bytes(password)
         return await self._hash_bytes(password_bytes)
 
     async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationResult:
-        """Verify with equal Argon2 work for absent, mismatched, and malformed hashes."""
+        """Verify with equal Argon2 work for absent, mismatched, and malformed hashes.
+
+        Args:
+            encoded_hash: The stored hash to verify against.
+            password: The submitted password.
+
+        Returns:
+            The sanitized decision, carrying a rehash only when the password
+            matched and the stored parameters are weaker than the current ones.
+        """
         password_input = _password_verification_input(password)
         if isinstance(password_input, PasswordVerificationResult):
             return password_input

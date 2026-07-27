@@ -163,7 +163,18 @@ class OIDCDiscoveryClient:
         )
 
     async def discover(self, issuer: str) -> OIDCMetadata:
-        """Fetch and validate metadata for one configured issuer."""
+        """Fetch and validate metadata for one configured issuer.
+
+        Args:
+            issuer: The issuer to discover, matched against configured trust anchors.
+
+        Returns:
+            The validated metadata.
+
+        Raises:
+            OIDCDiscoveryError: If the client is closed, the issuer is not a
+                configured anchor, or the document fails validation.
+        """
         if self._closed:
             raise_discovery("OIDC discovery client is closed")
         try:

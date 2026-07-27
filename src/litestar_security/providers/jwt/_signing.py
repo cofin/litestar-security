@@ -23,7 +23,15 @@ class TokenSigner(Protocol):
     """Sign caller-built local claims without owning application persistence."""
 
     async def sign(self, claims: Mapping[str, JSONValue], *, now: datetime) -> str:
-        """Return one compact signed access token."""
+        """Return one compact signed access token.
+
+        Args:
+            claims: The claim set to sign.
+            now: The signing timestamp.
+
+        Returns:
+            The compact JWT.
+        """
         ...  # pragma: no cover
 
 
@@ -32,7 +40,15 @@ class SyncTokenSigner(Protocol):
     """Blocking custom signer normalized once into the crypto worker."""
 
     def sign(self, claims: Mapping[str, JSONValue], *, now: datetime) -> str:
-        """Return one compact signed access token."""
+        """Return one compact signed access token.
+
+        Args:
+            claims: The claim set to sign.
+            now: The signing timestamp.
+
+        Returns:
+            The compact JWT.
+        """
         ...  # pragma: no cover
 
 
@@ -42,7 +58,16 @@ def normalize_signer(
     worker_limits: WorkerLimits | None = None,
     metrics: SecurityMetrics | None = None,
 ) -> TokenSigner:
-    """Normalize one custom signer once without blocking the event loop."""
+    """Normalize one custom signer once without blocking the event loop.
+
+    Args:
+        signer: The application's signer, blocking or async.
+        worker_limits: The shared crypto-worker budget a blocking signer runs inside.
+        metrics: The sink offered signing measurements.
+
+    Returns:
+        An async signer.
+    """
     sign_method = getattr(signer, "sign", None)
     if not callable(sign_method):
         raise_config("Token signer must define sign")

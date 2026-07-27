@@ -115,7 +115,22 @@ class RegistrationService(Generic[UserT]):
         | RateLimited
         | VerificationUnavailable
     ):
-        """Hash and pass one complete candidate registration to the atomic store."""
+        """Hash and pass one complete candidate registration to the atomic store.
+
+        Args:
+            identifier: The submitted identifier, normalized before use.
+            password: The submitted password, checked against policy first.
+            display_name: An optional human-readable name to store.
+            invitation_token: The invitation to consume under an invite-only
+                policy, or ``None`` under a public one.
+            now: Override the clock, for tests and replayable registration.
+            client_key: The caller identity for the rate-limit client bucket.
+
+        Returns:
+            The same acceptance whether or not the identifier was taken, a policy
+            violation, an invitation rejection, ``RateLimited`` when the budget is
+            spent, or ``VerificationUnavailable`` when a dependency failed.
+        """
         try:
             occurred_at = aware_utc_time(self.clock() if now is None else now)
             normalized_identifier = self.normalizer(identifier)
@@ -223,6 +238,15 @@ class VerificationTokenService(Generic[UserT]):
         Denial is safe to report here even though every other outcome is
         deliberately identical: the budget is consumed for unknown identifiers
         too, so being limited reveals nothing about whether an account exists.
+
+        Args:
+            identifier: The submitted identifier.
+            now: Override the clock, for tests and replayable requests.
+            client_key: The caller identity for the rate-limit client bucket.
+
+        Returns:
+            The same acceptance for every identifier, ``RateLimited`` when the
+            budget is spent, or ``VerificationUnavailable`` when a dependency failed.
         """
         limited = await self._check_rate_limit(identifier, client_key)
         if limited is not None:
@@ -258,7 +282,16 @@ class VerificationTokenService(Generic[UserT]):
         return LifecycleAccepted()
 
     async def consume(self, token: object, *, now: datetime | None = None) -> ConsumeResult | VerificationUnavailable:
-        """Verify purpose locally and delegate single-use mutation atomically."""
+        """Verify purpose locally and delegate single-use mutation atomically.
+
+        Args:
+            token: The presented verification token.
+            now: Override the clock, for tests and replayable consumption.
+
+        Returns:
+            The consumption outcome, or ``VerificationUnavailable`` when the store
+            failed. An expired, used, and unknown token are not distinguished.
+        """
         proof = self.tokens.proof(token, expected_purpose=TokenPurpose.VERIFICATION)
         if proof is None:
             return ConsumeResult(ConsumeStatus.INVALID)

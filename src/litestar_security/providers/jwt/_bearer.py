@@ -99,7 +99,19 @@ def extend_composite_bearer(
     slot: BearerTokenSlot,
     resolver: IdentityResolver[JWTClaims, UserT],
 ) -> AuthenticationMechanism[str, JWTClaims, UserT]:
-    """Extend one library-built composite while preserving one physical bearer owner."""
+    """Extend one library-built composite while preserving one physical bearer owner.
+
+    Only one mechanism may own the physical bearer slot, so an additional issuer
+    extends the existing composite rather than registering a second reader.
+
+    Args:
+        mechanism: The mechanism built by :class:`CompositeBearerConfig`.
+        slot: The additional trust slot to accept.
+        resolver: The identity resolver for that slot's claims.
+
+    Returns:
+        The extended mechanism, still owning exactly one bearer slot.
+    """
     authenticator = mechanism.authenticator
     if not isinstance(authenticator, _CompositeBearerAuthenticator):
         raise_config("Existing bearer mechanism was not built by CompositeBearerConfig")
@@ -160,7 +172,17 @@ class CompositeBearerConfig:
         participates_by_default: bool = True,
         scheme_name: str | None = None,
     ) -> tuple[CredentialSlot[str], AuthenticationMechanism[str, JWTClaims, UserT]]:
-        """Build one physical slot and one native bearer mechanism."""
+        """Build one physical slot and one native bearer mechanism.
+
+        Args:
+            resolver: The identity resolver for verified claims.
+            clock: The clock used for expiry decisions.
+            participates_by_default: Include this mechanism in implicit ``required()``.
+            scheme_name: The OpenAPI security scheme name to publish under.
+
+        Returns:
+            The credential slot paired with its mechanism.
+        """
         if not callable(clock):
             raise_config("Composite bearer clock must be callable")
         credential_slot = _BearerCredentialSlot(maximum_token_bytes=self.maximum_token_bytes)

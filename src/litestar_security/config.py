@@ -31,11 +31,22 @@ class SecurityMetrics(Protocol):
     """Vendor-neutral synchronous metric sink that must not block."""
 
     def increment(self, name: str, *, attributes: Mapping[str, str] = _EMPTY_METRIC_ATTRIBUTES) -> None:
-        """Increment one security counter."""
+        """Increment one security counter.
+
+        Args:
+            name: The counter name.
+            attributes: Dimensions to record with the increment.
+        """
         ...  # pragma: no cover
 
     def observe(self, name: str, value: float, *, attributes: Mapping[str, str] = _EMPTY_METRIC_ATTRIBUTES) -> None:
-        """Observe one security duration or size."""
+        """Observe one security duration or size.
+
+        Args:
+            name: The measurement name.
+            value: The observed value.
+            attributes: Dimensions to record with the observation.
+        """
         ...  # pragma: no cover
 
 
@@ -44,10 +55,21 @@ class NoOpSecurityMetrics:
     """Default metric sink with zero vendor or runtime overhead."""
 
     def increment(self, name: str, *, attributes: Mapping[str, str] = _EMPTY_METRIC_ATTRIBUTES) -> None:
-        """Ignore a counter."""
+        """Ignore a counter.
+
+        Args:
+            name: The counter name.
+            attributes: Dimensions to record with the increment.
+        """
 
     def observe(self, name: str, value: float, *, attributes: Mapping[str, str] = _EMPTY_METRIC_ATTRIBUTES) -> None:
-        """Ignore an observation."""
+        """Ignore an observation.
+
+        Args:
+            name: The measurement name.
+            value: The observed value.
+            attributes: Dimensions to record with the observation.
+        """
 
 
 @dataclass(frozen=True, slots=True)

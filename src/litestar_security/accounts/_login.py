@@ -88,7 +88,18 @@ class PasswordReauthenticationService:
     async def verify(  # noqa: PLR0911 - preserve explicit sanitized outcomes at each security boundary
         self, account_id: str, password: str, *, now: datetime | None = None
     ) -> PasswordReauthenticationProof | InvalidCredentials | VerificationUnavailable:
-        """Return an account- and epoch-bound proof or one sanitized domain outcome."""
+        """Return an account- and epoch-bound proof or one sanitized domain outcome.
+
+        Args:
+            account_id: The authenticated caller's account.
+            password: The current password to re-verify.
+            now: Override the clock, for tests and replayable proofs.
+
+        Returns:
+            Short-lived evidence bound to the account and its epoch,
+            ``InvalidCredentials`` when the password is rejected, or
+            ``VerificationUnavailable`` when a dependency failed.
+        """
         account_value: object = account_id
         if account_value.__class__ is not str or not (normalized_account_id := account_id.strip()):
             return InvalidCredentials()
@@ -211,7 +222,24 @@ class PasswordLoginService(Generic[UserT]):
     async def authenticate(
         self, identifier: str, password: str, *, now: datetime | None = None, client_key: str | None = None
     ) -> LocalAccount[UserT] | RateLimited | InvalidCredentials | VerificationUnavailable:
-        """Return an active verified account after limiting, lookup, and constant password work."""
+        """Return an active verified account after limiting, lookup, and constant password work.
+
+        The limiter runs before the store lookup and before Argon2, so a denied
+        attempt costs neither. An absent account still pays for a hash, so a
+        missing account is not measurably faster to probe than a present one.
+
+        Args:
+            identifier: The submitted identifier, normalized before lookup.
+            password: The submitted password.
+            now: Override the clock, for tests and replayable authentication.
+            client_key: The caller identity for the rate-limit client bucket.
+
+        Returns:
+            The authenticated account, ``RateLimited`` when the budget is spent,
+            ``InvalidCredentials`` when the credentials are rejected, or
+            ``VerificationUnavailable`` when a dependency failed. A rejected
+            identifier and a rejected password are not distinguished.
+        """
         normalized_identifier = ""
         lookup_unavailable = False
         try:

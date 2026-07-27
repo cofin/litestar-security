@@ -131,17 +131,37 @@ class RouteSecurityDeclaration:
 
 
 def mechanism(name: str, *scopes: str) -> "MechanismRequirement":
-    """Select a named mechanism and its requested OAuth or OIDC scopes."""
+    """Select a named mechanism and its requested OAuth or OIDC scopes.
+
+    Args:
+        name: The configured mechanism name.
+        *scopes: Provider scopes to request. Only OAuth and OIDC schemes accept these.
+
+    Returns:
+        The requirement, for use inside a policy expression.
+    """
     return MechanismRequirement(name=name, scopes=tuple(scopes))
 
 
 def public() -> AuthenticationPolicy:
-    """Deliberately skip request credential verification."""
+    """Deliberately skip request credential verification.
+
+    Returns:
+        A policy that authenticates nothing, leaving the anonymous principal in place.
+    """
     return PublicPolicy()
 
 
 def required(*requirements: "str | MechanismRequirement") -> AuthenticationPolicy:
-    """Require an explicit OR expression or the implicit default participants."""
+    """Require an explicit OR expression or the implicit default participants.
+
+    Args:
+        *requirements: Mechanism names or requirements. Passing none requires any
+            mechanism that participates by default.
+
+    Returns:
+        A policy that rejects a request presenting no accepted credential.
+    """
     if requirements:
         return any_of(*requirements)
     return MechanismPolicy(operator="any_of", requirements=(), implicit=True)
@@ -151,7 +171,20 @@ _AUTHENTICATION_REQUIRED = "Authentication required"
 
 
 def optional(policy: AuthenticationPolicy) -> AuthenticationPolicy:
-    """Allow anonymous access only when a positive policy sees no credential."""
+    """Allow anonymous access only when a positive policy sees no credential.
+
+    A presented-but-invalid credential is still rejected: optional means the
+    route tolerates absence, not failure.
+
+    Args:
+        policy: The positive policy to apply when a credential is present.
+
+    Returns:
+        A policy that admits anonymous callers alongside authenticated ones.
+
+    Raises:
+        ImproperlyConfiguredException: If the policy is public or already optional.
+    """
     _validate_policy(policy)
     if isinstance(policy, OptionalPolicy):
         message = "Authentication policy cannot contain a nested optional expression"
@@ -181,17 +214,43 @@ class MechanismRequirement:
 
 
 def any_of(*requirements: str | MechanismRequirement) -> AuthenticationPolicy:
-    """Require at least one named authentication mechanism."""
+    """Require at least one named authentication mechanism.
+
+    Args:
+        *requirements: Mechanism names or requirements to accept.
+
+    Returns:
+        A policy satisfied by any one participant.
+    """
     return MechanismPolicy(operator="any_of", requirements=_normalize_requirements(requirements, "any_of"))
 
 
 def all_of(*requirements: str | MechanismRequirement) -> AuthenticationPolicy:
-    """Require every named authentication mechanism."""
+    """Require every named authentication mechanism.
+
+    Args:
+        *requirements: Mechanism names or requirements that must all succeed.
+
+    Returns:
+        A policy satisfied only when every participant succeeds.
+    """
     return MechanismPolicy(operator="all_of", requirements=_normalize_requirements(requirements, "all_of"))
 
 
 def at_least(count: int, *requirements: str | MechanismRequirement) -> AuthenticationPolicy:
-    """Require a positive threshold of named authentication mechanisms."""
+    """Require a positive threshold of named authentication mechanisms.
+
+    Args:
+        count: How many participants must succeed.
+        *requirements: Mechanism names or requirements to draw from.
+
+    Returns:
+        A policy satisfied by any ``count`` of the participants.
+
+    Raises:
+        ImproperlyConfiguredException: If the count is not between one and the
+            number of participants.
+    """
     normalized = _normalize_requirements(requirements, "at_least")
     if not 1 <= count <= len(normalized):
         message = f"at_least count must be between 1 and {len(normalized)}"
@@ -215,6 +274,14 @@ def security(policy: AuthenticationPolicy, *, csrf_required: bool | None = None)
 
     Spread the result into a route handler decorator, or pass it as ``opt`` on
     an application, router, or controller ownership layer.
+
+    Args:
+        policy: The policy to attach.
+        csrf_required: Override CSRF coverage. Leave unset to derive it from
+            whether the policy admits a session-capable mechanism.
+
+    Returns:
+        Metadata to spread into a handler decorator or pass as ``opt``.
     """
     _validate_policy(policy)
     return cast(
@@ -275,7 +342,17 @@ class CredentialSlot(Protocol[_CredentialT]):
     name: str
 
     def extract(self, connection: ASGIConnection[Any, Any, Any, Any]) -> CredentialExtraction[_CredentialT]:
-        """Extract at most one credential from the connection."""
+        """Extract at most one credential from the connection.
+
+        Runs synchronously on every request, so it must not block or perform I/O.
+
+        Args:
+            connection: The incoming connection.
+
+        Returns:
+            The presented credential, ``NoCredentials`` when this slot is empty,
+            or ``InvalidCredentials`` when the slot is malformed.
+        """
         ...  # pragma: no cover
 
 
@@ -289,7 +366,16 @@ class RequestAuthenticator(Protocol[_RequestCredentialT_contra, _ClaimsT]):
     async def authenticate(
         self, credential: _RequestCredentialT_contra, connection: ASGIConnection[Any, Any, Any, Any]
     ) -> AuthenticationOutcome[_ClaimsT]:
-        """Verify a credential without resolving application identity."""
+        """Verify a credential without resolving application identity.
+
+        Args:
+            credential: The value produced by this authenticator's slot.
+            connection: The incoming connection.
+
+        Returns:
+            The verified claims, or a sanitized outcome describing why
+            verification did not succeed.
+        """
         ...  # pragma: no cover
 
 
@@ -297,7 +383,15 @@ class IdentityResolver(Protocol[_ResolverClaimsT_contra, _UserT]):
     """Async mapping from verified claims to one application principal."""
 
     async def resolve(self, claims: _ResolverClaimsT_contra) -> IdentityResolution[_UserT]:
-        """Resolve verified claims into a principal or sanitized resolution outcome."""
+        """Resolve verified claims into a principal or sanitized resolution outcome.
+
+        Args:
+            claims: The claims produced by the paired authenticator.
+
+        Returns:
+            The application principal, or a sanitized outcome when the claims
+            cannot be mapped to one.
+        """
         ...  # pragma: no cover
 
 
@@ -406,19 +500,44 @@ class AuthenticationRegistry(Generic[UserT]):
         return self._default_mechanism_names
 
     def get_slot(self, name: str) -> CredentialSlot[Any]:
-        """Look up an owned slot by normalized name."""
+        """Look up an owned slot by normalized name.
+
+        Args:
+            name: The slot name, normalized before lookup.
+
+        Returns:
+            The registered slot.
+        """
         return self._slots_by_name[_normalize_name(name, "Credential slot name")]
 
     def get_mechanism(self, name: str) -> AuthenticationMechanism[Any, Any, UserT]:
-        """Look up a mechanism by normalized name."""
+        """Look up a mechanism by normalized name.
+
+        Args:
+            name: The mechanism name, normalized before lookup.
+
+        Returns:
+            The registered mechanism.
+        """
         return self._mechanisms_by_name[_normalize_name(name, "Authentication mechanism name")]
 
     def get_mechanism_for_slot(self, name: str) -> AuthenticationMechanism[Any, Any, UserT] | None:
-        """Look up the sole mechanism owning a normalized slot."""
+        """Look up the sole mechanism owning a normalized slot.
+
+        Args:
+            name: The slot name, normalized before lookup.
+
+        Returns:
+            The owning mechanism, or ``None`` when no mechanism claims the slot.
+        """
         return self._mechanisms_by_slot.get(_normalize_name(name, "Credential slot name"))
 
     def evaluator(self) -> "_AuthenticationEvaluator[UserT]":
-        """Create a stateless evaluator bound to this compiled registry."""
+        """Create a stateless evaluator bound to this compiled registry.
+
+        Returns:
+            An evaluator that may be shared across requests.
+        """
         return _AuthenticationEvaluator(self)
 
 

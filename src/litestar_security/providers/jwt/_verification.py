@@ -75,7 +75,16 @@ class JWTVerifier(Protocol, Generic[ClaimsT]):
         ...  # pragma: no cover
 
     async def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[ClaimsT]:
-        """Return a structured authentication outcome."""
+        """Return a structured authentication outcome.
+
+        Args:
+            token: The compact JWT to verify.
+            now: The verification timestamp, used for expiry and not-before checks.
+
+        Returns:
+            The verified claims, or a sanitized outcome. A rejected signature and
+            a rejected claim are not distinguished.
+        """
         ...  # pragma: no cover
 
 
@@ -89,7 +98,16 @@ class SyncJWTVerifier(Protocol, Generic[ClaimsT]):
         ...  # pragma: no cover
 
     def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[ClaimsT]:
-        """Return a structured authentication outcome."""
+        """Return a structured authentication outcome.
+
+        Args:
+            token: The compact JWT to verify.
+            now: The verification timestamp, used for expiry and not-before checks.
+
+        Returns:
+            The verified claims, or a sanitized outcome. A rejected signature and
+            a rejected claim are not distinguished.
+        """
         ...  # pragma: no cover
 
 
@@ -99,7 +117,16 @@ def normalize_verifier(
     worker_limits: WorkerLimits | None = None,
     metrics: SecurityMetrics | None = None,
 ) -> JWTVerifier[ClaimsT]:
-    """Normalize one custom verifier once without blocking the event loop."""
+    """Normalize one custom verifier once without blocking the event loop.
+
+    Args:
+        verifier: The application's verifier, blocking or async.
+        worker_limits: The shared crypto-worker budget a blocking verifier runs inside.
+        metrics: The sink offered verification measurements.
+
+    Returns:
+        An async verifier.
+    """
     verify_method = getattr(verifier, "verify", None)
     config = getattr(verifier, "config", None)
     if not callable(verify_method) or not isinstance(config, JWTValidationConfig):

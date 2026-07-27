@@ -141,7 +141,23 @@ class PasswordChangeService:
         | InvalidLifecycleRequest
         | VerificationUnavailable
     ):
-        """Change a password after recent proof and preserve only an explicitly rebound session."""
+        """Change a password after recent proof and preserve only an explicitly rebound session.
+
+        Args:
+            account_id: The account whose password to replace.
+            password: The replacement password, checked against policy first.
+            proof: Recent password evidence, bound to the account and its epoch.
+            normalized_identifier: The identifier, rejected as a password.
+            current_session_id: The caller's session, kept when a replacement is supplied.
+            replacement_session: The prepared rebind, so the caller keeps a usable session.
+            compromise: Revoke the caller's own session with the others instead of rebinding.
+            now: Override the clock, for tests and replayable changes.
+
+        Returns:
+            The change outcome, a policy violation, or a sanitized failure. A
+            successful change advances the security epoch, which invalidates every
+            credential issued before it.
+        """
         try:
             occurred_at = aware_utc_time(self.clock() if now is None else now)
         except (AttributeError, TypeError, ValueError):
@@ -169,7 +185,22 @@ class PasswordChangeService:
         normalized_identifier: str | None = None,
         now: datetime | None = None,
     ) -> PasswordChangeResult | PasswordPolicyResult | InvalidLifecycleRequest | VerificationUnavailable:
-        """Perform an application-authorized reset without registering an admin route."""
+        """Perform an application-authorized reset without registering an admin route.
+
+        No generated route reaches this. The library ships no administrative
+        endpoint, so an application that needs one authorizes it itself and calls
+        this directly.
+
+        Args:
+            account_id: The account whose password to replace.
+            password: The replacement password, checked against policy first.
+            expected_epoch: The epoch the caller read; a different stored epoch is a conflict.
+            normalized_identifier: The identifier, rejected as a password.
+            now: Override the clock, for tests and replayable resets.
+
+        Returns:
+            The change outcome, a policy violation, or a sanitized failure.
+        """
         try:
             occurred_at = aware_utc_time(self.clock() if now is None else now)
         except (AttributeError, TypeError, ValueError):
@@ -412,6 +443,15 @@ class RecoveryTokenService(Generic[UserT]):
         Denial is safe to report here even though every other outcome is
         deliberately identical: the budget is consumed for unknown identifiers
         too, so being limited reveals nothing about whether an account exists.
+
+        Args:
+            identifier: The submitted identifier.
+            now: Override the clock, for tests and replayable requests.
+            client_key: The caller identity for the rate-limit bucket.
+
+        Returns:
+            The same acceptance for every identifier, ``RateLimited`` when the
+            budget is spent, or ``VerificationUnavailable`` when a dependency failed.
         """
         limited = await self._check_request_rate_limit(identifier, client_key)
         if limited is not None:
@@ -454,6 +494,17 @@ class RecoveryTokenService(Generic[UserT]):
         Only the client bucket applies: the presented value is a recovery token,
         and digesting it into a bucket key would let a limiter backend become a
         record of which tokens were attempted.
+
+        Args:
+            token: The presented recovery token.
+            password: The replacement password, checked against policy first.
+            now: Override the clock, for tests and replayable resets.
+            client_key: The caller identity for the rate-limit bucket.
+
+        Returns:
+            The reset outcome, a policy violation, ``RateLimited`` when the budget
+            is spent, or ``VerificationUnavailable`` when a dependency failed. An
+            expired, used, and unknown token are not distinguished.
         """
         limited = await self._check_reset_rate_limit(client_key)
         if limited is not None:

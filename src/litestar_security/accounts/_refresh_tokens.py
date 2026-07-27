@@ -166,7 +166,12 @@ class RefreshTokenCodec:
             raise ImproperlyConfiguredException(detail=msg)
 
     def issue(self) -> RefreshTokenIssue:
-        """Create one lookup/secret pair and its storage-safe digest."""
+        """Create one lookup/secret pair and its storage-safe digest.
+
+        Returns:
+            The reveal-once token alongside the digest to store. The secret half
+            is never recoverable from what is stored.
+        """
         lookup = self.entropy(LOOKUP_BYTES)
         secret = self.entropy(SECRET_BYTES)
         if (
@@ -182,7 +187,15 @@ class RefreshTokenCodec:
         return RefreshTokenIssue(refresh_token=refresh_token, token_id=token_id, digest=self._digest(token_id, secret))
 
     def verify(self, refresh_token: str) -> RefreshTokenProof | InvalidCredentials:
-        """Parse one canonical token while keeping malformed work in the HMAC class."""
+        """Parse one canonical token while keeping malformed work in the HMAC class.
+
+        Args:
+            refresh_token: The presented opaque token.
+
+        Returns:
+            The parsed lookup and digest, or ``InvalidCredentials``. Every
+            rejection costs the same work.
+        """
         parsed = _parse_refresh_token(refresh_token)
         token_id, secret = (
             parsed
@@ -193,7 +206,17 @@ class RefreshTokenCodec:
         return RefreshTokenProof(token_id=token_id, digest=digest) if parsed is not None else InvalidCredentials()
 
     def digest_idempotency_key(self, token_id: str, value: str) -> bytes | InvalidCredentials:
-        """Hash one canonical key carrying at least 128 bits of caller entropy."""
+        """Hash one canonical key carrying at least 128 bits of caller entropy.
+
+        Args:
+            token_id: The token the key is scoped to, so a key cannot be reused
+                across tokens.
+            value: The caller's ``Idempotency-Key`` header.
+
+        Returns:
+            The digest to compare against the stored one, or ``InvalidCredentials``
+            when the key carries too little entropy to be safe.
+        """
         if (
             not valid_identifier(token_id, prefix=_REFRESH_TOKEN_PREFIX)
             or value.__class__ is not str
