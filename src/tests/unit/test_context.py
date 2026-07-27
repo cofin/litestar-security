@@ -45,6 +45,8 @@ from litestar_security.providers.jwt import LocalKeyRing
 
 _DUPLICATE_GUARD = requires_authenticated()
 _ACCOUNT_NOW = datetime(2026, 7, 27, tzinfo=timezone.utc)
+_SESSION_ID = "c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M"
+_BINDING_ID = "sb_aWlpaWlpaWlpaWlpaWlpaQ"
 _BASE_LOCAL_CAPABILITIES = {
     "compare_and_replace_password",
     "consume_and_reset",
@@ -63,8 +65,8 @@ _SESSION_CAPABILITIES = {
     "get",
     "list_for_account",
     "rebind",
-    "revoke",
     "revoke_other_sessions",
+    "revoke_session_for_account",
     "revoke_sessions_for_account",
     "touch",
 }
@@ -697,6 +699,8 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "LocalAuthMode",
         "LoginMethod",
         "LoginMethodStore",
+        "NativeSessionAuth",
+        "NativeSessionStore",
         "NoOpSecurityEventSink",
         "NotificationCommand",
         "PasswordChangeResult",
@@ -741,8 +745,10 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "SecurityEventSink",
         "SessionAuthentication",
         "SessionBindingConfig",
+        "SessionBindingProof",
         "SessionRecord",
         "SessionRegistry",
+        "SessionSummary",
         "TokenIssue",
         "TokenPurpose",
         "VerificationTokenService",
@@ -799,7 +805,7 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
         account_id=account.account_id,
         correlation=event_correlation,
     )
-    binding_digest = b"binding-secret-digest"
+    binding_digest = b"b" * 32
     token_digest = b"d" * 32
     successor_digest = b"successor-secret-digest"
     receipt = b"sealed-secret-receipt"
@@ -837,16 +843,17 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
         accounts_module.RegistrationPolicy.disabled(),
         accounts_module.SessionBindingConfig(pepper=b"p" * 32),
         accounts_module.SessionAuthentication(
-            session_id="session-1",
-            binding_id="binding-1",
+            session_id=_SESSION_ID,
+            binding_id=_BINDING_ID,
             account_id=account.account_id,
             security_epoch=1,
             authenticated_at=now,
             expires_at=now + timedelta(hours=1),
         ),
+        accounts_module.SessionBindingProof(binding_id=_BINDING_ID, digest=binding_digest),
         accounts_module.SessionRecord(
-            session_id="session-1",
-            binding_id="binding-1",
+            session_id=_SESSION_ID,
+            binding_id=_BINDING_ID,
             binding_digest=binding_digest,
             account_id=account.account_id,
             security_epoch=1,
@@ -855,13 +862,16 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
             expires_at=now + timedelta(hours=1),
         ),
         accounts_module.CreateSessionCommand(
-            session_id="session-1",
-            binding_id="binding-1",
+            session_id=_SESSION_ID,
+            binding_id=_BINDING_ID,
             binding_digest=binding_digest,
             account_id=account.account_id,
             security_epoch=1,
             created_at=now,
             expires_at=now + timedelta(hours=1),
+        ),
+        accounts_module.SessionSummary(
+            session_id=_SESSION_ID, current=True, created_at=now, last_seen_at=now, expires_at=now + timedelta(hours=1)
         ),
         accounts_module.RotateRefreshCommand(
             token_id=refresh_lookup_id,
@@ -966,9 +976,15 @@ def test_account_password_session_and_refresh_contracts_share_one_strict_epoch_d
         lambda: accounts_module.PasswordReauthenticationProof("account-1", epoch, now, now + timedelta(minutes=5)),
         lambda: accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, epoch),
         lambda: accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.RESET, "account-1", epoch),
-        lambda: accounts_module.SessionAuthentication("session-1", "binding-1", "account-1", epoch, now, now),
-        lambda: accounts_module.SessionRecord("session-1", "binding-1", b"digest", "account-1", epoch, now, now, now),
-        lambda: accounts_module.CreateSessionCommand("session-1", "binding-1", b"digest", "account-1", epoch, now, now),
+        lambda: accounts_module.SessionAuthentication(
+            _SESSION_ID, _BINDING_ID, "account-1", epoch, now, now + timedelta(hours=1)
+        ),
+        lambda: accounts_module.SessionRecord(
+            _SESSION_ID, _BINDING_ID, b"d" * 32, "account-1", epoch, now, now, now + timedelta(hours=1)
+        ),
+        lambda: accounts_module.CreateSessionCommand(
+            _SESSION_ID, _BINDING_ID, b"d" * 32, "account-1", epoch, now, now + timedelta(hours=1)
+        ),
         lambda: accounts_module.RotateRefreshCommand(
             "refresh-1", b"digest", "account-1", "family-1", epoch, "refresh-2", b"successor", now, now, b"receipt", now
         ),
@@ -1076,6 +1092,36 @@ def test_local_auth_profiles_report_only_missing_enabled_capabilities(
         operation()
 
 
+def test_local_auth_rejects_transport_inconsistent_custom_session_runtime(local_key_ring: LocalKeyRing) -> None:
+    csrf = litestar_security.ExternalCSRF("application", lambda _method, _path, _policy: True)
+    binding = accounts_module.SessionBindingConfig(pepper=b"p" * 32)
+    audience = "local-client"
+    store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES))
+    other_store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES))
+    runtime = accounts_module.NativeSessionAuth(accounts=store, binding=binding)
+    matching = accounts_module.LocalAuth.session(accounts=store, csrf=csrf, binding=binding, session_auth=runtime)
+    assert matching.session_auth is runtime
+
+    with pytest.raises(ImproperlyConfiguredException, match="Token-only"):
+        accounts_module.LocalAuthConfig(
+            mode=accounts_module.LocalAuthMode.TOKENS,
+            accounts=store,
+            registration=accounts_module.RegistrationPolicy.disabled(),
+            route_prefix="/auth",
+            key_ring=local_key_ring,
+            token_audience=audience,
+            session_auth=runtime,
+        )
+    for mismatched in (
+        accounts_module.NativeSessionAuth(accounts=other_store, binding=binding),
+        accounts_module.NativeSessionAuth(
+            accounts=store, binding=accounts_module.SessionBindingConfig(pepper=b"q" * 32)
+        ),
+    ):
+        with pytest.raises(ImproperlyConfiguredException, match="must share"):
+            accounts_module.LocalAuth.session(accounts=store, csrf=csrf, binding=binding, session_auth=mismatched)
+
+
 @pytest.mark.parametrize(
     ("field_name", "invalid_value", "match"),
     [
@@ -1129,13 +1175,159 @@ def test_local_auth_config_rejects_incomplete_transport_values(
     ("kwargs", "match"),
     [
         ({"pepper": b"short"}, "at least 32 bytes"),
-        ({"pepper": b"p" * 32, "cookie_name": ""}, "must not be blank"),
-        ({"pepper": b"p" * 32, "secure": False}, "__Host-"),
+        ({"pepper": bytearray(b"p" * 32)}, "at least 32 bytes"),
+        ({"pepper": b"p" * 32, "cookie_name": ""}, "cookie-safe"),
+        ({"pepper": b"p" * 32, "cookie_name": " binding"}, "cookie-safe"),
+        ({"pepper": b"p" * 32, "cookie_name": "bind;ing"}, "cookie-safe"),
+        ({"pepper": b"p" * 32, "secure": 1}, "Secure setting"),
+        ({"pepper": b"p" * 32, "same_site": "bogus"}, "SameSite"),
+        ({"pepper": b"p" * 32, "allow_insecure": 1}, "opt-in must be boolean"),
+        ({"pepper": b"p" * 32, "allow_insecure": True}, "requires an insecure cookie"),
+        ({"pepper": b"p" * 32, "secure": False}, "development opt-in"),
+        ({"pepper": b"p" * 32, "secure": False, "allow_insecure": True}, "__Host-"),
+        (
+            {
+                "pepper": b"p" * 32,
+                "cookie_name": "binding",
+                "secure": False,
+                "allow_insecure": True,
+                "same_site": "none",
+            },
+            "SameSite=None",
+        ),
+        ({"pepper": b"p" * 32, "path": "/nested"}, "__Host-"),
+        ({"pepper": b"p" * 32, "cookie_name": "binding", "path": "relative"}, "absolute printable"),
+        ({"pepper": b"p" * 32, "cookie_name": "binding", "path": "/bad path"}, "absolute printable"),
+        ({"pepper": b"p" * 32, "cookie_name": "binding", "domain": " "}, "domain"),
+        ({"pepper": b"p" * 32, "cookie_name": "binding", "domain": "bad domain"}, "domain"),
+        ({"pepper": b"p" * 32, "max_age": 0}, "positive integer"),
+        ({"pepper": b"p" * 32, "max_age": True}, "positive integer"),
+        ({"pepper": b"p" * 32, "touch_interval": timedelta(0)}, "touch interval"),
+        ({"pepper": b"p" * 32, "touch_interval": object()}, "touch interval"),
+        ({"pepper": b"p" * 32, "max_age": 1, "touch_interval": timedelta(seconds=2)}, "touch interval"),
+        ({"pepper": b"p" * 32, "preserve_session_keys": ["cart"]}, "immutable tuple"),
+        ({"pepper": b"p" * 32, "preserve_session_keys": ("cart", "cart")}, "unique"),
+        ({"pepper": b"p" * 32, "preserve_session_keys": ("_litestar_security",)}, "unique"),
+        ({"pepper": b"p" * 32, "preserve_session_keys": (" ",)}, "unique"),
     ],
 )
 def test_session_binding_config_rejects_unsafe_boundaries(kwargs: dict[str, object], match: str) -> None:
     with pytest.raises(ImproperlyConfiguredException, match=match):
         accounts_module.SessionBindingConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def test_session_binding_config_supports_explicit_insecure_development() -> None:
+    config = accounts_module.SessionBindingConfig(
+        pepper=b"p" * 32,
+        cookie_name="litestar-security-binding",
+        secure=False,
+        allow_insecure=True,
+        preserve_session_keys=("cart",),
+    )
+
+    assert not config.secure
+    assert config.allow_insecure
+    assert config.preserve_session_keys == ("cart",)
+
+
+@pytest.mark.parametrize(
+    ("contract", "overrides", "match"),
+    [
+        ("authentication", {"authenticated_at": _ACCOUNT_NOW.replace(tzinfo=None)}, "timezone-aware"),
+        ("authentication", {"session_id": object()}, "payload"),
+        ("authentication", {"session_id": "invalid"}, "payload"),
+        ("authentication", {"binding_id": "invalid"}, "payload"),
+        ("authentication", {"account_id": " "}, "payload"),
+        ("authentication", {"expires_at": _ACCOUNT_NOW}, "payload"),
+        ("proof", {"binding_id": "invalid"}, "proof"),
+        ("proof", {"digest": bytearray(b"d" * 32)}, "proof"),
+        ("proof", {"digest": b"short"}, "proof"),
+        ("record", {"created_at": _ACCOUNT_NOW.replace(tzinfo=None)}, "timezone-aware"),
+        ("record", {"session_id": "invalid"}, "record is invalid"),
+        ("record", {"binding_id": "invalid"}, "record is invalid"),
+        ("record", {"binding_digest": bytearray(b"d" * 32)}, "record is invalid"),
+        ("record", {"binding_digest": b"short"}, "record is invalid"),
+        ("record", {"account_id": " "}, "record is invalid"),
+        ("record", {"last_seen_at": _ACCOUNT_NOW + timedelta(hours=1)}, "record is invalid"),
+        ("record", {"display_metadata": {" ": "browser"}}, "display metadata"),
+        ("record", {"display_metadata": {str(index): "x" for index in range(33)}}, "display metadata"),
+        ("record", {"display_metadata": {"device": "x" * 251}}, "display metadata"),
+        ("record", {"display_metadata": {str(index): "x" * 200 for index in range(21)}}, "display metadata"),
+        ("create", {"created_at": _ACCOUNT_NOW.replace(tzinfo=None)}, "timezone-aware"),
+        ("create", {"session_id": "invalid"}, "creation command"),
+        ("create", {"binding_id": "invalid"}, "creation command"),
+        ("create", {"binding_digest": bytearray(b"d" * 32)}, "creation command"),
+        ("create", {"binding_digest": b"short"}, "creation command"),
+        ("create", {"account_id": " "}, "creation command"),
+        ("create", {"expires_at": _ACCOUNT_NOW}, "creation command"),
+        ("summary", {"created_at": _ACCOUNT_NOW.replace(tzinfo=None)}, "timezone-aware"),
+        ("summary", {"session_id": "invalid"}, "summary is invalid"),
+        ("summary", {"current": 1}, "summary is invalid"),
+        ("summary", {"last_seen_at": _ACCOUNT_NOW + timedelta(hours=1)}, "summary is invalid"),
+        ("summary", {"display_metadata": {"device": " "}}, "display metadata"),
+    ],
+)
+def test_native_session_contracts_reject_malformed_state(
+    contract: str, overrides: dict[str, object], match: str
+) -> None:
+    common: dict[str, object] = {
+        "session_id": _SESSION_ID,
+        "binding_id": _BINDING_ID,
+        "binding_digest": b"d" * 32,
+        "account_id": "account-1",
+        "security_epoch": 1,
+        "created_at": _ACCOUNT_NOW,
+        "last_seen_at": _ACCOUNT_NOW,
+        "authenticated_at": _ACCOUNT_NOW,
+        "expires_at": _ACCOUNT_NOW + timedelta(hours=1),
+        "current": True,
+        "digest": b"d" * 32,
+    }
+    fields_by_contract = {
+        "authentication": (
+            "session_id",
+            "binding_id",
+            "account_id",
+            "security_epoch",
+            "authenticated_at",
+            "expires_at",
+        ),
+        "proof": ("binding_id", "digest"),
+        "record": (
+            "session_id",
+            "binding_id",
+            "binding_digest",
+            "account_id",
+            "security_epoch",
+            "created_at",
+            "last_seen_at",
+            "expires_at",
+            "display_metadata",
+        ),
+        "create": (
+            "session_id",
+            "binding_id",
+            "binding_digest",
+            "account_id",
+            "security_epoch",
+            "created_at",
+            "expires_at",
+            "display_metadata",
+        ),
+        "summary": ("session_id", "current", "created_at", "last_seen_at", "expires_at", "display_metadata"),
+    }
+    factories = {
+        "authentication": accounts_module.SessionAuthentication,
+        "proof": accounts_module.SessionBindingProof,
+        "record": accounts_module.SessionRecord,
+        "create": accounts_module.CreateSessionCommand,
+        "summary": accounts_module.SessionSummary,
+    }
+    common.update(overrides)
+    values = {name: common[name] for name in fields_by_contract[contract] if name in common}
+
+    with pytest.raises(ValueError, match=match):
+        factories[contract](**values)  # type: ignore[operator]
 
 
 def test_registration_policy_requires_an_explicit_mode() -> None:

@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import gzip
+import hmac
 import json
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import FrozenInstanceError
@@ -25,10 +26,12 @@ from argon2 import extract_parameters as extract_argon2_parameters
 from argon2.exceptions import VerificationError
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from litestar.connection import ASGIConnection
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.openapi.spec import SecurityScheme
 
 import litestar_security.accounts as accounts_module
+import litestar_security.accounts.sessions as sessions_module
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -4992,6 +4995,12 @@ class _CredentialCleanup:
         del session_id, event
         return False
 
+    async def revoke_session_for_account(
+        self, account_id: str, session_id: str, *, event: accounts_module.SecurityEvent
+    ) -> bool:
+        del account_id, session_id, event
+        return False
+
     async def revoke_sessions_for_account(self, account_id: str, *, event: accounts_module.SecurityEvent) -> int:
         self.session_revocations.append((account_id, event))
         if "sessions" in self.failures:
@@ -5047,9 +5056,9 @@ def _password_proof(
 
 def _replacement_session(*, security_epoch: int = 1) -> accounts_module.CreateSessionCommand:
     return accounts_module.CreateSessionCommand(
-        session_id="session-new",
-        binding_id="binding-new",
-        binding_digest=b"binding-digest",
+        session_id="bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4",
+        binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+        binding_digest=b"b" * 32,
         account_id="account-1",
         security_epoch=security_epoch,
         created_at=_JWT_NOW,
@@ -5949,3 +5958,706 @@ def test_lifecycle_services_reject_invalid_shared_configuration(field: str, valu
 
     with pytest.raises(ImproperlyConfiguredException):
         accounts_module.VerificationTokenService(**values)  # type: ignore[arg-type]
+
+
+class _NativeSessionStore:
+    def __init__(self) -> None:
+        self.account: accounts_module.LocalAccount[object] | None = accounts_module.LocalAccount(
+            account_id="account-1",
+            normalized_identifier="user@example.com",
+            display_name="User",
+            active=True,
+            verified=True,
+            security_epoch=1,
+            user=object(),
+        )
+        self.epoch: int | None = 1
+        self.records: dict[str, accounts_module.SessionRecord] = {}
+        self.commands: list[accounts_module.CreateSessionCommand] = []
+        self.rebinds: list[tuple[str, accounts_module.CreateSessionCommand]] = []
+        self.revocations: list[tuple[str, str]] = []
+        self.touches: list[tuple[str, datetime]] = []
+        self.failures: set[str] = set()
+        self.mismatch_create = False
+
+    @staticmethod
+    def record(command: accounts_module.CreateSessionCommand) -> accounts_module.SessionRecord:
+        return accounts_module.SessionRecord(
+            session_id=command.session_id,
+            binding_id=command.binding_id,
+            binding_digest=command.binding_digest,
+            account_id=command.account_id,
+            security_epoch=command.security_epoch,
+            created_at=command.created_at,
+            last_seen_at=command.created_at,
+            expires_at=command.expires_at,
+            display_metadata=command.display_metadata,
+        )
+
+    async def create(
+        self, command: accounts_module.CreateSessionCommand, *, event: accounts_module.SecurityEvent
+    ) -> accounts_module.SessionRecord:
+        del event
+        if "create" in self.failures:
+            raise OSError
+        self.commands.append(command)
+        record = self.record(command)
+        if self.mismatch_create:
+            return accounts_module.SessionRecord(
+                session_id=record.session_id,
+                binding_id=record.binding_id,
+                binding_digest=b"x" * 32,
+                account_id=record.account_id,
+                security_epoch=record.security_epoch,
+                created_at=record.created_at,
+                last_seen_at=record.last_seen_at,
+                expires_at=record.expires_at,
+            )
+        self.records[record.session_id] = record
+        return record
+
+    async def get(self, session_id: str) -> accounts_module.SessionRecord | None:
+        if "get" in self.failures:
+            raise OSError
+        return self.records.get(session_id)
+
+    async def get_by_id(self, account_id: str) -> accounts_module.LocalAccount[object] | None:
+        if "account" in self.failures:
+            raise OSError
+        return self.account if self.account is not None and self.account.account_id == account_id else None
+
+    async def current_epoch(self, account_id: str) -> int | None:
+        if "epoch" in self.failures:
+            raise OSError
+        return self.epoch if account_id == "account-1" else None
+
+    async def list_for_account(self, account_id: str) -> list[accounts_module.SessionRecord]:
+        if "list" in self.failures:
+            raise OSError
+        return list(self.records.values()) if account_id == "account-1" else []
+
+    async def touch(self, session_id: str, *, now: datetime) -> accounts_module.SessionRecord | None:
+        if "touch" in self.failures:
+            raise OSError
+        self.touches.append((session_id, now))
+        record = self.records.get(session_id)
+        if record is None:
+            return None
+        touched = accounts_module.SessionRecord(
+            session_id=record.session_id,
+            binding_id=record.binding_id,
+            binding_digest=record.binding_digest,
+            account_id=record.account_id,
+            security_epoch=record.security_epoch,
+            created_at=record.created_at,
+            last_seen_at=now,
+            expires_at=record.expires_at,
+            display_metadata=record.display_metadata,
+        )
+        self.records[session_id] = touched
+        return touched
+
+    async def revoke_session_for_account(
+        self, account_id: str, session_id: str, *, event: accounts_module.SecurityEvent
+    ) -> bool:
+        del event
+        if "revoke" in self.failures:
+            raise OSError
+        self.revocations.append((account_id, session_id))
+        record = self.records.get(session_id)
+        if record is None or record.account_id != account_id:
+            return False
+        del self.records[session_id]
+        return True
+
+    async def revoke_sessions_for_account(self, account_id: str, *, event: accounts_module.SecurityEvent) -> int:
+        del event
+        matches = tuple(key for key, record in self.records.items() if record.account_id == account_id)
+        for key in matches:
+            del self.records[key]
+        return len(matches)
+
+    async def revoke_other_sessions(
+        self, account_id: str, session_id: str, *, event: accounts_module.SecurityEvent
+    ) -> int:
+        del event
+        matches = tuple(
+            key for key, record in self.records.items() if record.account_id == account_id and key != session_id
+        )
+        for key in matches:
+            del self.records[key]
+        return len(matches)
+
+    async def rebind(
+        self,
+        prior_session_id: str,
+        command: accounts_module.CreateSessionCommand,
+        *,
+        event: accounts_module.SecurityEvent,
+    ) -> accounts_module.SessionRecord | None:
+        del event
+        if "rebind" in self.failures or prior_session_id not in self.records:
+            return None
+        self.rebinds.append((prior_session_id, command))
+        del self.records[prior_session_id]
+        record = self.record(command)
+        self.records[record.session_id] = record
+        return record
+
+
+class _SessionEntropy:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, length: int) -> bytes:
+        self.calls += 1
+        return bytes([self.calls]) * length
+
+
+def _native_session_connection(
+    session: dict[str, object],
+    *,
+    binding_token: str | None = None,
+    scope_type: str = "http",
+    cookie_name: str = "__Host-litestar-security-binding",
+) -> ASGIConnection[Any, Any, Any, Any]:
+    headers = [] if binding_token is None else [(b"cookie", f"{cookie_name}={binding_token}".encode())]
+    return ASGIConnection(
+        cast(
+            "Any",
+            {
+                "type": scope_type,
+                "asgi": {"spec_version": "2.0", "version": "3.0"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "https" if scope_type == "http" else "wss",
+                "path": "/",
+                "raw_path": b"/",
+                "query_string": b"",
+                "root_path": "",
+                "headers": headers,
+                "client": ("test", 50000),
+                "server": ("testserver", 443),
+                "session": session,
+            },
+        )
+    )
+
+
+def _queued_binding_token(connection: ASGIConnection[Any, Any, Any, Any]) -> str:
+    headers = cast("list[tuple[bytes, bytes]]", connection.scope["_litestar_security_response_headers"])
+    name_value = headers[-1][1].decode().partition(";")[0]
+    return name_value.partition("=")[2].strip('"')
+
+
+def _copy_native_session(session: dict[str, object]) -> dict[str, object]:
+    return {key: dict(value) if isinstance(value, dict) else value for key, value in session.items()}
+
+
+@pytest.mark.anyio
+async def test_native_session_establish_authenticate_touch_and_rebind_are_fixation_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _NativeSessionStore()
+    current = [_JWT_NOW]
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32, preserve_session_keys=("cart",)),
+        clock=lambda: current[0],
+        entropy=_SessionEntropy(),
+        event_ids=lambda: "event-1",
+    )
+    session: dict[str, object] = {"cart": "anonymous", "discard": "value"}
+    connection = _native_session_connection(session)
+
+    authentication = await auth.establish(
+        connection, cast("accounts_module.LocalAccount[object]", store.account), display_metadata={"device": "browser"}
+    )
+
+    assert isinstance(authentication, accounts_module.SessionAuthentication)
+    assert session == {
+        "cart": "anonymous",
+        "_litestar_security": {
+            "version": 1,
+            "session_id": authentication.session_id,
+            "binding_id": authentication.binding_id,
+            "account_id": "account-1",
+            "security_epoch": 1,
+            "authenticated_at": _JWT_NOW.isoformat(),
+            "expires_at": (_JWT_NOW + timedelta(days=14)).isoformat(),
+        },
+    }
+    token = _queued_binding_token(connection)
+    assert token.startswith(f"{authentication.binding_id}.")
+    assert token not in repr(store.commands)
+    assert "binding_digest" not in repr(store.commands[0])
+
+    comparisons: list[tuple[bytes | str, bytes | str]] = []
+
+    def monitored_compare_digest(left: bytes | str, right: bytes | str) -> bool:
+        comparisons.append((left, right))
+        return hmac.compare_digest(left, right)
+
+    monkeypatch.setattr(sessions_module, "compare_digest", monitored_compare_digest)
+    authenticated_connection = _native_session_connection(session, binding_token=token)
+    extraction = auth.extract(authenticated_connection)
+    assert isinstance(extraction, PresentedCredential)
+    outcome = await auth.authenticate(extraction.value, authenticated_connection)
+    assert isinstance(outcome, Authenticated)
+    assert outcome.evidence.mechanism == "session"
+    assert outcome.evidence.traits == frozenset({"session"})
+    assert comparisons == [
+        (authentication.binding_id.encode(), store.records[authentication.session_id].binding_id.encode()),
+        (extraction.value.binding.digest, store.records[authentication.session_id].binding_digest),
+    ]
+    principal = await auth.resolve(outcome.claims)
+    assert (principal.id, principal.display_name, principal.user) == ("account-1", "User", store.account.user)
+    assert store.touches == []
+
+    current[0] += timedelta(minutes=5)
+    assert isinstance(await auth.authenticate(extraction.value, authenticated_connection), Authenticated)
+    assert store.touches == [(authentication.session_id, current[0])]
+
+    old_session = _copy_native_session(session)
+    old_token = token
+    replacement = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(replacement, accounts_module.SessionAuthentication)
+    assert replacement.session_id != authentication.session_id
+    assert store.rebinds[0][0] == authentication.session_id
+    replacement_token = _queued_binding_token(connection)
+    assert replacement_token != old_token
+
+    replay_connection = _native_session_connection(old_session, binding_token=old_token)
+    replay = auth.extract(replay_connection)
+    assert isinstance(replay, PresentedCredential)
+    assert isinstance(await auth.authenticate(replay.value, replay_connection), InvalidCredentials)
+    assert "_litestar_security" not in old_session
+    replacement_connection = _native_session_connection(session, binding_token=replacement_token)
+    replacement_extraction = auth.extract(replacement_connection)
+    assert isinstance(replacement_extraction, PresentedCredential)
+    assert isinstance(await auth.authenticate(replacement_extraction.value, replacement_connection), Authenticated)
+
+
+@pytest.mark.parametrize(
+    ("session_value", "binding_token", "outcome_type", "cleared"),
+    [
+        ({}, None, NoCredentials, False),
+        ({"_litestar_security": {"version": 2}}, None, InvalidCredentials, True),
+        ({}, "malformed", InvalidCredentials, True),
+        ({"_litestar_security": "malformed"}, "malformed", InvalidCredentials, True),
+    ],
+)
+def test_native_session_extraction_is_strict_and_cleans_only_presented_invalid_http_state(
+    session_value: dict[str, object], binding_token: str | None, outcome_type: type[object], *, cleared: bool
+) -> None:
+    auth = accounts_module.NativeSessionAuth(
+        accounts=_NativeSessionStore(), binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32)
+    )
+    connection = _native_session_connection(session_value, binding_token=binding_token)
+
+    outcome = auth.extract(connection)
+
+    assert isinstance(outcome, outcome_type)
+    assert ("_litestar_security_response_headers" in connection.scope) is cleared
+    if cleared:
+        assert "_litestar_security" not in session_value
+
+
+@pytest.mark.parametrize("failure", ["get", "account", "epoch"])
+@pytest.mark.anyio
+async def test_native_session_transient_verification_failures_preserve_retryable_state(failure: str) -> None:
+    store = _NativeSessionStore()
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: _JWT_NOW,
+        entropy=_SessionEntropy(),
+    )
+    session: dict[str, object] = {}
+    establishing_connection = _native_session_connection(session)
+    assert isinstance(
+        await auth.establish(establishing_connection, cast("accounts_module.LocalAccount[object]", store.account)),
+        accounts_module.SessionAuthentication,
+    )
+    connection = _native_session_connection(session, binding_token=_queued_binding_token(establishing_connection))
+    extraction = auth.extract(connection)
+    assert isinstance(extraction, PresentedCredential)
+    store.failures.add(failure)
+
+    outcome = await auth.authenticate(extraction.value, connection)
+
+    assert isinstance(outcome, VerificationUnavailable)
+    assert "_litestar_security" in session
+    assert "_litestar_security_response_headers" not in connection.scope
+
+
+@pytest.mark.parametrize(
+    "invalid_state", ["missing", "disabled", "unverified", "epoch", "binding", "authenticated_at", "expired"]
+)
+@pytest.mark.anyio
+async def test_native_session_current_state_mismatch_is_invalid_and_cleared(invalid_state: str) -> None:
+    store = _NativeSessionStore()
+    current = [_JWT_NOW]
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: current[0],
+        entropy=_SessionEntropy(),
+    )
+    session: dict[str, object] = {}
+    establishing_connection = _native_session_connection(session)
+    established = await auth.establish(
+        establishing_connection, cast("accounts_module.LocalAccount[object]", store.account)
+    )
+    assert isinstance(established, accounts_module.SessionAuthentication)
+    if invalid_state == "missing":
+        store.records.clear()
+    elif invalid_state in {"disabled", "unverified"}:
+        store.account = accounts_module.LocalAccount(
+            account_id="account-1",
+            normalized_identifier="user@example.com",
+            display_name="User",
+            active=invalid_state != "disabled",
+            verified=invalid_state != "unverified",
+            security_epoch=1,
+        )
+    elif invalid_state == "epoch":
+        store.epoch = 2
+    elif invalid_state == "binding":
+        record = store.records[established.session_id]
+        store.records[established.session_id] = accounts_module.SessionRecord(
+            session_id=record.session_id,
+            binding_id=record.binding_id,
+            binding_digest=b"x" * 32,
+            account_id=record.account_id,
+            security_epoch=record.security_epoch,
+            created_at=record.created_at,
+            last_seen_at=record.last_seen_at,
+            expires_at=record.expires_at,
+        )
+    elif invalid_state == "authenticated_at":
+        payload = cast("dict[str, object]", session["_litestar_security"])
+        payload["authenticated_at"] = (_JWT_NOW + timedelta(seconds=1)).isoformat()
+    else:
+        current[0] = established.expires_at
+    connection = _native_session_connection(session, binding_token=_queued_binding_token(establishing_connection))
+    extraction = auth.extract(connection)
+    assert isinstance(extraction, PresentedCredential)
+
+    outcome = await auth.authenticate(extraction.value, connection)
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert "_litestar_security" not in session
+    assert _queued_binding_token(connection) == ""
+
+
+@pytest.mark.anyio
+async def test_native_session_logout_and_account_qualified_revoke_are_explicit_and_idempotent() -> None:
+    store = _NativeSessionStore()
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: _JWT_NOW,
+        entropy=_SessionEntropy(),
+        event_ids=lambda: "event-1",
+    )
+    session: dict[str, object] = {}
+    connection = _native_session_connection(session)
+    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(current, accounts_module.SessionAuthentication)
+    other = _NativeSessionStore.record(
+        accounts_module.CreateSessionCommand(
+            session_id="bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4",
+            binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+            binding_digest=b"b" * 32,
+            account_id="account-1",
+            security_epoch=1,
+            created_at=_JWT_NOW,
+            expires_at=_JWT_NOW + timedelta(hours=1),
+        )
+    )
+    store.records[other.session_id] = other
+
+    assert await auth.revoke_session(connection, "account-1", other.session_id, now=_JWT_NOW)
+    assert "_litestar_security" in session
+    assert not await auth.revoke_session(connection, "account-2", current.session_id, now=_JWT_NOW)
+    assert await auth.logout(connection, now=_JWT_NOW)
+    assert "_litestar_security" not in session
+    assert not await auth.logout(connection, now=_JWT_NOW)
+    assert store.revocations == [
+        ("account-1", other.session_id),
+        ("account-2", current.session_id),
+        ("account-1", current.session_id),
+    ]
+
+
+@pytest.mark.anyio
+async def test_native_session_lists_safe_summaries_and_websocket_lifecycle_is_read_only() -> None:
+    store = _NativeSessionStore()
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: _JWT_NOW,
+        entropy=_SessionEntropy(),
+    )
+    session: dict[str, object] = {}
+    connection = _native_session_connection(session)
+    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(current, accounts_module.SessionAuthentication)
+    summaries = await auth.list_sessions("account-1", current_session_id=current.session_id)
+    assert len(summaries) == 1
+    assert summaries[0].current
+    assert not hasattr(summaries[0], "binding_id")
+    assert not hasattr(summaries[0], "binding_digest")
+    assert await auth.list_sessions(" ") == ()
+
+    websocket_session = _copy_native_session(session)
+    websocket = _native_session_connection(
+        websocket_session, binding_token=_queued_binding_token(connection), scope_type="websocket"
+    )
+    extraction = auth.extract(websocket)
+    assert isinstance(extraction, PresentedCredential)
+    assert isinstance(await auth.authenticate(extraction.value, websocket), Authenticated)
+    assert isinstance(
+        await auth.establish(websocket, cast("accounts_module.LocalAccount[object]", store.account)),
+        VerificationUnavailable,
+    )
+    assert isinstance(await auth.logout(websocket), VerificationUnavailable)
+    assert isinstance(await auth.revoke_session(websocket, "account-1", current.session_id), VerificationUnavailable)
+    assert websocket_session == session
+    assert "_litestar_security_response_headers" not in websocket.scope
+
+    invalid_websocket_session = _copy_native_session(session)
+    invalid_websocket = _native_session_connection(
+        invalid_websocket_session,
+        binding_token="malformed",  # noqa: S106
+        scope_type="websocket",
+    )
+    assert isinstance(auth.extract(invalid_websocket), InvalidCredentials)
+    assert invalid_websocket_session == session
+    assert "_litestar_security_response_headers" not in invalid_websocket.scope
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("accounts", object(), "account, epoch"),
+        ("binding", object(), "SessionBindingConfig"),
+        ("clock", None, "hooks"),
+        ("entropy", None, "hooks"),
+        ("event_ids", None, "hooks"),
+    ],
+)
+def test_native_session_auth_rejects_invalid_runtime_dependencies(field: str, value: object, match: str) -> None:
+    values: dict[str, object] = {
+        "accounts": _NativeSessionStore(),
+        "binding": accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+    }
+    values[field] = value
+
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        accounts_module.NativeSessionAuth(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_native_session_rejects_wrong_credential_and_ignores_touch_failure() -> None:
+    store = _NativeSessionStore()
+    current = [_JWT_NOW]
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: current[0],
+        entropy=_SessionEntropy(),
+    )
+    session: dict[str, object] = {}
+    establishing_connection = _native_session_connection(session)
+    established = await auth.establish(
+        establishing_connection, cast("accounts_module.LocalAccount[object]", store.account)
+    )
+    assert isinstance(established, accounts_module.SessionAuthentication)
+    wrong_connection = _native_session_connection(_copy_native_session(session))
+
+    assert isinstance(await auth.authenticate(cast("Any", object()), wrong_connection), InvalidCredentials)
+    assert "_litestar_security" not in wrong_connection.scope["session"]
+
+    connection = _native_session_connection(session, binding_token=_queued_binding_token(establishing_connection))
+    extraction = auth.extract(connection)
+    assert isinstance(extraction, PresentedCredential)
+    current[0] += timedelta(minutes=5)
+    store.failures.add("touch")
+
+    assert isinstance(await auth.authenticate(extraction.value, connection), Authenticated)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["invalid_account", "create_failure", "record_mismatch", "lookup_entropy", "secret_entropy", "event_id", "clock"],
+)
+@pytest.mark.anyio
+async def test_native_session_establishment_fails_closed_without_revealing_a_cookie(case: str) -> None:  # noqa: C901
+    def valid_event_id() -> str:
+        return "event-1"
+
+    def valid_clock() -> datetime:
+        return _JWT_NOW
+
+    def short_entropy(length: int) -> bytes:
+        return b"x" * (length - 1)
+
+    secret_values = iter((b"i" * 16, b"short"))
+
+    def invalid_secret_entropy(_length: int) -> bytes:
+        return next(secret_values)
+
+    def invalid_event_id() -> str:
+        return " "
+
+    def naive_clock() -> datetime:
+        return _JWT_NOW.replace(tzinfo=None)
+
+    store = _NativeSessionStore()
+    entropy: Callable[[int], bytes] = _SessionEntropy()
+    event_ids: Callable[[], str] = valid_event_id
+    clock: Callable[[], datetime] = valid_clock
+    account = store.account
+    if case == "invalid_account":
+        account = accounts_module.LocalAccount(
+            "account-1", "user@example.com", None, active=False, verified=True, security_epoch=1
+        )
+    elif case == "create_failure":
+        store.failures.add("create")
+    elif case == "record_mismatch":
+        store.mismatch_create = True
+    elif case == "lookup_entropy":
+        entropy = short_entropy
+    elif case == "secret_entropy":
+        entropy = invalid_secret_entropy
+    elif case == "event_id":
+        event_ids = invalid_event_id
+    elif case == "clock":
+        clock = naive_clock
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=clock,
+        entropy=entropy,
+        event_ids=event_ids,
+    )
+    session: dict[str, object] = {"anonymous": "value"}
+    connection = _native_session_connection(session)
+
+    outcome = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", account))
+
+    assert isinstance(outcome, VerificationUnavailable)
+    assert session == {"anonymous": "value"}
+    assert "_litestar_security_response_headers" not in connection.scope
+
+
+@pytest.mark.parametrize("mutation", ["separator", "binding", "secret", "version", "boolean_version", "timestamp"])
+@pytest.mark.anyio
+async def test_native_session_rejects_canonical_length_malformed_binding_and_payload(mutation: str) -> None:
+    store = _NativeSessionStore()
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: _JWT_NOW,
+        entropy=_SessionEntropy(),
+    )
+    session: dict[str, object] = {}
+    establishing_connection = _native_session_connection(session)
+    assert isinstance(
+        await auth.establish(establishing_connection, cast("accounts_module.LocalAccount[object]", store.account)),
+        accounts_module.SessionAuthentication,
+    )
+    token = _queued_binding_token(establishing_connection)
+    if mutation == "separator":
+        token = token.replace(".", "x", 1)
+    elif mutation == "binding":
+        token = f"xx_{token[3:]}"
+    elif mutation == "secret":
+        token = f"{token[:-1]}!"
+    else:
+        payload = cast("dict[str, object]", session["_litestar_security"])
+        if mutation in {"version", "boolean_version"}:
+            payload["version"] = True if mutation == "boolean_version" else 2
+        else:
+            payload["authenticated_at"] = "not-a-timestamp"
+    connection = _native_session_connection(session, binding_token=token)
+
+    outcome = auth.extract(connection)
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert "_litestar_security" not in session
+
+
+@pytest.mark.anyio
+async def test_native_session_logout_and_revoke_report_store_failure_after_local_cleanup() -> None:
+    store = _NativeSessionStore()
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: _JWT_NOW,
+        entropy=_SessionEntropy(),
+    )
+    session: dict[str, object] = {}
+    connection = _native_session_connection(session)
+    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(current, accounts_module.SessionAuthentication)
+    store.failures.add("revoke")
+
+    assert isinstance(await auth.revoke_session(connection, "account-1", current.session_id), VerificationUnavailable)
+    assert "_litestar_security" in session
+    assert not await auth.revoke_session(connection, " ", current.session_id)
+    assert not await auth.revoke_session(connection, "account-1", "invalid")
+    assert isinstance(await auth.logout(connection), VerificationUnavailable)
+    assert "_litestar_security" not in session
+
+
+@pytest.mark.anyio
+async def test_native_session_current_revoke_clears_browser_state_and_list_filters_store_leaks() -> None:
+    store = _NativeSessionStore()
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: _JWT_NOW,
+        entropy=_SessionEntropy(),
+    )
+    session: dict[str, object] = {}
+    connection = _native_session_connection(session)
+    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(current, accounts_module.SessionAuthentication)
+    leaked = accounts_module.SessionRecord(
+        session_id="bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4",
+        binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+        binding_digest=b"b" * 32,
+        account_id="account-2",
+        security_epoch=1,
+        created_at=_JWT_NOW,
+        last_seen_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(hours=1),
+    )
+    store.records[leaked.session_id] = leaked
+
+    summaries = await auth.list_sessions("account-1", current_session_id=current.session_id)
+    assert tuple(summary.session_id for summary in summaries) == (current.session_id,)
+    assert await auth.revoke_session(connection, "account-1", current.session_id)
+    assert "_litestar_security" not in session
+
+    replacement = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(replacement, accounts_module.SessionAuthentication)
+    store.records.clear()
+    assert not await auth.revoke_session(connection, "account-1", replacement.session_id)
+    assert "_litestar_security" not in session
+
+
+def test_native_session_http_cleanup_without_mutable_native_session_only_expires_binding() -> None:
+    auth = accounts_module.NativeSessionAuth(
+        accounts=_NativeSessionStore(), binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32)
+    )
+    connection = _native_session_connection({}, binding_token="malformed")  # noqa: S106
+    connection.scope["session"] = object()
+
+    outcome = auth.extract(connection)
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert _queued_binding_token(connection) == ""

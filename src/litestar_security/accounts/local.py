@@ -12,7 +12,7 @@ from logging import getLogger
 from secrets import token_bytes
 from time import perf_counter
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast, runtime_checkable
 from unicodedata import normalize
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -27,6 +27,8 @@ from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts.sessions import (
     CreateSessionCommand,
+    NativeSessionAuth,
+    NativeSessionStore,
     RefreshTokenFamilyStore,
     SessionBindingConfig,
     SessionRegistry,
@@ -2098,6 +2100,7 @@ class LocalAuthConfig(Generic[UserT]):
     binding: SessionBindingConfig | None = field(default=None, repr=False)
     key_ring: LocalKeyRing | None = field(default=None, repr=False)
     token_audience: str | None = None
+    session_auth: NativeSessionAuth[UserT] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate transport-specific values and structural capabilities."""
@@ -2134,6 +2137,27 @@ class LocalAuthConfig(Generic[UserT]):
                 raise ImproperlyConfiguredException(detail=msg)
             object.__setattr__(self, "token_audience", audience)
         self._validate_capabilities()
+        self._configure_session_auth()
+
+    def _configure_session_auth(self) -> None:
+        if self.mode not in {LocalAuthMode.SESSION, LocalAuthMode.HYBRID}:
+            if self.session_auth is not None:
+                msg = "Token-only local authentication cannot configure native session authentication"
+                raise ImproperlyConfiguredException(detail=msg)
+            return
+        binding = self.binding
+        if not isinstance(binding, SessionBindingConfig):  # pragma: no cover - guarded above
+            return
+        session_auth = self.session_auth
+        if session_auth is None:
+            object.__setattr__(
+                self,
+                "session_auth",
+                NativeSessionAuth[UserT](accounts=cast("NativeSessionStore[UserT]", self.accounts), binding=binding),
+            )
+        elif id(session_auth.accounts) != id(self.accounts) or session_auth.binding is not binding:
+            msg = "Custom native session authentication must share the configured accounts and binding"
+            raise ImproperlyConfiguredException(detail=msg)
 
     def _validate_capabilities(self) -> None:
         required: list[type[Any]] = [
@@ -2163,12 +2187,13 @@ class LocalAuth:
     """Construct explicit session, token, or hybrid local-auth profiles."""
 
     @classmethod
-    def session(
+    def session(  # noqa: PLR0913
         cls,
         *,
         accounts: LocalAccountCapabilities[UserT],
         csrf: CSRFConfig | ExternalCSRF,
         binding: SessionBindingConfig,
+        session_auth: NativeSessionAuth[UserT] | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
     ) -> "LocalAuthConfig[UserT]":
@@ -2178,6 +2203,7 @@ class LocalAuth:
             accounts=accounts,
             csrf=csrf,
             binding=binding,
+            session_auth=session_auth,
             registration=registration,
             route_prefix=route_prefix,
         )
@@ -2211,6 +2237,7 @@ class LocalAuth:
         binding: SessionBindingConfig,
         key_ring: LocalKeyRing,
         token_audience: str,
+        session_auth: NativeSessionAuth[UserT] | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
     ) -> "LocalAuthConfig[UserT]":
@@ -2222,6 +2249,7 @@ class LocalAuth:
             binding=binding,
             key_ring=key_ring,
             token_audience=token_audience,
+            session_auth=session_auth,
             registration=registration,
             route_prefix=route_prefix,
         )

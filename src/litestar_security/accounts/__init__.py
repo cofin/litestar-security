@@ -61,14 +61,18 @@ from litestar_security.accounts.local import (
 )
 from litestar_security.accounts.sessions import (
     CreateSessionCommand,
+    NativeSessionAuth,
+    NativeSessionStore,
     RefreshRotationStatus,
     RefreshTokenFamilyStore,
     RotateRefreshCommand,
     RotateRefreshResult,
     SessionAuthentication,
     SessionBindingConfig,
+    SessionBindingProof,
     SessionRecord,
     SessionRegistry,
+    SessionSummary,
 )
 
 __all__ = (
@@ -87,6 +91,8 @@ __all__ = (
     "LocalAuthMode",
     "LoginMethod",
     "LoginMethodStore",
+    "NativeSessionAuth",
+    "NativeSessionStore",
     "NoOpSecurityEventSink",
     "NotificationCommand",
     "PasswordChangeResult",
@@ -131,8 +137,10 @@ __all__ = (
     "SecurityEventSink",
     "SessionAuthentication",
     "SessionBindingConfig",
+    "SessionBindingProof",
     "SessionRecord",
     "SessionRegistry",
+    "SessionSummary",
     "TokenIssue",
     "TokenPurpose",
     "VerificationTokenService",

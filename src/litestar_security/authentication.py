@@ -12,7 +12,7 @@ from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedExce
 from litestar.middleware import DefineMiddleware
 from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
 from litestar.openapi.spec import SecurityScheme
-from litestar.types import ASGIApp, HTTPScope, Receive, Scope, Send
+from litestar.types import ASGIApp, HTTPScope, Message, Receive, Scope, Send
 from typing_extensions import Self, TypedDict
 
 from litestar_security.context import (
@@ -64,7 +64,19 @@ _AUTHENTICATION_REQUIRED = "Authentication required"
 _AUTHENTICATION_UNAVAILABLE = "Authentication service unavailable"
 _RUNTIME_PLAN_OPT_KEY = "litestar_security_plan"
 _SECURITY_POLICY_OPT_KEY = "litestar_security_policy"
+_SECURITY_RESPONSE_HEADERS_SCOPE_KEY = "_litestar_security_response_headers"
 _NATIVE_EXCEPTION_HANDLER = ExceptionHandlerMiddleware
+
+
+def _queue_security_response_header(  # pyright: ignore[reportUnusedFunction]
+    scope: Scope, header: tuple[bytes, bytes]
+) -> None:
+    """Queue one encoded header for the next HTTP response start event."""
+    if scope["type"] != ScopeType.HTTP:
+        return
+    scope_data = cast("dict[str, object]", scope)
+    headers = cast("list[tuple[bytes, bytes]]", scope_data.setdefault(_SECURITY_RESPONSE_HEADERS_SCOPE_KEY, []))
+    headers.append(header)
 
 
 def _normalize_name(value: str, label: str) -> str:
@@ -537,7 +549,15 @@ class SecurityMiddlewareWrapper(Generic[UserT]):
         """Build the wrapper once and dispatch the connection."""
         if self._wrapped is None:
             self._wrapped = self._build_stack()
-        await self._wrapped(scope, receive, send)
+
+        async def send_with_security_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                scope_data = cast("dict[str, object]", scope)
+                queued = cast("list[tuple[bytes, bytes]]", scope_data.pop(_SECURITY_RESPONSE_HEADERS_SCOPE_KEY, []))
+                message["headers"] = [*message.get("headers", []), *queued]
+            await send(message)
+
+        await self._wrapped(scope, receive, send_with_security_headers)
 
 
 @dataclass(frozen=True, slots=True)

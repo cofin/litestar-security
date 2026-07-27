@@ -4,21 +4,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import jwt
 import pytest
-from litestar import Controller, Litestar, Request, Response, Router, WebSocket, get, websocket
+from litestar import Controller, Litestar, Request, Response, Router, WebSocket, get, post, websocket
 from litestar.config.app import AppConfig
 from litestar.enums import ScopeType
 from litestar.exceptions import NotAuthorizedException, ServiceUnavailableException
 from litestar.middleware import DefineMiddleware
 from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
 from litestar.middleware.session.base import BaseSessionBackend, SessionMiddleware
+from litestar.middleware.session.client_side import CookieBackendConfig
+from litestar.middleware.session.server_side import ServerSideSessionConfig
+from litestar.params import FromPath  # noqa: TC002 - Litestar resolves handler annotations at runtime
 from litestar.status_codes import HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAILABLE
+from litestar.stores.memory import MemoryStore
 from litestar.testing import AsyncTestClient, TestClient
 
 from litestar_security import SecurityConfig, SecurityPlugin, authentication
+from litestar_security.accounts import (
+    CreateSessionCommand,
+    LocalAccount,
+    LocalAuth,
+    SessionBindingConfig,
+    SessionRecord,
+)
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -32,8 +44,10 @@ from litestar_security.authentication import (
     SecurityRuntimePlan,
     VerificationUnavailable,
     public,
+    required,
     security,
 )
+from litestar_security.config import ExternalCSRF
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -571,6 +585,263 @@ def test_composite_bearer_runs_through_the_complete_litestar_runtime() -> None:
     assert authenticated.json() == {"id": "runtime-user", "mechanism": "bearer", "slot": "runtime"}
     assert invalid.status_code == HTTP_401_UNAUTHORIZED
     assert unavailable.status_code == HTTP_503_SERVICE_UNAVAILABLE
+
+
+def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  # noqa: C901
+    account = LocalAccount(
+        account_id="account-1",
+        normalized_identifier="user@example.com",
+        display_name="User",
+        active=True,
+        verified=True,
+        security_epoch=1,
+        user=object(),
+    )
+    records: dict[str, SessionRecord] = {}
+    state = SimpleNamespace(epoch=1, touches=0)
+
+    async def create(command: CreateSessionCommand, **_kwargs: object) -> SessionRecord:
+        record = SessionRecord(
+            session_id=command.session_id,
+            binding_id=command.binding_id,
+            binding_digest=command.binding_digest,
+            account_id=command.account_id,
+            security_epoch=command.security_epoch,
+            created_at=command.created_at,
+            last_seen_at=command.created_at,
+            expires_at=command.expires_at,
+            display_metadata=command.display_metadata,
+        )
+        records[record.session_id] = record
+        return record
+
+    async def get_session(session_id: str) -> SessionRecord | None:
+        return records.get(session_id)
+
+    async def get_account(account_id: str) -> LocalAccount[object] | None:
+        return account if account_id == account.account_id else None
+
+    async def current_epoch(account_id: str) -> int | None:
+        return cast("int", state.epoch) if account_id == account.account_id else None
+
+    async def list_for_account(account_id: str) -> list[SessionRecord]:
+        return [record for record in records.values() if record.account_id == account_id]
+
+    async def touch(session_id: str, **kwargs: object) -> SessionRecord | None:
+        record = records.get(session_id)
+        if record is None:
+            return None
+        state.touches += 1
+        touched = SessionRecord(
+            session_id=record.session_id,
+            binding_id=record.binding_id,
+            binding_digest=record.binding_digest,
+            account_id=record.account_id,
+            security_epoch=record.security_epoch,
+            created_at=record.created_at,
+            last_seen_at=cast("datetime", kwargs["now"]),
+            expires_at=record.expires_at,
+            display_metadata=record.display_metadata,
+        )
+        records[session_id] = touched
+        return touched
+
+    async def revoke_session_for_account(account_id: str, session_id: str, **_kwargs: object) -> bool:
+        record = records.get(session_id)
+        if record is None or record.account_id != account_id:
+            return False
+        del records[session_id]
+        return True
+
+    async def revoke_sessions_for_account(account_id: str, **_kwargs: object) -> int:
+        matches = tuple(key for key, record in records.items() if record.account_id == account_id)
+        for key in matches:
+            del records[key]
+        return len(matches)
+
+    async def revoke_other_sessions(account_id: str, session_id: str, **_kwargs: object) -> int:
+        matches = tuple(key for key, record in records.items() if record.account_id == account_id and key != session_id)
+        for key in matches:
+            del records[key]
+        return len(matches)
+
+    async def rebind(prior_session_id: str, command: CreateSessionCommand, **kwargs: object) -> SessionRecord | None:
+        if prior_session_id not in records:
+            return None
+        del records[prior_session_id]
+        return await create(command, **kwargs)
+
+    async def unused(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    return (
+        SimpleNamespace(
+            compare_and_replace_password=unused,
+            consume_and_reset=unused,
+            consume_and_verify=unused,
+            create=create,
+            current_epoch=current_epoch,
+            find_for_login=unused,
+            get=get_session,
+            get_by_id=get_account,
+            get_password_state=unused,
+            issue=unused,
+            list_for_account=list_for_account,
+            rebind=rebind,
+            register_login_method=unused,
+            replace_password_and_bump_epoch=unused,
+            revoke_login_method=unused,
+            revoke_other_sessions=revoke_other_sessions,
+            revoke_session_for_account=revoke_session_for_account,
+            revoke_sessions_for_account=revoke_sessions_for_account,
+            state=state,
+            touch=touch,
+        ),
+        account,
+    )
+
+
+@pytest.mark.parametrize("backend_kind", ["client", "server"])
+def test_real_native_session_backends_preserve_anonymous_state_and_resist_fixation(  # noqa: PLR0915
+    backend_kind: str,
+) -> None:
+    accounts, account = _native_local_accounts()
+    binding = SessionBindingConfig(
+        pepper=b"p" * 32, cookie_name="binding", secure=False, allow_insecure=True, max_age=600
+    )
+    local_auth = LocalAuth.session(
+        accounts=cast("Any", accounts),
+        csrf=ExternalCSRF("runtime", lambda _method, _path, _policy: True),
+        binding=binding,
+    )
+    current_time = [datetime(2026, 7, 27, tzinfo=timezone.utc)]
+    session_auth = cast("Any", local_auth.session_auth)
+    session_auth.clock = lambda: current_time[0]
+    session_config = (
+        CookieBackendConfig(
+            secret=bytes(range(16)),
+            key="native-session",
+            max_age=600,
+            scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+            secure=False,
+        )
+        if backend_kind == "client"
+        else ServerSideSessionConfig(
+            key="native-session",
+            max_age=600,
+            scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+            secure=False,
+            store="sessions",
+        )
+    )
+    backend = cast("BaseSessionBackend[Any]", session_config.middleware.kwargs["backend"])
+
+    @get("/anonymous", opt=security(public()))
+    async def anonymous_handler(request: Request) -> dict[str, int]:
+        visits = cast("int", request.session.get("visits", 0)) + 1
+        request.session["visits"] = visits
+        return {"visits": visits}
+
+    @get("/me", opt=security(required("session")))
+    async def current_handler(request: Request) -> dict[str, str]:
+        return {"id": request.user.id}
+
+    @get("/login", opt=security(public()))
+    async def login_handler(request: Request) -> dict[str, str]:
+        result = await session_auth.establish(request, account)
+        assert not isinstance(result, VerificationUnavailable)
+        return {"session_id": result.session_id}
+
+    @post("/logout", opt=security(required("session")))
+    async def logout_handler(request: Request) -> dict[str, bool]:
+        return {"revoked": bool(await session_auth.logout(request))}
+
+    @post("/revoke/{session_id:str}", opt=security(required("session")))
+    async def revoke_handler(request: Request, session_id: FromPath[str]) -> dict[str, bool]:
+        return {"revoked": bool(await session_auth.revoke_session(request, request.user.id, session_id))}
+
+    @websocket("/ws", opt=security(required("session")))
+    async def websocket_handler(socket: WebSocket) -> None:
+        await socket.accept()
+        await socket.send_json({"id": socket.user.id})
+        await socket.close()
+
+    app = Litestar(
+        route_handlers=[
+            anonymous_handler,
+            current_handler,
+            login_handler,
+            logout_handler,
+            revoke_handler,
+            websocket_handler,
+        ],
+        openapi_config=None,
+        stores={"sessions": MemoryStore()},
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, session_backend=backend))],
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/anonymous").json() == {"visits": 1}
+        assert client.get("/anonymous").json() == {"visits": 2}
+        fixed_native = client.cookies.get("native-session")
+        assert fixed_native is not None
+        assert client.cookies.get("binding") is None
+
+        first_login = client.get("/login")
+        assert first_login.status_code == 200
+        first_native = client.cookies.get("native-session")
+        first_binding = client.cookies.get("binding")
+        assert first_native is not None
+        assert first_binding is not None
+        cookie_headers = first_login.headers.get_list("set-cookie")
+        assert any(header.startswith("native-session=") for header in cookie_headers)
+        assert any(header.startswith("binding=") for header in cookie_headers)
+        assert sum(header.count(first_binding) for header in cookie_headers) == 1
+        assert client.get("/me").json() == {"id": "account-1"}
+        with client.websocket_connect("/ws") as socket:
+            assert socket.receive_json() == {"id": "account-1"}
+        assert accounts.state.touches == 0
+        current_time[0] += timedelta(minutes=5)
+        assert client.get("/me").status_code == 200
+        assert client.get("/me").status_code == 200
+        assert accounts.state.touches == 1
+
+        assert client.post("/logout").json() == {"revoked": True}
+        assert client.cookies.get("binding") is None
+        assert client.get("/me").status_code == HTTP_401_UNAUTHORIZED
+
+        assert client.get("/login").status_code == 200
+        accounts.state.epoch = 2
+        assert client.get("/me").status_code == HTTP_401_UNAUTHORIZED
+        accounts.state.epoch = 1
+
+        revoke_login = client.get("/login")
+        assert client.post(f"/revoke/{revoke_login.json()['session_id']}").json() == {"revoked": True}
+        assert client.cookies.get("binding") is None
+        assert client.get("/me").status_code == HTTP_401_UNAUTHORIZED
+
+        expiry_login = client.get("/login")
+        assert expiry_login.status_code == 200
+        current_time[0] += timedelta(minutes=10)
+        assert client.get("/me").status_code == HTTP_401_UNAUTHORIZED
+        current_time[0] += timedelta(seconds=1)
+
+        assert client.get("/login").status_code == 200
+        replay_native = client.cookies.get("native-session")
+        replay_binding = client.cookies.get("binding")
+        assert replay_native is not None
+        assert replay_binding is not None
+        assert client.get("/login").status_code == 200
+        assert client.cookies.get("binding") != replay_binding
+
+        client.cookies.clear()
+        client.cookies.set("native-session", replay_native)
+        client.cookies.set("binding", replay_binding)
+        assert client.get("/me").status_code == HTTP_401_UNAUTHORIZED
+
+        client.cookies.clear()
+        client.cookies.set("native-session", fixed_native)
+        assert client.get("/me").status_code == HTTP_401_UNAUTHORIZED
 
 
 def test_native_guard_layers_remain_cumulative_for_http_and_websocket_with_child_policy() -> None:

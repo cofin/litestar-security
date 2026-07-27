@@ -17,7 +17,10 @@ from litestar_security.authentication import (
     InvalidCredentials,
     NoCredentials,
     PresentedCredential,
+    SecurityMiddlewareWrapper,
+    SecurityRuntimeConfig,
     VerificationUnavailable,
+    _queue_security_response_header,
     all_of,
     any_of,
     at_least,
@@ -36,11 +39,36 @@ from litestar_security.context import (
 
 if TYPE_CHECKING:
     from litestar.connection import ASGIConnection
+    from litestar.types import Message, Receive, Scope, Send
 
     from litestar_security.authentication import _AuthenticationEvaluator
 
 _CONNECTION = cast("ASGIConnection", object())
 _NOW = datetime(2026, 7, 26, tzinfo=timezone.utc)
+
+
+def _scope(scope_type: str = "http") -> Scope:
+    return cast(
+        "Scope",
+        {
+            "type": scope_type,
+            "asgi": {"spec_version": "2.0", "version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/",
+            "raw_path": b"/",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [],
+            "client": ("test", 50000),
+            "server": ("testserver", 80),
+        },
+    )
+
+
+async def _receive() -> Message:
+    return {"type": "http.request", "body": b"", "more_body": False}
 
 
 class _Slot:
@@ -84,6 +112,49 @@ class _Resolver:
         self.calls += 1
         self.events.append(f"resolve:{self.name}")
         return self.principal
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [200, 401], ids=["normal", "exception"])
+async def test_security_wrapper_appends_queued_headers_to_every_http_response(status: int) -> None:
+    sent: list[Message] = []
+    existing = (b"x-existing", b"value")
+    first_cookie = (b"set-cookie", b"binding=first; Path=/; HttpOnly")
+    second_cookie = (b"set-cookie", b"binding=second; Path=/; HttpOnly")
+
+    async def app(scope: Scope, _receive: Receive, send: Send) -> None:
+        _queue_security_response_header(scope, first_cookie)
+        _queue_security_response_header(scope, second_cookie)
+        await send({"type": "http.response.start", "status": status, "headers": [existing]})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def capture(message: Message) -> None:
+        sent.append(message)
+
+    wrapper = SecurityMiddlewareWrapper(app=app, config=SecurityRuntimeConfig(registry=AuthenticationRegistry()))
+    await wrapper(_scope(), _receive, capture)
+
+    assert sent[0]["headers"] == [existing, first_cookie, second_cookie]
+    assert sent[1] == {"type": "http.response.body", "body": b""}
+
+
+@pytest.mark.anyio
+async def test_security_response_headers_are_not_queued_or_injected_for_websocket() -> None:
+    sent: list[Message] = []
+    existing = (b"x-existing", b"value")
+
+    async def app(scope: Scope, _receive: Receive, send: Send) -> None:
+        _queue_security_response_header(scope, (b"set-cookie", b"binding=secret"))
+        await send({"type": "websocket.accept", "subprotocol": None, "headers": [existing]})
+
+    async def capture(message: Message) -> None:
+        sent.append(message)
+
+    wrapper = SecurityMiddlewareWrapper(app=app, config=SecurityRuntimeConfig(registry=AuthenticationRegistry()))
+    scope = _scope("websocket")
+    await wrapper(scope, _receive, capture)
+
+    assert sent == [{"type": "websocket.accept", "subprotocol": None, "headers": [existing]}]
 
 
 def _success(

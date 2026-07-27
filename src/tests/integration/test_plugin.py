@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib.metadata import entry_points
 from secrets import token_hex
 from types import SimpleNamespace
@@ -18,10 +18,12 @@ from litestar import Controller, Litestar, Router, WebSocket, asgi, get, post, r
 from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
 from litestar.di import Provide
-from litestar.enums import HttpMethod
+from litestar.enums import HttpMethod, ScopeType
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.middleware import DefineMiddleware
 from litestar.middleware.session.base import SessionMiddleware
+from litestar.middleware.session.client_side import CookieBackendConfig
+from litestar.middleware.session.server_side import ServerSideSessionConfig
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.controller import OpenAPIController
 from litestar.openapi.plugins import JsonRenderPlugin
@@ -32,7 +34,13 @@ from litestar.testing import TestClient
 
 from litestar_security import SecurityConfig, SecurityPlugin
 from litestar_security._cli import register, security_group
-from litestar_security.accounts import LifecycleAccepted, LocalAuth, RegistrationPolicy, SessionRecord
+from litestar_security.accounts import (
+    LifecycleAccepted,
+    LocalAuth,
+    RegistrationPolicy,
+    SessionBindingConfig,
+    SessionSummary,
+)
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -158,6 +166,67 @@ def _operation_security(app: Litestar, path: str) -> list[dict[str, list[str]]] 
     operation = app.openapi_schema.paths[path].get
     assert operation is not None
     return cast("list[dict[str, list[str]]] | None", operation.security)
+
+
+def _local_session_accounts() -> Any:
+    capability_names = (
+        "compare_and_replace_password",
+        "consume_and_reset",
+        "consume_and_verify",
+        "create",
+        "current_epoch",
+        "find_for_login",
+        "get",
+        "get_by_id",
+        "get_password_state",
+        "issue",
+        "list_for_account",
+        "rebind",
+        "register_login_method",
+        "replace_password_and_bump_epoch",
+        "revoke",
+        "revoke_login_method",
+        "revoke_other_sessions",
+        "revoke_session_for_account",
+        "revoke_sessions_for_account",
+        "touch",
+    )
+    return SimpleNamespace(**{name: lambda *_args, **_kwargs: None for name in capability_names})
+
+
+def _native_session_backend(  # noqa: PLR0913
+    kind: Literal["client", "server"],
+    *,
+    key: str = "native-session",
+    max_age: int = 600,
+    scopes: set[ScopeType] | None = None,
+    secure: bool = True,
+    httponly: bool = True,
+) -> tuple[BaseSessionBackend[Any], DefineMiddleware]:
+    configured_scopes = scopes if scopes is not None else {ScopeType.HTTP, ScopeType.WEBSOCKET}
+    if kind == "client":
+        config = CookieBackendConfig(
+            secret=bytes(range(16)),
+            key=key,
+            max_age=max_age,
+            scopes=configured_scopes,
+            secure=secure,
+            httponly=httponly,
+        )
+    else:
+        config = ServerSideSessionConfig(
+            key=key, max_age=max_age, scopes=configured_scopes, secure=secure, httponly=httponly
+        )
+    middleware = config.middleware
+    return cast("BaseSessionBackend[Any]", middleware.kwargs["backend"]), middleware
+
+
+def _local_session_auth(*, csrf: CSRFConfig | ExternalCSRF, binding: SessionBindingConfig | None = None) -> Any:
+    return LocalAuth.session(
+        accounts=cast("Any", _local_session_accounts()),
+        csrf=csrf,
+        binding=binding or SessionBindingConfig(pepper=b"binding-pepper-for-plugin-tests!", max_age=600),
+    )
 
 
 def test_plugin_constructs_default_config() -> None:
@@ -661,14 +730,14 @@ def test_openapi_scope_and_combination_limits_fail_with_route_context() -> None:
 
 def test_account_dto_annotations_resolve_during_native_openapi_generation() -> None:
     @get("/sessions")
-    async def session_handler() -> SessionRecord:
+    async def session_handler() -> SessionSummary:
         raise NotImplementedError
 
     app = Litestar(route_handlers=[session_handler], openapi_config=OpenAPIConfig(title="Test", version="1.0"))
 
     assert app.openapi_schema.components is not None
     assert app.openapi_schema.components.schemas is not None
-    assert "SessionRecord" in app.openapi_schema.components.schemas
+    assert "SessionSummary" in app.openapi_schema.components.schemas
 
 
 def test_disabled_registration_adds_no_route_and_lifecycle_response_uses_native_202_schema(
@@ -1299,27 +1368,258 @@ def test_controller_handler_collision_is_reported_as_handler_owned() -> None:
         SecurityPlugin().on_app_init(AppConfig(route_handlers=[TestController]))
 
 
-def test_existing_native_session_remains_outer_to_security() -> None:
-    session = DefineMiddleware(SessionMiddleware, backend=object())
-    app_config = AppConfig(middleware=[session])
+def test_local_auth_native_csrf_becomes_the_effective_plugin_config() -> None:
+    csrf = CSRFConfig(secret=token_hex())
+    backend, _ = _native_session_backend("client")
+    local_auth = _local_session_auth(csrf=csrf)
 
-    SecurityPlugin().on_app_init(app_config)
+    result = SecurityPlugin(SecurityConfig(local_auth=local_auth, session_backend=backend)).on_app_init(AppConfig())
 
-    assert app_config.middleware[0] is session
-    assert isinstance(app_config.middleware[1], DefineMiddleware)
-    assert app_config.middleware[1].middleware is SecurityMiddlewareWrapper
+    assert result.csrf_config is csrf
 
 
-def test_config_owned_session_is_compiled_inside_security_wrapper() -> None:
-    backend = cast("BaseSessionBackend[Any]", object())
-    app_config = AppConfig()
+@pytest.mark.parametrize("owner", ["security", "application"])
+def test_local_auth_rejects_conflicting_native_csrf_sources(owner: str) -> None:
+    local_csrf = CSRFConfig(secret=token_hex())
+    conflicting = CSRFConfig(secret=token_hex())
+    backend, _ = _native_session_backend("client")
+    config = SecurityConfig(
+        local_auth=_local_session_auth(csrf=local_csrf),
+        session_backend=backend,
+        csrf_config=conflicting if owner == "security" else None,
+    )
+    app_config = AppConfig(csrf_config=conflicting if owner == "application" else None)
 
-    SecurityPlugin(SecurityConfig(session_backend=backend)).on_app_init(app_config)
+    with pytest.raises(ImproperlyConfiguredException, match="CSRF"):
+        SecurityPlugin(config).on_app_init(app_config)
 
-    middleware = cast("DefineMiddleware", app_config.middleware[0])
-    runtime_config = middleware.kwargs["config"]
-    assert runtime_config.owned_session_backend is not None
-    assert runtime_config.owned_session_backend.backend is backend
+
+def test_local_auth_rejects_native_and_external_csrf_combination() -> None:
+    backend, _ = _native_session_backend("client")
+    native = CSRFConfig(secret=token_hex())
+    external = ExternalCSRF(name="edge", validate=lambda _path, _method, _policy: True)
+
+    with pytest.raises(ImproperlyConfiguredException, match="cannot be combined"):
+        SecurityPlugin(
+            SecurityConfig(local_auth=_local_session_auth(csrf=native), session_backend=backend, external_csrf=external)
+        ).on_app_init(AppConfig())
+
+
+def test_local_auth_external_csrf_becomes_route_enforcement_and_rejects_conflicts() -> None:
+    calls: list[tuple[str, str, AuthenticationPolicy]] = []
+
+    def validate(path: str, method: str, policy: AuthenticationPolicy) -> bool:
+        calls.append((path, method, policy))
+        return True
+
+    external = ExternalCSRF(name="local-edge", validate=validate)
+    backend, _ = _native_session_backend("client")
+
+    @post("/session", opt=security(required("session")))
+    async def session_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[session_handler],
+        plugins=[
+            SecurityPlugin(SecurityConfig(local_auth=_local_session_auth(csrf=external), session_backend=backend))
+        ],
+    )
+
+    assert app.csrf_config is None
+    assert _http_plan(app, "/session", "POST").csrf_enforcement == "local-edge"
+    assert [(path, method) for path, method, _ in calls] == [("/session", "POST")]
+
+    conflicting = ExternalCSRF(name="other-edge", validate=lambda _path, _method, _policy: True)
+    with pytest.raises(ImproperlyConfiguredException, match="CSRF"):
+        SecurityPlugin(
+            SecurityConfig(
+                local_auth=_local_session_auth(csrf=external), session_backend=backend, external_csrf=conflicting
+            )
+        ).on_app_init(AppConfig())
+    with pytest.raises(ImproperlyConfiguredException, match="cannot be combined"):
+        SecurityPlugin(
+            SecurityConfig(
+                local_auth=_local_session_auth(csrf=external),
+                session_backend=backend,
+                csrf_config=CSRFConfig(secret=token_hex()),
+            )
+        ).on_app_init(AppConfig())
+
+
+@pytest.mark.parametrize(
+    ("native_cookie", "csrf_cookie", "binding_cookie"),
+    [("shared", "csrf", "shared"), ("native", "shared", "shared"), ("shared", "shared", "binding")],
+    ids=["binding-native", "binding-csrf", "native-csrf"],
+)
+def test_local_session_cookie_names_must_be_pairwise_distinct(
+    native_cookie: str, csrf_cookie: str, binding_cookie: str
+) -> None:
+    csrf = CSRFConfig(secret=token_hex(), cookie_name=csrf_cookie)
+    backend, _ = _native_session_backend("client", key=native_cookie)
+    binding = SessionBindingConfig(pepper=b"binding-pepper-for-plugin-tests!", cookie_name=binding_cookie, max_age=600)
+
+    with pytest.raises(ImproperlyConfiguredException, match="cookie names must be distinct"):
+        SecurityPlugin(
+            SecurityConfig(local_auth=_local_session_auth(csrf=csrf, binding=binding), session_backend=backend)
+        ).on_app_init(AppConfig())
+
+
+@pytest.mark.parametrize(
+    (
+        "scopes",
+        "native_max_age",
+        "binding_max_age",
+        "native_secure",
+        "native_httponly",
+        "binding_secure",
+        "allow_insecure",
+        "match",
+    ),
+    [
+        ({ScopeType.HTTP, ScopeType.WEBSOCKET}, 600, 600, True, True, True, False, None),
+        ({ScopeType.HTTP, ScopeType.WEBSOCKET}, 600, 600, False, True, False, True, None),
+        ({ScopeType.HTTP}, 600, 600, True, True, True, False, "HTTP and WebSocket"),
+        ({ScopeType.WEBSOCKET}, 600, 600, True, True, True, False, "HTTP and WebSocket"),
+        ({ScopeType.HTTP, ScopeType.WEBSOCKET}, 600, 1_200, True, True, True, False, "lifetime"),
+        ({ScopeType.HTTP, ScopeType.WEBSOCKET}, 600, 600, False, True, True, False, "Secure"),
+        ({ScopeType.HTTP, ScopeType.WEBSOCKET}, 600, 600, True, False, True, False, "HttpOnly"),
+    ],
+    ids=[
+        "production",
+        "development",
+        "http-only",
+        "websocket-only",
+        "binding-outlives-native",
+        "insecure-native",
+        "readable-native",
+    ],
+)
+def test_local_session_backend_constraints(  # noqa: PLR0913
+    scopes: set[ScopeType],
+    native_max_age: int,
+    binding_max_age: int,
+    *,
+    native_secure: bool,
+    native_httponly: bool,
+    binding_secure: bool,
+    allow_insecure: bool,
+    match: str | None,
+) -> None:
+    csrf = CSRFConfig(secret=token_hex())
+    backend, _ = _native_session_backend(
+        "client", max_age=native_max_age, scopes=scopes, secure=native_secure, httponly=native_httponly
+    )
+    binding = SessionBindingConfig(
+        pepper=b"binding-pepper-for-plugin-tests!",
+        cookie_name="__Host-binding" if binding_secure else "binding",
+        secure=binding_secure,
+        max_age=binding_max_age,
+        allow_insecure=allow_insecure,
+        touch_interval=timedelta(minutes=5),
+    )
+    plugin = SecurityPlugin(
+        SecurityConfig(local_auth=_local_session_auth(csrf=csrf, binding=binding), session_backend=backend)
+    )
+
+    if match is None:
+        result = plugin.on_app_init(AppConfig())
+        assert result.csrf_config is csrf
+    else:
+        with pytest.raises(ImproperlyConfiguredException, match=match):
+            plugin.on_app_init(AppConfig())
+
+
+def test_local_session_requires_a_backend_and_secure_samesite_none() -> None:
+    csrf = CSRFConfig(secret=token_hex())
+    binding = SessionBindingConfig(
+        pepper=b"binding-pepper-for-plugin-tests!",
+        cookie_name="binding",
+        secure=False,
+        allow_insecure=True,
+        max_age=600,
+    )
+    local_auth = _local_session_auth(csrf=csrf, binding=binding)
+
+    with pytest.raises(ImproperlyConfiguredException, match="requires one native"):
+        SecurityPlugin(SecurityConfig(local_auth=local_auth)).on_app_init(AppConfig())
+
+    config = CookieBackendConfig(
+        secret=bytes(range(16)),
+        key="native-session",
+        max_age=600,
+        scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+        secure=False,
+        httponly=True,
+        samesite="none",
+    )
+    backend = cast("BaseSessionBackend[Any]", config.middleware.kwargs["backend"])
+    with pytest.raises(ImproperlyConfiguredException, match="SameSite=None"):
+        SecurityPlugin(SecurityConfig(local_auth=local_auth, session_backend=backend)).on_app_init(AppConfig())
+
+
+@pytest.mark.parametrize("backend_kind", ["client", "server"])
+@pytest.mark.parametrize("ownership", ["owned", "existing"])
+def test_local_session_owned_and_existing_backends_have_registry_and_openapi_parity(
+    backend_kind: Literal["client", "server"], ownership: Literal["owned", "existing"]
+) -> None:
+    csrf = CSRFConfig(secret=token_hex())
+    binding = SessionBindingConfig(pepper=b"binding-pepper-for-plugin-tests!", max_age=600)
+    local_auth = _local_session_auth(csrf=csrf, binding=binding)
+    backend, native_middleware = _native_session_backend(backend_kind)
+    config = SecurityConfig(local_auth=local_auth, session_backend=backend if ownership == "owned" else None)
+
+    @get("/session", opt=security(required("session")))
+    async def session_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[session_handler],
+        middleware=[] if ownership == "owned" else [native_middleware],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin(config)],
+    )
+    security_middleware = next(
+        item
+        for item in app.middleware
+        if isinstance(item, DefineMiddleware) and item.middleware is SecurityMiddlewareWrapper
+    )
+    runtime = security_middleware.kwargs["config"]
+    registry = runtime.registry
+    session_mechanism = registry.get_mechanism("session")
+    native_middleware_count = sum(
+        isinstance(item, DefineMiddleware)
+        and isinstance(item.middleware, type)
+        and issubclass(item.middleware, SessionMiddleware)
+        for item in app.middleware
+    )
+
+    assert app.csrf_config is csrf
+    assert registry.slot_names == ("session",)
+    assert registry.mechanism_names == ("session",)
+    assert registry.default_mechanism_names == ("session",)
+    assert registry.get_slot("session") is local_auth.session_auth
+    assert session_mechanism.authenticator is local_auth.session_auth
+    assert session_mechanism.resolver is local_auth.session_auth
+    assert session_mechanism.session_capable
+    assert session_mechanism.scheme_name == "LocalSession"
+    assert _http_plan(app, "/session").csrf_enforcement == "native"
+    assert _operation_security(app, "/session") == [{"LocalSession": []}]
+    assert app.openapi_schema.components is not None
+    assert app.openapi_schema.components.security_schemes == {
+        "LocalSession": SecurityScheme(
+            type="apiKey",
+            name=binding.cookie_name,
+            security_scheme_in="cookie",
+            description="Litestar native session plus independent binding cookie.",
+        )
+    }
+    assert native_middleware_count == (0 if ownership == "owned" else 1)
+    assert (runtime.owned_session_backend is not None) is (ownership == "owned")
+    if ownership == "owned":
+        assert runtime.owned_session_backend.backend is backend
+    else:
+        assert app.middleware.index(native_middleware) < app.middleware.index(security_middleware)
 
 
 def test_duplicate_native_sessions_fail_startup() -> None:

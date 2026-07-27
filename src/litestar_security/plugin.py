@@ -12,10 +12,12 @@ from litestar import Litestar
 from litestar.config.app import AppConfig
 from litestar.controller import Controller
 from litestar.di import NamedDependency, Provide
+from litestar.enums import ScopeType
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.handlers.base import BaseRouteHandler
 from litestar.middleware import DefineMiddleware
 from litestar.middleware.session.base import SessionMiddleware
+from litestar.openapi.spec import SecurityScheme
 from litestar.plugins import CLIPlugin, InitPlugin, ReceiveRoutePlugin
 from litestar.router import Router
 from litestar.routes import BaseRoute
@@ -23,6 +25,7 @@ from litestar.types import Scope
 
 from litestar_security._openapi import OpenAPISchemeSet, RouteCompiler, prepare_openapi_config
 from litestar_security.authentication import (
+    AuthenticationMechanism,
     AuthenticationRegistry,
     OwnedSessionBackend,
     SecurityMiddlewareWrapper,
@@ -131,19 +134,22 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         for dependencies, owner in self._iter_owned_dependency_maps(app_config):
             self._validate_dependency_map(dependencies, owner)
 
-        native_sessions = [
-            (index, middleware)
-            for index, middleware in enumerate(app_config.middleware)
-            if self._is_native_session_middleware(middleware)
-        ]
+        native_sessions = cast(
+            "list[tuple[int, DefineMiddleware]]",
+            [
+                (index, middleware)
+                for index, middleware in enumerate(app_config.middleware)
+                if self._is_native_session_middleware(middleware)
+            ],
+        )
         if len(native_sessions) > 1:
             message = "Application config contains multiple native Litestar session middleware definitions"
             raise ImproperlyConfiguredException(detail=message)
         if native_sessions and self.config.session_backend is not None:
             message = "Security config and application middleware both configure native Litestar session handling"
             raise ImproperlyConfiguredException(detail=message)
-
         self._configure_csrf(app_config)
+        self._validate_local_session_backend(app_config, native_sessions)
 
         runtime, middleware = self._get_runtime(existing_session=bool(native_sessions))
         openapi_config = app_config.openapi_config
@@ -195,8 +201,28 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
 
     def _get_runtime(self, *, existing_session: bool) -> tuple[SecurityRuntimeConfig[UserT], DefineMiddleware]:
         if self._runtime_config is None:
+            slots = list(self.config.slots)
+            mechanisms = list(self.config.mechanisms)
+            local_auth = self.config.local_auth
+            if local_auth is not None and local_auth.session_auth is not None:
+                session_auth = local_auth.session_auth
+                slots.append(session_auth)
+                mechanisms.append(
+                    AuthenticationMechanism(
+                        authenticator=session_auth,
+                        resolver=session_auth,
+                        scheme_name="LocalSession",
+                        security_scheme=SecurityScheme(
+                            type="apiKey",
+                            name=session_auth.binding.cookie_name,
+                            security_scheme_in="cookie",
+                            description="Litestar native session plus independent binding cookie.",
+                        ),
+                        session_capable=True,
+                    )
+                )
             registry = AuthenticationRegistry(
-                slots=self.config.slots, mechanisms=self.config.mechanisms, require_default=self.config.require_default
+                slots=slots, mechanisms=mechanisms, require_default=self.config.require_default
             )
             owned_session = None
             if self.config.session_backend is not None and not existing_session:
@@ -238,9 +264,76 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         app_config.csrf_config = self.config.csrf_config
 
     def _configure_local_auth(self) -> None:
-        if self.config.local_auth is None:
+        local_auth = self.config.local_auth
+        if local_auth is None:
             return
-        _validate_local_auth(self.config.local_auth)
+        _validate_local_auth(local_auth)
+        from litestar.config.csrf import CSRFConfig  # noqa: PLC0415
+
+        from litestar_security.config import ExternalCSRF  # noqa: PLC0415
+
+        local_csrf = local_auth.csrf
+        if isinstance(local_csrf, CSRFConfig):
+            if self.config.external_csrf is not None:
+                message = "Local native CSRF cannot be combined with external CSRF configuration"
+                raise ImproperlyConfiguredException(detail=message)
+            if self.config.csrf_config is not None and self.config.csrf_config != local_csrf:
+                message = "Local and security native CSRF settings must be equal"
+                raise ImproperlyConfiguredException(detail=message)
+            self.config.csrf_config = local_csrf
+        elif isinstance(local_csrf, ExternalCSRF):
+            if self.config.csrf_config is not None:
+                message = "Local external CSRF cannot be combined with native CSRF configuration"
+                raise ImproperlyConfiguredException(detail=message)
+            if self.config.external_csrf is not None and self.config.external_csrf != local_csrf:
+                message = "Local and security external CSRF settings must be equal"
+                raise ImproperlyConfiguredException(detail=message)
+            self.config.external_csrf = local_csrf
+
+    def _validate_local_session_backend(
+        self, app_config: AppConfig, native_sessions: Sequence[tuple[int, DefineMiddleware]]
+    ) -> None:
+        local_auth = self.config.local_auth
+        if local_auth is None or local_auth.session_auth is None:
+            return
+        backend = (
+            self.config.session_backend
+            if self.config.session_backend is not None
+            else native_sessions[0][1].kwargs.get("backend")
+            if native_sessions
+            else None
+        )
+        if backend is None:
+            message = "Session local authentication requires one native Litestar session backend"
+            raise ImproperlyConfiguredException(detail=message)
+        backend_config = getattr(backend, "config", None)
+        scopes = getattr(backend_config, "scopes", ())
+        if not {ScopeType.HTTP, ScopeType.WEBSOCKET}.issubset(scopes):
+            message = "Session local authentication requires native HTTP and WebSocket session scopes"
+            raise ImproperlyConfiguredException(detail=message)
+        native_cookie = getattr(backend_config, "key", None)
+        csrf_cookie = app_config.csrf_config.cookie_name if app_config.csrf_config is not None else None
+        binding = local_auth.session_auth.binding
+        cookie_names = tuple(name for name in (native_cookie, csrf_cookie, binding.cookie_name) if name is not None)
+        if len(cookie_names) != len(frozenset(cookie_names)):
+            message = "Native session, CSRF, and binding cookie names must be distinct"
+            raise ImproperlyConfiguredException(detail=message)
+        backend_max_age = getattr(backend_config, "max_age", None)
+        if backend_max_age.__class__ is not int or binding.max_age > cast(  # type: ignore[redundant-cast]
+            "int", backend_max_age
+        ):
+            message = "Session binding lifetime cannot exceed the native session lifetime"
+            raise ImproperlyConfiguredException(detail=message)
+        native_secure = getattr(backend_config, "secure", None)
+        if native_secure is not True and not binding.allow_insecure:
+            message = "Production native session cookies must be Secure"
+            raise ImproperlyConfiguredException(detail=message)
+        if getattr(backend_config, "httponly", None) is not True:
+            message = "Native session cookies used for authentication must be HttpOnly"
+            raise ImproperlyConfiguredException(detail=message)
+        if getattr(backend_config, "samesite", None) == "none" and native_secure is not True:
+            message = "Native session SameSite=None requires Secure"
+            raise ImproperlyConfiguredException(detail=message)
 
     def _configure_local_jwks(self, app_config: AppConfig) -> None:
         if self.config.local_jwks is None:
