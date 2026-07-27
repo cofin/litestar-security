@@ -4650,24 +4650,36 @@ async def test_argon2_hasher_bounds_concurrency_and_maps_timeout(monkeypatch: py
 
 
 class _PasswordStore:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         encoded_hash: str | None = "current-hash",
         *,
         fail_read: bool = False,
         fail_replace: bool = False,
+        fail_bump: bool = False,
         replace_result: object = True,
+        security_epoch: int = 1,
+        bump_result: accounts_module.PasswordChangeResult | None = None,
     ) -> None:
         self.encoded_hash = encoded_hash
         self.fail_read = fail_read
         self.fail_replace = fail_replace
+        self.fail_bump = fail_bump
         self.replace_result = replace_result
+        self.security_epoch = security_epoch
+        self.bump_result = bump_result
         self.replacements: list[tuple[str, str, str, accounts_module.SecurityEvent]] = []
+        self.bump_calls: list[tuple[str, str, int, accounts_module.SecurityEvent]] = []
+        self._mutation_lock = asyncio.Lock()
 
-    async def get_password_hash(self, _account_id: str) -> str | None:
+    async def get_password_state(self, _account_id: str) -> accounts_module.PasswordCredentialState | None:
         if self.fail_read:
             raise OSError
-        return self.encoded_hash
+        return (
+            accounts_module.PasswordCredentialState(self.encoded_hash, self.security_epoch)
+            if self.encoded_hash is not None
+            else None
+        )
 
     async def compare_and_replace_password(
         self, account_id: str, expected_hash: str, password_hash: str, *, event: accounts_module.SecurityEvent
@@ -4680,10 +4692,26 @@ class _PasswordStore:
     async def replace_password_and_bump_epoch(
         self, account_id: str, password_hash: str, *, expected_epoch: int, event: accounts_module.SecurityEvent
     ) -> accounts_module.PasswordChangeResult:
-        del account_id, password_hash, event
-        return accounts_module.PasswordChangeResult(
-            accounts_module.PasswordChangeStatus.CHANGED, security_epoch=expected_epoch + 1
-        )
+        self.bump_calls.append((account_id, password_hash, expected_epoch, event))
+        if self.fail_bump:
+            raise OSError
+        if self.bump_result is not None:
+            return self.bump_result
+        async with self._mutation_lock:
+            if expected_epoch != self.security_epoch:
+                return accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CONFLICT)
+            if expected_epoch == 9_223_372_036_854_775_807:
+                return accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.EPOCH_EXHAUSTED)
+            self.encoded_hash = password_hash
+            self.security_epoch += 1
+            return accounts_module.PasswordChangeResult(
+                accounts_module.PasswordChangeStatus.CHANGED, security_epoch=self.security_epoch
+            )
+
+    async def current_epoch(self, _account_id: str) -> int | None:
+        if self.fail_read:
+            raise OSError
+        return self.security_epoch
 
 
 class _PasswordHasher:
@@ -4798,8 +4826,8 @@ async def test_password_reauthentication_emits_sanitized_malformed_hash_event(
 @pytest.mark.parametrize(
     ("replace_result", "fail_replace", "outcome_type"),
     [
-        (True, False, AuthenticationEvidence),
-        (False, False, AuthenticationEvidence),
+        (True, False, accounts_module.PasswordReauthenticationProof),
+        (False, False, VerificationUnavailable),
         (object(), False, VerificationUnavailable),
         (True, True, VerificationUnavailable),
     ],
@@ -4886,7 +4914,7 @@ async def test_password_reauthentication_uses_an_aware_default_clock() -> None:
     outcome = await service.verify("account-1", "presented secret")
 
     after = datetime.now(timezone.utc)
-    assert isinstance(outcome, AuthenticationEvidence)
+    assert isinstance(outcome, accounts_module.PasswordReauthenticationProof)
     assert before <= outcome.authenticated_at <= after
     assert outcome.expires_at == outcome.authenticated_at + timedelta(minutes=5)
 
@@ -4923,13 +4951,8 @@ async def test_password_reauthentication_returns_fresh_evidence_and_rehashes_ato
 
     outcome = await service.verify(" account-1 ", "presented secret", now=_JWT_NOW)
 
-    assert outcome == AuthenticationEvidence(
-        mechanism="password",
-        slot="password",
-        authenticated_at=_JWT_NOW,
-        expires_at=_JWT_NOW + timedelta(minutes=5),
-        methods=frozenset({"password"}),
-        amr=("pwd",),
+    assert outcome == accounts_module.PasswordReauthenticationProof(
+        account_id="account-1", security_epoch=1, authenticated_at=_JWT_NOW, expires_at=_JWT_NOW + timedelta(minutes=5)
     )
     assert hasher.calls == [("current-hash", "presented secret")]
     assert len(store.replacements) == 1
@@ -4938,6 +4961,416 @@ async def test_password_reauthentication_returns_fresh_evidence_and_rehashes_ato
     assert (event.operation, event.outcome, event.account_id) == ("local.password.rehash", "updated", "account-1")
     assert "presented secret" not in repr(event)
     assert replacement not in repr(event)
+
+
+class _CredentialCleanup:
+    def __init__(self, *, failures: frozenset[str] = frozenset()) -> None:
+        self.failures = failures
+        self.session_revocations: list[tuple[str, accounts_module.SecurityEvent]] = []
+        self.other_revocations: list[tuple[str, str, accounts_module.SecurityEvent]] = []
+        self.rebinds: list[tuple[str, accounts_module.CreateSessionCommand, accounts_module.SecurityEvent]] = []
+        self.refresh_revocations: list[tuple[str, accounts_module.SecurityEvent]] = []
+
+    async def create(
+        self, command: accounts_module.CreateSessionCommand, *, event: accounts_module.SecurityEvent
+    ) -> accounts_module.SessionRecord:
+        raise NotImplementedError
+
+    async def get(self, session_id: str) -> accounts_module.SessionRecord | None:
+        del session_id
+        return None
+
+    async def list_for_account(self, account_id: str) -> list[accounts_module.SessionRecord]:
+        del account_id
+        return []
+
+    async def touch(self, session_id: str, *, now: datetime) -> accounts_module.SessionRecord | None:
+        del session_id, now
+        return None
+
+    async def revoke(self, session_id: str, *, event: accounts_module.SecurityEvent) -> bool:
+        del session_id, event
+        return False
+
+    async def revoke_sessions_for_account(self, account_id: str, *, event: accounts_module.SecurityEvent) -> int:
+        self.session_revocations.append((account_id, event))
+        if "sessions" in self.failures:
+            raise OSError
+        return 1
+
+    async def revoke_other_sessions(
+        self, account_id: str, session_id: str, *, event: accounts_module.SecurityEvent
+    ) -> int:
+        self.other_revocations.append((account_id, session_id, event))
+        if "others" in self.failures:
+            raise OSError
+        return 1
+
+    async def rebind(
+        self,
+        prior_session_id: str,
+        command: accounts_module.CreateSessionCommand,
+        *,
+        event: accounts_module.SecurityEvent,
+    ) -> accounts_module.SessionRecord | None:
+        self.rebinds.append((prior_session_id, command, event))
+        if "rebind" in self.failures:
+            raise OSError
+        return None
+
+    async def rotate(
+        self, command: accounts_module.RotateRefreshCommand, *, now: datetime, event: accounts_module.SecurityEvent
+    ) -> accounts_module.RotateRefreshResult:
+        raise NotImplementedError
+
+    async def revoke_family(self, family_id: str, *, event: accounts_module.SecurityEvent) -> bool:
+        del family_id, event
+        return False
+
+    async def revoke_for_account(self, account_id: str, *, event: accounts_module.SecurityEvent) -> int:
+        self.refresh_revocations.append((account_id, event))
+        if "refresh" in self.failures:
+            raise OSError
+        return 1
+
+
+def _password_proof(
+    *, account_id: str = "account-1", security_epoch: int = 1, authenticated_at: datetime = _JWT_NOW
+) -> accounts_module.PasswordReauthenticationProof:
+    return accounts_module.PasswordReauthenticationProof(
+        account_id=account_id,
+        security_epoch=security_epoch,
+        authenticated_at=authenticated_at,
+        expires_at=authenticated_at + timedelta(minutes=5),
+    )
+
+
+def _replacement_session(*, security_epoch: int = 1) -> accounts_module.CreateSessionCommand:
+    return accounts_module.CreateSessionCommand(
+        session_id="session-new",
+        binding_id="binding-new",
+        binding_digest=b"binding-digest",
+        account_id="account-1",
+        security_epoch=security_epoch,
+        created_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(hours=1),
+    )
+
+
+@pytest.mark.parametrize(
+    ("proof", "now", "accepted"),
+    [
+        (_password_proof(), _JWT_NOW + timedelta(minutes=5), True),
+        (_password_proof(), _JWT_NOW + timedelta(minutes=5, microseconds=1), False),
+        (_password_proof(authenticated_at=_JWT_NOW + timedelta(seconds=1)), _JWT_NOW, False),
+        (_password_proof(account_id="account-2"), _JWT_NOW, False),
+    ],
+)
+@pytest.mark.anyio
+async def test_password_change_requires_account_epoch_bound_recent_proof(
+    proof: accounts_module.PasswordReauthenticationProof, now: datetime, *, accepted: bool
+) -> None:
+    store = _PasswordStore()
+    service = accounts_module.PasswordChangeService(accounts=store, hasher=_PasswordHasher())
+
+    outcome = await service.change("account-1", "correct horse battery staple", proof=proof, now=now)
+
+    if accepted:
+        assert outcome == accounts_module.PasswordChangeResult(
+            accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2
+        )
+        assert len(store.bump_calls) == 1
+    else:
+        assert isinstance(outcome, InvalidCredentials)
+        assert store.bump_calls == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"accounts": object()},
+        {"hasher": object()},
+        {"password_policy": object()},
+        {"sessions": object()},
+        {"refresh_tokens": object()},
+        {"evidence_ttl": timedelta(0)},
+        {"evidence_ttl": timedelta(minutes=6)},
+        {"clock": None},
+        {"event_ids": None},
+    ],
+)
+def test_password_change_rejects_invalid_configuration(kwargs: dict[str, object]) -> None:
+    values = {"accounts": _PasswordStore(), "hasher": _PasswordHasher(), **kwargs}
+
+    with pytest.raises(ImproperlyConfiguredException, match="Password change"):
+        accounts_module.PasswordChangeService(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("case", "outcome_type"),
+    [
+        ("change_time", accounts_module.InvalidLifecycleRequest),
+        ("force_time", accounts_module.InvalidLifecycleRequest),
+        ("invalid_proof", InvalidCredentials),
+        ("blank_account", accounts_module.InvalidLifecycleRequest),
+        ("compromise_rebind", accounts_module.InvalidLifecycleRequest),
+        ("missing_replacement", accounts_module.InvalidLifecycleRequest),
+        ("missing_current", accounts_module.InvalidLifecycleRequest),
+        ("no_session_registry", accounts_module.InvalidLifecycleRequest),
+        ("blank_current", accounts_module.InvalidLifecycleRequest),
+        ("naive_expiry", accounts_module.InvalidLifecycleRequest),
+        ("policy_failure", VerificationUnavailable),
+        ("policy_rejection", accounts_module.PasswordPolicyResult),
+        ("hash_failure", VerificationUnavailable),
+        ("store_failure", VerificationUnavailable),
+        ("event_failure", VerificationUnavailable),
+        ("wrong_epoch", VerificationUnavailable),
+    ],
+)
+@pytest.mark.anyio
+async def test_password_change_fails_closed_before_or_after_the_atomic_boundary(
+    case: str, outcome_type: type[object]
+) -> None:
+    store = _PasswordStore(
+        fail_bump=case == "store_failure",
+        bump_result=(
+            accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=3)
+            if case == "wrong_epoch"
+            else None
+        ),
+    )
+    hasher = _PasswordHasher(unavailable=case == "hash_failure")
+    cleanup = _CredentialCleanup()
+    service = accounts_module.PasswordChangeService(
+        accounts=store,
+        hasher=hasher,
+        password_policy=accounts_module.PasswordPolicy(
+            compromised=_unavailable_password_check if case == "policy_failure" else None
+        ),
+        sessions=None if case == "no_session_registry" else cleanup,
+        event_ids=(lambda: " ") if case == "event_failure" else (lambda: "event-1"),
+    )
+    proof: object = object() if case == "invalid_proof" else _password_proof()
+    replacement: accounts_module.CreateSessionCommand | None = _replacement_session()
+    current_session_id: str | None = None
+    compromise = False
+    account_id = "account-1"
+    password = "short" if case == "policy_rejection" else "correct horse battery staple"
+    now = _JWT_NOW.replace(tzinfo=None) if case in {"change_time", "force_time"} else _JWT_NOW
+    if case == "blank_account":
+        account_id = " "
+    elif case == "compromise_rebind":
+        compromise = True
+        current_session_id = "session-old"
+    elif case == "missing_replacement":
+        current_session_id = "session-old"
+        replacement = None
+    elif case == "missing_current":
+        replacement = _replacement_session()
+    elif case == "no_session_registry":
+        current_session_id = "session-old"
+    elif case == "blank_current":
+        current_session_id = " "
+    elif case == "naive_expiry":
+        current_session_id = "session-old"
+        replacement = _replacement_session()
+        object.__setattr__(replacement, "expires_at", _JWT_NOW.replace(tzinfo=None))
+
+    if case in {"blank_account", "force_time"}:
+        outcome = await service.force_reset(account_id, password, expected_epoch=1, now=now)
+    else:
+        outcome = await service.change(
+            account_id,
+            password,
+            proof=cast("accounts_module.PasswordReauthenticationProof", proof),
+            current_session_id=current_session_id,
+            replacement_session=replacement if current_session_id is not None or case == "missing_current" else None,
+            compromise=compromise,
+            now=now,
+        )
+
+    assert isinstance(outcome, outcome_type)
+
+
+@pytest.mark.anyio
+async def test_password_change_rebinds_only_current_session_at_new_epoch_and_revokes_all_refresh() -> None:
+    store = _PasswordStore()
+    cleanup = _CredentialCleanup()
+    service = accounts_module.PasswordChangeService(
+        accounts=store, hasher=_PasswordHasher(), sessions=cleanup, refresh_tokens=cleanup, event_ids=lambda: "event-1"
+    )
+
+    outcome = await service.change(
+        "account-1",
+        "correct horse battery staple",
+        proof=_password_proof(),
+        current_session_id="session-old",
+        replacement_session=_replacement_session(),
+        now=_JWT_NOW,
+    )
+
+    assert outcome == accounts_module.PasswordChangeResult(
+        accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2
+    )
+    assert [(account_id, session_id) for account_id, session_id, _event in cleanup.other_revocations] == [
+        ("account-1", "session-old")
+    ]
+    assert len(cleanup.rebinds) == 1
+    prior_session_id, command, event = cleanup.rebinds[0]
+    assert (prior_session_id, command.account_id, command.security_epoch, command.created_at) == (
+        "session-old",
+        "account-1",
+        2,
+        _JWT_NOW,
+    )
+    assert (event.operation, event.account_id) == ("local.password.session_rebind", "account-1")
+    assert [account_id for account_id, _event in cleanup.refresh_revocations] == ["account-1"]
+    assert cleanup.session_revocations == []
+
+
+@pytest.mark.parametrize("operation", ["compromise", "force_reset", "bearer"])
+@pytest.mark.anyio
+async def test_password_change_compromise_admin_and_bearer_paths_revoke_every_local_transport(operation: str) -> None:
+    store = _PasswordStore()
+    cleanup = _CredentialCleanup()
+    service = accounts_module.PasswordChangeService(
+        accounts=store, hasher=_PasswordHasher(), sessions=cleanup, refresh_tokens=cleanup
+    )
+
+    if operation == "force_reset":
+        outcome = await service.force_reset("account-1", "correct horse battery staple", expected_epoch=1, now=_JWT_NOW)
+    else:
+        outcome = await service.change(
+            "account-1",
+            "correct horse battery staple",
+            proof=_password_proof(),
+            compromise=operation == "compromise",
+            now=_JWT_NOW,
+        )
+
+    assert outcome == accounts_module.PasswordChangeResult(
+        accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2
+    )
+    assert [account_id for account_id, _event in cleanup.session_revocations] == ["account-1"]
+    assert [account_id for account_id, _event in cleanup.refresh_revocations] == ["account-1"]
+    assert cleanup.rebinds == []
+    assert cleanup.other_revocations == []
+
+
+@pytest.mark.anyio
+async def test_concurrent_password_changes_allow_exactly_one_epoch_compare_and_bump() -> None:
+    store = _PasswordStore()
+    cleanup = _CredentialCleanup()
+    service = accounts_module.PasswordChangeService(
+        accounts=store, hasher=_PasswordHasher(), sessions=cleanup, refresh_tokens=cleanup
+    )
+    outcomes: list[object] = []
+
+    async def change() -> None:
+        outcomes.append(
+            await service.change("account-1", "correct horse battery staple", proof=_password_proof(), now=_JWT_NOW)
+        )
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(change)
+        task_group.start_soon(change)
+
+    statuses = [cast("accounts_module.PasswordChangeResult", outcome).status for outcome in outcomes]
+    assert statuses.count(accounts_module.PasswordChangeStatus.CHANGED) == 1
+    assert statuses.count(accounts_module.PasswordChangeStatus.CONFLICT) == 1
+    assert len(cleanup.session_revocations) == 1
+    assert len(cleanup.refresh_revocations) == 1
+
+
+@pytest.mark.parametrize(
+    ("epoch", "expected_status", "hash_calls"),
+    [
+        (9_223_372_036_854_775_806, accounts_module.PasswordChangeStatus.CHANGED, ["correct horse battery staple"]),
+        (9_223_372_036_854_775_807, accounts_module.PasswordChangeStatus.EPOCH_EXHAUSTED, []),
+    ],
+)
+@pytest.mark.anyio
+async def test_password_change_never_wraps_security_epoch(
+    epoch: int, expected_status: accounts_module.PasswordChangeStatus, hash_calls: list[str]
+) -> None:
+    store = _PasswordStore(security_epoch=epoch)
+    hasher = _PasswordHasher()
+    service = accounts_module.PasswordChangeService(accounts=store, hasher=hasher)
+
+    outcome = await service.change(
+        "account-1", "correct horse battery staple", proof=_password_proof(security_epoch=epoch), now=_JWT_NOW
+    )
+
+    assert isinstance(outcome, accounts_module.PasswordChangeResult)
+    assert outcome.status is expected_status
+    assert hasher.hash_calls == hash_calls
+
+
+@pytest.mark.parametrize("failure", ["sessions", "refresh", "others", "rebind"])
+@pytest.mark.anyio
+async def test_committed_password_change_survives_best_effort_cleanup_failure(
+    failure: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = _PasswordStore()
+    cleanup = _CredentialCleanup(failures=frozenset({failure}))
+    service = accounts_module.PasswordChangeService(
+        accounts=store, hasher=_PasswordHasher(), sessions=cleanup, refresh_tokens=cleanup
+    )
+    rebind = failure in {"others", "rebind"}
+
+    outcome = await service.change(
+        "account-1",
+        "correct horse battery staple",
+        proof=_password_proof(),
+        current_session_id="session-old" if rebind else None,
+        replacement_session=_replacement_session() if rebind else None,
+        now=_JWT_NOW,
+    )
+
+    assert outcome == accounts_module.PasswordChangeResult(
+        accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2
+    )
+    assert "cleanup failed" in caplog.text or "rebind failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("current_epoch", "presented_epoch", "fail", "outcome_type"),
+    [
+        (3, 3, False, type(None)),
+        (3, 2, False, InvalidCredentials),
+        (None, 3, False, InvalidCredentials),
+        (True, 1, False, InvalidCredentials),
+        (3, 3, True, VerificationUnavailable),
+    ],
+)
+@pytest.mark.anyio
+async def test_security_epoch_validator_maps_exact_current_invalid_and_unavailable_states(
+    current_epoch: object, presented_epoch: int, *, fail: bool, outcome_type: type[object]
+) -> None:
+    class Store:
+        async def current_epoch(self, account_id: str) -> int | None:
+            del account_id
+            if fail:
+                raise OSError
+            return cast("int | None", current_epoch)
+
+    validator = accounts_module.SecurityEpochValidator(cast("Any", Store()))
+
+    outcome = await validator.validate("account-1", presented_epoch)
+
+    assert isinstance(outcome, outcome_type)
+
+
+@pytest.mark.anyio
+async def test_security_epoch_validator_rejects_invalid_configuration_and_presented_state() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Security epoch validator"):
+        accounts_module.SecurityEpochValidator(cast("Any", object()))
+    validator = accounts_module.SecurityEpochValidator(_PasswordStore())
+    invalid_value: object = True
+    invalid_epoch = cast("int", invalid_value)
+
+    assert isinstance(await validator.validate(" ", 1), InvalidCredentials)
+    assert isinstance(await validator.validate("account-1", invalid_epoch), InvalidCredentials)
 
 
 class _LifecycleStore:
@@ -5331,6 +5764,7 @@ async def test_recovery_request_is_generic_and_emits_only_atomic_outbox_commands
     if issue_count:
         issue, notification, event = store.issues[0]
         assert issue.purpose is accounts_module.TokenPurpose.RECOVERY
+        assert issue.issued_security_epoch == 1
         assert issue.expires_at == _JWT_NOW + timedelta(minutes=30)
         assert codec.proof(
             notification.token, expected_purpose=accounts_module.TokenPurpose.RECOVERY
@@ -5358,7 +5792,10 @@ async def test_recovery_reset_delegates_replay_expiry_and_epoch_mutation_atomica
     issued = _lifecycle_token(codec, accounts_module.TokenPurpose.RECOVERY, timedelta(minutes=30))
     store = _LifecycleStore(reset_status=status)
     hasher = _PasswordHasher()
-    service = accounts_module.RecoveryTokenService(accounts=store, store=store, tokens=codec, hasher=hasher)
+    cleanup = _CredentialCleanup()
+    service = accounts_module.RecoveryTokenService(
+        accounts=store, store=store, tokens=codec, hasher=hasher, sessions=cleanup, refresh_tokens=cleanup
+    )
 
     outcome = await service.reset(
         issued.notification.token, "correct horse battery staple", now=_JWT_NOW + timedelta(minutes=1)
@@ -5376,6 +5813,38 @@ async def test_recovery_reset_delegates_replay_expiry_and_epoch_mutation_atomica
         _JWT_NOW + timedelta(minutes=1),
     )
     assert event.operation == "local.recovery.consume"
+    expected_cleanup = ["account-1"] if status is accounts_module.PasswordResetStatus.RESET else []
+    assert [account_id for account_id, _event in cleanup.session_revocations] == expected_cleanup
+    assert [account_id for account_id, _event in cleanup.refresh_revocations] == expected_cleanup
+
+
+@pytest.mark.parametrize("transport", ["sessions", "refresh", "refresh_failure"])
+@pytest.mark.anyio
+async def test_recovery_reset_cleans_each_configured_transport_independently(
+    transport: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+    issued = _lifecycle_token(codec, accounts_module.TokenPurpose.RECOVERY, timedelta(minutes=30))
+    store = _LifecycleStore()
+    cleanup = _CredentialCleanup(failures=frozenset({"refresh"}) if transport == "refresh_failure" else frozenset())
+    service = accounts_module.RecoveryTokenService(
+        accounts=store,
+        store=store,
+        tokens=codec,
+        hasher=_PasswordHasher(),
+        sessions=cleanup if transport == "sessions" else None,
+        refresh_tokens=cleanup if transport != "sessions" else None,
+    )
+
+    outcome = await service.reset(
+        issued.notification.token, "correct horse battery staple", now=_JWT_NOW + timedelta(minutes=1)
+    )
+
+    assert outcome == accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.RESET, "account-1", 2)
+    assert len(cleanup.session_revocations) == (1 if transport == "sessions" else 0)
+    assert len(cleanup.refresh_revocations) == (0 if transport == "sessions" else 1)
+    if transport == "refresh_failure":
+        assert "Password refresh cleanup failed" in caplog.text
 
 
 @pytest.mark.parametrize("case", ["purpose_swap", "policy", "policy_failure", "store_failure"])
@@ -5436,6 +5905,8 @@ async def test_recovery_reset_rejects_invalid_inputs_without_splitting_atomic_co
         ("recovery", "tokens"),
         ("recovery", "hasher"),
         ("recovery", "password_policy"),
+        ("recovery", "sessions"),
+        ("recovery", "refresh_tokens"),
     ],
 )
 def test_lifecycle_services_reject_invalid_structural_dependencies(service_name: str, invalid_field: str) -> None:

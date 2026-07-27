@@ -26,6 +26,11 @@ __all__ = (
 
 _EMPTY_DISPLAY_METADATA: "Mapping[str, str]" = MappingProxyType({})
 _MINIMUM_PEPPER_BYTES = 32
+_MAXIMUM_SECURITY_EPOCH = 9_223_372_036_854_775_807
+
+
+def _valid_security_epoch(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAXIMUM_SECURITY_EPOCH
 
 
 class RefreshRotationStatus(str, Enum):
@@ -75,6 +80,12 @@ class SessionAuthentication:
     authenticated_at: "datetime"
     expires_at: "datetime"
 
+    def __post_init__(self) -> None:
+        """Reject session payloads outside the shared epoch domain."""
+        if not _valid_security_epoch(self.security_epoch):
+            msg = "Session authentication security epoch is invalid"
+            raise ValueError(msg)
+
 
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
@@ -92,6 +103,9 @@ class SessionRecord:
 
     def __post_init__(self) -> None:
         """Freeze caller-supplied display metadata."""
+        if not _valid_security_epoch(self.security_epoch):
+            msg = "Session record security epoch is invalid"
+            raise ValueError(msg)
         object.__setattr__(self, "display_metadata", MappingProxyType(dict(self.display_metadata)))
 
 
@@ -110,6 +124,9 @@ class CreateSessionCommand:
 
     def __post_init__(self) -> None:
         """Freeze caller-supplied display metadata."""
+        if not _valid_security_epoch(self.security_epoch):
+            msg = "Session creation security epoch is invalid"
+            raise ValueError(msg)
         object.__setattr__(self, "display_metadata", MappingProxyType(dict(self.display_metadata)))
 
 
@@ -168,6 +185,12 @@ class RotateRefreshCommand:
     sealed_receipt: bytes = field(repr=False)
     receipt_expires_at: "datetime"
     idempotency_digest: bytes | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        """Reject refresh candidates outside the shared epoch domain."""
+        if not _valid_security_epoch(self.security_epoch):
+            msg = "Refresh rotation security epoch is invalid"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)

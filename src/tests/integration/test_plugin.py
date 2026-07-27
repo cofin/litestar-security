@@ -683,7 +683,7 @@ def test_disabled_registration_adds_no_route_and_lifecycle_response_uses_native_
             "current_epoch",
             "find_for_login",
             "get_by_id",
-            "get_password_hash",
+            "get_password_state",
             "issue",
             "register_login_method",
             "replace_password_and_bump_epoch",

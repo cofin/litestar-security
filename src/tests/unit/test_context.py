@@ -52,7 +52,7 @@ _BASE_LOCAL_CAPABILITIES = {
     "current_epoch",
     "find_for_login",
     "get_by_id",
-    "get_password_hash",
+    "get_password_state",
     "issue",
     "register_login_method",
     "replace_password_and_bump_epoch",
@@ -700,13 +700,16 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "NoOpSecurityEventSink",
         "NotificationCommand",
         "PasswordChangeResult",
+        "PasswordChangeService",
         "PasswordChangeStatus",
+        "PasswordCredentialState",
         "PasswordCredentialStore",
         "PasswordHasher",
         "PasswordHashingUnavailableError",
         "PasswordPolicy",
         "PasswordPolicyResult",
         "PasswordPolicyViolation",
+        "PasswordReauthenticationProof",
         "PasswordReauthenticationService",
         "PasswordResetResult",
         "PasswordResetStatus",
@@ -733,6 +736,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "RotateRefreshCommand",
         "RotateRefreshResult",
         "SecurityEpochStore",
+        "SecurityEpochValidator",
         "SecurityEvent",
         "SecurityEventSink",
         "SessionAuthentication",
@@ -754,7 +758,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         (accounts_module.LocalAccountCapabilities, _BASE_LOCAL_CAPABILITIES),
         (
             accounts_module.PasswordCredentialStore,
-            {"get_password_hash", "compare_and_replace_password", "replace_password_and_bump_epoch"},
+            {"get_password_state", "compare_and_replace_password", "replace_password_and_bump_epoch"},
         ),
         (accounts_module.LoginMethodStore, {"register_login_method", "revoke_login_method"}),
         (accounts_module.RegistrationStore, {"register"}),
@@ -821,6 +825,10 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
             expires_at=now + timedelta(hours=1),
         ),
         accounts_module.RegistrationCommand(normalized_identifier="user@example.com"),
+        accounts_module.PasswordCredentialState("encoded-secret-hash", 1),
+        accounts_module.PasswordReauthenticationProof(
+            account_id=account.account_id, security_epoch=1, authenticated_at=now, expires_at=now + timedelta(minutes=5)
+        ),
         accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2),
         accounts_module.RevokeLoginMethodResult(accounts_module.RevokeLoginMethodStatus.REVOKED),
         accounts_module.RegistrationResult(accounts_module.RegistrationStatus.CREATED, account),
@@ -882,6 +890,7 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
         "binding-secret-digest",
         "destination-secret",
         "raw-notification-secret",
+        "encoded-secret-hash",
         "sealed-secret-receipt",
         "successor-secret-digest",
         "token-secret-digest",
@@ -939,10 +948,55 @@ def test_atomic_results_reject_contradictory_status_payloads() -> None:
     assert accounts_module.RotateRefreshResult(
         accounts_module.RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True
     ).family_revoked
+
+
+@pytest.mark.parametrize("epoch", [-1, True, 9_223_372_036_854_775_808])
+def test_account_password_session_and_refresh_contracts_share_one_strict_epoch_domain(epoch: object) -> None:
+    now = _ACCOUNT_NOW
+    factories = (
+        lambda: accounts_module.LocalAccount(
+            account_id="account-1",
+            normalized_identifier="user@example.com",
+            display_name=None,
+            active=True,
+            verified=True,
+            security_epoch=epoch,
+        ),
+        lambda: accounts_module.PasswordCredentialState("encoded-hash", epoch),
+        lambda: accounts_module.PasswordReauthenticationProof("account-1", epoch, now, now + timedelta(minutes=5)),
+        lambda: accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, epoch),
+        lambda: accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.RESET, "account-1", epoch),
+        lambda: accounts_module.SessionAuthentication("session-1", "binding-1", "account-1", epoch, now, now),
+        lambda: accounts_module.SessionRecord("session-1", "binding-1", b"digest", "account-1", epoch, now, now, now),
+        lambda: accounts_module.CreateSessionCommand("session-1", "binding-1", b"digest", "account-1", epoch, now, now),
+        lambda: accounts_module.RotateRefreshCommand(
+            "refresh-1", b"digest", "account-1", "family-1", epoch, "refresh-2", b"successor", now, now, b"receipt", now
+        ),
+    )
+
+    for factory in factories:
+        with pytest.raises(ValueError, match="epoch"):
+            factory()
     assert accounts_module.RotateRefreshResult(
         accounts_module.RefreshRotationStatus.REVOKED, family_revoked=True
     ).family_revoked
     assert not accounts_module.RotateRefreshResult(accounts_module.RefreshRotationStatus.EXPIRED).family_revoked
+
+
+@pytest.mark.parametrize(
+    ("authenticated_at", "expires_at", "match"),
+    [
+        (_ACCOUNT_NOW.replace(tzinfo=None), _ACCOUNT_NOW + timedelta(minutes=5), "timezone-aware"),
+        (_ACCOUNT_NOW, _ACCOUNT_NOW.replace(tzinfo=None), "timezone-aware"),
+        (object(), _ACCOUNT_NOW + timedelta(minutes=5), "timezone-aware"),
+        (_ACCOUNT_NOW, _ACCOUNT_NOW + timedelta(minutes=5, microseconds=1), "valid lifetime"),
+    ],
+)
+def test_password_reauthentication_proof_requires_aware_timestamps(
+    authenticated_at: datetime, expires_at: datetime, match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        accounts_module.PasswordReauthenticationProof("account-1", 1, authenticated_at, expires_at)
 
 
 def test_local_auth_profiles_validate_only_structural_enabled_capabilities(local_key_ring: LocalKeyRing) -> None:
@@ -1247,12 +1301,25 @@ def test_bound_token_and_proof_reject_invalid_identifiers_or_digests() -> None:
         maximum_attempts=5,
     )
 
-    with pytest.raises(ValueError, match="account ID"):
+    with pytest.raises(ValueError, match="account binding"):
         pending.bind(" ")
     with pytest.raises(ValueError, match="proof"):
         accounts_module.PurposeTokenProof(
             token_id=pending.token_id, digest=b"short", purpose=accounts_module.TokenPurpose.VERIFICATION
         )
+
+    recovery = accounts_module.PendingTokenIssue(
+        token_id="recovery_aWlpaWlpaWlpaWlpaWlpaQ",  # noqa: S106 - non-secret lookup ID
+        digest=b"d" * 32,
+        purpose=accounts_module.TokenPurpose.RECOVERY,
+        expires_at=_ACCOUNT_NOW + timedelta(hours=1),
+        maximum_attempts=5,
+    )
+    with pytest.raises(ValueError, match="issuance epoch"):
+        recovery.bind("account-1")
+    assert recovery.bind("account-1", security_epoch=1).issued_security_epoch == 1
+    with pytest.raises(ValueError, match="issuance epoch"):
+        pending.bind("account-1", security_epoch=1)
 
 
 def test_purpose_token_delivery_is_codec_created_digest_bound_and_redacted() -> None:

@@ -2,7 +2,7 @@
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Mapping  # noqa: TC003 - Litestar resolves public annotations at runtime
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from functools import partial
@@ -17,7 +17,7 @@ from unicodedata import normalize
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from anyio import to_thread
+from anyio import CancelScope, to_thread
 from argon2 import PasswordHasher as _Argon2Engine
 from argon2 import extract_parameters
 from argon2.exceptions import Argon2Error, InvalidHashError, VerificationError, VerifyMismatchError
@@ -25,10 +25,14 @@ from argon2.low_level import Type as Argon2Type
 from litestar.config.csrf import CSRFConfig
 from litestar.exceptions import ImproperlyConfiguredException
 
-from litestar_security.accounts.sessions import RefreshTokenFamilyStore, SessionBindingConfig, SessionRegistry
+from litestar_security.accounts.sessions import (
+    CreateSessionCommand,
+    RefreshTokenFamilyStore,
+    SessionBindingConfig,
+    SessionRegistry,
+)
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.config import ExternalCSRF, WorkerLimits
-from litestar_security.context import AuthenticationEvidence
 from litestar_security.providers.jwt import LocalKeyRing
 
 if TYPE_CHECKING:
@@ -54,13 +58,16 @@ __all__ = (
     "NoOpSecurityEventSink",
     "NotificationCommand",
     "PasswordChangeResult",
+    "PasswordChangeService",
     "PasswordChangeStatus",
+    "PasswordCredentialState",
     "PasswordCredentialStore",
     "PasswordHasher",
     "PasswordHashingUnavailableError",
     "PasswordPolicy",
     "PasswordPolicyResult",
     "PasswordPolicyViolation",
+    "PasswordReauthenticationProof",
     "PasswordReauthenticationService",
     "PasswordResetResult",
     "PasswordResetStatus",
@@ -83,6 +90,7 @@ __all__ = (
     "RevokeLoginMethodResult",
     "RevokeLoginMethodStatus",
     "SecurityEpochStore",
+    "SecurityEpochValidator",
     "SecurityEvent",
     "SecurityEventSink",
     "TokenIssue",
@@ -117,6 +125,7 @@ _TOKEN_LOOKUP_CHARACTERS = 22
 _TOKEN_SECRET_CHARACTERS = 43
 _DEFAULT_TOKEN_ATTEMPTS = 5
 _MAXIMUM_TOKEN_ATTEMPTS = 100
+_MAXIMUM_SECURITY_EPOCH = 9_223_372_036_854_775_807
 _VERIFICATION_TOKEN_LIFETIME = timedelta(hours=24)
 _RECOVERY_TOKEN_LIFETIME = timedelta(minutes=30)
 _DUMMY_TOKEN_LOOKUP = b"\x00" * _TOKEN_LOOKUP_BYTES
@@ -154,6 +163,7 @@ class PasswordChangeStatus(str, Enum):
     CHANGED = "changed"
     CONFLICT = "conflict"
     NOT_FOUND = "not_found"
+    EPOCH_EXHAUSTED = "epoch_exhausted"
 
 
 class PasswordPolicyViolation(str, Enum):
@@ -209,6 +219,7 @@ class PasswordResetStatus(str, Enum):
     EXPIRED = "expired"
     USED = "used"
     CONFLICT = "conflict"
+    EPOCH_EXHAUSTED = "epoch_exhausted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +234,16 @@ class LocalAccount(Generic[UserT]):
     security_epoch: int
     user: UserT | None = field(default=None, repr=False)
 
+    def __post_init__(self) -> None:
+        """Validate the stable account and strict epoch projection."""
+        if (
+            not _strict_text(self.account_id)
+            or not _strict_text(self.normalized_identifier)
+            or not _valid_security_epoch(self.security_epoch)
+        ):
+            msg = "Local account requires stable identifiers and a valid security epoch"
+            raise ValueError(msg)
+
 
 @dataclass(frozen=True, slots=True)
 class LoginMethod:
@@ -232,6 +253,49 @@ class LoginMethod:
     kind: str
     created_at: "datetime"
     display_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PasswordCredentialState:
+    """Atomic password hash and epoch snapshot used for reauthentication."""
+
+    password_hash: str = field(repr=False)
+    security_epoch: int
+
+    def __post_init__(self) -> None:
+        """Require one encoded hash bound to a strict current epoch."""
+        if not _strict_text(self.password_hash) or not _valid_security_epoch(self.security_epoch):
+            msg = "Password credential state requires a hash and valid security epoch"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class PasswordReauthenticationProof:
+    """Account- and epoch-bound recent password proof for sensitive mutation."""
+
+    account_id: str
+    security_epoch: int
+    authenticated_at: "datetime"
+    expires_at: "datetime"
+
+    def __post_init__(self) -> None:
+        """Require a strict identity, epoch, and forward-moving proof window."""
+        try:
+            authenticated_at = _aware_utc_time(self.authenticated_at)
+            expires_at = _aware_utc_time(self.expires_at)
+        except (AttributeError, ValueError):
+            msg = "Password reauthentication proof timestamps must be timezone-aware"
+            raise ValueError(msg) from None
+        if (
+            not _strict_text(self.account_id)
+            or not _valid_security_epoch(self.security_epoch)
+            or expires_at <= authenticated_at
+            or expires_at - authenticated_at > _DEFAULT_REAUTHENTICATION_TTL
+        ):
+            msg = "Password reauthentication proof requires an account, epoch, and valid lifetime"
+            raise ValueError(msg)
+        object.__setattr__(self, "authenticated_at", authenticated_at)
+        object.__setattr__(self, "expires_at", expires_at)
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,7 +350,7 @@ class PendingTokenIssue:
         """Validate secret-safe storage material and bounded attempt policy."""
         _validate_pending_token_issue(self)
 
-    def bind(self, account_id: str) -> "TokenIssue":
+    def bind(self, account_id: str, *, security_epoch: int | None = None) -> "TokenIssue":
         """Bind this material to an application-allocated account ID."""
         return TokenIssue(
             token_id=self.token_id,
@@ -295,20 +359,31 @@ class PendingTokenIssue:
             account_id=account_id,
             expires_at=self.expires_at,
             maximum_attempts=self.maximum_attempts,
+            issued_security_epoch=security_epoch,
         )
 
 
 @dataclass(frozen=True, slots=True)
-class TokenIssue(PendingTokenIssue):
+class TokenIssue:
     """Hashed, purpose-bound token material accepted by an atomic store."""
 
+    token_id: str
+    digest: bytes = field(repr=False)
+    purpose: TokenPurpose
+    expires_at: "datetime"
+    maximum_attempts: int
     account_id: str
+    issued_security_epoch: int | None = None
 
     def __post_init__(self) -> None:
         """Require a stable account binding in addition to valid token material."""
-        PendingTokenIssue.__post_init__(self)
-        if not _strict_text(self.account_id):
-            msg = "Purpose token account ID must not be blank"
+        _validate_pending_token_issue(self)
+        recovery_epoch_valid = self.purpose is not TokenPurpose.RECOVERY or _valid_security_epoch(
+            self.issued_security_epoch
+        )
+        non_recovery_epoch_valid = self.purpose is TokenPurpose.RECOVERY or self.issued_security_epoch is None
+        if not _strict_text(self.account_id) or not recovery_epoch_valid or not non_recovery_epoch_valid:
+            msg = "Purpose token account binding or issuance epoch is invalid"
             raise ValueError(msg)
 
 
@@ -376,9 +451,9 @@ class PurposeTokenDelivery:
         message = "PurposeTokenDelivery must be created by PurposeTokenCodec"
         raise TypeError(message)
 
-    def bind(self, account_id: str) -> tuple[TokenIssue, NotificationCommand]:
+    def bind(self, account_id: str, *, security_epoch: int | None = None) -> tuple[TokenIssue, NotificationCommand]:
         """Bind the storage material while preserving the codec-created notification."""
-        return self.issue.bind(account_id), self.notification
+        return self.issue.bind(account_id, security_epoch=security_epoch), self.notification
 
 
 @dataclass(frozen=True, slots=True)
@@ -528,7 +603,11 @@ def _strict_text(value: object) -> bool:
     return isinstance(value, str) and value.__class__ is str and bool(value.strip())
 
 
-def _validate_pending_token_issue(issue: PendingTokenIssue) -> None:
+def _valid_security_epoch(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAXIMUM_SECURITY_EPOCH
+
+
+def _validate_pending_token_issue(issue: "PendingTokenIssue | TokenIssue") -> None:
     if (
         issue.purpose.__class__ is not TokenPurpose
         or not _valid_token_id(issue.token_id, issue.purpose)
@@ -970,7 +1049,11 @@ class PasswordChangeResult:
     def __post_init__(self) -> None:
         """Require an epoch only for a successful atomic replacement."""
         changed = self.status is PasswordChangeStatus.CHANGED
-        if changed != (self.security_epoch is not None):
+        if (
+            self.status.__class__ is not PasswordChangeStatus
+            or changed != (self.security_epoch is not None)
+            or (changed and not _valid_security_epoch(self.security_epoch))
+        ):
             msg = "Changed password results require exactly one security epoch"
             raise ValueError(msg)
 
@@ -1027,7 +1110,12 @@ class PasswordResetResult:
         """Require account and epoch payload only for a completed reset."""
         reset = self.status is PasswordResetStatus.RESET
         has_payload = self.account_id is not None and self.security_epoch is not None
-        if reset != has_payload or (not reset and (self.account_id is not None or self.security_epoch is not None)):
+        if (
+            self.status.__class__ is not PasswordResetStatus
+            or reset != has_payload
+            or (not reset and (self.account_id is not None or self.security_epoch is not None))
+            or (reset and (not _strict_text(self.account_id) or not _valid_security_epoch(self.security_epoch)))
+        ):
             msg = "Reset password results require exactly one account and security epoch"
             raise ValueError(msg)
 
@@ -1072,8 +1160,8 @@ class AccountLookup(Protocol[UserT]):
 class PasswordCredentialStore(Protocol):
     """Store password credentials through atomic security operations."""
 
-    async def get_password_hash(self, account_id: str) -> str | None:
-        """Load the current encoded password hash."""
+    async def get_password_state(self, account_id: str) -> PasswordCredentialState | None:
+        """Load one atomic encoded-password and security-epoch snapshot."""
         ...  # pragma: no cover
 
     async def compare_and_replace_password(
@@ -1148,7 +1236,7 @@ class RecoveryTokenStore(Protocol):
     async def consume_and_reset(
         self, token_id: str, digest: bytes, new_password_hash: str, *, now: "datetime", event: SecurityEvent
     ) -> PasswordResetResult:
-        """Consume a recovery token and reset password/epoch atomically."""
+        """Consume only at its issued epoch, then reset password and advance epoch atomically."""
         ...  # pragma: no cover
 
 
@@ -1172,6 +1260,33 @@ class LocalAccountCapabilities(
     Protocol[UserT],
 ):
     """Structural account capabilities required by every local-auth profile."""
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityEpochValidator:
+    """Validate one presented epoch against authoritative application state."""
+
+    store: SecurityEpochStore = field(repr=False)
+
+    def __post_init__(self) -> None:
+        """Require the exact epoch lookup capability."""
+        if not isinstance(object.__getattribute__(self, "store"), SecurityEpochStore):
+            msg = "Security epoch validator store must implement SecurityEpochStore"
+            raise ImproperlyConfiguredException(detail=msg)
+
+    async def validate(
+        self, account_id: str, presented_epoch: int
+    ) -> InvalidCredentials | VerificationUnavailable | None:
+        """Return ``None`` only when the exact current epoch matches."""
+        if not _strict_text(account_id) or not _valid_security_epoch(presented_epoch):
+            return InvalidCredentials()
+        try:
+            current_epoch = await self.store.current_epoch(account_id)
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+        if not _valid_security_epoch(current_epoch) or current_epoch != presented_epoch:
+            return InvalidCredentials()
+        return None
 
 
 def _utc_now() -> datetime:
@@ -1402,6 +1517,276 @@ class VerificationTokenService(Generic[UserT]):
 
 
 @dataclass(frozen=True, slots=True)
+class PasswordChangeService:
+    """Apply authenticated or administrative password changes and epoch invalidation."""
+
+    accounts: PasswordCredentialStore = field(repr=False)
+    hasher: PasswordHasher = field(repr=False)
+    password_policy: PasswordPolicy = field(default_factory=PasswordPolicy, repr=False)
+    sessions: SessionRegistry | None = field(default=None, repr=False)
+    refresh_tokens: RefreshTokenFamilyStore | None = field(default=None, repr=False)
+    evidence_ttl: timedelta = _DEFAULT_REAUTHENTICATION_TTL
+    clock: "Callable[[], datetime]" = field(default=_utc_now, repr=False, compare=False)
+    event_ids: "Callable[[], str]" = field(default=_new_event_id, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate atomic mutation, hashing, and optional transport cleanup ports."""
+        if not isinstance(object.__getattribute__(self, "accounts"), PasswordCredentialStore):
+            msg = "Password change accounts must implement PasswordCredentialStore"
+            raise ImproperlyConfiguredException(detail=msg)
+        if not isinstance(object.__getattribute__(self, "hasher"), PasswordHasher):
+            msg = "Password change hasher must implement PasswordHasher"
+            raise ImproperlyConfiguredException(detail=msg)
+        if object.__getattribute__(self, "password_policy").__class__ is not PasswordPolicy:
+            msg = "Password change policy must be PasswordPolicy"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.sessions is not None and not isinstance(object.__getattribute__(self, "sessions"), SessionRegistry):
+            msg = "Password change sessions must implement SessionRegistry"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.refresh_tokens is not None and not isinstance(
+            object.__getattribute__(self, "refresh_tokens"), RefreshTokenFamilyStore
+        ):
+            msg = "Password change refresh tokens must implement RefreshTokenFamilyStore"
+            raise ImproperlyConfiguredException(detail=msg)
+        if (
+            self.evidence_ttl.__class__ is not timedelta
+            or self.evidence_ttl <= timedelta(0)
+            or self.evidence_ttl > _DEFAULT_REAUTHENTICATION_TTL
+            or not callable(self.clock)
+            or not callable(self.event_ids)
+        ):
+            msg = "Password change evidence lifetime and hooks must be valid"
+            raise ImproperlyConfiguredException(detail=msg)
+
+    async def change(  # noqa: PLR0913
+        self,
+        account_id: str,
+        password: str,
+        *,
+        proof: PasswordReauthenticationProof,
+        normalized_identifier: str | None = None,
+        current_session_id: str | None = None,
+        replacement_session: CreateSessionCommand | None = None,
+        compromise: bool = False,
+        now: datetime | None = None,
+    ) -> (
+        PasswordChangeResult
+        | PasswordPolicyResult
+        | InvalidCredentials
+        | InvalidLifecycleRequest
+        | VerificationUnavailable
+    ):
+        """Change a password after recent proof and preserve only an explicitly rebound session."""
+        try:
+            occurred_at = _aware_utc_time(self.clock() if now is None else now)
+        except (AttributeError, TypeError, ValueError):
+            return InvalidLifecycleRequest()
+        if not self._recent_password_proof(account_id, proof, occurred_at):
+            return InvalidCredentials()
+        return await self._replace(
+            account_id,
+            password,
+            expected_epoch=proof.security_epoch,
+            normalized_identifier=normalized_identifier,
+            current_session_id=current_session_id,
+            replacement_session=replacement_session,
+            compromise=compromise,
+            occurred_at=occurred_at,
+            operation="local.password.change",
+        )
+
+    async def force_reset(
+        self,
+        account_id: str,
+        password: str,
+        *,
+        expected_epoch: int,
+        normalized_identifier: str | None = None,
+        now: datetime | None = None,
+    ) -> PasswordChangeResult | PasswordPolicyResult | InvalidLifecycleRequest | VerificationUnavailable:
+        """Perform an application-authorized reset without registering an admin route."""
+        try:
+            occurred_at = _aware_utc_time(self.clock() if now is None else now)
+        except (AttributeError, TypeError, ValueError):
+            return InvalidLifecycleRequest()
+        return await self._replace(
+            account_id,
+            password,
+            expected_epoch=expected_epoch,
+            normalized_identifier=normalized_identifier,
+            current_session_id=None,
+            replacement_session=None,
+            compromise=True,
+            occurred_at=occurred_at,
+            operation="local.password.force_reset",
+        )
+
+    async def _replace(  # noqa: PLR0911, PLR0913
+        self,
+        account_id: str,
+        password: str,
+        *,
+        expected_epoch: int,
+        normalized_identifier: str | None,
+        current_session_id: str | None,
+        replacement_session: CreateSessionCommand | None,
+        compromise: bool,
+        occurred_at: datetime,
+        operation: str,
+    ) -> PasswordChangeResult | PasswordPolicyResult | InvalidLifecycleRequest | VerificationUnavailable:
+        if (
+            not _strict_text(account_id)
+            or not _valid_security_epoch(expected_epoch)
+            or not self._valid_rebind(
+                account_id,
+                occurred_at,
+                current_session_id=current_session_id,
+                replacement_session=replacement_session,
+                compromise=compromise,
+            )
+        ):
+            return InvalidLifecycleRequest()
+        if expected_epoch == _MAXIMUM_SECURITY_EPOCH:
+            return PasswordChangeResult(PasswordChangeStatus.EPOCH_EXHAUSTED)
+        try:
+            policy_result = self.password_policy.check(password, normalized_identifier=normalized_identifier)
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+        if not policy_result.accepted:
+            return policy_result
+        try:
+            password_hash = await self.hasher.hash(password)
+            result = await self.accounts.replace_password_and_bump_epoch(
+                account_id,
+                password_hash,
+                expected_epoch=expected_epoch,
+                event=_lifecycle_event(
+                    self.event_ids, occurred_at, operation=operation, outcome="changed", account_id=account_id
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+        if result.status is not PasswordChangeStatus.CHANGED:
+            return result
+        new_epoch = result.security_epoch
+        if new_epoch is None or new_epoch != expected_epoch + 1:
+            return VerificationUnavailable()
+        with CancelScope(shield=True):
+            await self._cleanup_after_change(
+                account_id,
+                new_epoch,
+                occurred_at,
+                current_session_id=current_session_id,
+                replacement_session=replacement_session,
+                compromise=compromise,
+            )
+        return result
+
+    def _valid_rebind(
+        self,
+        account_id: str,
+        occurred_at: datetime,
+        *,
+        current_session_id: str | None,
+        replacement_session: CreateSessionCommand | None,
+        compromise: bool,
+    ) -> bool:
+        if compromise and (current_session_id is not None or replacement_session is not None):
+            return False
+        if (current_session_id is None) != (replacement_session is None):
+            return False
+        if current_session_id is None:
+            return True
+        if self.sessions is None or not _strict_text(current_session_id) or replacement_session is None:
+            return False
+        try:
+            expires_at = _aware_utc_time(replacement_session.expires_at)
+        except (AttributeError, ValueError):
+            return False
+        return (
+            replacement_session.__class__ is CreateSessionCommand
+            and replacement_session.account_id == account_id
+            and _strict_text(replacement_session.session_id)
+            and replacement_session.session_id != current_session_id
+            and expires_at > occurred_at
+        )
+
+    def _recent_password_proof(self, account_id: str, proof: object, occurred_at: datetime) -> bool:
+        if (
+            not isinstance(proof, PasswordReauthenticationProof)
+            or proof.__class__ is not PasswordReauthenticationProof
+            or not _strict_text(account_id)
+        ):
+            return False
+        return (
+            compare_digest(proof.account_id.encode("utf-8"), account_id.encode("utf-8"))
+            and proof.authenticated_at <= occurred_at
+            and occurred_at - proof.authenticated_at <= self.evidence_ttl
+            and occurred_at <= proof.expires_at
+        )
+
+    async def _cleanup_after_change(  # noqa: PLR0913
+        self,
+        account_id: str,
+        security_epoch: int,
+        occurred_at: datetime,
+        *,
+        current_session_id: str | None,
+        replacement_session: CreateSessionCommand | None,
+        compromise: bool,
+    ) -> None:
+        if self.refresh_tokens is not None:
+            try:
+                await self.refresh_tokens.revoke_for_account(
+                    account_id,
+                    event=_lifecycle_event(
+                        self.event_ids,
+                        occurred_at,
+                        operation="local.password.refresh_revoke",
+                        outcome="revoked",
+                        account_id=account_id,
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.error("Password refresh cleanup failed")  # noqa: TRY400
+        if self.sessions is None:
+            return
+        if compromise or current_session_id is None or replacement_session is None:
+            await _revoke_all_sessions(self.sessions, account_id, occurred_at, self.event_ids)
+            return
+        try:
+            await self.sessions.revoke_other_sessions(
+                account_id,
+                current_session_id,
+                event=_lifecycle_event(
+                    self.event_ids,
+                    occurred_at,
+                    operation="local.password.session_revoke_others",
+                    outcome="revoked",
+                    account_id=account_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.error("Password session cleanup failed")  # noqa: TRY400
+        try:
+            await self.sessions.rebind(
+                current_session_id,
+                replace(
+                    replacement_session, account_id=account_id, security_epoch=security_epoch, created_at=occurred_at
+                ),
+                event=_lifecycle_event(
+                    self.event_ids,
+                    occurred_at,
+                    operation="local.password.session_rebind",
+                    outcome="rebound",
+                    account_id=account_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.error("Password session rebind failed")  # noqa: TRY400
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryTokenService(Generic[UserT]):
     """Issue enumeration-resistant password-recovery notification commands."""
 
@@ -1410,6 +1795,8 @@ class RecoveryTokenService(Generic[UserT]):
     tokens: PurposeTokenCodec = field(repr=False)
     hasher: PasswordHasher = field(repr=False)
     password_policy: PasswordPolicy = field(default_factory=PasswordPolicy, repr=False)
+    sessions: SessionRegistry | None = field(default=None, repr=False)
+    refresh_tokens: RefreshTokenFamilyStore | None = field(default=None, repr=False)
     lifetime: timedelta = _RECOVERY_TOKEN_LIFETIME
     maximum_attempts: int = _DEFAULT_TOKEN_ATTEMPTS
     return_url: str | None = None
@@ -1433,6 +1820,14 @@ class RecoveryTokenService(Generic[UserT]):
             raise ImproperlyConfiguredException(detail=msg)
         if object.__getattribute__(self, "password_policy").__class__ is not PasswordPolicy:
             msg = "Recovery token password policy must be PasswordPolicy"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.sessions is not None and not isinstance(object.__getattribute__(self, "sessions"), SessionRegistry):
+            msg = "Recovery token sessions must implement SessionRegistry"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.refresh_tokens is not None and not isinstance(
+            object.__getattribute__(self, "refresh_tokens"), RefreshTokenFamilyStore
+        ):
+            msg = "Recovery token refresh tokens must implement RefreshTokenFamilyStore"
             raise ImproperlyConfiguredException(detail=msg)
         _validate_lifecycle_configuration(
             lifetime=self.lifetime,
@@ -1460,7 +1855,7 @@ class RecoveryTokenService(Generic[UserT]):
             )
             account = await self.accounts.find_for_login(normalized_identifier) if normalized_identifier else None
             if account is not None and account.active:
-                issue, notification = issued.bind(account.account_id)
+                issue, notification = issued.bind(account.account_id, security_epoch=account.security_epoch)
                 await self.store.issue(
                     issue,
                     notification,
@@ -1492,7 +1887,7 @@ class RecoveryTokenService(Generic[UserT]):
         try:
             occurred_at = _aware_utc_time(self.clock() if now is None else now)
             password_hash = await self.hasher.hash(password)
-            return await self.store.consume_and_reset(
+            result = await self.store.consume_and_reset(
                 proof.token_id,
                 proof.digest,
                 password_hash,
@@ -1503,6 +1898,65 @@ class RecoveryTokenService(Generic[UserT]):
             )
         except Exception:  # noqa: BLE001
             return VerificationUnavailable()
+        if result.status is PasswordResetStatus.RESET and result.account_id is not None:
+            with CancelScope(shield=True):
+                await _revoke_all_credentials(
+                    account_id=result.account_id,
+                    sessions=self.sessions,
+                    refresh_tokens=self.refresh_tokens,
+                    occurred_at=occurred_at,
+                    event_ids=self.event_ids,
+                    operation="local.recovery",
+                )
+        return result
+
+
+async def _revoke_all_sessions(
+    sessions: SessionRegistry,
+    account_id: str,
+    occurred_at: datetime,
+    event_ids: "Callable[[], str]",
+    *,
+    operation: str = "local.password.session_revoke_all",
+) -> None:
+    try:
+        await sessions.revoke_sessions_for_account(
+            account_id,
+            event=_lifecycle_event(
+                event_ids, occurred_at, operation=operation, outcome="revoked", account_id=account_id
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        _LOGGER.error("Password session cleanup failed")  # noqa: TRY400
+
+
+async def _revoke_all_credentials(  # noqa: PLR0913
+    *,
+    account_id: str,
+    sessions: SessionRegistry | None,
+    refresh_tokens: RefreshTokenFamilyStore | None,
+    occurred_at: datetime,
+    event_ids: "Callable[[], str]",
+    operation: str,
+) -> None:
+    if sessions is not None:
+        await _revoke_all_sessions(
+            sessions, account_id, occurred_at, event_ids, operation=f"{operation}.session_revoke_all"
+        )
+    if refresh_tokens is not None:
+        try:
+            await refresh_tokens.revoke_for_account(
+                account_id,
+                event=_lifecycle_event(
+                    event_ids,
+                    occurred_at,
+                    operation=f"{operation}.refresh_revoke",
+                    outcome="revoked",
+                    account_id=account_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.error("Password refresh cleanup failed")  # noqa: TRY400
 
 
 def _validate_lifecycle_configuration(  # noqa: PLR0913
@@ -1573,18 +2027,19 @@ class PasswordReauthenticationService:
 
     async def verify(
         self, account_id: str, password: str, *, now: datetime | None = None
-    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
-        """Return fresh password evidence or one sanitized domain outcome."""
+    ) -> PasswordReauthenticationProof | InvalidCredentials | VerificationUnavailable:
+        """Return an account- and epoch-bound proof or one sanitized domain outcome."""
         account_value: object = account_id
         if account_value.__class__ is not str or not (normalized_account_id := account_id.strip()):
             return InvalidCredentials()
         try:
             authenticated_at = _aware_utc_time(self.clock() if now is None else now)
-            encoded_hash = await self.accounts.get_password_hash(normalized_account_id)
+            state = await self.accounts.get_password_state(normalized_account_id)
+            encoded_hash = state.password_hash if state is not None else None
             result = await self.hasher.verify(encoded_hash, password)
         except Exception:  # noqa: BLE001
             return VerificationUnavailable()
-        if not result.verified or encoded_hash is None:
+        if not result.verified or encoded_hash is None or state is None:
             if result.status is PasswordVerificationStatus.MALFORMED:
                 await self._emit_malformed(normalized_account_id, authenticated_at)
             return InvalidCredentials()
@@ -1592,13 +2047,11 @@ class PasswordReauthenticationService:
             normalized_account_id, encoded_hash, result.replacement_hash, authenticated_at
         ):
             return VerificationUnavailable()
-        return AuthenticationEvidence(
-            mechanism="password",
-            slot="password",
+        return PasswordReauthenticationProof(
+            account_id=normalized_account_id,
+            security_epoch=state.security_epoch,
             authenticated_at=authenticated_at,
             expires_at=authenticated_at + self.evidence_ttl,
-            methods=frozenset({"password"}),
-            amr=("pwd",),
         )
 
     async def _rehash(self, account_id: str, expected_hash: str, replacement_hash: str, occurred_at: datetime) -> bool:
@@ -1609,7 +2062,7 @@ class PasswordReauthenticationService:
             )
         except Exception:  # noqa: BLE001
             return False
-        return replaced.__class__ is bool
+        return replaced is True
 
     def _event(self, account_id: str, occurred_at: datetime, *, operation: str, outcome: str) -> SecurityEvent:
         event_id = self.event_ids().strip()
