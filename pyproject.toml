@@ -27,7 +27,11 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]
-dependencies = ["litestar>=2.24.0"]
+dependencies = [
+  "argon2-cffi>=25.1,<26",
+  "litestar>=2.24.0",
+  "PyJWT[crypto]>=2.13",
+]
 
 [project.urls]
 Issues = "https://github.com/cofin/litestar-security/issues"
@@ -123,6 +127,7 @@ dev = [
 ###########
 [tool.pytest.ini_options]
 addopts = ["-ra", "--strict-config", "--strict-markers"]
+markers = ["performance: deterministic local regression gates excluded from the normal suite"]
 testpaths = ["src/tests"]
 
 [tool.coverage.run]
@@ -137,6 +142,34 @@ exclude_lines = [
   "pragma: no cover",
   "if TYPE_CHECKING:",
 ]
+
+#########
+# UV    #
+#########
+[tool.uv]
+exclude-newer = "2026-07-19T00:00:00Z"
+preview-features = ["index-exclude-newer"]
+
+[tool.uv.exclude-newer-package]
+advanced-alchemy = "2099-01-01T00:00:00Z"
+litestar = "2099-01-01T00:00:00Z"
+litestar-asyncapi = "2099-01-01T00:00:00Z"
+litestar-asyncpg = "2099-01-01T00:00:00Z"
+litestar-autowire = "2099-01-01T00:00:00Z"
+litestar-email = "2099-01-01T00:00:00Z"
+litestar-granian = "2099-01-01T00:00:00Z"
+litestar-htmx = "2099-01-01T00:00:00Z"
+litestar-mcp = "2099-01-01T00:00:00Z"
+litestar-oracledb = "2099-01-01T00:00:00Z"
+litestar-queues = "2099-01-01T00:00:00Z"
+litestar-saq = "2099-01-01T00:00:00Z"
+litestar-security = "2099-01-01T00:00:00Z"
+litestar-vite = "2099-01-01T00:00:00Z"
+polyfactory = "2099-01-01T00:00:00Z"
+pytest-databases = "2099-01-01T00:00:00Z"
+sqlglot = "2099-01-01T00:00:00Z"
+sqlglotc = "2099-01-01T00:00:00Z"
+sqlspec = "2099-01-01T00:00:00Z"
 
 #########
 # Ruff  #
@@ -171,6 +204,9 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "docs/conf.py" = ["A001", "INP001"]
+# Every value in this module is an audit event name. S105 fires on each PASSWORD_*
+# constant because the name looks credential-bearing, but the module holds no secrets.
+"src/litestar_security/accounts/_operations.py" = ["S105"]
 "src/tests/**/*.py" = ["ANN", "D", "PLR2004", "S101"]
 "tools/**/*.py" = ["T201"]
 
@@ -191,13 +227,13 @@ warn_return_any = true
 warn_unreachable = true
 warn_unused_configs = true
 warn_unused_ignores = true
-files = ["src/litestar_security"]
+files = ["src/litestar_security", "src/tests/typing/helpers.py"]
 
 ###########
 # Pyright #
 ###########
 [tool.pyright]
-include = ["src/litestar_security"]
+include = ["src/litestar_security", "src/tests/typing/helpers.py"]
 pythonVersion = "3.10"
 typeCheckingMode = "strict"
 

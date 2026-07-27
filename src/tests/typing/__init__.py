@@ -1,0 +1,1 @@
+"""Strict typing fixtures."""

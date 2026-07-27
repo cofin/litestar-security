@@ -19,6 +19,10 @@ def security_group() -> None:
 
 
 def register(cli: "Group") -> None:
-    """Attach the security command group to a Click group once."""
+    """Attach the security command group to a Click group once.
+
+    Args:
+        cli: The Click group to attach to. Calling this repeatedly is safe.
+    """
     if security_group.name not in cli.commands:
         cli.add_command(security_group)

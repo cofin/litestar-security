@@ -7,11 +7,9 @@
 Litestar Security
 =================
 
-Litestar Security is a pre-alpha plugin library for security integrations in
-Litestar applications. Version 0.1.0 establishes packaging, typing, plugin, and
-CLI contracts only.
-
-Authentication and authorization behavior is not implemented yet.
+Litestar Security is a pre-alpha plugin library for typed security integrations
+in Litestar applications. Its initial runtime includes authentication policy,
+guards, local JWT signing, strict OIDC discovery, and bounded JWKS rotation.
 
 .. toctree::
    :hidden:
@@ -20,12 +18,27 @@ Authentication and authorization behavior is not implemented yet.
    introduction
    development-installation
    plugin-scaffold
+   jwt-and-jwks
+   generated-routes
+   rate-limiting
    contributing
    reference
    changelog
 
 .. grid:: 1 1 2 2
    :gutter: 2
+
+   .. grid-item-card:: Generated routes
+      :link: generated-routes
+      :link-type: doc
+
+      See what a local-auth profile adds to your application and its OpenAPI document.
+
+   .. grid-item-card:: Rate limiting
+      :link: rate-limiting
+      :link-type: doc
+
+      Understand the default budgets and make them correct across worker processes.
 
    .. grid-item-card:: Introduction
       :link: introduction
@@ -43,7 +56,13 @@ Authentication and authorization behavior is not implemented yet.
       :link: plugin-scaffold
       :link-type: doc
 
-      Add the typed placeholder plugin to a Litestar application.
+      Add the typed security plugin to a Litestar application.
+
+   .. grid-item-card:: JWT and JWKS
+      :link: jwt-and-jwks
+      :link-type: doc
+
+      Configure explicit local keys, strict discovery, and bounded rotation.
 
    .. grid-item-card:: API reference
       :link: reference
