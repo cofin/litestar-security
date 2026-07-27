@@ -19,6 +19,30 @@ Plugin
 .. automodule:: litestar_security.plugin
    :members:
 
+Authentication
+--------------
+
+.. automodule:: litestar_security.authentication
+   :members:
+
+Security context
+----------------
+
+.. automodule:: litestar_security.context
+   :members:
+
+Authorization guards
+--------------------
+
+.. automodule:: litestar_security.guards
+   :members:
+
+Local accounts
+--------------
+
+.. automodule:: litestar_security.accounts
+   :members:
+
 Providers
 ---------
 
