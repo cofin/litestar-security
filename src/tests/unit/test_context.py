@@ -23,6 +23,7 @@ import litestar_security.accounts as accounts_module
 import litestar_security.accounts._purpose_tokens as purpose_tokens_module
 import litestar_security.accounts._receipts as receipts_module
 import litestar_security.authentication as authentication_module
+from litestar_security.accounts import AssuranceRequirement, AssuranceTrait
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -40,6 +41,7 @@ from litestar_security.guards import any_of as guards_any_of
 from litestar_security.guards import at_least as guards_at_least
 from litestar_security.guards import (
     one_of,
+    requires_assurance,
     requires_authenticated,
     requires_capability,
     requires_role,
@@ -263,11 +265,14 @@ def _guard_connection(
     *,
     authenticated: bool = True,
     authorization: AuthorizationSnapshot | None = None,
+    evidence: tuple[AuthenticationEvidence, ...] = (),
     path_params: dict[str, object] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         user=Principal(id="user-1") if authenticated else Principal.anonymous(),
-        auth=SecurityContext(session=NullSessionHandle(), authorization=authorization or AuthorizationSnapshot()),
+        auth=SecurityContext(
+            session=NullSessionHandle(), evidence=evidence, authorization=authorization or AuthorizationSnapshot()
+        ),
         path_params=path_params or {},
     )
 
@@ -362,6 +367,97 @@ def test_evidence_normalizes_utc_and_preserves_assurance_details() -> None:
 def test_evidence_rejects_blank_names_and_naive_timestamps(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError, match=r"must not be blank|must be timezone-aware"):
         AuthenticationEvidence(**kwargs)
+
+
+def test_assurance_requires_distinct_method_and_trait_evidence_at_the_freshness_boundary() -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    connection = _guard_connection(
+        evidence=(
+            AuthenticationEvidence(
+                mechanism="local",
+                slot="session",
+                authenticated_at=now - timedelta(minutes=5),
+                methods=frozenset({"password"}),
+            ),
+            AuthenticationEvidence(
+                mechanism="totp",
+                slot="mfa",
+                authenticated_at=now - timedelta(minutes=5),
+                methods=frozenset({"totp"}),
+                traits=frozenset({AssuranceTrait.USER_VERIFIED}),
+            ),
+        )
+    )
+    predicate = requires_assurance(
+        methods={"password", "totp"},
+        traits={AssuranceTrait.USER_VERIFIED},
+        max_age=timedelta(minutes=5),
+        clock=lambda: now,
+    )
+
+    assert predicate.decide(connection).granted  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("evidence", "purpose", "code"),
+    [
+        (
+            AuthenticationEvidence(
+                mechanism="oidc",
+                slot="authorization.bearer",
+                authenticated_at=datetime(2026, 7, 27, 11, 54, 59, tzinfo=timezone.utc),
+                methods=frozenset({"password", "totp"}),
+            ),
+            None,
+            "assurance_too_old",
+        ),
+        (
+            AuthenticationEvidence(
+                mechanism="oidc",
+                slot="authorization.bearer",
+                authenticated_at=datetime(2026, 7, 27, 12, tzinfo=timezone.utc),
+                acr="urn:example:aal2",
+                amr=("pwd", "otp"),
+            ),
+            None,
+            "missing_assurance",
+        ),
+        (
+            AuthenticationEvidence(
+                mechanism="step-up",
+                slot="session",
+                authenticated_at=datetime(2026, 7, 27, 12, tzinfo=timezone.utc),
+                methods=frozenset({"password"}),
+                traits=frozenset({"purpose:password-change"}),
+            ),
+            "provider-unlink",
+            "assurance_purpose_mismatch",
+        ),
+    ],
+)
+def test_assurance_rejects_stale_raw_provider_or_wrong_purpose_evidence(
+    evidence: AuthenticationEvidence, purpose: str | None, code: str
+) -> None:
+    connection = _guard_connection(evidence=(evidence,))
+    predicate = requires_assurance(
+        methods={"password"},
+        max_age=timedelta(minutes=5),
+        purpose=purpose,
+        clock=lambda: datetime(2026, 7, 27, 12, tzinfo=timezone.utc),
+    )
+
+    assert predicate.decide(connection).code == code  # type: ignore[arg-type]
+
+
+def test_assurance_contract_validates_utc_clock_and_requirement_values() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="clock must return a timezone-aware"):
+        requires_assurance(clock=lambda: datetime(2026, 7, 27, 12)).decide(  # noqa: DTZ001
+            _guard_connection()  # type: ignore[arg-type]
+        )
+    with pytest.raises(ImproperlyConfiguredException, match="max_age must be positive"):
+        AssuranceRequirement(max_age=timedelta())
+    with pytest.raises(ImproperlyConfiguredException, match="purpose must not be blank"):
+        AssuranceRequirement(purpose=" ")
 
 
 def test_authorization_snapshot_defensively_freezes_input() -> None:
@@ -800,6 +896,8 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "REFRESH_RESPONSE_HEADERS",
         "AccountLookup",
         "Argon2PasswordHasher",
+        "AssuranceRequirement",
+        "AssuranceTrait",
         "ConsumeResult",
         "ConsumeStatus",
         "CreateRefreshFamilyCommand",
@@ -2438,6 +2536,8 @@ def test_security_config_is_typed_and_slotted() -> None:
         "session_backend",
         "local_auth",
         "local_jwks",
+        "mfa",
+        "passkeys",
         "jwks_providers",
         "jwks_warmup_failure",
     )

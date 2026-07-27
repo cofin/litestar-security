@@ -19,7 +19,15 @@ if TYPE_CHECKING:
     from litestar_security.providers.jwks import JWKSProvider
     from litestar_security.providers.jwt import LocalJWKSConfig
 
-__all__ = ("ExternalCSRF", "NoOpSecurityMetrics", "SecurityConfig", "SecurityMetrics", "WorkerLimits")
+__all__ = (
+    "ExternalCSRF",
+    "MFAConfig",
+    "NoOpSecurityMetrics",
+    "PasskeyConfig",
+    "SecurityConfig",
+    "SecurityMetrics",
+    "WorkerLimits",
+)
 
 UserT = TypeVar("UserT")
 _EMPTY_METRIC_ATTRIBUTES: Mapping[str, str] = MappingProxyType({})
@@ -123,6 +131,30 @@ class ExternalCSRF:
         object.__setattr__(self, "name", name)
 
 
+@dataclass(frozen=True, slots=True)
+class MFAConfig:
+    """Configure MFA capabilities without selecting a persistence technology."""
+
+    store: object
+    secret_protector: object = field(repr=False)
+    register_routes: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class PasskeyConfig:
+    """Configure exact WebAuthn relying-party and persistence boundaries."""
+
+    store: object
+    challenge_store: object
+    rp_id: str
+    origins: Sequence[str]
+    register_routes: bool = True
+
+    def __post_init__(self) -> None:
+        """Freeze relying-party origins for deterministic validation."""
+        object.__setattr__(self, "origins", tuple(self.origins))
+
+
 @dataclass(slots=True)
 class SecurityConfig(Generic[UserT]):
     """Configure the per-application security runtime."""
@@ -138,6 +170,8 @@ class SecurityConfig(Generic[UserT]):
     session_backend: BaseSessionBackend[Any] | None = None
     local_auth: "LocalAuthConfig[UserT] | None" = None
     local_jwks: "LocalJWKSConfig | None" = None
+    mfa: MFAConfig | None = None
+    passkeys: PasskeyConfig | None = None
     jwks_providers: Sequence["JWKSProvider"] = ()
     jwks_warmup_failure: Literal["fail_startup", "lazy"] = "fail_startup"
 

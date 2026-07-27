@@ -1,7 +1,9 @@
 """Pure authorization predicates exposed as native Litestar guards."""
 
-from collections.abc import Collection
-from dataclasses import dataclass
+from collections.abc import Callable, Collection
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import Any, Literal, cast
 
 from litestar.connection import ASGIConnection
@@ -11,12 +13,15 @@ from litestar.handlers import BaseRouteHandler
 from litestar_security.context import AuthorizationSnapshot, Principal, SecurityContext
 
 __all__ = (
+    "AssuranceRequirement",
+    "AssuranceTrait",
     "AuthorizationDecision",
     "AuthorizationPredicate",
     "all_of",
     "any_of",
     "at_least",
     "one_of",
+    "requires_assurance",
     "requires_authenticated",
     "requires_capability",
     "requires_role",
@@ -30,6 +35,40 @@ _AUTHENTICATION_REQUIRED = "Authentication required"
 
 
 _PERMISSION_DENIED = "Permission denied"
+
+
+class AssuranceTrait(str, Enum):
+    """Normalized assurance properties established by verified evidence."""
+
+    PHISHING_RESISTANT = "phishing-resistant"
+    USER_VERIFIED = "user-verified"
+    HARDWARE_BACKED = "hardware-backed"
+
+
+@dataclass(frozen=True, slots=True)
+class AssuranceRequirement:
+    """Method, trait, freshness, and purpose observations required by a route."""
+
+    methods: frozenset[str] = frozenset()
+    traits: frozenset[AssuranceTrait] = frozenset()
+    max_age: timedelta | None = None
+    purpose: str | None = None
+
+    def __post_init__(self) -> None:
+        """Normalize and validate the immutable assurance requirement."""
+        try:
+            methods = frozenset(_normalize_name(method, "Assurance method") for method in self.methods)
+            traits = frozenset(AssuranceTrait(trait) for trait in self.traits)
+        except (TypeError, ValueError) as exc:
+            message = "Assurance methods and traits must be supported non-blank values"
+            raise ImproperlyConfiguredException(detail=message) from exc
+        if self.max_age is not None and self.max_age <= timedelta():
+            message = "Assurance max_age must be positive"
+            raise ImproperlyConfiguredException(detail=message)
+        purpose = _normalize_name(self.purpose, "Assurance purpose") if self.purpose is not None else None
+        object.__setattr__(self, "methods", methods)
+        object.__setattr__(self, "traits", traits)
+        object.__setattr__(self, "purpose", purpose)
 
 
 class AuthorizationPredicate:
@@ -73,6 +112,38 @@ def requires_authenticated() -> AuthorizationPredicate:
         A predicate satisfied by any non-anonymous principal.
     """
     return _AuthenticatedPredicate()
+
+
+def requires_assurance(
+    *,
+    methods: Collection[str] = (),
+    traits: Collection[AssuranceTrait] = (),
+    max_age: timedelta | None = None,
+    purpose: str | None = None,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> AuthorizationPredicate:
+    """Require normalized authentication observations from immutable evidence.
+
+    Raw provider ``acr`` and ``amr`` values remain inert. Applications that
+    understand them must map them to project-owned methods or traits before
+    constructing evidence.
+
+    Args:
+        methods: Verified authentication methods that must all be represented.
+        traits: Verified assurance traits that must all be represented.
+        max_age: Maximum age of every item of evidence used by the requirement.
+        purpose: Optional action to which a step-up observation must be bound.
+        clock: Injected UTC clock used for deterministic freshness decisions.
+
+    Returns:
+        A synchronous native Litestar authorization predicate.
+    """
+    return _AssurancePredicate(
+        requirement=AssuranceRequirement(
+            methods=frozenset(methods), traits=frozenset(traits), max_age=max_age, purpose=purpose
+        ),
+        clock=clock,
+    )
 
 
 def requires_scope(scope: str) -> AuthorizationPredicate:
@@ -281,6 +352,55 @@ class _AuthenticatedPredicate(AuthorizationPredicate):
             code="authentication_required",
             path="authenticated",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _AssurancePredicate(AuthorizationPredicate):
+    requirement: AssuranceRequirement
+    clock: Callable[[], datetime] = field(repr=False, compare=False)
+
+    def decide(self, connection: ASGIConnection[Any, Any, Any, Any]) -> AuthorizationDecision:
+        if not _principal(connection).is_authenticated:
+            return AuthorizationDecision(
+                granted=False, code="authentication_required", path=("assurance",), authentication_required=True
+            )
+        now = self.clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            message = "Assurance clock must return a timezone-aware datetime"
+            raise ImproperlyConfiguredException(detail=message)
+        now = now.astimezone(timezone.utc)
+        evidence = cast("SecurityContext", connection.auth).evidence
+        purpose_trait = f"purpose:{self.requirement.purpose}" if self.requirement.purpose is not None else None
+        available_methods = frozenset(method for item in evidence for method in item.methods)
+        available_traits = frozenset(trait for item in evidence for trait in item.traits)
+        required_traits = frozenset(trait.value for trait in self.requirement.traits)
+        if purpose_trait is not None and purpose_trait not in available_traits:
+            code = (
+                "assurance_purpose_mismatch"
+                if any(trait.startswith("purpose:") for trait in available_traits)
+                else "missing_assurance"
+            )
+            return AuthorizationDecision(granted=False, code=code, path=("assurance",))
+        if not self.requirement.methods.issubset(available_methods) or not required_traits.issubset(available_traits):
+            return AuthorizationDecision(granted=False, code="missing_assurance", path=("assurance",))
+        if self.requirement.max_age is not None:
+            relevant = tuple(
+                item
+                for item in evidence
+                if item.methods.intersection(self.requirement.methods)
+                or item.traits.intersection(required_traits)
+                or (purpose_trait is not None and purpose_trait in item.traits)
+            )
+            if not relevant:
+                relevant = evidence
+            if any(
+                item.authenticated_at > now
+                or now - item.authenticated_at > self.requirement.max_age
+                or (item.expires_at is not None and item.expires_at <= now)
+                for item in relevant
+            ):
+                return AuthorizationDecision(granted=False, code="assurance_too_old", path=("assurance",))
+        return _ALLOWED
 
 
 @dataclass(frozen=True, slots=True)

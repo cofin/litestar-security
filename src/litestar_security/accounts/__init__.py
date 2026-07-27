@@ -134,6 +134,7 @@ from litestar_security.accounts._stores import (
     SecurityEpochValidator,
     VerificationTokenStore,
 )
+from litestar_security.guards import AssuranceRequirement, AssuranceTrait
 
 __all__ = (
     "DEFAULT_RATE_LIMIT_POLICIES",
@@ -142,6 +143,8 @@ __all__ = (
     "REFRESH_RESPONSE_HEADERS",
     "AccountLookup",
     "Argon2PasswordHasher",
+    "AssuranceRequirement",
+    "AssuranceTrait",
     "ConsumeResult",
     "ConsumeStatus",
     "CreateRefreshFamilyCommand",
