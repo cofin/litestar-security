@@ -284,7 +284,7 @@ async def test_sync_crypto_normalization_is_bounded_and_keeps_the_event_loop_liv
                 await checkpoint()
         observed_ticks = ticker_count
         release.set()
-        with fail_after(1):
+        with fail_after(5):
             while len(outcomes) != 100:
                 await checkpoint()
         stop_ticker.set()

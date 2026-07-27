@@ -31,6 +31,7 @@ from litestar.testing import TestClient
 
 from litestar_security import SecurityConfig, SecurityPlugin
 from litestar_security._cli import register, security_group
+from litestar_security.accounts import SessionRecord  # noqa: TC001 - Litestar resolves the handler annotation
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -655,6 +656,18 @@ def test_openapi_scope_and_combination_limits_fail_with_route_context() -> None:
     )
 
     assert len(cast("list[object]", _operation_security(app, "/threshold"))) == 36
+
+
+def test_account_dto_annotations_resolve_during_native_openapi_generation() -> None:
+    @get("/sessions")
+    async def session_handler() -> SessionRecord:
+        raise NotImplementedError
+
+    app = Litestar(route_handlers=[session_handler], openapi_config=OpenAPIConfig(title="Test", version="1.0"))
+
+    assert app.openapi_schema.components is not None
+    assert app.openapi_schema.components.schemas is not None
+    assert "SessionRecord" in app.openapi_schema.components.schemas
 
 
 def test_openapi_component_contribution_preserves_callers_and_validates_duplicates() -> None:

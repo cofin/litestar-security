@@ -1,10 +1,8 @@
 """Native-session registry and strict refresh-family contracts."""
 
-from __future__ import annotations
-
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence  # noqa: TC003 - Litestar resolves public annotations at runtime
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime  # noqa: TC003 - Litestar resolves public annotations at runtime
 from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
@@ -26,7 +24,8 @@ __all__ = (
     "SessionRegistry",
 )
 
-_EMPTY_DISPLAY_METADATA: Mapping[str, str] = MappingProxyType({})
+_EMPTY_DISPLAY_METADATA: "Mapping[str, str]" = MappingProxyType({})
+_MINIMUM_PEPPER_BYTES = 32
 
 
 class RefreshRotationStatus(str, Enum):
@@ -54,13 +53,13 @@ class SessionBindingConfig:
 
     def __post_init__(self) -> None:
         """Reject configurations that cannot provide the planned binding boundary."""
-        if len(self.pepper) < 32:
+        if len(self.pepper) < _MINIMUM_PEPPER_BYTES:
             msg = "Session binding pepper must contain at least 32 bytes"
             raise ImproperlyConfiguredException(detail=msg)
         if not self.cookie_name:
             msg = "Session binding cookie name must not be blank"
             raise ImproperlyConfiguredException(detail=msg)
-        if self.cookie_name.startswith("__Host-") and (not self.secure or self.path != "/" or self.domain is not None):
+        if self.cookie_name.startswith("__Host-") and (self.secure, self.path, self.domain) != (True, "/", None):
             msg = "__Host- session binding cookies require Secure, Path=/, and no Domain"
             raise ImproperlyConfiguredException(detail=msg)
 
@@ -73,8 +72,8 @@ class SessionAuthentication:
     binding_id: str
     account_id: str
     security_epoch: int
-    authenticated_at: datetime
-    expires_at: datetime
+    authenticated_at: "datetime"
+    expires_at: "datetime"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,10 +85,10 @@ class SessionRecord:
     binding_digest: bytes = field(repr=False)
     account_id: str
     security_epoch: int
-    created_at: datetime
-    last_seen_at: datetime
-    expires_at: datetime
-    display_metadata: Mapping[str, str] = field(default=_EMPTY_DISPLAY_METADATA)
+    created_at: "datetime"
+    last_seen_at: "datetime"
+    expires_at: "datetime"
+    display_metadata: "Mapping[str, str]" = field(default=_EMPTY_DISPLAY_METADATA)
 
     def __post_init__(self) -> None:
         """Freeze caller-supplied display metadata."""
@@ -105,9 +104,9 @@ class CreateSessionCommand:
     binding_digest: bytes = field(repr=False)
     account_id: str
     security_epoch: int
-    created_at: datetime
-    expires_at: datetime
-    display_metadata: Mapping[str, str] = field(default=_EMPTY_DISPLAY_METADATA)
+    created_at: "datetime"
+    expires_at: "datetime"
+    display_metadata: "Mapping[str, str]" = field(default=_EMPTY_DISPLAY_METADATA)
 
     def __post_init__(self) -> None:
         """Freeze caller-supplied display metadata."""
@@ -118,7 +117,7 @@ class CreateSessionCommand:
 class SessionRegistry(Protocol):
     """Atomic authenticated-session inventory and revocation boundary."""
 
-    async def create(self, command: CreateSessionCommand, *, event: SecurityEvent) -> SessionRecord:
+    async def create(self, command: CreateSessionCommand, *, event: "SecurityEvent") -> SessionRecord:
         """Create a registry record with its durable event."""
         ...  # pragma: no cover
 
@@ -126,28 +125,28 @@ class SessionRegistry(Protocol):
         """Load one current session record."""
         ...  # pragma: no cover
 
-    async def list_for_account(self, account_id: str) -> Sequence[SessionRecord]:
+    async def list_for_account(self, account_id: str) -> "Sequence[SessionRecord]":
         """List safe session metadata for one account."""
         ...  # pragma: no cover
 
-    async def touch(self, session_id: str, *, now: datetime) -> SessionRecord | None:
+    async def touch(self, session_id: str, *, now: "datetime") -> SessionRecord | None:
         """Apply the implementation's bounded last-seen write policy."""
         ...  # pragma: no cover
 
-    async def revoke(self, session_id: str, *, event: SecurityEvent) -> bool:
+    async def revoke(self, session_id: str, *, event: "SecurityEvent") -> bool:
         """Revoke one authenticated session atomically."""
         ...  # pragma: no cover
 
-    async def revoke_for_account(self, account_id: str, *, event: SecurityEvent) -> int:
+    async def revoke_sessions_for_account(self, account_id: str, *, event: "SecurityEvent") -> int:
         """Revoke every authenticated session for an account."""
         ...  # pragma: no cover
 
-    async def revoke_other_sessions(self, account_id: str, session_id: str, *, event: SecurityEvent) -> int:
+    async def revoke_other_sessions(self, account_id: str, session_id: str, *, event: "SecurityEvent") -> int:
         """Revoke all account sessions except the named current session."""
         ...  # pragma: no cover
 
     async def rebind(
-        self, prior_session_id: str, command: CreateSessionCommand, *, event: SecurityEvent
+        self, prior_session_id: str, command: CreateSessionCommand, *, event: "SecurityEvent"
     ) -> SessionRecord | None:
         """Revoke a prior record and create its replacement atomically."""
         ...  # pragma: no cover
@@ -164,10 +163,10 @@ class RotateRefreshCommand:
     security_epoch: int
     successor_id: str
     successor_digest: bytes = field(repr=False)
-    successor_expires_at: datetime
-    family_expires_at: datetime
+    successor_expires_at: "datetime"
+    family_expires_at: "datetime"
     sealed_receipt: bytes = field(repr=False)
-    receipt_expires_at: datetime
+    receipt_expires_at: "datetime"
     idempotency_digest: bytes | None = field(default=None, repr=False)
 
 
@@ -179,21 +178,32 @@ class RotateRefreshResult:
     sealed_receipt: bytes | None = field(default=None, repr=False)
     family_revoked: bool = False
 
+    def __post_init__(self) -> None:
+        """Reject contradictory receipt and revocation outcomes."""
+        receipt_status = self.status in {RefreshRotationStatus.ROTATED, RefreshRotationStatus.IDEMPOTENT_REPLAY}
+        if receipt_status != (self.sealed_receipt is not None) or (receipt_status and self.family_revoked):
+            msg = "Successful refresh rotation results require exactly one sealed receipt"
+            raise ValueError(msg)
+        revoked_status = self.status in {RefreshRotationStatus.REPLAY_DETECTED, RefreshRotationStatus.REVOKED}
+        if revoked_status != self.family_revoked:
+            msg = "Replay or revoked refresh results must report family revocation"
+            raise ValueError(msg)
+
 
 @runtime_checkable
 class RefreshTokenFamilyStore(Protocol):
     """Atomic strict refresh-family rotation and revocation boundary."""
 
     async def rotate(
-        self, command: RotateRefreshCommand, *, now: datetime, event: SecurityEvent
+        self, command: RotateRefreshCommand, *, now: "datetime", event: "SecurityEvent"
     ) -> RotateRefreshResult:
         """Rotate once, replay one sealed receipt, or revoke on reuse."""
         ...  # pragma: no cover
 
-    async def revoke_family(self, family_id: str, *, event: SecurityEvent) -> bool:
+    async def revoke_family(self, family_id: str, *, event: "SecurityEvent") -> bool:
         """Revoke one refresh-token family."""
         ...  # pragma: no cover
 
-    async def revoke_for_account(self, account_id: str, *, event: SecurityEvent) -> int:
+    async def revoke_for_account(self, account_id: str, *, event: "SecurityEvent") -> int:
         """Revoke every refresh family for an account."""
         ...  # pragma: no cover
