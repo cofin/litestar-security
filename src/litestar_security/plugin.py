@@ -44,6 +44,7 @@ SecurityContextDependency: TypeAlias = NamedDependency[SecurityContext]
 CurrentUser: TypeAlias = NamedDependency[UserT]
 
 _RESERVED_DEPENDENCIES = ("principal", "security_context", "current_user")
+_SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _SIGNATURE_NAMESPACE: Mapping[str, object] = {
     "CurrentUser": CurrentUser,
     "Principal": Principal,
@@ -256,12 +257,47 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                     raise ImproperlyConfiguredException(detail=message)
 
     def _configure_csrf(self, app_config: AppConfig) -> None:
-        if self.config.csrf_config is None:
-            return
-        if app_config.csrf_config is not None and app_config.csrf_config != self.config.csrf_config:
+        configured = self.config.csrf_config
+        existing = app_config.csrf_config
+        if existing is not None:
+            self._validate_csrf_config(existing)
+        if configured is not None:
+            self._validate_csrf_config(configured)
+        if configured is not None and existing is not None and existing != configured:
             message = "Security config and application configure unequal native Litestar CSRF settings"
             raise ImproperlyConfiguredException(detail=message)
-        app_config.csrf_config = self.config.csrf_config
+        effective = configured if configured is not None else existing
+        if effective is not None and self.config.external_csrf is not None:
+            message = "Security configuration cannot combine native and external CSRF enforcement"
+            raise ImproperlyConfiguredException(detail=message)
+        if configured is not None:
+            app_config.csrf_config = configured
+
+    @staticmethod
+    def _validate_csrf_config(config: object) -> None:
+        from litestar.config.csrf import CSRFConfig  # noqa: PLC0415
+
+        if not isinstance(config, CSRFConfig):
+            message = "Native CSRF configuration must be a Litestar CSRFConfig"
+            raise ImproperlyConfiguredException(detail=message)
+        if config.exclude is not None:
+            message = "Native CSRF path exclusions are forbidden; use compiled route policy"
+            raise ImproperlyConfiguredException(detail=message)
+        try:
+            safe_methods = frozenset(config.safe_methods)
+        except TypeError as exc:
+            message = "Native CSRF safe methods must contain only safe HTTP methods"
+            raise ImproperlyConfiguredException(detail=message) from exc
+        unsafe_methods = safe_methods.difference(_SAFE_HTTP_METHODS)
+        if unsafe_methods:
+            message = "Native CSRF safe methods cannot include unsafe HTTP methods"
+            raise ImproperlyConfiguredException(detail=message)
+        if safe_methods != _SAFE_HTTP_METHODS:
+            message = "Native CSRF safe methods must include GET, HEAD, and OPTIONS"
+            raise ImproperlyConfiguredException(detail=message)
+        if config.exclude_from_csrf_key.__class__ is not str or not config.exclude_from_csrf_key.strip():
+            message = "Native CSRF route exclusion opt key must be non-empty text"
+            raise ImproperlyConfiguredException(detail=message)
 
     def _configure_local_auth(self) -> None:
         local_auth = self.config.local_auth

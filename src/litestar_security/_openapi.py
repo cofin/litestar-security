@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from inspect import iscoroutine
 from itertools import combinations
 from math import comb
 from types import MappingProxyType
@@ -39,6 +40,12 @@ __all__ = ()
 UserT = TypeVar("UserT")
 _OPENAPI_SECURITY_OPT_KEY = "litestar_security_openapi_security"
 _CSRF_COVERAGE_OPT_KEY = "litestar_security_csrf"
+_RESERVED_OPT_KEYS = frozenset({
+    _CSRF_COVERAGE_OPT_KEY,
+    _OPENAPI_SECURITY_OPT_KEY,
+    _RUNTIME_PLAN_OPT_KEY,
+    _SECURITY_POLICY_OPT_KEY,
+})
 _MISSING = object()
 
 
@@ -202,6 +209,9 @@ class RouteCompiler(Generic[UserT]):
 
     def __post_init__(self) -> None:
         """Create one per-registry policy compiler."""
+        if self.csrf_exclude_key in _RESERVED_OPT_KEYS:
+            message = "Native CSRF exclusion opt key collides with reserved Litestar Security metadata"
+            raise ImproperlyConfiguredException(detail=message)
         self._policy_compiler = PolicyCompiler(self.registry, max_openapi_combinations=self.max_openapi_combinations)
         self._schemes = (
             OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", self.registry))
@@ -307,6 +317,10 @@ class RouteCompiler(Generic[UserT]):
             self._raise_route_error(route, route_handler, "Conflicting manual native CSRF exclusion metadata")
         if marker is not None and marker != desired_exclusion:
             self._raise_route_error(route, route_handler, "Conflicting compiled native CSRF coverage")
+        if marker is not None and (
+            (desired_exclusion and existing is not True) or (not desired_exclusion and existing is not _MISSING)
+        ):
+            self._raise_route_error(route, route_handler, "Conflicting compiled native CSRF coverage")
 
     def _resolve_csrf_enforcement(
         self, route: HTTPRoute, route_handler: HTTPRouteHandler, plan: SecurityRuntimePlan, *, native: bool
@@ -324,7 +338,10 @@ class RouteCompiler(Generic[UserT]):
     ) -> None:
         external = cast("ExternalCSRF", self.external_csrf)
         for method in sorted(route_handler.http_methods):
-            if not external.validate(route.path, method, policy):
+            result = cast("object", external.validate(route.path, method, policy))
+            if iscoroutine(result):
+                result.close()
+            if result is not True:
                 self._raise_route_error(
                     route, route_handler, f"External CSRF integration {external.name} rejected coverage for {method}"
                 )

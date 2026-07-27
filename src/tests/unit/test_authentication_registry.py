@@ -1215,6 +1215,16 @@ def test_authentication_mechanism_declares_session_capability() -> None:
 def test_external_csrf_requires_a_named_integration() -> None:
     with pytest.raises(ImproperlyConfiguredException, match="name must not be blank"):
         ExternalCSRF(name=" ", validate=lambda _path, _method, _policy: True)
+    with pytest.raises(ImproperlyConfiguredException, match="name must be text"):
+        ExternalCSRF(name=cast("Any", object()), validate=lambda _path, _method, _policy: True)
+    with pytest.raises(ImproperlyConfiguredException, match="hook must be callable"):
+        ExternalCSRF(name="edge", validate=cast("Any", object()))
+
+    async def validate(_path: str, _method: str, _policy: AuthenticationPolicy) -> bool:
+        return True
+
+    with pytest.raises(ImproperlyConfiguredException, match="hook must be synchronous"):
+        ExternalCSRF(name="edge", validate=cast("Any", validate))
 
 
 @pytest.mark.parametrize("limit", [0, -1])

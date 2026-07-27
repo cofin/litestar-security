@@ -2,9 +2,10 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from inspect import iscoroutinefunction
 from math import isfinite
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 from anyio import CapacityLimiter
 from litestar.config.csrf import CSRFConfig
@@ -82,9 +83,20 @@ class ExternalCSRF:
 
     def __post_init__(self) -> None:
         """Normalize the integration name."""
-        name = self.name.strip()
+        name_value = cast("object", self.name)
+        if name_value.__class__ is not str:
+            message = "External CSRF integration name must be text"
+            raise ImproperlyConfiguredException(detail=message)
+        name = cast("str", name_value).strip()  # type: ignore[redundant-cast]
         if not name:
             message = "External CSRF integration name must not be blank"
+            raise ImproperlyConfiguredException(detail=message)
+        validator = cast("object", self.validate)
+        if not callable(validator):
+            message = "External CSRF validation hook must be callable"
+            raise ImproperlyConfiguredException(detail=message)
+        if iscoroutinefunction(validator):
+            message = "External CSRF validation hook must be synchronous"
             raise ImproperlyConfiguredException(detail=message)
         object.__setattr__(self, "name", name)
 
@@ -111,6 +123,17 @@ class SecurityConfig(Generic[UserT]):
         """Freeze ordered authentication collections."""
         if self.max_openapi_combinations < 1:
             msg = "max_openapi_combinations must be positive"
+            raise ImproperlyConfiguredException(detail=msg)
+        csrf_config = cast("object | None", self.csrf_config)
+        external_csrf = cast("object | None", self.external_csrf)
+        if csrf_config is not None and not isinstance(csrf_config, CSRFConfig):
+            msg = "Native CSRF configuration must be a Litestar CSRFConfig"
+            raise ImproperlyConfiguredException(detail=msg)
+        if external_csrf is not None and not isinstance(external_csrf, ExternalCSRF):
+            msg = "External CSRF configuration must be an ExternalCSRF assertion"
+            raise ImproperlyConfiguredException(detail=msg)
+        if csrf_config is not None and external_csrf is not None:
+            msg = "Security configuration cannot combine native and external CSRF enforcement"
             raise ImproperlyConfiguredException(detail=msg)
         self.slots = tuple(self.slots)
         self.mechanisms = tuple(self.mechanisms)
