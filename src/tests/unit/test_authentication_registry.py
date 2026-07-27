@@ -5,7 +5,8 @@ import base64
 import gzip
 import hmac
 import json
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 from math import inf, nan
@@ -5061,6 +5062,12 @@ class _CredentialCleanup:
     ) -> accounts_module.SessionRecord:
         raise NotImplementedError
 
+    async def create_family(
+        self, command: accounts_module.CreateRefreshFamilyCommand, *, event: accounts_module.SecurityEvent
+    ) -> bool:
+        del command, event
+        return False
+
     async def get(self, session_id: str) -> accounts_module.SessionRecord | None:
         del session_id
         return None
@@ -5109,6 +5116,21 @@ class _CredentialCleanup:
             raise OSError
         return None
 
+    async def prepare_rotation(
+        self,
+        proof: accounts_module.RefreshTokenProof,
+        idempotency_digest: bytes | None,
+        *,
+        now: datetime,
+        event: accounts_module.SecurityEvent,
+    ) -> (
+        accounts_module.RefreshFamilyContext
+        | accounts_module.RefreshReceiptReplay
+        | accounts_module.PrepareRefreshResult
+    ):
+        del proof, idempotency_digest, now, event
+        return accounts_module.PrepareRefreshResult(accounts_module.RefreshRotationStatus.INVALID)
+
     async def rotate(
         self, command: accounts_module.RotateRefreshCommand, *, now: datetime, event: accounts_module.SecurityEvent
     ) -> accounts_module.RotateRefreshResult:
@@ -5116,6 +5138,10 @@ class _CredentialCleanup:
 
     async def revoke_family(self, family_id: str, *, event: accounts_module.SecurityEvent) -> bool:
         del family_id, event
+        return False
+
+    async def revoke_token(self, token_id: str, token_digest: bytes, *, event: accounts_module.SecurityEvent) -> bool:
+        del token_id, token_digest, event
         return False
 
     async def revoke_for_account(self, account_id: str, *, event: accounts_module.SecurityEvent) -> int:
@@ -7130,3 +7156,1105 @@ async def test_local_bearer_resolver_rejects_malformed_epoch_without_lookup(epoc
 
     assert isinstance(outcome, InvalidCredentials)
     assert store.id_lookups == []
+
+
+class _RefreshEntropy:
+    def __init__(self) -> None:
+        self.value = 0
+
+    def __call__(self, length: int) -> bytes:
+        self.value += 1
+        return self.value.to_bytes(length, "big")
+
+
+def _refresh_identifier(prefix: str, value: int) -> str:
+    return f"{prefix}{base64.urlsafe_b64encode(value.to_bytes(16, 'big')).rstrip(b'=').decode()}"
+
+
+def _refresh_idempotency_key(value: int = 1) -> str:
+    return base64.urlsafe_b64encode(value.to_bytes(16, "big")).rstrip(b"=").decode()
+
+
+class _AtomicRefreshStore:
+    """Deterministic test-only implementation of the strict atomic store contract."""
+
+    def __init__(
+        self,
+        accounts: _LocalAccessStore,
+        *,
+        expected_preparations: int = 0,
+        expected_atomic_rotations: int = 0,
+        before_atomic_rotate: Callable[[], None] | None = None,
+    ) -> None:
+        self.accounts = accounts
+        self.tokens: dict[str, SimpleNamespace] = {}
+        self.revoked_families: set[str] = set()
+        self.rotations: list[accounts_module.RefreshRotationStatus] = []
+        self.preparations: list[
+            accounts_module.PrepareRefreshResult
+            | accounts_module.RefreshFamilyContext
+            | accounts_module.RefreshReceiptReplay
+        ] = []
+        self.preparation_events: list[accounts_module.SecurityEvent] = []
+        self.override_receipt: bytes | None = None
+        self._lock = asyncio.Lock()
+        self._expected_preparations = expected_preparations
+        self._prepared_count = 0
+        self._preparation_gate = asyncio.Event()
+        self._expected_atomic_rotations = expected_atomic_rotations
+        self._atomic_rotation_count = 0
+        self._atomic_rotation_gate = asyncio.Event()
+        self._atomic_rotation_lock = asyncio.Lock()
+        self._before_atomic_rotate = before_atomic_rotate
+
+    async def create_family(
+        self, command: accounts_module.CreateRefreshFamilyCommand, *, event: accounts_module.SecurityEvent
+    ) -> bool:
+        self.preparation_events.append(event)
+        async with self._lock:
+            if command.token_id in self.tokens or command.security_epoch != self.accounts.security_epoch:
+                return False
+            self.tokens[command.token_id] = SimpleNamespace(
+                account_id=command.account_id,
+                consumed=False,
+                family_expires_at=command.family_expires_at,
+                family_id=command.family_id,
+                idempotency_digest=None,
+                receipt_expires_at=None,
+                scopes=command.scopes,
+                sealed_receipt=None,
+                security_epoch=command.security_epoch,
+                token_digest=command.token_digest,
+                token_expires_at=command.token_expires_at,
+            )
+            return True
+
+    async def prepare_rotation(
+        self,
+        proof: accounts_module.RefreshTokenProof,
+        idempotency_digest: bytes | None,
+        *,
+        now: datetime,
+        event: accounts_module.SecurityEvent,
+    ) -> (
+        accounts_module.RefreshFamilyContext
+        | accounts_module.RefreshReceiptReplay
+        | accounts_module.PrepareRefreshResult
+    ):
+        self.preparation_events.append(event)
+        async with self._lock:
+            record = self.tokens.get(proof.token_id)
+            if record is None or not hmac.compare_digest(record.token_digest, proof.digest):
+                result: (
+                    accounts_module.RefreshFamilyContext
+                    | accounts_module.RefreshReceiptReplay
+                    | accounts_module.PrepareRefreshResult
+                ) = accounts_module.PrepareRefreshResult(accounts_module.RefreshRotationStatus.INVALID)
+            elif record.family_id in self.revoked_families:
+                result = accounts_module.PrepareRefreshResult(
+                    accounts_module.RefreshRotationStatus.REVOKED, family_revoked=True
+                )
+            elif record.security_epoch != self.accounts.security_epoch:
+                result = accounts_module.PrepareRefreshResult(accounts_module.RefreshRotationStatus.EPOCH_MISMATCH)
+            elif now >= record.token_expires_at or now >= record.family_expires_at:
+                result = accounts_module.PrepareRefreshResult(accounts_module.RefreshRotationStatus.EXPIRED)
+            elif record.consumed:
+                same_key = (
+                    record.idempotency_digest is not None
+                    and idempotency_digest is not None
+                    and hmac.compare_digest(record.idempotency_digest, idempotency_digest)
+                )
+                if same_key and now < record.receipt_expires_at:
+                    result = accounts_module.RefreshReceiptReplay(
+                        context=accounts_module.RefreshFamilyContext(
+                            account_id=record.account_id,
+                            family_id=record.family_id,
+                            security_epoch=record.security_epoch,
+                            token_expires_at=record.token_expires_at,
+                            family_expires_at=record.family_expires_at,
+                            scopes=record.scopes,
+                        ),
+                        sealed_receipt=record.sealed_receipt,
+                    )
+                else:
+                    self.revoked_families.add(record.family_id)
+                    result = accounts_module.PrepareRefreshResult(
+                        accounts_module.RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True
+                    )
+            else:
+                result = accounts_module.RefreshFamilyContext(
+                    account_id=record.account_id,
+                    family_id=record.family_id,
+                    security_epoch=record.security_epoch,
+                    token_expires_at=record.token_expires_at,
+                    family_expires_at=record.family_expires_at,
+                    scopes=record.scopes,
+                )
+            self.preparations.append(result)
+            if self._expected_preparations:
+                self._prepared_count += 1
+                if self._prepared_count == self._expected_preparations:
+                    self._preparation_gate.set()
+        if self._expected_preparations:
+            await self._preparation_gate.wait()
+        return result
+
+    async def rotate(  # noqa: C901, PLR0911 - explicit atomic state-machine outcomes
+        self, command: accounts_module.RotateRefreshCommand, *, now: datetime, event: accounts_module.SecurityEvent
+    ) -> accounts_module.RotateRefreshResult:
+        del event
+        if self._expected_atomic_rotations:
+            async with self._atomic_rotation_lock:
+                self._atomic_rotation_count += 1
+                if self._atomic_rotation_count == self._expected_atomic_rotations:
+                    if self._before_atomic_rotate is not None:
+                        self._before_atomic_rotate()
+                    self._atomic_rotation_gate.set()
+            await self._atomic_rotation_gate.wait()
+        async with self._lock:
+            record = self.tokens.get(command.token_id)
+            if record is None or not hmac.compare_digest(record.token_digest, command.token_digest):
+                return self._result(accounts_module.RefreshRotationStatus.INVALID)
+            if record.family_id in self.revoked_families:
+                return self._result(accounts_module.RefreshRotationStatus.REVOKED, family_revoked=True)
+            if (
+                command.account_id != record.account_id
+                or command.family_id != record.family_id
+                or command.security_epoch != record.security_epoch
+                or command.family_expires_at != record.family_expires_at
+                or command.scopes != record.scopes
+            ):
+                return self._result(accounts_module.RefreshRotationStatus.INVALID)
+            if command.security_epoch != self.accounts.security_epoch:
+                return self._result(accounts_module.RefreshRotationStatus.EPOCH_MISMATCH)
+            if now >= record.token_expires_at or now >= record.family_expires_at:
+                return self._result(accounts_module.RefreshRotationStatus.EXPIRED)
+            if record.consumed:
+                same_key = (
+                    record.idempotency_digest is not None
+                    and command.idempotency_digest is not None
+                    and hmac.compare_digest(record.idempotency_digest, command.idempotency_digest)
+                )
+                if same_key and now < record.receipt_expires_at:
+                    return self._result(
+                        accounts_module.RefreshRotationStatus.IDEMPOTENT_REPLAY, sealed_receipt=record.sealed_receipt
+                    )
+                self.revoked_families.add(record.family_id)
+                return self._result(accounts_module.RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True)
+            record.consumed = True
+            record.idempotency_digest = command.idempotency_digest
+            record.receipt_expires_at = command.receipt_expires_at
+            record.sealed_receipt = command.sealed_receipt
+            self.tokens[command.successor_id] = SimpleNamespace(
+                account_id=record.account_id,
+                consumed=False,
+                family_expires_at=record.family_expires_at,
+                family_id=record.family_id,
+                idempotency_digest=None,
+                receipt_expires_at=None,
+                scopes=record.scopes,
+                sealed_receipt=None,
+                security_epoch=record.security_epoch,
+                token_digest=command.successor_digest,
+                token_expires_at=command.successor_expires_at,
+            )
+            return self._result(
+                accounts_module.RefreshRotationStatus.ROTATED,
+                sealed_receipt=self.override_receipt or command.sealed_receipt,
+            )
+
+    async def revoke_family(self, family_id: str, *, event: accounts_module.SecurityEvent) -> bool:
+        del event
+        async with self._lock:
+            exists = any(record.family_id == family_id for record in self.tokens.values())
+            if not exists or family_id in self.revoked_families:
+                return False
+            self.revoked_families.add(family_id)
+            return True
+
+    async def revoke_token(self, token_id: str, token_digest: bytes, *, event: accounts_module.SecurityEvent) -> bool:
+        del event
+        async with self._lock:
+            record = self.tokens.get(token_id)
+            if (
+                record is None
+                or record.family_id in self.revoked_families
+                or not hmac.compare_digest(record.token_digest, token_digest)
+            ):
+                return False
+            self.revoked_families.add(record.family_id)
+            return True
+
+    async def revoke_for_account(self, account_id: str, *, event: accounts_module.SecurityEvent) -> int:
+        del event
+        async with self._lock:
+            families = {
+                record.family_id
+                for record in self.tokens.values()
+                if record.account_id == account_id and record.family_id not in self.revoked_families
+            }
+            self.revoked_families.update(families)
+            return len(families)
+
+    def _result(
+        self,
+        status: accounts_module.RefreshRotationStatus,
+        *,
+        sealed_receipt: bytes | None = None,
+        family_revoked: bool = False,
+    ) -> accounts_module.RotateRefreshResult:
+        self.rotations.append(status)
+        return accounts_module.RotateRefreshResult(
+            status=status, sealed_receipt=sealed_receipt, family_revoked=family_revoked
+        )
+
+
+def _refresh_service(
+    *,
+    expected_preparations: int = 0,
+    expected_atomic_rotations: int = 0,
+    before_atomic_rotate: Callable[[], None] | None = None,
+    idle_lifetime: timedelta = timedelta(days=7),
+    absolute_lifetime: timedelta = timedelta(days=30),
+) -> tuple[
+    accounts_module.RefreshTokenService[object],
+    _AtomicRefreshStore,
+    _LocalAccessStore,
+    accounts_module.LocalAccount[object],
+]:
+    account = _local_access_account()
+    accounts = _LocalAccessStore(account)
+    store = _AtomicRefreshStore(
+        accounts,
+        expected_preparations=expected_preparations,
+        expected_atomic_rotations=expected_atomic_rotations,
+        before_atomic_rotate=before_atomic_rotate,
+    )
+    codec = accounts_module.RefreshTokenCodec(pepper=b"p" * 32, entropy=_RefreshEntropy())
+    receipts = accounts_module.RefreshReceiptSealer(
+        active_key=accounts_module.RefreshReceiptKey("active", b"k" * 32), entropy=_RefreshEntropy()
+    )
+    access_tokens = accounts_module.LocalAccessTokenIssuer(
+        signer=_AccessSigner(),
+        issuer=_JWT_ISSUER,
+        audience=_JWT_AUDIENCE,
+        clock=lambda: _JWT_NOW,
+        token_ids=lambda: "access-token",
+    )
+    return (
+        accounts_module.RefreshTokenService(
+            accounts=accounts,
+            store=store,
+            codec=codec,
+            receipts=receipts,
+            access_tokens=access_tokens,
+            idle_lifetime=idle_lifetime,
+            absolute_lifetime=absolute_lifetime,
+            clock=lambda: _JWT_NOW,
+            family_ids=lambda: _refresh_identifier("rf_", 1),
+            event_ids=lambda: "refresh-event",
+        ),
+        store,
+        accounts,
+        account,
+    )
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "",
+        "rt_missing-secret",
+        "rt_AAAAAAAAAAAAAAAAAAAAAA.%",
+        "rt_AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.extra",
+        "xx_AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ],
+)
+def test_refresh_codec_is_canonical_hmac_only_and_rejects_malformed_tokens(token: str) -> None:
+    first = accounts_module.RefreshTokenCodec(pepper=b"p" * 32, entropy=_RefreshEntropy())
+    second = accounts_module.RefreshTokenCodec(pepper=b"q" * 32, entropy=_RefreshEntropy())
+    issued = first.issue()
+
+    proof = first.verify(issued.refresh_token)
+    other_pepper = second.verify(issued.refresh_token)
+
+    assert issued.refresh_token.startswith("rt_")
+    assert len(issued.refresh_token) == 69
+    assert isinstance(proof, accounts_module.RefreshTokenProof)
+    assert proof.digest == issued.digest
+    assert isinstance(other_pepper, accounts_module.RefreshTokenProof)
+    assert other_pepper.digest != issued.digest
+    assert isinstance(first.verify(token), InvalidCredentials)
+    assert isinstance(first.digest_idempotency_key(issued.token_id, "%" * 22), InvalidCredentials)
+    assert issued.refresh_token not in repr(issued)
+    assert issued.digest.hex() not in repr(issued)
+
+
+@pytest.mark.anyio
+async def test_refresh_known_lookup_with_wrong_digest_is_invalid_without_family_revocation() -> None:
+    service, store, _accounts, account = _refresh_service()
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    token_id = initial.refresh_token.split(".")[0]
+    wrong_secret = base64.urlsafe_b64encode(b"wrong" * 6 + b"!!").rstrip(b"=").decode()
+
+    outcome = await service.rotate(
+        f"{token_id}.{wrong_secret}", idempotency_key=_refresh_idempotency_key(), now=_JWT_NOW
+    )
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert not store.revoked_families
+    assert store.rotations == []
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("token_id", _refresh_identifier("rt_", 2)),
+        ("family_id", _refresh_identifier("rf_", 2)),
+        ("account_id", "account-2"),
+        ("security_epoch", 4),
+        ("idempotency_digest", b"z" * 32),
+    ],
+)
+def test_refresh_receipts_bind_all_context_and_support_key_rotation(field: str, replacement: object) -> None:
+    codec = accounts_module.RefreshTokenCodec(pepper=b"p" * 32, entropy=_RefreshEntropy())
+    response = accounts_module.RefreshTokenResponse(
+        access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
+        refresh_token=codec.issue().refresh_token,
+        expires_in=600,
+    )
+    context = accounts_module.RefreshReceiptContext(
+        token_id=_refresh_identifier("rt_", 1),
+        family_id=_refresh_identifier("rf_", 1),
+        account_id="account-1",
+        security_epoch=3,
+        idempotency_digest=b"i" * 32,
+    )
+    old_key = accounts_module.RefreshReceiptKey("old", b"o" * 32)
+    receipt = accounts_module.RefreshReceiptSealer(active_key=old_key, entropy=_RefreshEntropy()).seal(
+        response, context, expires_at=_JWT_NOW + timedelta(seconds=30)
+    )
+    rotated = accounts_module.RefreshReceiptSealer(
+        active_key=accounts_module.RefreshReceiptKey("new", b"n" * 32),
+        retained_keys=(old_key, accounts_module.RefreshReceiptKey("alias", old_key.key)),
+    )
+
+    assert rotated.unseal(receipt, context, now=_JWT_NOW) == response
+    assert isinstance(
+        rotated.unseal(receipt, replace(context, **{field: replacement}), now=_JWT_NOW), InvalidCredentials
+    )
+    assert isinstance(
+        accounts_module.RefreshReceiptSealer(active_key=rotated.active_key).unseal(receipt, context, now=_JWT_NOW),
+        InvalidCredentials,
+    )
+    assert isinstance(
+        rotated.unseal(receipt[:-1] + bytes([receipt[-1] ^ 1]), context, now=_JWT_NOW), InvalidCredentials
+    )
+    assert isinstance(
+        rotated.unseal(receipt.replace(b".old.", b".alias.", 1), context, now=_JWT_NOW), InvalidCredentials
+    )
+    assert isinstance(rotated.unseal(receipt, context, now=_JWT_NOW + timedelta(seconds=30)), InvalidCredentials)
+    assert response.access_token.encode() not in receipt
+    assert response.refresh_token.encode() not in receipt
+    assert response.access_token not in repr(response)
+    assert response.refresh_token not in repr(response)
+
+
+@pytest.mark.anyio
+async def test_refresh_first_rotation_and_same_key_duplicate_return_exact_sealed_result() -> None:
+    service, store, _accounts, account = _refresh_service()
+    initial = await service.issue(account, scopes=frozenset({"reports:read"}), now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    key = _refresh_idempotency_key()
+
+    first = await service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW)
+    duplicate = await service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW)
+
+    assert isinstance(first, accounts_module.RefreshTokenResponse)
+    assert duplicate == first
+    assert store.rotations == [accounts_module.RefreshRotationStatus.ROTATED]
+    assert isinstance(store.preparations[-1], accounts_module.RefreshReceiptReplay)
+    original = next(iter(store.tokens.values()))
+    successor_id = next(token_id for token_id in store.tokens if token_id != initial.refresh_token.split(".")[0])
+    successor = store.tokens[successor_id]
+    assert original.consumed
+    assert successor.scopes == frozenset({"reports:read"})
+    assert successor.token_expires_at <= successor.family_expires_at
+    stored = repr(store.tokens)
+    for plaintext in (initial.refresh_token, first.access_token, first.refresh_token):
+        assert plaintext not in stored
+
+
+@pytest.mark.parametrize("outage", ["signer", "token_entropy", "receipt_entropy"])
+@pytest.mark.anyio
+async def test_refresh_same_key_retry_recovers_without_fresh_crypto(outage: str) -> None:
+    service, _store, _accounts, account = _refresh_service()
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    key = _refresh_idempotency_key()
+    first = await service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW)
+    assert isinstance(first, accounts_module.RefreshTokenResponse)
+    if outage == "signer":
+        service = replace(service, access_tokens=_RefreshAccessOutcome(VerificationUnavailable(), fail=True))
+    elif outage == "token_entropy":
+        service = replace(
+            service,
+            codec=accounts_module.RefreshTokenCodec(pepper=service.codec.pepper, entropy=lambda _length: b"short"),
+        )
+    else:
+        service = replace(service, receipts=replace(service.receipts, entropy=lambda _length: b"short"))
+
+    duplicate = await service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW)
+
+    assert duplicate == first
+
+
+@pytest.mark.anyio
+async def test_refresh_receipt_window_preserves_subsecond_precision() -> None:
+    service, _store, _accounts, account = _refresh_service()
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    key = _refresh_idempotency_key()
+    rotated_at = _JWT_NOW + timedelta(microseconds=500_000)
+    first = await service.rotate(initial.refresh_token, idempotency_key=key, now=rotated_at)
+    assert isinstance(first, accounts_module.RefreshTokenResponse)
+
+    duplicate = await service.rotate(
+        initial.refresh_token, idempotency_key=key, now=rotated_at + timedelta(seconds=29, microseconds=750_000)
+    )
+
+    assert duplicate == first
+
+
+@pytest.mark.anyio
+async def test_refresh_malformed_key_revokes_consumed_token_but_not_active_token() -> None:
+    service, store, _accounts, account = _refresh_service()
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(
+        await service.rotate(initial.refresh_token, idempotency_key="weak", now=_JWT_NOW), InvalidCredentials
+    )
+    first = await service.rotate(initial.refresh_token, idempotency_key=_refresh_idempotency_key(), now=_JWT_NOW)
+    assert isinstance(first, accounts_module.RefreshTokenResponse)
+    assert isinstance(
+        await service.rotate(initial.refresh_token, idempotency_key="weak", now=_JWT_NOW), InvalidCredentials
+    )
+    assert next(iter(store.tokens.values())).family_id in store.revoked_families
+    assert store.preparation_events[-1].operation == "local.refresh.prepare"
+    assert store.preparation_events[-1].outcome == "attempted"
+    assert "weak" not in repr(store.preparation_events[-1])
+
+
+@pytest.mark.anyio
+async def test_refresh_preflight_replay_receipt_failure_revokes_family() -> None:
+    service, store, _accounts, account = _refresh_service()
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    key = _refresh_idempotency_key()
+    first = await service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW)
+    assert isinstance(first, accounts_module.RefreshTokenResponse)
+    record = store.tokens[initial.refresh_token.partition(".")[0]]
+    record.sealed_receipt = b"malformed"
+
+    outcome = await service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW)
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert record.family_id in store.revoked_families
+
+
+@pytest.mark.parametrize(
+    ("second_key", "advance"),
+    [
+        (None, timedelta(0)),
+        (_refresh_idempotency_key(2), timedelta(0)),
+        (_refresh_idempotency_key(1), timedelta(seconds=30)),
+    ],
+)
+@pytest.mark.anyio
+async def test_refresh_replay_without_exact_live_key_revokes_family(second_key: str | None, advance: timedelta) -> None:
+    service, store, _accounts, account = _refresh_service()
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    first = await service.rotate(initial.refresh_token, idempotency_key=_refresh_idempotency_key(1), now=_JWT_NOW)
+    assert isinstance(first, accounts_module.RefreshTokenResponse)
+
+    replay = await service.rotate(initial.refresh_token, idempotency_key=second_key, now=_JWT_NOW + advance)
+
+    assert isinstance(replay, InvalidCredentials)
+    assert any(
+        isinstance(prepared, accounts_module.PrepareRefreshResult)
+        and prepared.status is accounts_module.RefreshRotationStatus.REPLAY_DETECTED
+        and prepared.family_revoked
+        for prepared in store.preparations
+    )
+    family_id = next(iter(store.tokens.values())).family_id
+    assert family_id in store.revoked_families
+    assert isinstance(
+        await service.rotate(first.refresh_token, idempotency_key=second_key, now=_JWT_NOW + advance),
+        InvalidCredentials,
+    )
+
+
+@pytest.mark.parametrize("receipt_kind", ["malformed", "expired", "swapped_context"])
+@pytest.mark.anyio
+async def test_refresh_invalid_store_receipt_fails_closed_and_revokes_family(receipt_kind: str) -> None:
+    service, store, _accounts, account = _refresh_service()
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    key = _refresh_idempotency_key()
+    proof = service.codec.verify(initial.refresh_token)
+    assert isinstance(proof, accounts_module.RefreshTokenProof)
+    digest = service.codec.digest_idempotency_key(proof.token_id, key)
+    assert isinstance(digest, bytes)
+    record = store.tokens[proof.token_id]
+    if receipt_kind == "malformed":
+        store.override_receipt = b"rr1.malformed"
+    else:
+        context = accounts_module.RefreshReceiptContext(
+            token_id=proof.token_id,
+            family_id=(_refresh_identifier("rf_", 2) if receipt_kind == "swapped_context" else record.family_id),
+            account_id=record.account_id,
+            security_epoch=record.security_epoch,
+            idempotency_digest=digest,
+        )
+        store.override_receipt = service.receipts.seal(
+            accounts_module.RefreshTokenResponse(
+                access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
+                refresh_token=service.codec.issue().refresh_token,
+                expires_in=600,
+            ),
+            context,
+            expires_at=_JWT_NOW if receipt_kind == "expired" else _JWT_NOW + timedelta(seconds=30),
+        )
+
+    outcome = await service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW)
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert record.family_id in store.revoked_families
+
+
+@pytest.mark.parametrize("condition", ["idle", "absolute", "epoch", "disabled", "account_revoke", "family_revoke"])
+@pytest.mark.anyio
+async def test_refresh_rotation_rejects_expiry_epoch_and_revocation_boundaries(condition: str) -> None:
+    idle = timedelta(days=1)
+    absolute = timedelta(days=2)
+    service, store, accounts, account = _refresh_service(idle_lifetime=idle, absolute_lifetime=absolute)
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    rotate_at = _JWT_NOW
+    if condition == "idle":
+        rotate_at += idle
+    elif condition == "absolute":
+        rotate_at += absolute
+    elif condition == "epoch":
+        accounts.security_epoch += 1
+    elif condition == "disabled":
+        accounts.account = replace(account, active=False)
+    elif condition == "account_revoke":
+        await store.revoke_for_account(
+            account.account_id,
+            event=accounts_module.SecurityEvent(
+                "event-revoke", _JWT_NOW, "local.refresh.revoke", "revoked", account_id=account.account_id
+            ),
+        )
+    else:
+        family_id = next(iter(store.tokens.values())).family_id
+        await store.revoke_family(
+            family_id,
+            event=accounts_module.SecurityEvent(
+                "event-revoke", _JWT_NOW, "local.refresh.revoke", "revoked", family_id=family_id
+            ),
+        )
+
+    outcome = await service.rotate(initial.refresh_token, idempotency_key=_refresh_idempotency_key(), now=rotate_at)
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert len(store.tokens) == 1
+
+
+@pytest.mark.anyio
+async def test_refresh_epoch_bump_after_preflight_is_rejected_by_atomic_rotate() -> None:
+    accounts_holder: list[_LocalAccessStore] = []
+
+    def bump_epoch() -> None:
+        accounts_holder[0].security_epoch += 1
+
+    service, store, accounts, account = _refresh_service(
+        expected_preparations=100, expected_atomic_rotations=100, before_atomic_rotate=bump_epoch
+    )
+    accounts_holder.append(accounts)
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+
+    outcomes = await asyncio.gather(
+        *(
+            service.rotate(initial.refresh_token, idempotency_key=_refresh_idempotency_key(), now=_JWT_NOW)
+            for _ in range(100)
+        )
+    )
+
+    assert all(isinstance(outcome, InvalidCredentials) for outcome in outcomes)
+    assert store.rotations == [accounts_module.RefreshRotationStatus.EPOCH_MISMATCH] * 100
+    assert len(store.tokens) == 1
+    assert not store.revoked_families
+
+
+@pytest.mark.anyio
+async def test_refresh_atomic_rotate_revalidates_preserved_scopes() -> None:
+    service, store, _accounts, account = _refresh_service()
+    initial = await service.issue(account, scopes=frozenset({"read"}), now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    prepare_rotation = store.prepare_rotation
+
+    async def broadened_preflight(
+        proof: accounts_module.RefreshTokenProof,
+        idempotency_digest: bytes | None,
+        *,
+        now: datetime,
+        event: accounts_module.SecurityEvent,
+    ) -> (
+        accounts_module.RefreshFamilyContext
+        | accounts_module.RefreshReceiptReplay
+        | accounts_module.PrepareRefreshResult
+    ):
+        prepared = await prepare_rotation(proof, idempotency_digest, now=now, event=event)
+        return (
+            replace(prepared, scopes=frozenset({"admin"}))
+            if isinstance(prepared, accounts_module.RefreshFamilyContext)
+            else prepared
+        )
+
+    store.prepare_rotation = broadened_preflight  # type: ignore[method-assign]
+
+    outcome = await service.rotate(initial.refresh_token, idempotency_key=_refresh_idempotency_key(), now=_JWT_NOW)
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert store.rotations == [accounts_module.RefreshRotationStatus.INVALID]
+    assert len(store.tokens) == 1
+
+
+@pytest.mark.anyio
+async def test_refresh_presented_token_revoke_is_exact_and_idempotent() -> None:
+    service, store, _accounts, account = _refresh_service()
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+
+    assert await service.revoke(initial.refresh_token, now=_JWT_NOW)
+    assert not await service.revoke(initial.refresh_token, now=_JWT_NOW)
+    assert isinstance(await service.revoke("malformed", now=_JWT_NOW), InvalidCredentials)
+    assert len(store.revoked_families) == 1
+
+
+@pytest.mark.parametrize("mode", ["shared_key", "no_key"])
+@pytest.mark.anyio
+async def test_refresh_one_hundred_way_races_enforce_one_logical_result(mode: str) -> None:
+    service, store, _accounts, account = _refresh_service(expected_preparations=100)
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    key = _refresh_idempotency_key() if mode == "shared_key" else None
+
+    outcomes = await asyncio.gather(
+        *(service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW) for _ in range(100))
+    )
+
+    successes = [outcome for outcome in outcomes if isinstance(outcome, accounts_module.RefreshTokenResponse)]
+    if mode == "shared_key":
+        assert len(successes) == 100
+        assert all(outcome == successes[0] for outcome in successes)
+        assert store.rotations.count(accounts_module.RefreshRotationStatus.ROTATED) == 1
+        assert store.rotations.count(accounts_module.RefreshRotationStatus.IDEMPOTENT_REPLAY) == 99
+        assert not store.revoked_families
+    else:
+        assert len(successes) == 1
+        assert sum(isinstance(outcome, InvalidCredentials) for outcome in outcomes) == 99
+        assert store.rotations.count(accounts_module.RefreshRotationStatus.ROTATED) == 1
+        assert accounts_module.RefreshRotationStatus.REPLAY_DETECTED in store.rotations
+        assert len(store.revoked_families) == 1
+        assert isinstance(await service.rotate(successes[0].refresh_token, now=_JWT_NOW), InvalidCredentials)
+
+
+def test_refresh_response_headers_are_immutable_no_store_contract() -> None:
+    assert accounts_module.REFRESH_RESPONSE_HEADERS == {"Cache-Control": "no-store", "Pragma": "no-cache"}
+    with pytest.raises(TypeError):
+        accounts_module.REFRESH_RESPONSE_HEADERS["Cache-Control"] = "public"  # type: ignore[index]
+
+
+def test_refresh_service_rejects_invalid_composition_and_lifetimes() -> None:
+    service, _store, _accounts, _account = _refresh_service()
+    invalid_values = (
+        ("accounts", object(), "accounts"),
+        ("store", object(), "store"),
+        ("codec", object(), "codec"),
+        ("receipts", object(), "receipts"),
+        ("access_tokens", object(), "issuer"),
+        ("idle_lifetime", object(), "lifetimes"),
+        ("absolute_lifetime", object(), "lifetimes"),
+        ("receipt_window", object(), "lifetimes"),
+        ("idle_lifetime", timedelta(0), "lifetimes"),
+        ("absolute_lifetime", timedelta(days=1), "lifetimes"),
+        ("receipt_window", timedelta(0), "lifetimes"),
+        ("receipt_window", timedelta(seconds=31), "lifetimes"),
+        ("clock", None, "factories"),
+        ("family_ids", None, "factories"),
+        ("event_ids", None, "factories"),
+    )
+
+    for field_name, value, match in invalid_values:
+        with pytest.raises(ImproperlyConfiguredException, match=match):
+            replace(service, **{field_name: value})
+
+
+@pytest.mark.anyio
+async def test_refresh_service_default_clock_and_id_factories_issue_valid_family() -> None:
+    service, store, accounts, account = _refresh_service()
+    defaulted = accounts_module.RefreshTokenService(
+        accounts=accounts,
+        store=store,
+        codec=service.codec,
+        receipts=service.receipts,
+        access_tokens=service.access_tokens,
+    )
+
+    outcome = await defaulted.issue(account)
+
+    assert isinstance(outcome, accounts_module.RefreshTokenResponse)
+    assert next(iter(store.tokens.values())).family_id.startswith("rf_")
+
+
+class _BrokenRefreshScopes(AbstractSet[str]):
+    def __contains__(self, _value: object) -> bool:
+        return False
+
+    def __len__(self) -> int:
+        return 1
+
+    def __iter__(self) -> Iterator[str]:
+        raise TypeError
+
+
+class _RefreshAccessOutcome:
+    def __init__(self, outcome: object, *, fail: bool = False) -> None:
+        self.outcome = outcome
+        self.fail = fail
+
+    async def issue(self, _account: object, *, scopes: object, now: datetime) -> object:
+        del scopes, now
+        if self.fail:
+            raise OSError
+        return self.outcome
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "not_account",
+        "inactive",
+        "unverified",
+        "clock_failure",
+        "epoch_failure",
+        "epoch_bool",
+        "epoch_mismatch",
+        "scopes_type",
+        "scopes_broken",
+        "scopes_invalid",
+        "access_outcome",
+        "access_failure",
+        "access_shape",
+        "bad_family_id",
+        "codec_failure",
+        "event_failure",
+        "create_failure",
+        "create_false",
+    ],
+)
+@pytest.mark.anyio
+async def test_refresh_issue_sanitizes_invalid_and_unavailable_composition(  # noqa: C901, PLR0912, PLR0915
+    mode: str,
+) -> None:
+    service, store, accounts, account = _refresh_service()
+    candidate: object = account
+    scopes: object = frozenset()
+    now: datetime | None = _JWT_NOW
+    if mode == "not_account":
+        candidate = object()
+    elif mode == "inactive":
+        candidate = replace(account, active=False)
+    elif mode == "unverified":
+        candidate = replace(account, verified=False)
+    elif mode == "clock_failure":
+        service = replace(service, clock=lambda: 1 / 0)
+        now = None
+    elif mode == "epoch_failure":
+
+        async def current_epoch(_account_id: str) -> int:
+            raise OSError
+
+        accounts.current_epoch = current_epoch  # type: ignore[method-assign]
+    elif mode == "epoch_bool":
+
+        async def current_epoch(_account_id: str) -> bool:
+            return True
+
+        accounts.current_epoch = current_epoch  # type: ignore[method-assign]
+    elif mode == "epoch_mismatch":
+        accounts.security_epoch += 1
+    elif mode == "scopes_type":
+        scopes = ["read"]
+    elif mode == "scopes_broken":
+        scopes = _BrokenRefreshScopes()
+    elif mode == "scopes_invalid":
+        scopes = frozenset({"bad scope"})
+    elif mode == "access_outcome":
+        service = replace(service, access_tokens=_RefreshAccessOutcome(InvalidCredentials()))
+    elif mode == "access_failure":
+        service = replace(service, access_tokens=_RefreshAccessOutcome(VerificationUnavailable(), fail=True))
+    elif mode == "access_shape":
+        service = replace(service, access_tokens=_RefreshAccessOutcome(object()))
+    elif mode == "bad_family_id":
+        service = replace(service, family_ids=lambda: "invalid")
+    elif mode == "codec_failure":
+        service = replace(
+            service, codec=accounts_module.RefreshTokenCodec(pepper=b"p" * 32, entropy=lambda _length: b"short")
+        )
+    elif mode == "event_failure":
+        service = replace(service, event_ids=lambda: " ")
+    elif mode == "create_failure":
+
+        async def create_family(
+            _command: accounts_module.CreateRefreshFamilyCommand, *, event: accounts_module.SecurityEvent
+        ) -> bool:
+            del event
+            raise OSError
+
+        store.create_family = create_family  # type: ignore[method-assign]
+    else:
+
+        async def create_family(
+            _command: accounts_module.CreateRefreshFamilyCommand, *, event: accounts_module.SecurityEvent
+        ) -> bool:
+            del event
+            return False
+
+        store.create_family = create_family  # type: ignore[method-assign]
+
+    outcome = await service.issue(candidate, scopes=scopes, now=now)  # type: ignore[arg-type]
+
+    expected = (
+        VerificationUnavailable
+        if mode
+        in {
+            "clock_failure",
+            "epoch_failure",
+            "access_failure",
+            "access_shape",
+            "bad_family_id",
+            "codec_failure",
+            "event_failure",
+            "create_failure",
+            "create_false",
+        }
+        else InvalidCredentials
+    )
+    assert isinstance(outcome, expected)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "malformed",
+        "prepare_failure",
+        "prepare_shape",
+        "expired_context",
+        "invalid_idempotency",
+        "replay_account_failure",
+        "account_failure",
+        "access_outcome",
+        "access_failure",
+        "access_shape",
+        "codec_failure",
+        "seal_failure",
+        "event_failure",
+        "rotate_failure",
+        "rotate_shape",
+        "receipt_revoke_failure",
+        "receipt_revoke_false",
+    ],
+)
+@pytest.mark.anyio
+async def test_refresh_rotate_sanitizes_invalid_and_unavailable_composition(  # noqa: C901,PLR0912,PLR0915
+    mode: str,
+) -> None:
+    service, store, accounts, account = _refresh_service()
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    presented = initial.refresh_token
+    idempotency_key: str | None = _refresh_idempotency_key()
+    if mode == "malformed":
+        presented = "malformed"
+    elif mode == "prepare_failure":
+
+        async def prepare_rotation(
+            _proof: accounts_module.RefreshTokenProof,
+            _idempotency_digest: bytes | None,
+            *,
+            now: datetime,
+            event: accounts_module.SecurityEvent,
+        ) -> accounts_module.PrepareRefreshResult:
+            del now, event
+            raise OSError
+
+        store.prepare_rotation = prepare_rotation  # type: ignore[method-assign]
+    elif mode == "prepare_shape":
+
+        async def prepare_rotation(
+            _proof: accounts_module.RefreshTokenProof,
+            _idempotency_digest: bytes | None,
+            *,
+            now: datetime,
+            event: accounts_module.SecurityEvent,
+        ) -> object:
+            del now, event
+            return object()
+
+        store.prepare_rotation = prepare_rotation  # type: ignore[method-assign]
+    elif mode == "expired_context":
+        record = next(iter(store.tokens.values()))
+
+        async def prepare_rotation(
+            _proof: accounts_module.RefreshTokenProof,
+            _idempotency_digest: bytes | None,
+            *,
+            now: datetime,
+            event: accounts_module.SecurityEvent,
+        ) -> accounts_module.RefreshFamilyContext:
+            del now, event
+            return accounts_module.RefreshFamilyContext(
+                account_id=record.account_id,
+                family_id=record.family_id,
+                security_epoch=record.security_epoch,
+                token_expires_at=_JWT_NOW,
+                family_expires_at=record.family_expires_at,
+                scopes=record.scopes,
+            )
+
+        store.prepare_rotation = prepare_rotation  # type: ignore[method-assign]
+    elif mode == "invalid_idempotency":
+        idempotency_key = "weak"
+    elif mode == "replay_account_failure":
+        first = await service.rotate(presented, idempotency_key=idempotency_key, now=_JWT_NOW)
+        assert isinstance(first, accounts_module.RefreshTokenResponse)
+
+        async def get_by_id(_account_id: str) -> None:
+            return None
+
+        accounts.get_by_id = get_by_id  # type: ignore[method-assign]
+    elif mode == "account_failure":
+
+        async def get_by_id(_account_id: str) -> accounts_module.LocalAccount[object] | None:
+            raise OSError
+
+        accounts.get_by_id = get_by_id  # type: ignore[method-assign]
+    elif mode == "access_outcome":
+        service = replace(service, access_tokens=_RefreshAccessOutcome(VerificationUnavailable()))
+    elif mode == "access_failure":
+        service = replace(service, access_tokens=_RefreshAccessOutcome(VerificationUnavailable(), fail=True))
+    elif mode == "access_shape":
+        service = replace(service, access_tokens=_RefreshAccessOutcome(object()))
+    elif mode == "codec_failure":
+        service = replace(
+            service,
+            codec=accounts_module.RefreshTokenCodec(pepper=service.codec.pepper, entropy=lambda _length: b"short"),
+        )
+    elif mode == "seal_failure":
+        service = replace(
+            service,
+            receipts=accounts_module.RefreshReceiptSealer(
+                active_key=accounts_module.RefreshReceiptKey("key", b"k" * 32), entropy=lambda _length: b"short"
+            ),
+        )
+    elif mode == "event_failure":
+        service = replace(service, event_ids=lambda: " ")
+    elif mode == "rotate_failure":
+
+        async def rotate(
+            _command: accounts_module.RotateRefreshCommand, *, now: datetime, event: accounts_module.SecurityEvent
+        ) -> accounts_module.RotateRefreshResult:
+            del now, event
+            raise OSError
+
+        store.rotate = rotate  # type: ignore[method-assign]
+    elif mode == "rotate_shape":
+
+        async def rotate(
+            _command: accounts_module.RotateRefreshCommand, *, now: datetime, event: accounts_module.SecurityEvent
+        ) -> object:
+            del now, event
+            return object()
+
+        store.rotate = rotate  # type: ignore[method-assign]
+    else:
+        store.override_receipt = b"malformed"
+        if mode == "receipt_revoke_failure":
+
+            async def revoke_family(_family_id: str, *, event: accounts_module.SecurityEvent) -> bool:
+                del event
+                raise OSError
+
+        else:
+
+            async def revoke_family(_family_id: str, *, event: accounts_module.SecurityEvent) -> bool:
+                del event
+                return False
+
+        store.revoke_family = revoke_family  # type: ignore[method-assign,possibly-undefined]
+
+    outcome = await service.rotate(presented, idempotency_key=idempotency_key, now=_JWT_NOW)
+
+    unavailable_modes = {
+        "prepare_failure",
+        "prepare_shape",
+        "account_failure",
+        "access_outcome",
+        "access_failure",
+        "access_shape",
+        "codec_failure",
+        "seal_failure",
+        "event_failure",
+        "rotate_failure",
+        "rotate_shape",
+        "receipt_revoke_failure",
+        "receipt_revoke_false",
+    }
+    assert isinstance(outcome, VerificationUnavailable if mode in unavailable_modes else InvalidCredentials)
+
+
+@pytest.mark.anyio
+async def test_refresh_revoke_maps_store_and_clock_failures_to_unavailable() -> None:
+    service, store, _accounts, account = _refresh_service()
+    initial = await service.issue(account, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+
+    async def revoke_token(_token_id: str, _token_digest: bytes, *, event: accounts_module.SecurityEvent) -> bool:
+        del event
+        raise OSError
+
+    store.revoke_token = revoke_token  # type: ignore[method-assign]
+    assert isinstance(await service.revoke(initial.refresh_token, now=_JWT_NOW), VerificationUnavailable)
+
+    async def malformed_revoke_token(
+        _token_id: str, _token_digest: bytes, *, event: accounts_module.SecurityEvent
+    ) -> object:
+        del event
+        return object()
+
+    store.revoke_token = malformed_revoke_token  # type: ignore[method-assign]
+    assert isinstance(await service.revoke(initial.refresh_token, now=_JWT_NOW), VerificationUnavailable)
+    assert isinstance(
+        await replace(service, clock=lambda: 1 / 0).revoke(initial.refresh_token), VerificationUnavailable
+    )
+
+
+def test_refresh_codec_rejects_runtime_non_text_token() -> None:
+    codec = accounts_module.RefreshTokenCodec(pepper=b"p" * 32)
+    assert isinstance(codec.verify(object()), InvalidCredentials)  # type: ignore[arg-type]

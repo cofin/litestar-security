@@ -762,16 +762,19 @@ def test_disabled_registration_adds_no_route_and_lifecycle_response_uses_native_
             "compare_and_replace_password",
             "consume_and_reset",
             "consume_and_verify",
+            "create_family",
             "current_epoch",
             "find_for_login",
             "get_by_id",
             "get_password_state",
             "issue",
+            "prepare_rotation",
             "register_login_method",
             "replace_password_and_bump_epoch",
             "revoke_family",
             "revoke_for_account",
             "revoke_login_method",
+            "revoke_token",
             "rotate",
         )
     })
@@ -1756,7 +1759,7 @@ def test_local_token_profile_registers_one_composite_bearer_and_native_openapi(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
     capabilities = _local_session_accounts()
-    for name in ("revoke_family", "revoke_for_account", "rotate"):
+    for name in ("create_family", "prepare_rotation", "revoke_family", "revoke_for_account", "revoke_token", "rotate"):
         setattr(capabilities, name, lambda *_args, **_kwargs: None)
     private_key, _public_key = jwt_key_material["EdDSA"]
     local_auth = LocalAuth.tokens(
@@ -1799,7 +1802,7 @@ def test_local_token_profile_extends_one_existing_composite_bearer_owner(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
     capabilities = _local_session_accounts()
-    for name in ("revoke_family", "revoke_for_account", "rotate"):
+    for name in ("create_family", "prepare_rotation", "revoke_family", "revoke_for_account", "revoke_token", "rotate"):
         setattr(capabilities, name, lambda *_args, **_kwargs: None)
     local_private_key, _local_public_key = jwt_key_material["EdDSA"]
     _external_private_key, external_public_key = jwt_key_material["RS256"]
@@ -1862,7 +1865,7 @@ def test_local_token_profile_rejects_a_second_bearer_owner(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]], owner_kind: Literal["slot_only", "standalone"], match: str
 ) -> None:
     capabilities = _local_session_accounts()
-    for name in ("revoke_family", "revoke_for_account", "rotate"):
+    for name in ("create_family", "prepare_rotation", "revoke_family", "revoke_for_account", "revoke_token", "rotate"):
         setattr(capabilities, name, lambda *_args, **_kwargs: None)
     private_key, _public_key = jwt_key_material["EdDSA"]
     local_auth = LocalAuth.tokens(
