@@ -18,6 +18,9 @@ from litestar_security.providers.jwks._cache import JWKSCacheEntry, JWKSCachePol
 from litestar_security.providers.jwks._internal import valid_selection_value
 from litestar_security.providers.jwt import JWTAlgorithm, VerificationKey
 
+__all__ = ("parse_document",)
+
+
 _SelectionKey: TypeAlias = tuple[str, str]
 
 

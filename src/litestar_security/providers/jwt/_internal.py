@@ -22,6 +22,22 @@ from litestar_security.providers._internal import (
     validate_depth,
 )
 
+__all__ = (
+    "aware_utc",
+    "decode_base64url",
+    "decode_json_segment",
+    "freeze_json",
+    "is_scope_token",
+    "is_strict_identifier",
+    "raise_value",
+    "reject",
+    "strict_identifier",
+    "strict_identifier_value",
+    "strict_key_id",
+    "strict_scope_value",
+)
+
+
 _BASE64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 

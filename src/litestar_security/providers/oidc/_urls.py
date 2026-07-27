@@ -12,6 +12,9 @@ from urllib.parse import unquote, urlsplit
 import httpx
 from anyio import getaddrinfo
 
+__all__ = ("NormalizedURL", "normalize_url", "optional_url_value", "public_address", "resolve_addresses")
+
+
 _DEFAULT_HTTPS_PORT = 443
 _DEFAULT_HTTP_PORT = 80
 

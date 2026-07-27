@@ -14,6 +14,9 @@ from anyio import CapacityLimiter, fail_after, to_thread
 from litestar_security.config import NoOpSecurityMetrics, SecurityMetrics
 from litestar_security.providers._internal import raise_config, safe_increment, safe_observe
 
+__all__ = ("metric_sink", "run_worker", "validate_limiter")
+
+
 ResultT = TypeVar("ResultT")
 _MAXIMUM_WORKER_TOKENS = 1_024
 
