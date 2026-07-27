@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from importlib.metadata import entry_points
 from secrets import token_hex
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import anyio.lowlevel
@@ -31,7 +32,7 @@ from litestar.testing import TestClient
 
 from litestar_security import SecurityConfig, SecurityPlugin
 from litestar_security._cli import register, security_group
-from litestar_security.accounts import SessionRecord  # noqa: TC001 - Litestar resolves the handler annotation
+from litestar_security.accounts import LifecycleAccepted, LocalAuth, RegistrationPolicy, SessionRecord
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -668,6 +669,76 @@ def test_account_dto_annotations_resolve_during_native_openapi_generation() -> N
     assert app.openapi_schema.components is not None
     assert app.openapi_schema.components.schemas is not None
     assert "SessionRecord" in app.openapi_schema.components.schemas
+
+
+def test_disabled_registration_adds_no_route_and_lifecycle_response_uses_native_202_schema(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    capabilities = SimpleNamespace(**{
+        name: lambda: None
+        for name in (
+            "compare_and_replace_password",
+            "consume_and_reset",
+            "consume_and_verify",
+            "current_epoch",
+            "find_for_login",
+            "get_by_id",
+            "get_password_hash",
+            "issue",
+            "register_login_method",
+            "replace_password_and_bump_epoch",
+            "revoke_family",
+            "revoke_for_account",
+            "revoke_login_method",
+            "rotate",
+        )
+    })
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth = LocalAuth.tokens(
+        accounts=cast("Any", capabilities),
+        key_ring=LocalKeyRing(
+            issuer="https://issuer.example",
+            active_signing_key=SigningKey(key_id="active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-client",  # noqa: S106 - public JWT audience
+        registration=RegistrationPolicy.disabled(),
+    )
+    disabled = Litestar(
+        route_handlers=[],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))],
+    )
+
+    assert cast("SecurityPlugin[object]", disabled.plugins.init[0]).config.local_auth is local_auth
+    assert "/auth/register" not in disabled.openapi_schema.paths
+    assert all(
+        not isinstance(route_value, HTTPRoute) or route_value.path != "/auth/register"
+        for route_value in disabled.routes
+    )
+
+    @post("/lifecycle", status_code=202)
+    async def lifecycle_handler() -> LifecycleAccepted:
+        return LifecycleAccepted()
+
+    app = Litestar(
+        route_handlers=[lifecycle_handler],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin()],
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/lifecycle")
+    operation = app.openapi_schema.paths["/lifecycle"].post
+    assert operation is not None
+    assert response.status_code == 202
+    assert response.json() == {"detail": "If eligible, the request will be processed."}
+    assert "202" in operation.responses
+    assert app.openapi_schema.components is not None
+    assert app.openapi_schema.components.schemas is not None
+    assert "LifecycleAccepted" in app.openapi_schema.components.schemas
+
+    with pytest.raises(ImproperlyConfiguredException, match="must be a LocalAuthConfig"):
+        SecurityPlugin(SecurityConfig(local_auth=cast("Any", object()))).on_app_init(AppConfig())
 
 
 def test_openapi_component_contribution_preserves_callers_and_validates_duplicates() -> None:

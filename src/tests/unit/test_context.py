@@ -15,6 +15,7 @@ from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedExce
 import litestar_security
 import litestar_security._openapi as openapi_module
 import litestar_security.accounts as accounts_module
+import litestar_security.accounts.local as local_accounts_module
 import litestar_security.authentication as authentication_module
 from litestar_security.context import (
     AuthenticationEvidence,
@@ -43,6 +44,7 @@ from litestar_security.guards import (
 from litestar_security.providers.jwt import LocalKeyRing
 
 _DUPLICATE_GUARD = requires_authenticated()
+_ACCOUNT_NOW = datetime(2026, 7, 27, tzinfo=timezone.utc)
 _BASE_LOCAL_CAPABILITIES = {
     "compare_and_replace_password",
     "consume_and_reset",
@@ -685,6 +687,9 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "ConsumeResult",
         "ConsumeStatus",
         "CreateSessionCommand",
+        "InvalidInvitation",
+        "InvalidLifecycleRequest",
+        "LifecycleAccepted",
         "LocalAccount",
         "LocalAccountCapabilities",
         "LocalAuth",
@@ -707,6 +712,12 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "PasswordResetStatus",
         "PasswordVerificationResult",
         "PasswordVerificationStatus",
+        "PendingTokenIssue",
+        "PurposeTokenCodec",
+        "PurposeTokenDelivery",
+        "PurposeTokenGenerationError",
+        "PurposeTokenProof",
+        "RecoveryTokenService",
         "RecoveryTokenStore",
         "RefreshRotationStatus",
         "RefreshTokenFamilyStore",
@@ -714,6 +725,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "RegistrationMode",
         "RegistrationPolicy",
         "RegistrationResult",
+        "RegistrationService",
         "RegistrationStatus",
         "RegistrationStore",
         "RevokeLoginMethodResult",
@@ -728,6 +740,8 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "SessionRecord",
         "SessionRegistry",
         "TokenIssue",
+        "TokenPurpose",
+        "VerificationTokenService",
         "VerificationTokenStore",
         "normalize_identifier",
     )
@@ -782,10 +796,10 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
         correlation=event_correlation,
     )
     binding_digest = b"binding-secret-digest"
-    token_digest = b"token-secret-digest"
+    token_digest = b"d" * 32
     successor_digest = b"successor-secret-digest"
     receipt = b"sealed-secret-receipt"
-    lookup_id = "token-1"
+    lookup_id = "verification_aWlpaWlpaWlpaWlpaWlpaQ"
     notification_value = "raw-notification-secret"
     refresh_lookup_id = "refresh-1"
     values = (
@@ -795,7 +809,7 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
         accounts_module.TokenIssue(
             token_id=lookup_id,
             digest=token_digest,
-            purpose="verification",
+            purpose=accounts_module.TokenPurpose.VERIFICATION,
             account_id=account.account_id,
             expires_at=now + timedelta(hours=1),
             maximum_attempts=5,
@@ -1082,6 +1096,226 @@ def test_registration_policy_requires_an_explicit_mode() -> None:
     )
 
 
+def _purpose_token_delivery(
+    codec: accounts_module.PurposeTokenCodec, purpose: accounts_module.TokenPurpose, lifetime: timedelta
+) -> accounts_module.PurposeTokenDelivery:
+    return codec.issue(
+        purpose, now=_ACCOUNT_NOW, lifetime=lifetime, template=f"local.{purpose.value}", destination="user@example.com"
+    )
+
+
+def test_purpose_token_codec_generates_strict_redacted_and_bindable_material() -> None:
+    entropy_values = iter((b"i" * 16, b"s" * 32))
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32, entropy=lambda _length: next(entropy_values))
+
+    issued = _purpose_token_delivery(codec, accounts_module.TokenPurpose.VERIFICATION, timedelta(hours=24))
+    token = issued.notification.token
+    proof = codec.proof(token, expected_purpose=accounts_module.TokenPurpose.VERIFICATION)
+
+    assert token.startswith("verification_")
+    assert len(token.split("_", 1)[1].split(".", 1)[0]) == 22
+    assert len(token.rsplit(".", 1)[1]) == 43
+    assert proof == accounts_module.PurposeTokenProof(
+        token_id=issued.issue.token_id, digest=issued.issue.digest, purpose=accounts_module.TokenPurpose.VERIFICATION
+    )
+    assert issued.issue.expires_at == _ACCOUNT_NOW + timedelta(hours=24)
+    assert issued.issue.maximum_attempts == 5
+    bound, notification = issued.bind("account-1")
+    assert (bound.account_id, bound.token_id, bound.digest) == ("account-1", issued.issue.token_id, issued.issue.digest)
+    assert notification is issued.notification
+    assert token not in repr(issued)
+    assert issued.issue.digest.hex() not in repr(issued.issue)
+    assert "p" * 32 not in repr(codec)
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        None,
+        object(),
+        "",
+        "verification_missing-secret",
+        "verification_a.b.c",
+        "verification_!!!!!!!!!!!!!!!!!!!!!!.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "verification_AAAAAAAAAAAAAAAAAAAAA=.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "verification_" + "\ud800" * 22 + "." + "A" * 43,
+        "unknown_AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ],
+)
+def test_purpose_token_codec_rejects_malformed_runtime_values(token: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+    calls = 0
+    original = local_accounts_module.hmac_digest
+
+    def tracked(key: bytes, message: bytes, digest: str) -> bytes:
+        nonlocal calls
+        calls += 1
+        return original(key, message, digest)
+
+    monkeypatch.setattr(local_accounts_module, "hmac_digest", tracked)
+
+    assert codec.proof(token, expected_purpose=accounts_module.TokenPurpose.VERIFICATION) is None
+    assert calls == 1
+
+
+def test_purpose_token_codec_never_crosses_namespaces() -> None:
+    entropy_values = iter((b"i" * 16, b"s" * 32))
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32, entropy=lambda _length: next(entropy_values))
+    issued = _purpose_token_delivery(codec, accounts_module.TokenPurpose.RECOVERY, timedelta(minutes=30))
+    token = issued.notification.token
+
+    assert codec.proof(token, expected_purpose=accounts_module.TokenPurpose.VERIFICATION) is None
+    assert codec.proof(token, expected_purpose=accounts_module.TokenPurpose.INVITATION) is None
+    assert codec.proof(token, expected_purpose=accounts_module.TokenPurpose.RECOVERY) is not None
+
+
+@pytest.mark.parametrize("kwargs", [{"pepper": b"short"}, {"pepper": "p" * 32}, {"pepper": b"p" * 32, "entropy": None}])
+def test_purpose_token_codec_rejects_invalid_configuration(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Purpose token"):
+        accounts_module.PurposeTokenCodec(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "entropy", [lambda _length: b"short", lambda _length: "not-bytes", lambda _length: (_ for _ in ()).throw(OSError)]
+)
+def test_purpose_token_codec_rejects_invalid_entropy(entropy: object) -> None:
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32, entropy=entropy)  # type: ignore[arg-type]
+
+    with pytest.raises(accounts_module.PurposeTokenGenerationError):
+        _purpose_token_delivery(codec, accounts_module.TokenPurpose.VERIFICATION, timedelta(hours=24))
+
+
+@pytest.mark.parametrize(
+    ("purpose", "lifetime", "attempts"),
+    [
+        ("verification", timedelta(hours=1), 5),
+        (accounts_module.TokenPurpose.VERIFICATION, timedelta(0), 5),
+        (accounts_module.TokenPurpose.VERIFICATION, timedelta(hours=1), 0),
+        (accounts_module.TokenPurpose.VERIFICATION, timedelta(hours=1), True),
+    ],
+)
+def test_purpose_token_codec_rejects_invalid_issue_arguments(
+    purpose: object, lifetime: timedelta, attempts: object
+) -> None:
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+
+    with pytest.raises(ValueError, match="Purpose token"):
+        codec.issue(  # type: ignore[arg-type]
+            purpose,
+            now=_ACCOUNT_NOW,
+            lifetime=lifetime,
+            template="local.verify",
+            destination="user@example.com",
+            maximum_attempts=attempts,
+        )
+    with pytest.raises(ValueError, match="Expected purpose"):
+        codec.proof("invalid", expected_purpose="verification")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"token_id": "invalid"},
+        {"token_id": object()},
+        {"digest": b"short"},
+        {"purpose": "verification"},
+        {"maximum_attempts": 0},
+        {"maximum_attempts": True},
+        {"expires_at": datetime(2026, 7, 27)},  # noqa: DTZ001 - explicit rejection input
+    ],
+)
+def test_pending_token_issue_rejects_invalid_storage_shapes(kwargs: dict[str, object]) -> None:
+    values = {
+        "token_id": "verification_aWlpaWlpaWlpaWlpaWlpaQ",
+        "digest": b"d" * 32,
+        "purpose": accounts_module.TokenPurpose.VERIFICATION,
+        "expires_at": _ACCOUNT_NOW + timedelta(hours=1),
+        "maximum_attempts": 5,
+        **kwargs,
+    }
+
+    with pytest.raises(ValueError, match="purpose token"):
+        accounts_module.PendingTokenIssue(**values)  # type: ignore[arg-type]
+
+
+def test_bound_token_and_proof_reject_invalid_identifiers_or_digests() -> None:
+    pending = accounts_module.PendingTokenIssue(
+        token_id="verification_aWlpaWlpaWlpaWlpaWlpaQ",  # noqa: S106 - non-secret lookup ID
+        digest=b"d" * 32,
+        purpose=accounts_module.TokenPurpose.VERIFICATION,
+        expires_at=_ACCOUNT_NOW + timedelta(hours=1),
+        maximum_attempts=5,
+    )
+
+    with pytest.raises(ValueError, match="account ID"):
+        pending.bind(" ")
+    with pytest.raises(ValueError, match="proof"):
+        accounts_module.PurposeTokenProof(
+            token_id=pending.token_id, digest=b"short", purpose=accounts_module.TokenPurpose.VERIFICATION
+        )
+
+
+def test_purpose_token_delivery_is_codec_created_digest_bound_and_redacted() -> None:
+    entropy_values = iter((b"i" * 16, b"s" * 32))
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32, entropy=lambda _length: next(entropy_values))
+    plan = codec.issue(
+        accounts_module.TokenPurpose.VERIFICATION,
+        now=_ACCOUNT_NOW,
+        lifetime=timedelta(hours=24),
+        template="local.verify",
+        destination="user@example.com",
+        return_url="https://app.example/verified",
+    )
+    proof = codec.proof(plan.notification.token, expected_purpose=accounts_module.TokenPurpose.VERIFICATION)
+
+    assert plan.issue.purpose is accounts_module.TokenPurpose.VERIFICATION
+    assert proof == accounts_module.PurposeTokenProof(
+        plan.issue.token_id, plan.issue.digest, accounts_module.TokenPurpose.VERIFICATION
+    )
+    assert plan.notification.token not in repr(plan.notification)
+    assert "user@example.com" not in repr(plan.notification)
+    assert plan.notification.token not in repr(plan)
+
+
+def test_purpose_token_delivery_cannot_be_publicly_constructed_with_mismatched_material() -> None:
+    with pytest.raises(TypeError, match="PurposeTokenCodec"):
+        accounts_module.PurposeTokenDelivery()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"template": "", "destination": "user", "token": "token"},
+        {"template": "verify", "destination": "", "token": "token"},
+        {"template": "verify", "destination": "user", "token": ""},
+        {
+            "template": "verify",
+            "destination": "user",
+            "token": "token",
+            "expires_at": datetime(2026, 7, 27),  # noqa: DTZ001 - explicit rejection input
+        },
+        {
+            "template": "verify",
+            "destination": "user",
+            "token": "token",
+            "return_url": "https://user:secret@app.example/callback",
+        },
+        {
+            "template": "verify",
+            "destination": "user",
+            "token": "token",
+            "return_url": "https://app.example/callback#token",
+        },
+        {"template": "verify", "destination": "user", "token": "token", "return_url": object()},
+    ],
+)
+def test_notification_command_rejects_incomplete_or_unsafe_values(kwargs: dict[str, object]) -> None:
+    values = {"expires_at": _ACCOUNT_NOW + timedelta(hours=1), **kwargs}
+
+    with pytest.raises(ValueError, match="Notification"):
+        accounts_module.NotificationCommand(**values)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     ("password", "identifier", "violations"),
     [
@@ -1211,6 +1445,7 @@ def test_security_config_is_typed_and_slotted() -> None:
         "external_csrf",
         "require_default",
         "session_backend",
+        "local_auth",
         "local_jwks",
         "jwks_providers",
         "jwks_warmup_failure",

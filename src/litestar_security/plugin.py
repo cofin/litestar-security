@@ -70,6 +70,14 @@ def _owner_name(layer: object) -> str:
     return "handler"
 
 
+def _validate_local_auth(value: object) -> None:
+    from litestar_security.accounts.local import LocalAuthConfig  # noqa: PLC0415
+
+    if not isinstance(value, LocalAuthConfig):
+        message = "Security local authentication must be a LocalAuthConfig"
+        raise ImproperlyConfiguredException(detail=message)
+
+
 def _iter_route_handler_layers(route_handler: object) -> Iterator[object]:
     if isinstance(route_handler, Router):
         for route in route_handler.routes:
@@ -115,6 +123,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
 
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
         """Validate ownership and install one typed security runtime."""
+        self._configure_local_auth()
         self._configure_local_jwks(app_config)
         self._configure_jwks_lifespan(app_config)
         self._validate_dependency_map(app_config.dependencies, "application")
@@ -227,6 +236,11 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             message = "Security config and application configure unequal native Litestar CSRF settings"
             raise ImproperlyConfiguredException(detail=message)
         app_config.csrf_config = self.config.csrf_config
+
+    def _configure_local_auth(self) -> None:
+        if self.config.local_auth is None:
+            return
+        _validate_local_auth(self.config.local_auth)
 
     def _configure_local_jwks(self, app_config: AppConfig) -> None:
         if self.config.local_jwks is None:

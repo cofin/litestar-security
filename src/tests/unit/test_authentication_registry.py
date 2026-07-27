@@ -4695,8 +4695,12 @@ class _PasswordHasher:
         )
         self.unavailable = unavailable
         self.calls: list[tuple[str | None, str]] = []
+        self.hash_calls: list[str] = []
 
     async def hash(self, password: str) -> str:
+        self.hash_calls.append(password)
+        if self.unavailable:
+            raise accounts_module.PasswordHashingUnavailableError
         return f"hashed:{password}"
 
     async def verify(self, encoded_hash: str | None, password: str) -> accounts_module.PasswordVerificationResult:
@@ -4934,3 +4938,543 @@ async def test_password_reauthentication_returns_fresh_evidence_and_rehashes_ato
     assert (event.operation, event.outcome, event.account_id) == ("local.password.rehash", "updated", "account-1")
     assert "presented secret" not in repr(event)
     assert replacement not in repr(event)
+
+
+class _LifecycleStore:
+    def __init__(
+        self,
+        *,
+        account: "accounts_module.LocalAccount[object] | None" = None,
+        registration_status: accounts_module.RegistrationStatus = accounts_module.RegistrationStatus.CREATED,
+        consume_status: accounts_module.ConsumeStatus = accounts_module.ConsumeStatus.CONSUMED,
+        reset_status: accounts_module.PasswordResetStatus = accounts_module.PasswordResetStatus.RESET,
+        fail: bool = False,
+    ) -> None:
+        self.account = account
+        self.registration_status = registration_status
+        self.consume_status = consume_status
+        self.reset_status = reset_status
+        self.fail = fail
+        self.registrations: list[tuple[object, ...]] = []
+        self.issues: list[
+            tuple[accounts_module.TokenIssue, accounts_module.NotificationCommand, accounts_module.SecurityEvent]
+        ] = []
+        self.consumptions: list[tuple[str, bytes, datetime, accounts_module.SecurityEvent]] = []
+        self.resets: list[tuple[str, bytes, str, datetime, accounts_module.SecurityEvent]] = []
+
+    async def find_for_login(self, _normalized_identifier: str) -> "accounts_module.LocalAccount[object] | None":
+        return self.account
+
+    async def get_by_id(self, _account_id: str) -> "accounts_module.LocalAccount[object] | None":
+        return self.account
+
+    async def register(  # noqa: PLR0913
+        self,
+        command: accounts_module.RegistrationCommand,
+        password_hash: str,
+        *,
+        invitation_digest: bytes | None,
+        verification: accounts_module.PurposeTokenDelivery | None,
+        now: datetime,
+        event: accounts_module.SecurityEvent,
+    ) -> "accounts_module.RegistrationResult[object]":
+        self.registrations.append((command, password_hash, invitation_digest, verification, now, event))
+        if self.fail:
+            raise OSError
+        account = (
+            accounts_module.LocalAccount(
+                account_id="account-1",
+                normalized_identifier="user@example.com",
+                display_name=None,
+                active=True,
+                verified=verification is None,
+                security_epoch=1,
+            )
+            if self.registration_status is accounts_module.RegistrationStatus.CREATED
+            else None
+        )
+        return accounts_module.RegistrationResult(self.registration_status, account)
+
+    async def issue(
+        self,
+        issue: accounts_module.TokenIssue,
+        notification: accounts_module.NotificationCommand,
+        *,
+        event: accounts_module.SecurityEvent,
+    ) -> None:
+        self.issues.append((issue, notification, event))
+        if self.fail:
+            raise OSError
+
+    async def consume_and_verify(
+        self, token_id: str, digest: bytes, *, now: datetime, event: accounts_module.SecurityEvent
+    ) -> accounts_module.ConsumeResult:
+        self.consumptions.append((token_id, digest, now, event))
+        if self.fail:
+            raise OSError
+        if self.consume_status is accounts_module.ConsumeStatus.CONSUMED:
+            return accounts_module.ConsumeResult(self.consume_status, "account-1", 1)
+        return accounts_module.ConsumeResult(self.consume_status)
+
+    async def consume_and_reset(
+        self,
+        token_id: str,
+        digest: bytes,
+        new_password_hash: str,
+        *,
+        now: datetime,
+        event: accounts_module.SecurityEvent,
+    ) -> accounts_module.PasswordResetResult:
+        self.resets.append((token_id, digest, new_password_hash, now, event))
+        if self.fail:
+            raise OSError
+        if self.reset_status is accounts_module.PasswordResetStatus.RESET:
+            return accounts_module.PasswordResetResult(self.reset_status, "account-1", 2)
+        return accounts_module.PasswordResetResult(self.reset_status)
+
+
+def _lifecycle_account(*, active: bool = True, verified: bool = False) -> "accounts_module.LocalAccount[object]":
+    return accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="user@example.com",
+        display_name="User",
+        active=active,
+        verified=verified,
+        security_epoch=1,
+    )
+
+
+def _lifecycle_token(
+    codec: accounts_module.PurposeTokenCodec, purpose: accounts_module.TokenPurpose, lifetime: timedelta
+) -> accounts_module.PurposeTokenDelivery:
+    return codec.issue(
+        purpose, now=_JWT_NOW, lifetime=lifetime, template=f"local.{purpose.value}", destination="user@example.com"
+    )
+
+
+def _unavailable_password_check(_password: str) -> bool:
+    raise OSError
+
+
+@pytest.mark.parametrize(
+    ("registration_status", "require_verification"),
+    [
+        (accounts_module.RegistrationStatus.CREATED, True),
+        (accounts_module.RegistrationStatus.DUPLICATE, True),
+        (accounts_module.RegistrationStatus.CREATED, False),
+        (accounts_module.RegistrationStatus.DUPLICATE, False),
+    ],
+)
+@pytest.mark.anyio
+async def test_registration_service_collapses_created_and_duplicate_atomic_results(
+    registration_status: accounts_module.RegistrationStatus, *, require_verification: bool
+) -> None:
+    store = _LifecycleStore(registration_status=registration_status)
+    hasher = _PasswordHasher()
+    service = accounts_module.RegistrationService(
+        accounts=store,
+        hasher=hasher,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        registration=accounts_module.RegistrationPolicy.public(require_verification=require_verification),
+        verification_return_url="https://app.example/verified",
+        event_ids=lambda: "event-1",
+    )
+
+    outcome = await service.register(
+        " User@EXAMPLE.COM ", "correct horse battery staple", display_name="User", now=_JWT_NOW
+    )
+
+    assert outcome == accounts_module.LifecycleAccepted()
+    assert hasher.hash_calls == ["correct horse battery staple"]
+    assert len(store.registrations) == 1
+    command, password_hash, invitation_digest, verification, now, event = store.registrations[0]
+    assert command == accounts_module.RegistrationCommand(normalized_identifier="user@example.com", display_name="User")
+    assert password_hash == "hashed:correct horse battery staple"  # noqa: S105 - fake hasher output
+    assert invitation_digest is None
+    assert now == _JWT_NOW
+    assert (event.event_id, event.operation, event.outcome) == ("event-1", "local.registration", "created")
+    assert (verification is not None) is require_verification
+    if verification is not None:
+        assert verification.issue.purpose is accounts_module.TokenPurpose.VERIFICATION
+        assert verification.issue.expires_at == _JWT_NOW + timedelta(hours=24)
+        assert verification.notification.expires_at == verification.issue.expires_at
+        assert "correct horse battery staple" not in repr(verification)
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_type", "store_status"),
+    [
+        ("missing", accounts_module.InvalidInvitation, accounts_module.RegistrationStatus.CREATED),
+        ("purpose_swap", accounts_module.InvalidInvitation, accounts_module.RegistrationStatus.CREATED),
+        ("replay", accounts_module.InvalidInvitation, accounts_module.RegistrationStatus.INVALID_INVITATION),
+        ("expired", accounts_module.InvalidInvitation, accounts_module.RegistrationStatus.INVALID_INVITATION),
+        ("accepted", accounts_module.LifecycleAccepted, accounts_module.RegistrationStatus.CREATED),
+    ],
+)
+@pytest.mark.anyio
+async def test_invite_registration_passes_only_one_purpose_bound_digest_to_atomic_store(
+    case: str, expected_type: type[object], store_status: accounts_module.RegistrationStatus
+) -> None:
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+    purpose = (
+        accounts_module.TokenPurpose.RECOVERY if case == "purpose_swap" else accounts_module.TokenPurpose.INVITATION
+    )
+    issued = _lifecycle_token(codec, purpose, timedelta(hours=1))
+    invitation = None if case == "missing" else issued.notification.token
+    store = _LifecycleStore(registration_status=store_status)
+    hasher = _PasswordHasher()
+    service = accounts_module.RegistrationService(
+        accounts=store, hasher=hasher, tokens=codec, registration=accounts_module.RegistrationPolicy.invite_only()
+    )
+
+    outcome = await service.register(
+        "user@example.com", "correct horse battery staple", invitation_token=invitation, now=_JWT_NOW
+    )
+
+    assert isinstance(outcome, expected_type)
+    if case in {"missing", "purpose_swap"}:
+        assert store.registrations == []
+        assert hasher.hash_calls == []
+    else:
+        assert len(store.registrations) == 1
+        stored_digest = store.registrations[0][2]
+        proof = codec.proof(issued.notification.token, expected_purpose=accounts_module.TokenPurpose.INVITATION)
+        assert proof is not None
+        assert stored_digest == proof.digest
+        assert issued.notification.token not in repr(store.registrations[0])
+
+
+@pytest.mark.parametrize("failure", ["password", "policy", "store", "identifier", "empty_identifier", "event"])
+@pytest.mark.anyio
+async def test_registration_service_returns_secret_free_domain_failures(failure: str) -> None:
+    store = _LifecycleStore(fail=failure == "store")
+    hasher = _PasswordHasher(unavailable=failure == "password")
+    service = accounts_module.RegistrationService(
+        accounts=store,
+        hasher=hasher,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        registration=accounts_module.RegistrationPolicy.public(),
+        password_policy=accounts_module.PasswordPolicy(
+            compromised=_unavailable_password_check if failure == "policy" else None
+        ),
+        normalizer=(
+            (lambda _value: (_ for _ in ()).throw(ValueError))
+            if failure == "identifier"
+            else (lambda _value: "")
+            if failure == "empty_identifier"
+            else accounts_module.normalize_identifier
+        ),
+        event_ids=(lambda: " ") if failure == "event" else (lambda: "event-1"),
+    )
+
+    outcome = await service.register("user@example.com", "correct horse battery staple", now=_JWT_NOW)
+
+    assert isinstance(
+        outcome,
+        (
+            accounts_module.InvalidLifecycleRequest
+            if failure in {"identifier", "empty_identifier"}
+            else VerificationUnavailable
+        ),
+    )
+    assert "correct horse battery staple" not in repr(outcome)
+
+
+@pytest.mark.anyio
+async def test_registration_service_returns_password_policy_without_hash_or_store_call() -> None:
+    store = _LifecycleStore()
+    hasher = _PasswordHasher()
+    service = accounts_module.RegistrationService(
+        accounts=store,
+        hasher=hasher,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        registration=accounts_module.RegistrationPolicy.public(),
+    )
+
+    outcome = await service.register("user@example.com", "short", now=_JWT_NOW)
+
+    assert outcome == accounts_module.PasswordPolicyResult(
+        frozenset({accounts_module.PasswordPolicyViolation.TOO_SHORT})
+    )
+    assert hasher.hash_calls == []
+    assert store.registrations == []
+
+
+@pytest.mark.parametrize(
+    ("account", "fail", "issue_count"),
+    [
+        (None, False, 0),
+        (_lifecycle_account(verified=True), False, 0),
+        (_lifecycle_account(active=False), False, 0),
+        (_lifecycle_account(), False, 1),
+        (_lifecycle_account(), True, 1),
+    ],
+)
+@pytest.mark.anyio
+async def test_verification_resend_is_generic_across_account_and_store_states(
+    account: "accounts_module.LocalAccount[object] | None",
+    *,
+    fail: bool,
+    issue_count: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _LifecycleStore(account=account, fail=fail)
+    service = accounts_module.VerificationTokenService(
+        accounts=store,
+        store=store,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        return_url="https://app.example/verified",
+        event_ids=lambda: "event-1",
+    )
+
+    outcome = await service.resend(" User@EXAMPLE.COM ", now=_JWT_NOW)
+
+    assert outcome == accounts_module.LifecycleAccepted()
+    assert len(store.issues) == issue_count
+    if issue_count:
+        issue, notification, event = store.issues[0]
+        assert issue.purpose is accounts_module.TokenPurpose.VERIFICATION
+        assert issue.expires_at == _JWT_NOW + timedelta(hours=24)
+        assert (event.operation, event.account_id) == ("local.verification.issue", "account-1")
+        assert "user@example.com" not in repr(notification)
+        assert notification.token not in repr(notification)
+    if fail:
+        assert "Verification token request failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        accounts_module.ConsumeStatus.CONSUMED,
+        accounts_module.ConsumeStatus.INVALID,
+        accounts_module.ConsumeStatus.EXPIRED,
+        accounts_module.ConsumeStatus.USED,
+    ],
+)
+@pytest.mark.anyio
+async def test_verification_consume_delegates_replay_and_expiry_atomically(
+    status: accounts_module.ConsumeStatus,
+) -> None:
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+    issued = _lifecycle_token(codec, accounts_module.TokenPurpose.VERIFICATION, timedelta(hours=24))
+    store = _LifecycleStore(consume_status=status)
+    service = accounts_module.VerificationTokenService(accounts=store, store=store, tokens=codec)
+
+    outcome = await service.consume(issued.notification.token, now=_JWT_NOW)
+
+    assert isinstance(outcome, accounts_module.ConsumeResult)
+    assert outcome.status is status
+    assert len(store.consumptions) == 1
+    token_id, digest, now, event = store.consumptions[0]
+    assert (token_id, digest, now) == (issued.issue.token_id, issued.issue.digest, _JWT_NOW)
+    assert event.operation == "local.verification.consume"
+
+
+@pytest.mark.anyio
+async def test_verification_consume_rejects_purpose_swap_without_store_access() -> None:
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+    recovery = _lifecycle_token(codec, accounts_module.TokenPurpose.RECOVERY, timedelta(minutes=30))
+    store = _LifecycleStore()
+    service = accounts_module.VerificationTokenService(accounts=store, store=store, tokens=codec)
+
+    outcome = await service.consume(recovery.notification.token, now=_JWT_NOW)
+
+    assert outcome == accounts_module.ConsumeResult(accounts_module.ConsumeStatus.INVALID)
+    assert store.consumptions == []
+
+
+@pytest.mark.anyio
+async def test_verification_consume_maps_atomic_store_failure_to_unavailable() -> None:
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+    issued = _lifecycle_token(codec, accounts_module.TokenPurpose.VERIFICATION, timedelta(hours=24))
+    store = _LifecycleStore(fail=True)
+    service = accounts_module.VerificationTokenService(accounts=store, store=store, tokens=codec)
+
+    outcome = await service.consume(issued.notification.token, now=_JWT_NOW)
+
+    assert isinstance(outcome, VerificationUnavailable)
+    assert len(store.consumptions) == 1
+
+
+@pytest.mark.parametrize(
+    ("account", "fail", "issue_count"),
+    [
+        (None, False, 0),
+        (_lifecycle_account(active=False), False, 0),
+        (_lifecycle_account(), False, 1),
+        (_lifecycle_account(), True, 1),
+    ],
+)
+@pytest.mark.anyio
+async def test_recovery_request_is_generic_and_emits_only_atomic_outbox_commands(
+    account: "accounts_module.LocalAccount[object] | None",
+    *,
+    fail: bool,
+    issue_count: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _LifecycleStore(account=account, fail=fail)
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+    service = accounts_module.RecoveryTokenService(
+        accounts=store,
+        store=store,
+        tokens=codec,
+        hasher=_PasswordHasher(),
+        return_url="https://app.example/reset",
+        event_ids=lambda: "event-1",
+    )
+
+    outcome = await service.request(" User@EXAMPLE.COM ", now=_JWT_NOW)
+
+    assert outcome == accounts_module.LifecycleAccepted()
+    assert len(store.issues) == issue_count
+    if issue_count:
+        issue, notification, event = store.issues[0]
+        assert issue.purpose is accounts_module.TokenPurpose.RECOVERY
+        assert issue.expires_at == _JWT_NOW + timedelta(minutes=30)
+        assert codec.proof(
+            notification.token, expected_purpose=accounts_module.TokenPurpose.RECOVERY
+        ) == accounts_module.PurposeTokenProof(issue.token_id, issue.digest, accounts_module.TokenPurpose.RECOVERY)
+        assert (event.operation, event.account_id) == ("local.recovery.issue", "account-1")
+    if fail:
+        assert "Recovery token request failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        accounts_module.PasswordResetStatus.RESET,
+        accounts_module.PasswordResetStatus.INVALID,
+        accounts_module.PasswordResetStatus.EXPIRED,
+        accounts_module.PasswordResetStatus.USED,
+        accounts_module.PasswordResetStatus.CONFLICT,
+    ],
+)
+@pytest.mark.anyio
+async def test_recovery_reset_delegates_replay_expiry_and_epoch_mutation_atomically(
+    status: accounts_module.PasswordResetStatus,
+) -> None:
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+    issued = _lifecycle_token(codec, accounts_module.TokenPurpose.RECOVERY, timedelta(minutes=30))
+    store = _LifecycleStore(reset_status=status)
+    hasher = _PasswordHasher()
+    service = accounts_module.RecoveryTokenService(accounts=store, store=store, tokens=codec, hasher=hasher)
+
+    outcome = await service.reset(
+        issued.notification.token, "correct horse battery staple", now=_JWT_NOW + timedelta(minutes=1)
+    )
+
+    assert isinstance(outcome, accounts_module.PasswordResetResult)
+    assert outcome.status is status
+    assert hasher.hash_calls == ["correct horse battery staple"]
+    assert len(store.resets) == 1
+    token_id, digest, password_hash, now, event = store.resets[0]
+    assert (token_id, digest, password_hash, now) == (
+        issued.issue.token_id,
+        issued.issue.digest,
+        "hashed:correct horse battery staple",
+        _JWT_NOW + timedelta(minutes=1),
+    )
+    assert event.operation == "local.recovery.consume"
+
+
+@pytest.mark.parametrize("case", ["purpose_swap", "policy", "policy_failure", "store_failure"])
+@pytest.mark.anyio
+async def test_recovery_reset_rejects_invalid_inputs_without_splitting_atomic_consumption(case: str) -> None:
+    codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+    purpose = (
+        accounts_module.TokenPurpose.VERIFICATION if case == "purpose_swap" else accounts_module.TokenPurpose.RECOVERY
+    )
+    issued = _lifecycle_token(codec, purpose, timedelta(minutes=30))
+    store = _LifecycleStore(fail=case == "store_failure")
+    hasher = _PasswordHasher()
+    service = accounts_module.RecoveryTokenService(
+        accounts=store,
+        store=store,
+        tokens=codec,
+        hasher=hasher,
+        password_policy=accounts_module.PasswordPolicy(
+            compromised=_unavailable_password_check if case == "policy_failure" else None
+        ),
+    )
+    password = "short" if case == "policy" else "correct horse battery staple"
+
+    outcome = await service.reset(issued.notification.token, password, now=_JWT_NOW)
+
+    if case == "purpose_swap":
+        assert outcome == accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.INVALID)
+        assert hasher.hash_calls == []
+        assert store.resets == []
+    elif case == "policy":
+        assert outcome == accounts_module.PasswordPolicyResult(
+            frozenset({accounts_module.PasswordPolicyViolation.TOO_SHORT})
+        )
+        assert hasher.hash_calls == []
+        assert store.resets == []
+    elif case == "store_failure":
+        assert isinstance(outcome, VerificationUnavailable)
+        assert hasher.hash_calls == ["correct horse battery staple"]
+        assert len(store.resets) == 1
+    else:
+        assert isinstance(outcome, VerificationUnavailable)
+        assert hasher.hash_calls == []
+        assert store.resets == []
+
+
+@pytest.mark.parametrize(
+    ("service_name", "invalid_field"),
+    [
+        ("registration", "accounts"),
+        ("registration", "hasher"),
+        ("registration", "tokens"),
+        ("registration", "registration"),
+        ("verification", "accounts"),
+        ("verification", "store"),
+        ("verification", "tokens"),
+        ("recovery", "accounts"),
+        ("recovery", "store"),
+        ("recovery", "tokens"),
+        ("recovery", "hasher"),
+        ("recovery", "password_policy"),
+    ],
+)
+def test_lifecycle_services_reject_invalid_structural_dependencies(service_name: str, invalid_field: str) -> None:
+    store = _LifecycleStore()
+    common: dict[str, object] = {"accounts": store, "tokens": accounts_module.PurposeTokenCodec(pepper=b"p" * 32)}
+    if service_name == "registration":
+        factory = accounts_module.RegistrationService
+        common.update(hasher=_PasswordHasher(), registration=accounts_module.RegistrationPolicy.public())
+    elif service_name == "verification":
+        factory = accounts_module.VerificationTokenService
+        common["store"] = store
+    else:
+        factory = accounts_module.RecoveryTokenService
+        common.update(store=store, hasher=_PasswordHasher())
+    common[invalid_field] = object()
+
+    with pytest.raises(ImproperlyConfiguredException):
+        factory(**common)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("lifetime", timedelta(0)),
+        ("attempts", 0),
+        ("attempts", True),
+        ("return_url", "javascript:alert(1)"),
+        ("clock", None),
+        ("normalizer", None),
+        ("event_ids", None),
+    ],
+)
+def test_lifecycle_services_reject_invalid_shared_configuration(field: str, value: object) -> None:
+    values: dict[str, object] = {
+        "accounts": _LifecycleStore(),
+        "store": _LifecycleStore(),
+        "tokens": accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+    }
+    values["maximum_attempts" if field == "attempts" else field] = value
+
+    with pytest.raises(ImproperlyConfiguredException):
+        accounts_module.VerificationTokenService(**values)  # type: ignore[arg-type]

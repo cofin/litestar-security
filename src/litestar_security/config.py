@@ -14,6 +14,7 @@ from litestar.middleware.session.base import BaseSessionBackend
 from litestar_security.authentication import AuthenticationMechanism, AuthenticationPolicy, CredentialSlot, required
 
 if TYPE_CHECKING:
+    from litestar_security.accounts.local import LocalAuthConfig
     from litestar_security.providers.jwks import JWKSProvider
     from litestar_security.providers.jwt import LocalJWKSConfig
 
@@ -101,6 +102,7 @@ class SecurityConfig(Generic[UserT]):
     external_csrf: ExternalCSRF | None = None
     require_default: bool = False
     session_backend: BaseSessionBackend[Any] | None = None
+    local_auth: "LocalAuthConfig[UserT] | None" = None
     local_jwks: "LocalJWKSConfig | None" = None
     jwks_providers: Sequence["JWKSProvider"] = ()
     jwks_warmup_failure: Literal["fail_startup", "lazy"] = "fail_startup"

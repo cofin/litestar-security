@@ -1,16 +1,20 @@
 """Backend-agnostic local-account contracts and explicit transport profiles."""
 
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Mapping  # noqa: TC003 - Litestar resolves public annotations at runtime
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from functools import partial
 from hmac import compare_digest
+from hmac import digest as hmac_digest
 from logging import getLogger
+from secrets import token_bytes
 from time import perf_counter
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
 from unicodedata import normalize
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from anyio import to_thread
@@ -37,6 +41,9 @@ __all__ = (
     "Argon2PasswordHasher",
     "ConsumeResult",
     "ConsumeStatus",
+    "InvalidInvitation",
+    "InvalidLifecycleRequest",
+    "LifecycleAccepted",
     "LocalAccount",
     "LocalAccountCapabilities",
     "LocalAuth",
@@ -59,11 +66,18 @@ __all__ = (
     "PasswordResetStatus",
     "PasswordVerificationResult",
     "PasswordVerificationStatus",
+    "PendingTokenIssue",
+    "PurposeTokenCodec",
+    "PurposeTokenDelivery",
+    "PurposeTokenGenerationError",
+    "PurposeTokenProof",
+    "RecoveryTokenService",
     "RecoveryTokenStore",
     "RegistrationCommand",
     "RegistrationMode",
     "RegistrationPolicy",
     "RegistrationResult",
+    "RegistrationService",
     "RegistrationStatus",
     "RegistrationStore",
     "RevokeLoginMethodResult",
@@ -72,6 +86,8 @@ __all__ = (
     "SecurityEvent",
     "SecurityEventSink",
     "TokenIssue",
+    "TokenPurpose",
+    "VerificationTokenService",
     "VerificationTokenStore",
     "normalize_identifier",
 )
@@ -93,6 +109,18 @@ _MAXIMUM_ARGON2_HASH_LENGTH = 64
 _MAXIMUM_ENCODED_PASSWORD_HASH_BYTES = 1_024
 _MAXIMUM_ARGON2_WORKER_MEMORY_KIB = 1_048_576
 _ARGON2_VERSION = 19
+_MINIMUM_TOKEN_PEPPER_BYTES = 32
+_TOKEN_LOOKUP_BYTES = 16
+_TOKEN_SECRET_BYTES = 32
+_TOKEN_DIGEST_BYTES = 32
+_TOKEN_LOOKUP_CHARACTERS = 22
+_TOKEN_SECRET_CHARACTERS = 43
+_DEFAULT_TOKEN_ATTEMPTS = 5
+_MAXIMUM_TOKEN_ATTEMPTS = 100
+_VERIFICATION_TOKEN_LIFETIME = timedelta(hours=24)
+_RECOVERY_TOKEN_LIFETIME = timedelta(minutes=30)
+_DUMMY_TOKEN_LOOKUP = b"\x00" * _TOKEN_LOOKUP_BYTES
+_DUMMY_TOKEN_SECRET = b"\x00" * _TOKEN_SECRET_BYTES
 _LOGGER = getLogger(__name__)
 
 
@@ -110,6 +138,14 @@ class RegistrationMode(str, Enum):
     DISABLED = "disabled"
     PUBLIC = "public"
     INVITE_ONLY = "invite_only"
+
+
+class TokenPurpose(str, Enum):
+    """Closed namespaces for one-time local-account tokens."""
+
+    INVITATION = "invitation"
+    VERIFICATION = "verification"
+    RECOVERY = "recovery"
 
 
 class PasswordChangeStatus(str, Enum):
@@ -237,15 +273,43 @@ class NoOpSecurityEventSink:
 
 
 @dataclass(frozen=True, slots=True)
-class TokenIssue:
-    """Hashed, purpose-bound token material accepted by an atomic store."""
+class PendingTokenIssue:
+    """Account-unbound hashed token material for one atomic registration."""
 
     token_id: str
     digest: bytes = field(repr=False)
-    purpose: str
-    account_id: str
+    purpose: TokenPurpose
     expires_at: "datetime"
     maximum_attempts: int
+
+    def __post_init__(self) -> None:
+        """Validate secret-safe storage material and bounded attempt policy."""
+        _validate_pending_token_issue(self)
+
+    def bind(self, account_id: str) -> "TokenIssue":
+        """Bind this material to an application-allocated account ID."""
+        return TokenIssue(
+            token_id=self.token_id,
+            digest=self.digest,
+            purpose=self.purpose,
+            account_id=account_id,
+            expires_at=self.expires_at,
+            maximum_attempts=self.maximum_attempts,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TokenIssue(PendingTokenIssue):
+    """Hashed, purpose-bound token material accepted by an atomic store."""
+
+    account_id: str
+
+    def __post_init__(self) -> None:
+        """Require a stable account binding in addition to valid token material."""
+        PendingTokenIssue.__post_init__(self)
+        if not _strict_text(self.account_id):
+            msg = "Purpose token account ID must not be blank"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +322,20 @@ class NotificationCommand:
     expires_at: "datetime"
     return_url: str | None = None
 
+    def __post_init__(self) -> None:
+        """Reject incomplete delivery commands and unapproved callback shapes."""
+        if not _strict_text(self.template) or not _strict_text(self.destination) or not _strict_text(self.token):
+            msg = "Notification template, destination, and token must not be blank"
+            raise ValueError(msg)
+        try:
+            _aware_utc_time(self.expires_at)
+        except (AttributeError, ValueError):
+            msg = "Notification expiry must be timezone-aware"
+            raise ValueError(msg) from None
+        if self.return_url is not None and not _approved_return_url(self.return_url):
+            msg = "Notification return URL must be an absolute HTTP(S) URL without credentials or fragments"
+            raise ValueError(msg)
+
 
 @dataclass(frozen=True, slots=True)
 class RegistrationCommand:
@@ -267,12 +345,257 @@ class RegistrationCommand:
     display_name: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PurposeTokenProof:
+    """Secret-free parsed lookup and HMAC proof passed to an atomic store."""
+
+    token_id: str
+    digest: bytes = field(repr=False)
+    purpose: TokenPurpose
+
+    def __post_init__(self) -> None:
+        """Validate the exact storage-facing proof shape."""
+        if (
+            self.purpose.__class__ is not TokenPurpose
+            or not _valid_token_id(self.token_id, self.purpose)
+            or len(self.digest) != _TOKEN_DIGEST_BYTES
+        ):
+            msg = "Invalid purpose token proof"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PurposeTokenDelivery:
+    """Codec-created storage issue and durable notification outbox plan."""
+
+    issue: PendingTokenIssue
+    notification: NotificationCommand
+
+    def __init__(self) -> None:
+        """Prevent callers from bypassing codec-owned digest binding."""
+        message = "PurposeTokenDelivery must be created by PurposeTokenCodec"
+        raise TypeError(message)
+
+    def bind(self, account_id: str) -> tuple[TokenIssue, NotificationCommand]:
+        """Bind the storage material while preserving the codec-created notification."""
+        return self.issue.bind(account_id), self.notification
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleAccepted:
+    """Shared enumeration-resistant response body for lifecycle requests."""
+
+    detail: str = field(default="If eligible, the request will be processed.", init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class InvalidInvitation:
+    """Generic invalid-invitation response without expiry or replay details."""
+
+    detail: str = "Invitation is invalid or unavailable."
+
+
+@dataclass(frozen=True, slots=True)
+class InvalidLifecycleRequest:
+    """Generic malformed lifecycle request response."""
+
+    detail: str = "The request is invalid."
+
+
 def normalize_identifier(value: str) -> str:
     """Apply the default compatibility, whitespace, and case normalization."""
     if value.__class__ is not str:
         msg = "Identifier normalization requires text"
         raise ValueError(msg)
     return normalize("NFKC", value).strip().casefold()
+
+
+class PurposeTokenGenerationError(RuntimeError):
+    """Indicate that one-time token material could not be generated safely."""
+
+    def __init__(self) -> None:
+        """Initialize a stable secret-free error."""
+        super().__init__("Purpose token generation unavailable")
+
+
+@dataclass(frozen=True, slots=True)
+class PurposeTokenCodec:
+    """Generate and verify strict purpose-bound opaque one-time tokens."""
+
+    pepper: bytes = field(repr=False)
+    entropy: "Callable[[int], bytes]" = field(default=token_bytes, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Require an explicit strong HMAC pepper and callable entropy source."""
+        pepper_value: object = object.__getattribute__(self, "pepper")
+        entropy_value: object = object.__getattribute__(self, "entropy")
+        if pepper_value.__class__ is not bytes or len(self.pepper) < _MINIMUM_TOKEN_PEPPER_BYTES:
+            msg = "Purpose token pepper must contain at least 32 bytes"
+            raise ImproperlyConfiguredException(detail=msg)
+        if not callable(entropy_value):
+            msg = "Purpose token entropy must be callable"
+            raise ImproperlyConfiguredException(detail=msg)
+
+    def issue(  # noqa: PLR0913
+        self,
+        purpose: TokenPurpose,
+        *,
+        now: datetime,
+        lifetime: timedelta,
+        template: str,
+        destination: str,
+        return_url: str | None = None,
+        maximum_attempts: int = _DEFAULT_TOKEN_ATTEMPTS,
+    ) -> PurposeTokenDelivery:
+        """Create one digest-bound issue whose raw token exists only in its notification."""
+        if purpose.__class__ is not TokenPurpose:
+            msg = "Purpose token namespace must be a TokenPurpose"
+            raise ValueError(msg)
+        issued_at = _aware_utc_time(now)
+        if lifetime.__class__ is not timedelta or lifetime <= timedelta(0):
+            msg = "Purpose token lifetime must be positive"
+            raise ValueError(msg)
+        if maximum_attempts.__class__ is not int or not 1 <= maximum_attempts <= _MAXIMUM_TOKEN_ATTEMPTS:
+            msg = "Purpose token attempts must be a positive bounded integer"
+            raise ValueError(msg)
+        lookup = self._entropy(_TOKEN_LOOKUP_BYTES)
+        secret = self._entropy(_TOKEN_SECRET_BYTES)
+        lookup_segment = _encode_token_segment(lookup)
+        secret_segment = _encode_token_segment(secret)
+        token_id = f"{purpose.value}_{lookup_segment}"
+        token = f"{token_id}.{secret_segment}"
+        issue = PendingTokenIssue(
+            token_id=token_id,
+            digest=_purpose_token_digest(self.pepper, purpose, lookup, secret),
+            purpose=purpose,
+            expires_at=issued_at + lifetime,
+            maximum_attempts=maximum_attempts,
+        )
+        notification = NotificationCommand(
+            template=template, destination=destination, token=token, expires_at=issue.expires_at, return_url=return_url
+        )
+        delivery = object.__new__(PurposeTokenDelivery)
+        object.__setattr__(delivery, "issue", issue)
+        object.__setattr__(delivery, "notification", notification)
+        return delivery
+
+    def proof(self, token: object, *, expected_purpose: TokenPurpose) -> PurposeTokenProof | None:
+        """Return a storage proof after one HMAC work class, or generic invalid."""
+        if expected_purpose.__class__ is not TokenPurpose:
+            msg = "Expected purpose token namespace must be a TokenPurpose"
+            raise ValueError(msg)
+        lookup = _DUMMY_TOKEN_LOOKUP
+        secret = _DUMMY_TOKEN_SECRET
+        token_id = ""
+        valid = False
+        if isinstance(token, str) and token.__class__ is str:
+            expected_prefix = f"{expected_purpose.value}_"
+            left, separator, secret_segment = token.partition(".")
+            purpose_prefix, purpose_separator, lookup_segment = left.partition("_")
+            decoded_lookup = _decode_token_segment(lookup_segment, _TOKEN_LOOKUP_BYTES)
+            decoded_secret = _decode_token_segment(secret_segment, _TOKEN_SECRET_BYTES)
+            valid = (
+                separator == "."
+                and "." not in secret_segment
+                and purpose_separator == "_"
+                and compare_digest(purpose_prefix, expected_purpose.value)
+                and left.startswith(expected_prefix)
+                and decoded_lookup is not None
+                and decoded_secret is not None
+            )
+            if decoded_lookup is not None:
+                lookup = decoded_lookup
+            if decoded_secret is not None:
+                secret = decoded_secret
+            if valid:
+                token_id = left
+        digest = _purpose_token_digest(self.pepper, expected_purpose, lookup, secret)
+        if not valid:
+            return None
+        return PurposeTokenProof(token_id=token_id, digest=digest, purpose=expected_purpose)
+
+    def _entropy(self, length: int) -> bytes:
+        try:
+            value = self.entropy(length)
+        except Exception:  # noqa: BLE001
+            raise PurposeTokenGenerationError from None
+        if value.__class__ is not bytes or len(value) != length:
+            raise PurposeTokenGenerationError
+        return value
+
+
+def _strict_text(value: object) -> bool:
+    return isinstance(value, str) and value.__class__ is str and bool(value.strip())
+
+
+def _validate_pending_token_issue(issue: PendingTokenIssue) -> None:
+    if (
+        issue.purpose.__class__ is not TokenPurpose
+        or not _valid_token_id(issue.token_id, issue.purpose)
+        or issue.digest.__class__ is not bytes
+        or len(issue.digest) != _TOKEN_DIGEST_BYTES
+        or issue.maximum_attempts.__class__ is not int
+        or not 1 <= issue.maximum_attempts <= _MAXIMUM_TOKEN_ATTEMPTS
+    ):
+        msg = "Invalid pending purpose token issue"
+        raise ValueError(msg)
+    try:
+        _aware_utc_time(issue.expires_at)
+    except (AttributeError, ValueError):
+        msg = "Pending purpose token expiry must be timezone-aware"
+        raise ValueError(msg) from None
+
+
+def _valid_token_id(token_id: object, purpose: TokenPurpose) -> bool:
+    if not isinstance(token_id, str) or token_id.__class__ is not str:
+        return False
+    prefix = f"{purpose.value}_"
+    if not token_id.startswith(prefix):
+        return False
+    segment = token_id[len(prefix) :]
+    return _decode_token_segment(segment, _TOKEN_LOOKUP_BYTES) is not None
+
+
+def _purpose_token_digest(pepper: bytes, purpose: TokenPurpose, lookup: bytes, secret: bytes) -> bytes:
+    return hmac_digest(pepper, purpose.value.encode("ascii") + lookup + secret, "sha256")
+
+
+def _encode_token_segment(value: bytes) -> str:
+    return urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _decode_token_segment(value: object, expected_bytes: int) -> bytes | None:
+    expected_characters = (
+        _TOKEN_LOOKUP_CHARACTERS if expected_bytes == _TOKEN_LOOKUP_BYTES else _TOKEN_SECRET_CHARACTERS
+    )
+    if not isinstance(value, str) or value.__class__ is not str or len(value) != expected_characters:
+        return None
+    try:
+        encoded = value.encode("ascii")
+        decoded = urlsafe_b64decode(encoded + b"=" * (-len(encoded) % 4))
+    except (UnicodeError, ValueError):
+        return None
+    if len(decoded) != expected_bytes or _encode_token_segment(decoded) != value:
+        return None
+    return decoded
+
+
+def _approved_return_url(value: object) -> bool:
+    if (
+        not isinstance(value, str)
+        or value.__class__ is not str
+        or not value.strip()
+        or any(ord(character) < _ASCII_CONTROL_LIMIT for character in value)
+    ):
+        return False
+    parsed = urlsplit(value)
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(parsed.netloc)
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.fragment
+    )
 
 
 def _password_shape_violations(password: str, policy: "PasswordPolicy") -> set[PasswordPolicyViolation]:
@@ -791,8 +1114,8 @@ class RegistrationStore(Protocol[UserT]):
         password_hash: str,
         *,
         invitation_digest: bytes | None,
-        verification: TokenIssue,
-        notification: NotificationCommand,
+        verification: PurposeTokenDelivery | None,
+        now: "datetime",
         event: SecurityEvent,
     ) -> RegistrationResult[UserT]:
         """Commit registration, invitation, verification, notification, and event."""
@@ -863,6 +1186,347 @@ def _aware_utc_time(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError
     return value.astimezone(timezone.utc)
+
+
+def _lifecycle_event(
+    event_ids: "Callable[[], str]",
+    occurred_at: datetime,
+    *,
+    operation: str,
+    outcome: str,
+    account_id: str | None = None,
+) -> SecurityEvent:
+    event_id = event_ids()
+    if not _strict_text(event_id):
+        raise ValueError
+    return SecurityEvent(
+        event_id=event_id.strip(),
+        occurred_at=occurred_at,
+        operation=operation,
+        outcome=outcome,
+        account_id=account_id,
+        mechanism="password",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RegistrationService(Generic[UserT]):
+    """Apply policy and commit one atomic enumeration-resistant registration."""
+
+    accounts: RegistrationStore[UserT] = field(repr=False)
+    hasher: PasswordHasher = field(repr=False)
+    tokens: PurposeTokenCodec = field(repr=False)
+    registration: RegistrationPolicy
+    password_policy: PasswordPolicy = field(default_factory=PasswordPolicy)
+    verification_lifetime: timedelta = _VERIFICATION_TOKEN_LIFETIME
+    verification_attempts: int = _DEFAULT_TOKEN_ATTEMPTS
+    verification_return_url: str | None = None
+    clock: "Callable[[], datetime]" = field(default=_utc_now, repr=False, compare=False)
+    normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
+    event_ids: "Callable[[], str]" = field(default=_new_event_id, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate the selected registration policy and injected boundaries."""
+        accounts_value: object = object.__getattribute__(self, "accounts")
+        hasher_value: object = object.__getattribute__(self, "hasher")
+        tokens_value: object = object.__getattribute__(self, "tokens")
+        if not isinstance(accounts_value, RegistrationStore):
+            msg = "Registration service accounts must implement RegistrationStore"
+            raise ImproperlyConfiguredException(detail=msg)
+        if not isinstance(hasher_value, PasswordHasher):
+            msg = "Registration service hasher must implement PasswordHasher"
+            raise ImproperlyConfiguredException(detail=msg)
+        if tokens_value.__class__ is not PurposeTokenCodec:
+            msg = "Registration service tokens must be PurposeTokenCodec"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.registration.__class__ is not RegistrationPolicy or self.registration.mode is RegistrationMode.DISABLED:
+            msg = "Registration service requires an enabled RegistrationPolicy"
+            raise ImproperlyConfiguredException(detail=msg)
+        _validate_lifecycle_configuration(
+            lifetime=self.verification_lifetime,
+            attempts=self.verification_attempts,
+            return_url=self.verification_return_url,
+            clock=self.clock,
+            normalizer=self.normalizer,
+            event_ids=self.event_ids,
+            name="Registration service",
+        )
+
+    async def register(  # noqa: PLR0911
+        self,
+        identifier: str,
+        password: str,
+        *,
+        display_name: str | None = None,
+        invitation_token: str | None = None,
+        now: datetime | None = None,
+    ) -> (
+        LifecycleAccepted | InvalidInvitation | InvalidLifecycleRequest | PasswordPolicyResult | VerificationUnavailable
+    ):
+        """Hash and pass one complete candidate registration to the atomic store."""
+        try:
+            occurred_at = _aware_utc_time(self.clock() if now is None else now)
+            normalized_identifier = self.normalizer(identifier)
+        except (TypeError, UnicodeError, ValueError):
+            return InvalidLifecycleRequest()
+        if not _strict_text(normalized_identifier):
+            return InvalidLifecycleRequest()
+        try:
+            password_result = self.password_policy.check(password, normalized_identifier=normalized_identifier)
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+        if not password_result.accepted:
+            return password_result
+        invitation_digest: bytes | None = None
+        if self.registration.mode is RegistrationMode.INVITE_ONLY:
+            invitation = self.tokens.proof(invitation_token, expected_purpose=TokenPurpose.INVITATION)
+            if invitation is None:
+                return InvalidInvitation()
+            invitation_digest = invitation.digest
+        try:
+            password_hash = await self.hasher.hash(password)
+            verification = self._verification_plan(normalized_identifier, occurred_at)
+            event = _lifecycle_event(self.event_ids, occurred_at, operation="local.registration", outcome="created")
+            result = await self.accounts.register(
+                RegistrationCommand(normalized_identifier=normalized_identifier, display_name=display_name),
+                password_hash,
+                invitation_digest=invitation_digest,
+                verification=verification,
+                now=occurred_at,
+                event=event,
+            )
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+        if result.status is RegistrationStatus.INVALID_INVITATION:
+            return InvalidInvitation()
+        return LifecycleAccepted()
+
+    def _verification_plan(self, destination: str, occurred_at: datetime) -> PurposeTokenDelivery | None:
+        if not self.registration.require_verification:
+            return None
+        return self.tokens.issue(
+            TokenPurpose.VERIFICATION,
+            now=occurred_at,
+            lifetime=self.verification_lifetime,
+            template="local.verify",
+            destination=destination,
+            return_url=self.verification_return_url,
+            maximum_attempts=self.verification_attempts,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationTokenService(Generic[UserT]):
+    """Issue generic verification resends and atomically consume confirmations."""
+
+    accounts: AccountLookup[UserT] = field(repr=False)
+    store: VerificationTokenStore = field(repr=False)
+    tokens: PurposeTokenCodec = field(repr=False)
+    lifetime: timedelta = _VERIFICATION_TOKEN_LIFETIME
+    maximum_attempts: int = _DEFAULT_TOKEN_ATTEMPTS
+    return_url: str | None = None
+    clock: "Callable[[], datetime]" = field(default=_utc_now, repr=False, compare=False)
+    normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
+    event_ids: "Callable[[], str]" = field(default=_new_event_id, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate lookup, atomic token store, and deterministic hooks."""
+        if not isinstance(object.__getattribute__(self, "accounts"), AccountLookup):
+            msg = "Verification token accounts must implement AccountLookup"
+            raise ImproperlyConfiguredException(detail=msg)
+        if not isinstance(object.__getattribute__(self, "store"), VerificationTokenStore):
+            msg = "Verification token store must implement VerificationTokenStore"
+            raise ImproperlyConfiguredException(detail=msg)
+        if object.__getattribute__(self, "tokens").__class__ is not PurposeTokenCodec:
+            msg = "Verification token codec must be PurposeTokenCodec"
+            raise ImproperlyConfiguredException(detail=msg)
+        _validate_lifecycle_configuration(
+            lifetime=self.lifetime,
+            attempts=self.maximum_attempts,
+            return_url=self.return_url,
+            clock=self.clock,
+            normalizer=self.normalizer,
+            event_ids=self.event_ids,
+            name="Verification token service",
+        )
+
+    async def resend(self, identifier: str, *, now: datetime | None = None) -> LifecycleAccepted:
+        """Always return the shared response after one token-HMAC work class."""
+        try:
+            occurred_at = _aware_utc_time(self.clock() if now is None else now)
+            normalized_identifier = self.normalizer(identifier)
+            issued = self.tokens.issue(
+                TokenPurpose.VERIFICATION,
+                now=occurred_at,
+                lifetime=self.lifetime,
+                template="local.verify",
+                destination=normalized_identifier,
+                return_url=self.return_url,
+                maximum_attempts=self.maximum_attempts,
+            )
+            account = await self.accounts.find_for_login(normalized_identifier) if normalized_identifier else None
+            if account is not None and account.active and not account.verified:
+                issue, notification = issued.bind(account.account_id)
+                await self.store.issue(
+                    issue,
+                    notification,
+                    event=_lifecycle_event(
+                        self.event_ids,
+                        occurred_at,
+                        operation="local.verification.issue",
+                        outcome="issued",
+                        account_id=account.account_id,
+                    ),
+                )
+        except Exception:  # noqa: BLE001
+            _LOGGER.error("Verification token request failed")  # noqa: TRY400 - omit untrusted exception details
+        return LifecycleAccepted()
+
+    async def consume(self, token: object, *, now: datetime | None = None) -> ConsumeResult | VerificationUnavailable:
+        """Verify purpose locally and delegate single-use mutation atomically."""
+        proof = self.tokens.proof(token, expected_purpose=TokenPurpose.VERIFICATION)
+        if proof is None:
+            return ConsumeResult(ConsumeStatus.INVALID)
+        try:
+            occurred_at = _aware_utc_time(self.clock() if now is None else now)
+            return await self.store.consume_and_verify(
+                proof.token_id,
+                proof.digest,
+                now=occurred_at,
+                event=_lifecycle_event(
+                    self.event_ids, occurred_at, operation="local.verification.consume", outcome="verified"
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryTokenService(Generic[UserT]):
+    """Issue enumeration-resistant password-recovery notification commands."""
+
+    accounts: AccountLookup[UserT] = field(repr=False)
+    store: RecoveryTokenStore = field(repr=False)
+    tokens: PurposeTokenCodec = field(repr=False)
+    hasher: PasswordHasher = field(repr=False)
+    password_policy: PasswordPolicy = field(default_factory=PasswordPolicy, repr=False)
+    lifetime: timedelta = _RECOVERY_TOKEN_LIFETIME
+    maximum_attempts: int = _DEFAULT_TOKEN_ATTEMPTS
+    return_url: str | None = None
+    clock: "Callable[[], datetime]" = field(default=_utc_now, repr=False, compare=False)
+    normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
+    event_ids: "Callable[[], str]" = field(default=_new_event_id, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate lookup, atomic recovery store, and deterministic hooks."""
+        if not isinstance(object.__getattribute__(self, "accounts"), AccountLookup):
+            msg = "Recovery token accounts must implement AccountLookup"
+            raise ImproperlyConfiguredException(detail=msg)
+        if not isinstance(object.__getattribute__(self, "store"), RecoveryTokenStore):
+            msg = "Recovery token store must implement RecoveryTokenStore"
+            raise ImproperlyConfiguredException(detail=msg)
+        if object.__getattribute__(self, "tokens").__class__ is not PurposeTokenCodec:
+            msg = "Recovery token codec must be PurposeTokenCodec"
+            raise ImproperlyConfiguredException(detail=msg)
+        if not isinstance(object.__getattribute__(self, "hasher"), PasswordHasher):
+            msg = "Recovery token hasher must implement PasswordHasher"
+            raise ImproperlyConfiguredException(detail=msg)
+        if object.__getattribute__(self, "password_policy").__class__ is not PasswordPolicy:
+            msg = "Recovery token password policy must be PasswordPolicy"
+            raise ImproperlyConfiguredException(detail=msg)
+        _validate_lifecycle_configuration(
+            lifetime=self.lifetime,
+            attempts=self.maximum_attempts,
+            return_url=self.return_url,
+            clock=self.clock,
+            normalizer=self.normalizer,
+            event_ids=self.event_ids,
+            name="Recovery token service",
+        )
+
+    async def request(self, identifier: str, *, now: datetime | None = None) -> LifecycleAccepted:
+        """Always return the shared response after one token-HMAC work class."""
+        try:
+            occurred_at = _aware_utc_time(self.clock() if now is None else now)
+            normalized_identifier = self.normalizer(identifier)
+            issued = self.tokens.issue(
+                TokenPurpose.RECOVERY,
+                now=occurred_at,
+                lifetime=self.lifetime,
+                template="local.recovery",
+                destination=normalized_identifier,
+                return_url=self.return_url,
+                maximum_attempts=self.maximum_attempts,
+            )
+            account = await self.accounts.find_for_login(normalized_identifier) if normalized_identifier else None
+            if account is not None and account.active:
+                issue, notification = issued.bind(account.account_id)
+                await self.store.issue(
+                    issue,
+                    notification,
+                    event=_lifecycle_event(
+                        self.event_ids,
+                        occurred_at,
+                        operation="local.recovery.issue",
+                        outcome="issued",
+                        account_id=account.account_id,
+                    ),
+                )
+        except Exception:  # noqa: BLE001
+            _LOGGER.error("Recovery token request failed")  # noqa: TRY400 - omit untrusted exception details
+        return LifecycleAccepted()
+
+    async def reset(
+        self, token: object, password: str, *, now: datetime | None = None
+    ) -> PasswordResetResult | PasswordPolicyResult | VerificationUnavailable:
+        """Apply policy and delegate token consumption and password replacement atomically."""
+        proof = self.tokens.proof(token, expected_purpose=TokenPurpose.RECOVERY)
+        if proof is None:
+            return PasswordResetResult(PasswordResetStatus.INVALID)
+        try:
+            policy_result = self.password_policy.check(password)
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+        if not policy_result.accepted:
+            return policy_result
+        try:
+            occurred_at = _aware_utc_time(self.clock() if now is None else now)
+            password_hash = await self.hasher.hash(password)
+            return await self.store.consume_and_reset(
+                proof.token_id,
+                proof.digest,
+                password_hash,
+                now=occurred_at,
+                event=_lifecycle_event(
+                    self.event_ids, occurred_at, operation="local.recovery.consume", outcome="reset"
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+
+
+def _validate_lifecycle_configuration(  # noqa: PLR0913
+    *,
+    lifetime: timedelta,
+    attempts: int,
+    return_url: str | None,
+    clock: object,
+    normalizer: object,
+    event_ids: object,
+    name: str,
+) -> None:
+    if lifetime.__class__ is not timedelta or lifetime <= timedelta(0):
+        msg = f"{name} lifetime must be positive"
+        raise ImproperlyConfiguredException(detail=msg)
+    if attempts.__class__ is not int or not 1 <= attempts <= _MAXIMUM_TOKEN_ATTEMPTS:
+        msg = f"{name} attempts must be a positive bounded integer"
+        raise ImproperlyConfiguredException(detail=msg)
+    if return_url is not None and not _approved_return_url(return_url):
+        msg = f"{name} return URL must be an approved absolute HTTP(S) URL"
+        raise ImproperlyConfiguredException(detail=msg)
+    if not callable(clock) or not callable(normalizer) or not callable(event_ids):
+        msg = f"{name} hooks must be callable"
+        raise ImproperlyConfiguredException(detail=msg)
 
 
 @dataclass(frozen=True, slots=True)
