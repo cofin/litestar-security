@@ -68,6 +68,7 @@ opencode.json
 .tmp/
 tmp/
 *.log
+benchmarks/
 
 # Keep the reproducible uv lockfile tracked
 !uv.lock
