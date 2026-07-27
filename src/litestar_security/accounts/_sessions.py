@@ -202,7 +202,7 @@ class SessionRecord:
     created_at: "datetime"
     last_seen_at: "datetime"
     expires_at: "datetime"
-    display_metadata: "Mapping[str, str]" = field(default=_EMPTY_DISPLAY_METADATA)
+    display_metadata: "Mapping[str, str]" = field(default_factory=lambda: _EMPTY_DISPLAY_METADATA)
 
     def __post_init__(self) -> None:
         """Validate authoritative record state and freeze safe display metadata."""
@@ -243,7 +243,7 @@ class CreateSessionCommand:
     security_epoch: int
     created_at: "datetime"
     expires_at: "datetime"
-    display_metadata: "Mapping[str, str]" = field(default=_EMPTY_DISPLAY_METADATA)
+    display_metadata: "Mapping[str, str]" = field(default_factory=lambda: _EMPTY_DISPLAY_METADATA)
 
     def __post_init__(self) -> None:
         """Validate atomic creation material and freeze safe display metadata."""
@@ -305,7 +305,7 @@ class SessionSummary:
     created_at: "datetime"
     last_seen_at: "datetime"
     expires_at: "datetime"
-    display_metadata: "Mapping[str, str]" = field(default=_EMPTY_DISPLAY_METADATA)
+    display_metadata: "Mapping[str, str]" = field(default_factory=lambda: _EMPTY_DISPLAY_METADATA)
 
     def __post_init__(self) -> None:
         """Validate safe listing state without accepting binding material."""

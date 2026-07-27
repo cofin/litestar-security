@@ -243,7 +243,7 @@ class StoreRateLimiter:
         clock: Source of the current time.
     """
 
-    policies: "Mapping[str, RateLimitPolicy]" = DEFAULT_RATE_LIMIT_POLICIES
+    policies: "Mapping[str, RateLimitPolicy]" = field(default_factory=lambda: DEFAULT_RATE_LIMIT_POLICIES)
     store_name: str = RATE_LIMIT_STORE_NAME
     store: Store | None = field(default=None, repr=False)
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)

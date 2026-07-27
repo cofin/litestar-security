@@ -230,7 +230,7 @@ class SecurityEvent:
     mechanism: str | None = None
     session_id: str | None = None
     family_id: str | None = None
-    correlation: "Mapping[str, str]" = field(default=_EMPTY_CORRELATION)
+    correlation: "Mapping[str, str]" = field(default_factory=lambda: _EMPTY_CORRELATION)
 
     def __post_init__(self) -> None:
         """Freeze caller-supplied correlation fields."""
