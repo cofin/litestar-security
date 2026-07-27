@@ -7579,6 +7579,262 @@ def test_recovery_pepper_rejects_ambiguous_or_short_keys(kwargs: dict[str, objec
         accounts_module.RecoveryCodePepper(**kwargs)  # type: ignore[arg-type]
 
 
+class _ChallengeStore:
+    def __init__(self) -> None:
+        self.records: dict[bytes, accounts_module.WebAuthnChallenge] = {}
+        self.lock = asyncio.Lock()
+        self.fail = False
+
+    async def put(self, challenge: accounts_module.WebAuthnChallenge) -> None:
+        if self.fail:
+            raise OSError
+        self.records[challenge.challenge_digest] = challenge
+
+    async def consume(
+        self, challenge_digest: bytes, *, binding_digest: bytes, purpose: str, now: datetime
+    ) -> accounts_module.WebAuthnChallenge | None:
+        if self.fail:
+            raise OSError
+        async with self.lock:
+            challenge = self.records.pop(challenge_digest, None)
+            if (
+                challenge is None
+                or challenge.binding_digest != binding_digest
+                or challenge.purpose != purpose
+                or challenge.expires_at <= now
+            ):
+                return None
+            return challenge
+
+
+class _PasskeyStore:
+    def __init__(self) -> None:
+        self.credentials: dict[bytes, accounts_module.PasskeyCredential] = {}
+        self.fail = False
+
+    async def add_credential(self, credential: accounts_module.PasskeyCredential) -> bool:
+        if self.fail:
+            raise OSError
+        if credential.credential_id in self.credentials:
+            return False
+        self.credentials[credential.credential_id] = credential
+        return True
+
+    async def get_credential(self, credential_id: bytes) -> accounts_module.PasskeyCredential | None:
+        if self.fail:
+            raise OSError
+        return self.credentials.get(credential_id)
+
+    async def record_assertion(  # noqa: PLR0913 - mirrors the explicit atomic application port
+        self,
+        credential_id: bytes,
+        *,
+        expected_version: int,
+        sign_count: int,
+        backup_eligible: bool,
+        backup_state: bool,
+        clone_risk: bool,
+        now: datetime,
+    ) -> accounts_module.AssertionRecordResult:
+        del sign_count, backup_eligible, backup_state, clone_risk, now
+        credential = self.credentials.get(credential_id)
+        if self.fail:
+            raise OSError
+        if credential is None or credential.version != expected_version:
+            return accounts_module.AssertionRecordResult.CONFLICT
+        return accounts_module.AssertionRecordResult.RECORDED
+
+
+class _WebAuthnVerifier:
+    challenge = b"c" * 32
+    expected_credential_id = b"credential-1"
+
+    def __init__(self, *, failure: str | None = None, user_verified: bool = True) -> None:
+        self.failure = failure
+        self.user_verified = user_verified
+
+    def registration_options(self, **kwargs: object) -> str:
+        assert kwargs["challenge"] == self.challenge
+        return '{"challenge":"Y2Nj"}'
+
+    def authentication_options(self, **kwargs: object) -> str:
+        assert kwargs["challenge"] == self.challenge
+        return '{"challenge":"Y2Nj"}'
+
+    def registration_challenge(self, response: str) -> bytes:
+        del response
+        return self.challenge
+
+    def authentication_challenge(self, response: str) -> bytes:
+        del response
+        return self.challenge
+
+    def credential_id(self, response: str) -> bytes:
+        del response
+        return self.expected_credential_id
+
+    def verify_registration(self, **kwargs: object) -> accounts_module.RegistrationVerification:
+        del kwargs
+        if self.failure is not None:
+            raise accounts_module.InvalidWebAuthnResponseError
+        return accounts_module.RegistrationVerification(
+            credential_id=self.expected_credential_id,
+            public_key=b"public-key",
+            sign_count=0,
+            backup_eligible=False,
+            backup_state=False,
+            user_verified=self.user_verified,
+            aaguid="00000000-0000-0000-0000-000000000000",
+            attestation_format="none",
+        )
+
+    def verify_authentication(self, **kwargs: object) -> accounts_module.AuthenticationVerification:
+        del kwargs
+        if self.failure is not None:
+            raise accounts_module.InvalidWebAuthnResponseError
+        return accounts_module.AuthenticationVerification(
+            credential_id=self.expected_credential_id,
+            sign_count=1,
+            backup_eligible=False,
+            backup_state=False,
+            user_verified=self.user_verified,
+        )
+
+
+def _passkey_service(
+    *,
+    challenge_store: _ChallengeStore | None = None,
+    store: _PasskeyStore | None = None,
+    verifier: _WebAuthnVerifier | None = None,
+    now: datetime = _JWT_NOW,
+) -> accounts_module.PasskeyService:
+    return accounts_module.PasskeyService(
+        store=store or _PasskeyStore(),
+        challenge_store=challenge_store or _ChallengeStore(),
+        verifier=verifier or _WebAuthnVerifier(),
+        rp_id="example.com",
+        rp_name="Example",
+        origins=("https://example.com",),
+        user_verification=accounts_module.UserVerification.REQUIRED,
+        clock=lambda: now,
+        challenge_entropy=lambda length: b"c" * length,
+    )
+
+
+@pytest.mark.anyio
+async def test_passkey_registration_is_bound_one_time_and_stores_only_verified_project_types() -> None:
+    challenge_store = _ChallengeStore()
+    store = _PasskeyStore()
+    service = _passkey_service(challenge_store=challenge_store, store=store)
+    binding = b"session-binding"
+    options = await service.begin_registration("account-1", user_name="person@example.com", binding=binding)
+    assert isinstance(options, accounts_module.WebAuthnOptions)
+
+    credential = await service.verify_registration("account-1", binding=binding, response='{"id":"credential"}')
+
+    assert isinstance(credential, accounts_module.PasskeyCredential)
+    assert credential.account_id == "account-1"
+    assert credential.user_verified
+    assert b"public-key" not in repr(credential).encode()
+    assert isinstance(
+        await service.verify_registration("account-1", binding=binding, response='{"id":"credential"}'),
+        InvalidCredentials,
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "binding",
+        "account",
+        "expired",
+        "wrong_type",
+        "origin",
+        "rp_id",
+        "user_presence",
+        "user_verification",
+        "signature",
+        "algorithm",
+        "store",
+    ],
+)
+@pytest.mark.anyio
+async def test_passkey_registration_rejects_unbound_invalid_or_unavailable_ceremonies(case: str) -> None:
+    challenge_store = _ChallengeStore()
+    store = _PasskeyStore()
+    verifier = _WebAuthnVerifier(failure=case if case not in {"binding", "account", "expired", "store"} else None)
+    service = _passkey_service(challenge_store=challenge_store, store=store, verifier=verifier)
+    binding = b"session-binding"
+    assert isinstance(
+        await service.begin_registration("account-1", user_name="person@example.com", binding=binding),
+        accounts_module.WebAuthnOptions,
+    )
+    if case == "expired":
+        service.clock = lambda: _JWT_NOW + timedelta(minutes=5)
+    if case == "store":
+        store.fail = True
+
+    outcome = await service.verify_registration(
+        "account-2" if case == "account" else "account-1",
+        binding=b"wrong" if case == "binding" else binding,
+        response='{"id":"credential"}',
+    )
+
+    assert isinstance(outcome, VerificationUnavailable if case == "store" else InvalidCredentials)
+
+
+def test_py_webauthn_adapter_builds_exact_options_and_sanitizes_malformed_json() -> None:
+    verifier = accounts_module.PyWebAuthnVerifier()
+    registration = verifier.registration_options(
+        challenge=b"c" * 32,
+        rp_id="example.com",
+        rp_name="Example",
+        account_id="account-1",
+        user_name="person@example.com",
+        timeout_ms=300_000,
+        user_verification="required",
+        algorithms=(-8, -7, -257),
+    )
+    authentication = verifier.authentication_options(
+        challenge=b"c" * 32, rp_id="example.com", timeout_ms=300_000, user_verification="required"
+    )
+
+    assert json.loads(registration)["rp"]["id"] == "example.com"
+    assert json.loads(registration)["attestation"] == "none"
+    assert json.loads(authentication)["userVerification"] == "required"
+    for operation in (verifier.registration_challenge, verifier.authentication_challenge, verifier.credential_id):
+        with pytest.raises(accounts_module.InvalidWebAuthnResponseError):
+            operation("{}")
+
+
+@pytest.mark.anyio
+async def test_passkey_authentication_verifies_owner_and_emits_normalized_assurance() -> None:
+    challenge_store = _ChallengeStore()
+    store = _PasskeyStore()
+    verifier = _WebAuthnVerifier()
+    store.credentials[verifier.expected_credential_id] = accounts_module.PasskeyCredential(
+        credential_id=verifier.expected_credential_id,
+        account_id="account-1",
+        public_key=b"public-key",
+        sign_count=0,
+        backup_eligible=False,
+        backup_state=False,
+        user_verified=True,
+        aaguid="00000000-0000-0000-0000-000000000000",
+        attestation_format="none",
+        created_at=_JWT_NOW,
+    )
+    service = _passkey_service(challenge_store=challenge_store, store=store, verifier=verifier)
+    binding = b"session-binding"
+    assert isinstance(await service.begin_authentication("account-1", binding=binding), accounts_module.WebAuthnOptions)
+
+    evidence = await service.verify_authentication("account-1", binding=binding, response='{"id":"credential"}')
+
+    assert isinstance(evidence, AuthenticationEvidence)
+    assert evidence.methods == frozenset({"passkey"})
+    assert evidence.traits == frozenset({"phishing-resistant", "user-verified"})
+
+
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
