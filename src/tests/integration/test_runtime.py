@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -11,6 +11,7 @@ import jwt
 import pytest
 from litestar import Controller, Litestar, Request, Response, Router, WebSocket, get, post, websocket
 from litestar.config.app import AppConfig
+from litestar.config.csrf import CSRFConfig
 from litestar.enums import ScopeType
 from litestar.exceptions import NotAuthorizedException, ServiceUnavailableException
 from litestar.middleware import DefineMiddleware
@@ -25,11 +26,37 @@ from litestar.testing import AsyncTestClient, TestClient
 
 from litestar_security import SecurityConfig, SecurityPlugin, authentication
 from litestar_security.accounts import (
+    ConsumeResult,
+    ConsumeStatus,
+    CreateRefreshFamilyCommand,
     CreateSessionCommand,
     LocalAccount,
     LocalAuth,
+    LocalAuthSecrets,
+    NotificationCommand,
+    PasswordChangeResult,
+    PasswordChangeStatus,
+    PasswordCredentialState,
+    PasswordResetResult,
+    PasswordResetStatus,
+    PasswordVerificationResult,
+    PasswordVerificationStatus,
+    PurposeTokenCodec,
+    RefreshFamilyContext,
+    RefreshReceiptKey,
+    RefreshReceiptSealer,
+    RefreshRotationStatus,
+    RefreshTokenCodec,
+    RefreshTokenProof,
+    RegistrationPolicy,
+    RegistrationResult,
+    RegistrationStatus,
+    RotateRefreshCommand,
+    RotateRefreshResult,
     SessionBindingConfig,
     SessionRecord,
+    TokenIssue,
+    TokenPurpose,
 )
 from litestar_security.authentication import (
     Authenticated,
@@ -77,6 +104,16 @@ if TYPE_CHECKING:
     from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency
 
 _NOW = datetime(2026, 7, 26, tzinfo=timezone.utc)
+
+
+def _local_auth_secrets(*, refresh: bool = False) -> LocalAuthSecrets:
+    return LocalAuthSecrets(
+        purpose_tokens=PurposeTokenCodec(pepper=b"p" * 32),
+        refresh_codec=RefreshTokenCodec(pepper=b"q" * 32) if refresh else None,
+        refresh_receipts=(
+            RefreshReceiptSealer(active_key=RefreshReceiptKey("test-key", b"r" * 32)) if refresh else None
+        ),
+    )
 
 
 class _Slot:
@@ -701,6 +738,7 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  #
             revoke_family=unused,
             revoke_for_account=unused,
             revoke_token=unused,
+            revoke_token_for_account=unused,
             revoke_login_method=unused,
             revoke_other_sessions=revoke_other_sessions,
             revoke_session_for_account=revoke_session_for_account,
@@ -713,6 +751,259 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  #
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _RoutePasswordHasher:
+    async def hash(self, password: str) -> str:
+        return f"test-hash:{password}"
+
+    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationResult:
+        return PasswordVerificationResult(
+            PasswordVerificationStatus.VERIFIED
+            if encoded_hash == f"test-hash:{password}"
+            else PasswordVerificationStatus.INVALID
+        )
+
+
+@dataclass(slots=True)
+class _RouteRefreshState:
+    token_id: str
+    token_digest: bytes
+    account_id: str
+    family_id: str
+    security_epoch: int
+    token_expires_at: datetime
+    family_expires_at: datetime
+    scopes: frozenset[str]
+    revoked: bool = False
+
+
+@dataclass(slots=True)
+class _GeneratedRouteAccounts:
+    account: LocalAccount[object] | None = None
+    password_hash: str | None = None
+    sessions: dict[str, SessionRecord] = field(default_factory=dict)
+    purpose_tokens: dict[str, TokenIssue] = field(default_factory=dict)
+    refresh_tokens: dict[str, _RouteRefreshState] = field(default_factory=dict)
+    verification_token: str | None = None
+    recovery_token: str | None = None
+
+    async def find_for_login(self, normalized_identifier: str) -> LocalAccount[object] | None:
+        if self.account is None or self.account.normalized_identifier != normalized_identifier:
+            return None
+        return self.account
+
+    async def get_by_id(self, account_id: str) -> LocalAccount[object] | None:
+        return self.account if self.account is not None and self.account.account_id == account_id else None
+
+    async def current_epoch(self, account_id: str) -> int | None:
+        account = await self.get_by_id(account_id)
+        return account.security_epoch if account is not None else None
+
+    async def get_password_state(self, account_id: str) -> PasswordCredentialState | None:
+        account = await self.get_by_id(account_id)
+        if account is None or self.password_hash is None:
+            return None
+        return PasswordCredentialState(password_hash=self.password_hash, security_epoch=account.security_epoch)
+
+    async def compare_and_replace_password(
+        self, account_id: str, expected_hash: str, password_hash: str, **_kwargs: object
+    ) -> bool:
+        if await self.get_by_id(account_id) is None or self.password_hash != expected_hash:
+            return False
+        self.password_hash = password_hash
+        return True
+
+    async def replace_password_and_bump_epoch(
+        self, account_id: str, password_hash: str, *, expected_epoch: int, **_kwargs: object
+    ) -> PasswordChangeResult:
+        account = await self.get_by_id(account_id)
+        if account is None or account.security_epoch != expected_epoch:
+            return PasswordChangeResult(PasswordChangeStatus.CONFLICT)
+        self.password_hash = password_hash
+        self.account = replace(account, security_epoch=expected_epoch + 1)
+        return PasswordChangeResult(PasswordChangeStatus.CHANGED, expected_epoch + 1)
+
+    async def register(
+        self, command: object, password_hash: str, *, verification: object | None, **_kwargs: object
+    ) -> RegistrationResult[object]:
+        if self.account is not None:
+            return RegistrationResult(RegistrationStatus.DUPLICATE)
+        self.account = LocalAccount(
+            account_id="account-1",
+            normalized_identifier=cast("Any", command).normalized_identifier,
+            display_name=cast("Any", command).display_name,
+            active=True,
+            verified=verification is None,
+            security_epoch=1,
+            user=object(),
+        )
+        self.password_hash = password_hash
+        if verification is not None:
+            issue, notification = cast("Any", verification).bind(self.account.account_id)
+            await self.issue(issue, notification)
+        return RegistrationResult(RegistrationStatus.CREATED, self.account)
+
+    async def issue(self, issue: TokenIssue, notification: NotificationCommand, **_kwargs: object) -> None:
+        self.purpose_tokens[issue.token_id] = issue
+        if issue.purpose is TokenPurpose.VERIFICATION:
+            self.verification_token = notification.token
+        elif issue.purpose is TokenPurpose.RECOVERY:
+            self.recovery_token = notification.token
+
+    async def consume_and_verify(self, token_id: str, digest: bytes, **_kwargs: object) -> ConsumeResult:
+        issue = self.purpose_tokens.pop(token_id, None)
+        if issue is None or issue.digest != digest or self.account is None:
+            return ConsumeResult(ConsumeStatus.INVALID)
+        self.account = replace(self.account, verified=True)
+        return ConsumeResult(ConsumeStatus.CONSUMED, self.account.account_id, self.account.security_epoch)
+
+    async def consume_and_reset(
+        self, token_id: str, digest: bytes, new_password_hash: str, **_kwargs: object
+    ) -> PasswordResetResult:
+        issue = self.purpose_tokens.pop(token_id, None)
+        if issue is None or issue.digest != digest or self.account is None:
+            return PasswordResetResult(PasswordResetStatus.INVALID)
+        self.password_hash = new_password_hash
+        self.account = replace(self.account, security_epoch=self.account.security_epoch + 1)
+        return PasswordResetResult(PasswordResetStatus.RESET, self.account.account_id, self.account.security_epoch)
+
+    async def register_login_method(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def revoke_login_method(self, *_args: object, **_kwargs: object) -> object:
+        return object()
+
+    async def create(self, command: CreateSessionCommand, **_kwargs: object) -> SessionRecord:
+        record = SessionRecord(
+            session_id=command.session_id,
+            binding_id=command.binding_id,
+            binding_digest=command.binding_digest,
+            account_id=command.account_id,
+            security_epoch=command.security_epoch,
+            created_at=command.created_at,
+            last_seen_at=command.created_at,
+            expires_at=command.expires_at,
+            display_metadata=command.display_metadata,
+        )
+        self.sessions[record.session_id] = record
+        return record
+
+    async def get(self, session_id: str) -> SessionRecord | None:
+        return self.sessions.get(session_id)
+
+    async def list_for_account(self, account_id: str) -> list[SessionRecord]:
+        return [record for record in self.sessions.values() if record.account_id == account_id]
+
+    async def touch(self, session_id: str, *, now: datetime) -> SessionRecord | None:
+        record = self.sessions.get(session_id)
+        if record is None:
+            return None
+        touched = replace(record, last_seen_at=now)
+        self.sessions[session_id] = touched
+        return touched
+
+    async def revoke_session_for_account(self, account_id: str, session_id: str, **_kwargs: object) -> bool:
+        record = self.sessions.get(session_id)
+        if record is None or record.account_id != account_id:
+            return False
+        del self.sessions[session_id]
+        return True
+
+    async def revoke_sessions_for_account(self, account_id: str, **_kwargs: object) -> int:
+        matches = tuple(key for key, record in self.sessions.items() if record.account_id == account_id)
+        for key in matches:
+            del self.sessions[key]
+        return len(matches)
+
+    async def revoke_other_sessions(self, account_id: str, session_id: str, **_kwargs: object) -> int:
+        matches = tuple(
+            key for key, record in self.sessions.items() if record.account_id == account_id and key != session_id
+        )
+        for key in matches:
+            del self.sessions[key]
+        return len(matches)
+
+    async def rebind(
+        self, prior_session_id: str, command: CreateSessionCommand, **kwargs: object
+    ) -> SessionRecord | None:
+        if prior_session_id not in self.sessions:
+            return None
+        del self.sessions[prior_session_id]
+        return await self.create(command, **kwargs)
+
+    async def create_family(self, command: CreateRefreshFamilyCommand, **_kwargs: object) -> bool:
+        self.refresh_tokens[command.token_id] = _RouteRefreshState(
+            token_id=command.token_id,
+            token_digest=command.token_digest,
+            account_id=command.account_id,
+            family_id=command.family_id,
+            security_epoch=command.security_epoch,
+            token_expires_at=command.token_expires_at,
+            family_expires_at=command.family_expires_at,
+            scopes=command.scopes,
+        )
+        return True
+
+    async def prepare_rotation(
+        self, proof: RefreshTokenProof, _idempotency_digest: bytes | None, **_kwargs: object
+    ) -> RefreshFamilyContext:
+        state = self.refresh_tokens[proof.token_id]
+        assert state.token_digest == proof.digest
+        assert not state.revoked
+        return RefreshFamilyContext(
+            account_id=state.account_id,
+            family_id=state.family_id,
+            security_epoch=state.security_epoch,
+            token_expires_at=state.token_expires_at,
+            family_expires_at=state.family_expires_at,
+            scopes=state.scopes,
+        )
+
+    async def rotate(self, command: RotateRefreshCommand, **_kwargs: object) -> RotateRefreshResult:
+        current = self.refresh_tokens.pop(command.token_id)
+        assert current.token_digest == command.token_digest
+        assert not current.revoked
+        self.refresh_tokens[command.successor_id] = _RouteRefreshState(
+            token_id=command.successor_id,
+            token_digest=command.successor_digest,
+            account_id=command.account_id,
+            family_id=command.family_id,
+            security_epoch=command.security_epoch,
+            token_expires_at=command.successor_expires_at,
+            family_expires_at=command.family_expires_at,
+            scopes=command.scopes,
+        )
+        return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+
+    async def revoke_family(self, family_id: str, **_kwargs: object) -> bool:
+        matches = [state for state in self.refresh_tokens.values() if state.family_id == family_id]
+        for state in matches:
+            state.revoked = True
+        return bool(matches)
+
+    async def revoke_token(self, token_id: str, token_digest: bytes, **_kwargs: object) -> bool:
+        state = self.refresh_tokens.get(token_id)
+        if state is None or state.token_digest != token_digest:
+            return False
+        state.revoked = True
+        return True
+
+    async def revoke_token_for_account(
+        self, account_id: str, token_id: str, token_digest: bytes, **_kwargs: object
+    ) -> bool:
+        state = self.refresh_tokens.get(token_id)
+        if state is None or state.account_id != account_id or state.token_digest != token_digest:
+            return False
+        state.revoked = True
+        return True
+
+    async def revoke_for_account(self, account_id: str, **_kwargs: object) -> int:
+        matches = [state for state in self.refresh_tokens.values() if state.account_id == account_id]
+        for state in matches:
+            state.revoked = True
+        return len(matches)
+
+
 @pytest.mark.anyio
 async def test_local_access_token_runtime_enforces_scope_account_and_epoch(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
@@ -721,6 +1012,7 @@ async def test_local_access_token_runtime_enforces_scope_account_and_epoch(
     private_key, _public_key = jwt_key_material["EdDSA"]
     local_auth = LocalAuth.tokens(
         accounts=cast("Any", accounts),
+        secrets=_local_auth_secrets(refresh=True),
         key_ring=LocalKeyRing(
             issuer="https://local.example",
             active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
@@ -774,6 +1066,7 @@ def test_real_native_session_backends_preserve_anonymous_state_and_resist_fixati
     )
     local_auth = LocalAuth.session(
         accounts=cast("Any", accounts),
+        secrets=_local_auth_secrets(),
         csrf=ExternalCSRF("runtime", lambda _method, _path, _policy: True),
         binding=binding,
     )
@@ -905,6 +1198,146 @@ def test_real_native_session_backends_preserve_anonymous_state_and_resist_fixati
         client.cookies.clear()
         client.cookies.set("native-session", fixed_native)
         assert client.get("/me").status_code == HTTP_401_UNAUTHORIZED
+
+
+def test_generated_session_routes_complete_local_account_lifecycle() -> None:
+    accounts = _GeneratedRouteAccounts()
+    csrf = CSRFConfig(secret="s" * 32)
+    binding = SessionBindingConfig(
+        pepper=b"b" * 32, cookie_name="binding", secure=False, allow_insecure=True, max_age=600
+    )
+    local_auth = LocalAuth.session(
+        accounts=accounts,
+        secrets=_local_auth_secrets(),
+        csrf=csrf,
+        binding=binding,
+        password_hasher=_RoutePasswordHasher(),
+        registration=RegistrationPolicy.public(),
+    )
+    backend = cast(
+        "BaseSessionBackend[Any]",
+        CookieBackendConfig(
+            secret=bytes(range(16)),
+            key="native-session",
+            max_age=600,
+            scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+            secure=False,
+        ).middleware.kwargs["backend"],
+    )
+
+    @get("/csrf", opt=security(public(), csrf_required=True))
+    async def csrf_seed() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[csrf_seed],
+        openapi_config=None,
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, session_backend=backend))],
+    )
+    initial_password = "initial password 123"  # noqa: S105
+    changed_password = "changed password 123"  # noqa: S105
+    recovered_password = "recovered password 123"  # noqa: S105
+
+    with TestClient(app) as client:
+        assert client.get("/csrf").status_code == 200
+        csrf_headers = {csrf.header_name: cast("str", client.cookies.get(csrf.cookie_name))}
+        registration = client.post(
+            "/auth/register",
+            json={"identifier": "user@example.com", "password": initial_password, "display_name": "User"},
+        )
+        assert registration.status_code == 202, registration.text
+        assert accounts.verification_token is not None
+        assert client.post("/auth/verification/confirm", json={"token": accounts.verification_token}).status_code == 200
+
+        login = client.post(
+            "/auth/login", json={"identifier": "user@example.com", "password": initial_password}, headers=csrf_headers
+        )
+        assert login.status_code == 200
+        assert login.json() == {"account_id": "account-1", "display_name": "User"}
+        sessions = client.get("/auth/sessions")
+        assert sessions.status_code == 200, sessions.text
+        assert sessions.json()["sessions"][0]["current"] is True
+
+        change = client.post(
+            "/auth/password/change",
+            json={"current_password": initial_password, "password": changed_password},
+            headers=csrf_headers,
+        )
+        assert change.status_code == 200
+        assert client.get("/auth/sessions").status_code == 200
+        assert client.post("/auth/password/recovery", json={"identifier": "user@example.com"}).status_code == 202
+        assert accounts.recovery_token is not None
+        assert (
+            client.post(
+                "/auth/password/reset", json={"token": accounts.recovery_token, "password": recovered_password}
+            ).status_code
+            == 200
+        )
+        assert client.get("/auth/sessions").status_code == HTTP_401_UNAUTHORIZED
+
+        assert (
+            client.post(
+                "/auth/login",
+                json={"identifier": "user@example.com", "password": recovered_password},
+                headers=csrf_headers,
+            ).status_code
+            == 200
+        )
+        logout = client.post("/auth/logout", headers=csrf_headers)
+        assert logout.status_code == 200
+        assert client.get("/auth/sessions").status_code == HTTP_401_UNAUTHORIZED
+
+
+def test_generated_token_routes_register_verify_login_refresh_and_revoke(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    accounts = _GeneratedRouteAccounts()
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth = LocalAuth.tokens(
+        accounts=accounts,
+        secrets=_local_auth_secrets(refresh=True),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-api",  # noqa: S106 - public JWT audience
+        password_hasher=_RoutePasswordHasher(),
+        registration=RegistrationPolicy.public(),
+    )
+    app = Litestar(
+        route_handlers=[], openapi_config=None, plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))]
+    )
+    password = "initial password 123"  # noqa: S105
+
+    with TestClient(app) as client:
+        assert (
+            client.post("/auth/register", json={"identifier": "user@example.com", "password": password}).status_code
+            == 202
+        )
+        assert accounts.verification_token is not None
+        assert client.post("/auth/verification/confirm", json={"token": accounts.verification_token}).status_code == 200
+
+        login = client.post("/auth/token", json={"identifier": "user@example.com", "password": password})
+        assert login.status_code == 200
+        assert login.headers["cache-control"] == "no-store"
+        first = login.json()
+        rotated = client.post(
+            "/auth/token/refresh",
+            json={"token": first["refresh_token"]},
+            headers={"Idempotency-Key": "aWlpaWlpaWlpaWlpaWlpaQ"},
+        )
+        assert rotated.status_code == 200
+        assert rotated.headers["pragma"] == "no-cache"
+        second = rotated.json()
+        revoke = client.post(
+            "/auth/token/revoke",
+            json={"token": second["refresh_token"]},
+            headers={"Authorization": f"Bearer {second['access_token']}"},
+        )
+
+    assert revoke.status_code == 200
+    assert revoke.json() == {"detail": "Token revoked."}
+    assert any(state.revoked for state in accounts.refresh_tokens.values())
 
 
 def test_native_guard_layers_remain_cumulative_for_http_and_websocket_with_child_policy() -> None:

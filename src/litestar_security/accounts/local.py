@@ -13,7 +13,7 @@ from logging import getLogger
 from secrets import token_bytes
 from time import perf_counter
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 from unicodedata import normalize
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -23,14 +23,34 @@ from argon2 import PasswordHasher as _Argon2Engine
 from argon2 import extract_parameters
 from argon2.exceptions import Argon2Error, InvalidHashError, VerificationError, VerifyMismatchError
 from argon2.low_level import Type as Argon2Type
+from litestar import Controller, Request, Response, Router, delete, get, post
 from litestar.config.csrf import CSRFConfig
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar.connection import ASGIConnection
+from litestar.datastructures import CacheControlHeader
+from litestar.di import NamedDependency, Provide
+from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
+from litestar.handlers import BaseRouteHandler
+from litestar.openapi.datastructures import ResponseSpec
+from litestar.params import FromPath, HeaderParameter, JSONBody, SkipValidation
+from litestar.status_codes import (
+    HTTP_200_OK,
+    HTTP_202_ACCEPTED,
+    HTTP_400_BAD_REQUEST,
+    HTTP_401_UNAUTHORIZED,
+    HTTP_503_SERVICE_UNAVAILABLE,
+)
 
 from litestar_security.accounts.sessions import (
     CreateSessionCommand,
     NativeSessionAuth,
     NativeSessionStore,
+    RefreshReceiptKey,
+    RefreshReceiptSealer,
+    RefreshTokenCodec,
     RefreshTokenFamilyStore,
+    RefreshTokenResponse,
+    RefreshTokenService,
+    SessionAuthentication,
     SessionBindingConfig,
     SessionRegistry,
 )
@@ -39,9 +59,12 @@ from litestar_security.authentication import (
     AuthenticationOutcome,
     InvalidCredentials,
     VerificationUnavailable,
+    public,
+    required,
+    security,
 )
 from litestar_security.config import ExternalCSRF, WorkerLimits
-from litestar_security.context import AuthorizationSnapshot, Principal
+from litestar_security.context import AuthorizationSnapshot, Principal, SecurityContext
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
     BearerTokenSlot,
@@ -71,10 +94,23 @@ __all__ = (
     "LocalAccessTokenIssuer",
     "LocalAccount",
     "LocalAccountCapabilities",
+    "LocalAccountResponse",
     "LocalAuth",
     "LocalAuthConfig",
     "LocalAuthMode",
+    "LocalAuthSecrets",
+    "LocalAuthServices",
     "LocalBearerIdentityResolver",
+    "LocalCredentials",
+    "LocalIdentifierRequest",
+    "LocalInvitationRegistrationRequest",
+    "LocalPasswordChangeRequest",
+    "LocalPasswordResetRequest",
+    "LocalRegistrationRequest",
+    "LocalRouteResponse",
+    "LocalSessionListResponse",
+    "LocalSessionResponse",
+    "LocalTokenRequest",
     "LoginMethod",
     "LoginMethodStore",
     "NoOpSecurityEventSink",
@@ -120,7 +156,9 @@ __all__ = (
     "TokenPurpose",
     "VerificationTokenService",
     "VerificationTokenStore",
+    "build_local_auth_routes",
     "normalize_identifier",
+    "requires_local_bearer",
 )
 
 UserT = TypeVar("UserT")
@@ -506,6 +544,111 @@ class InvalidLifecycleRequest:
     """Generic malformed lifecycle request response."""
 
     detail: str = "The request is invalid."
+
+
+@dataclass(frozen=True, slots=True)
+class LocalCredentials:
+    """Password credentials accepted by generated login handlers."""
+
+    identifier: str
+    password: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class LocalRegistrationRequest:
+    """Typed public self-service registration input."""
+
+    identifier: str
+    password: str = field(repr=False)
+    display_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LocalInvitationRegistrationRequest:
+    """Typed invite-only self-service registration input."""
+
+    identifier: str
+    password: str = field(repr=False)
+    invitation_token: str = field(repr=False)
+    display_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LocalIdentifierRequest:
+    """Typed enumeration-resistant identifier request."""
+
+    identifier: str
+
+
+@dataclass(frozen=True, slots=True)
+class LocalTokenRequest:
+    """Typed one-time or refresh-token request."""
+
+    token: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class LocalPasswordResetRequest:
+    """Typed password recovery completion input."""
+
+    token: str = field(repr=False)
+    password: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class LocalPasswordChangeRequest:
+    """Typed authenticated password-change input."""
+
+    current_password: str = field(repr=False)
+    password: str = field(repr=False)
+    compromise: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class LocalAccountResponse:
+    """Minimal account projection returned after session login."""
+
+    account_id: str
+    display_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LocalRouteResponse:
+    """Stable generated-route status body."""
+
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class LocalSessionListResponse:
+    """Safe caller-owned session inventory."""
+
+    sessions: tuple["LocalSessionResponse", ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LocalSessionResponse:
+    """JSON-safe generated-route session projection."""
+
+    session_id: str
+    current: bool
+    created_at: datetime
+    last_seen_at: datetime
+    expires_at: datetime
+    display_metadata: dict[str, str]
+
+
+_LOCAL_BAD_REQUEST_RESPONSES = {
+    HTTP_400_BAD_REQUEST: ResponseSpec(LocalRouteResponse, description="The lifecycle request is invalid."),
+    HTTP_503_SERVICE_UNAVAILABLE: ResponseSpec(
+        LocalRouteResponse, description="The authentication service is unavailable."
+    ),
+}
+_LOCAL_AUTH_REQUIRED_RESPONSES = {
+    HTTP_401_UNAUTHORIZED: ResponseSpec(LocalRouteResponse, description="Authentication is required."),
+    HTTP_503_SERVICE_UNAVAILABLE: _LOCAL_BAD_REQUEST_RESPONSES[HTTP_503_SERVICE_UNAVAILABLE],
+}
+_LOCAL_REAUTHENTICATION_RESPONSES = {**_LOCAL_BAD_REQUEST_RESPONSES, **_LOCAL_AUTH_REQUIRED_RESPONSES}
 
 
 def normalize_identifier(value: str) -> str:
@@ -1802,9 +1945,7 @@ class PasswordChangeService:
         try:
             await self.sessions.rebind(
                 current_session_id,
-                replace(
-                    replacement_session, account_id=account_id, security_epoch=security_epoch, created_at=occurred_at
-                ),
+                replace(replacement_session, account_id=account_id, security_epoch=security_epoch),
                 event=_lifecycle_event(
                     self.event_ids,
                     occurred_at,
@@ -2379,13 +2520,174 @@ def _valid_compact_access_token(value: object) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class LocalAuthSecrets:
+    """Explicit stable cryptographic inputs for local lifecycle routes."""
+
+    purpose_tokens: PurposeTokenCodec = field(repr=False)
+    refresh_codec: RefreshTokenCodec | None = field(default=None, repr=False)
+    refresh_receipts: RefreshReceiptSealer | None = field(default=None, repr=False)
+
+    @classmethod
+    def session(cls, *, purpose_token_pepper: bytes) -> "LocalAuthSecrets":
+        """Build the stable secrets required by session-only local authentication."""
+        return cls(purpose_tokens=PurposeTokenCodec(purpose_token_pepper))
+
+    @classmethod
+    def tokens(
+        cls,
+        *,
+        purpose_token_pepper: bytes,
+        refresh_token_pepper: bytes,
+        active_receipt_key_id: str,
+        active_receipt_key: bytes,
+        retained_receipt_keys: tuple[RefreshReceiptKey, ...] = (),
+    ) -> "LocalAuthSecrets":
+        """Build the stable secrets required by token or hybrid local authentication."""
+        return cls(
+            purpose_tokens=PurposeTokenCodec(purpose_token_pepper),
+            refresh_codec=RefreshTokenCodec(refresh_token_pepper),
+            refresh_receipts=RefreshReceiptSealer(
+                active_key=RefreshReceiptKey(active_receipt_key_id, active_receipt_key),
+                retained_keys=retained_receipt_keys,
+            ),
+        )
+
+    def __post_init__(self) -> None:
+        """Require exact codecs and a complete optional refresh pair."""
+        if self.purpose_tokens.__class__ is not PurposeTokenCodec:
+            msg = "Local authentication purpose tokens must be a PurposeTokenCodec"
+            raise ImproperlyConfiguredException(detail=msg)
+        has_refresh_codec = self.refresh_codec is not None
+        has_refresh_receipts = self.refresh_receipts is not None
+        if has_refresh_codec != has_refresh_receipts:
+            msg = "Local authentication refresh codec and receipts must be configured together"
+            raise ImproperlyConfiguredException(detail=msg)
+        if has_refresh_codec and self.refresh_codec.__class__ is not RefreshTokenCodec:
+            msg = "Local authentication refresh codec must be a RefreshTokenCodec"
+            raise ImproperlyConfiguredException(detail=msg)
+        if has_refresh_receipts and self.refresh_receipts.__class__ is not RefreshReceiptSealer:
+            msg = "Local authentication refresh receipts must be a RefreshReceiptSealer"
+            raise ImproperlyConfiguredException(detail=msg)
+
+
+@dataclass(frozen=True, slots=True)
+class LocalAuthServices(Generic[UserT]):
+    """Singleton service graph shared by generated and application controllers."""
+
+    accounts: LocalAccountCapabilities[UserT] = field(repr=False)
+    password_login: PasswordLoginService[UserT] = field(repr=False)
+    password_reauthentication: PasswordReauthenticationService = field(repr=False)
+    password_change: PasswordChangeService = field(repr=False)
+    verification: VerificationTokenService[UserT] = field(repr=False)
+    recovery: RecoveryTokenService[UserT] = field(repr=False)
+    registration: RegistrationService[UserT] | None = field(default=None, repr=False)
+    session_auth: NativeSessionAuth[UserT] | None = field(default=None, repr=False)
+    refresh_tokens: RefreshTokenService[UserT] | None = field(default=None, repr=False)
+
+    async def session_login(
+        self, request: Request[Any, Any, Any], credentials: LocalCredentials
+    ) -> LocalAccountResponse | InvalidCredentials | VerificationUnavailable:
+        """Authenticate a password and establish fixation-safe session state."""
+        account = await self.password_login.authenticate(credentials.identifier, credentials.password)
+        if not isinstance(account, LocalAccount):
+            return account
+        session_auth = self.session_auth
+        if session_auth is None:
+            return VerificationUnavailable()
+        established = await session_auth.establish(request, account)
+        if not isinstance(established, SessionAuthentication):
+            return established
+        return LocalAccountResponse(account_id=account.account_id, display_name=account.display_name)
+
+    async def token_login(
+        self, credentials: LocalCredentials
+    ) -> RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+        """Authenticate a password and issue one access/refresh pair."""
+        account = await self.password_login.authenticate(credentials.identifier, credentials.password)
+        if not isinstance(account, LocalAccount):
+            return account
+        refresh_tokens = self.refresh_tokens
+        if refresh_tokens is None:
+            return VerificationUnavailable()
+        return await refresh_tokens.issue(account)
+
+    async def change_session_password(  # noqa: PLR0911 - preserve explicit sanitized outcomes
+        self, request: Request[Any, Any, Any], account_id: str, data: LocalPasswordChangeRequest
+    ) -> (
+        PasswordChangeResult
+        | PasswordPolicyResult
+        | InvalidCredentials
+        | InvalidLifecycleRequest
+        | VerificationUnavailable
+    ):
+        """Change a password and atomically prepare the current session rebind."""
+        session_auth = self.session_auth
+        if session_auth is None:
+            return VerificationUnavailable()
+        proof = await self.password_reauthentication.verify(account_id, data.current_password)
+        if not isinstance(proof, PasswordReauthenticationProof):
+            return proof
+        if data.compromise:
+            result = await self.password_change.change(account_id, data.password, proof=proof, compromise=True)
+            if isinstance(result, PasswordChangeResult) and result.status is PasswordChangeStatus.CHANGED:
+                await session_auth.logout(request)
+            return result
+        authentication = session_auth.current_authentication(request)
+        if authentication is None or authentication.account_id != account_id:
+            return InvalidCredentials()
+        try:
+            account = await self.accounts.get_by_id(account_id)
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+        if account is None or account.security_epoch != proof.security_epoch:
+            return InvalidCredentials()
+        plan = session_auth.prepare_password_rebind(request, account)
+        if isinstance(plan, VerificationUnavailable):
+            return plan
+        result = await self.password_change.change(
+            account_id,
+            data.password,
+            proof=proof,
+            current_session_id=plan.prior_session_id,
+            replacement_session=plan.command,
+        )
+        if (
+            isinstance(result, PasswordChangeResult)
+            and result.status is PasswordChangeStatus.CHANGED
+            and result.security_epoch is not None
+        ):
+            await session_auth.activate_password_rebind(request, plan, result.security_epoch)
+        return result
+
+    async def change_token_password(
+        self, account_id: str, data: LocalPasswordChangeRequest
+    ) -> (
+        PasswordChangeResult
+        | PasswordPolicyResult
+        | InvalidCredentials
+        | InvalidLifecycleRequest
+        | VerificationUnavailable
+    ):
+        """Change a bearer-authenticated password and revoke local transports."""
+        proof = await self.password_reauthentication.verify(account_id, data.current_password)
+        if not isinstance(proof, PasswordReauthenticationProof):
+            return proof
+        return await self.password_change.change(account_id, data.password, proof=proof, compromise=data.compromise)
+
+
+_LocalAuthServicesDependency = NamedDependency[SkipValidation[LocalAuthServices[Any]]]
+
+
+@dataclass(frozen=True, slots=True)
 class LocalAuthConfig(Generic[UserT]):
     """Explicit local-authentication transport and capability selection."""
 
     mode: LocalAuthMode
     accounts: LocalAccountCapabilities[UserT] = field(repr=False)
+    secrets: LocalAuthSecrets = field(repr=False)
     registration: RegistrationPolicy
     route_prefix: str
+    register_routes: bool = True
     csrf: CSRFConfig | ExternalCSRF | None = field(default=None, repr=False)
     binding: SessionBindingConfig | None = field(default=None, repr=False)
     key_ring: LocalKeyRing | None = field(default=None, repr=False)
@@ -2402,14 +2704,23 @@ class LocalAuthConfig(Generic[UserT]):
     bearer_resolver: LocalBearerIdentityResolver[UserT] | None = field(
         init=False, default=None, repr=False, compare=False
     )
+    services: LocalAuthServices[UserT] = field(init=False, repr=False, compare=False)
+    _route_handlers: tuple[Router, ...] | None = field(init=False, default=None, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901 - explicit transport invariants remain centralized
         """Validate transport-specific values and structural capabilities."""
         if self.mode.__class__ is not LocalAuthMode:
             msg = "Local authentication mode must be a LocalAuthMode"
             raise ImproperlyConfiguredException(detail=msg)
         if self.registration.__class__ is not RegistrationPolicy:
             msg = "Local authentication registration must be a RegistrationPolicy"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.secrets.__class__ is not LocalAuthSecrets:
+            msg = "Local authentication secrets must be LocalAuthSecrets"
+            raise ImproperlyConfiguredException(detail=msg)
+        register_routes_value: object = self.register_routes
+        if register_routes_value.__class__ is not bool:
+            msg = "Local authentication route registration must be boolean"
             raise ImproperlyConfiguredException(detail=msg)
         password_hasher_value: object = object.__getattribute__(self, "password_hasher")
         if not isinstance(password_hasher_value, PasswordHasher):
@@ -2454,6 +2765,7 @@ class LocalAuthConfig(Generic[UserT]):
         )
         self._configure_session_auth()
         self._configure_token_auth()
+        self._configure_services()
 
     def _configure_session_auth(self) -> None:
         if self.mode not in {LocalAuthMode.SESSION, LocalAuthMode.HYBRID}:
@@ -2497,7 +2809,13 @@ class LocalAuthConfig(Generic[UserT]):
 
     def _configure_token_auth(self) -> None:
         if self.mode not in {LocalAuthMode.TOKENS, LocalAuthMode.HYBRID}:
+            if self.secrets.refresh_codec is not None or self.secrets.refresh_receipts is not None:
+                msg = "Session-only local authentication cannot configure refresh-token secrets"
+                raise ImproperlyConfiguredException(detail=msg)
             return
+        if self.secrets.refresh_codec is None or self.secrets.refresh_receipts is None:
+            msg = "Token local authentication requires explicit refresh codec and receipt keys"
+            raise ImproperlyConfiguredException(detail=msg)
         key_ring = cast("LocalKeyRing", self.key_ring)
         audience = cast("str", self.token_audience)
         validation = JWTValidationConfig(
@@ -2532,6 +2850,86 @@ class LocalAuthConfig(Generic[UserT]):
         )
         object.__setattr__(self, "bearer_resolver", LocalBearerIdentityResolver(accounts=self.accounts))
 
+    def _configure_services(self) -> None:
+        session_registry = (
+            cast("SessionRegistry", self.accounts)
+            if self.mode in {LocalAuthMode.SESSION, LocalAuthMode.HYBRID}
+            else None
+        )
+        refresh_store = (
+            cast("RefreshTokenFamilyStore", self.accounts)
+            if self.mode in {LocalAuthMode.TOKENS, LocalAuthMode.HYBRID}
+            else None
+        )
+        password_reauthentication = PasswordReauthenticationService(accounts=self.accounts, hasher=self.password_hasher)
+        password_change = PasswordChangeService(
+            accounts=self.accounts, hasher=self.password_hasher, sessions=session_registry, refresh_tokens=refresh_store
+        )
+        verification = VerificationTokenService(
+            accounts=self.accounts, store=self.accounts, tokens=self.secrets.purpose_tokens
+        )
+        recovery = RecoveryTokenService(
+            accounts=self.accounts,
+            store=self.accounts,
+            tokens=self.secrets.purpose_tokens,
+            hasher=self.password_hasher,
+            sessions=session_registry,
+            refresh_tokens=refresh_store,
+        )
+        registration = (
+            RegistrationService(
+                accounts=cast("RegistrationStore[UserT]", self.accounts),
+                hasher=self.password_hasher,
+                tokens=self.secrets.purpose_tokens,
+                registration=self.registration,
+            )
+            if self.registration.mode is not RegistrationMode.DISABLED
+            else None
+        )
+        refresh_tokens = None
+        if self.mode in {LocalAuthMode.TOKENS, LocalAuthMode.HYBRID}:
+            access_token_issuer = self.access_token_issuer
+            refresh_codec = self.secrets.refresh_codec
+            refresh_receipts = self.secrets.refresh_receipts
+            if (
+                access_token_issuer is None
+                or refresh_store is None
+                or refresh_codec is None
+                or refresh_receipts is None
+            ):  # pragma: no cover - mode invariants
+                msg = "Token local authentication services are incomplete"
+                raise ImproperlyConfiguredException(detail=msg)
+            refresh_tokens = RefreshTokenService(
+                accounts=self.accounts,
+                store=refresh_store,
+                codec=refresh_codec,
+                receipts=refresh_receipts,
+                access_tokens=access_token_issuer,
+            )
+        object.__setattr__(
+            self,
+            "services",
+            LocalAuthServices(
+                accounts=self.accounts,
+                password_login=self.password_login,
+                password_reauthentication=password_reauthentication,
+                password_change=password_change,
+                verification=verification,
+                recovery=recovery,
+                registration=registration,
+                session_auth=self.session_auth,
+                refresh_tokens=refresh_tokens,
+            ),
+        )
+
+    def build_route_handlers(self) -> tuple[Router, ...]:
+        """Build and cache the standard end-user route tree."""
+        if not self.register_routes:
+            return ()
+        if self._route_handlers is None:
+            object.__setattr__(self, "_route_handlers", (build_local_auth_routes(self),))
+        return cast("tuple[Router, ...]", self._route_handlers)
+
 
 _DISABLED_REGISTRATION = RegistrationPolicy.disabled()
 
@@ -2544,23 +2942,27 @@ class LocalAuth:
         cls,
         *,
         accounts: LocalAccountCapabilities[UserT],
+        secrets: LocalAuthSecrets,
         csrf: CSRFConfig | ExternalCSRF,
         binding: SessionBindingConfig,
         session_auth: NativeSessionAuth[UserT] | None = None,
         password_hasher: PasswordHasher | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
+        register_routes: bool = True,
     ) -> "LocalAuthConfig[UserT]":
         """Select native-session local authentication."""
         return LocalAuthConfig(
             mode=LocalAuthMode.SESSION,
             accounts=accounts,
+            secrets=secrets,
             csrf=csrf,
             binding=binding,
             session_auth=session_auth,
             password_hasher=Argon2PasswordHasher() if password_hasher is None else password_hasher,
             registration=registration,
             route_prefix=route_prefix,
+            register_routes=register_routes,
         )
 
     @classmethod
@@ -2568,6 +2970,7 @@ class LocalAuth:
         cls,
         *,
         accounts: LocalAccountCapabilities[UserT],
+        secrets: LocalAuthSecrets,
         key_ring: LocalKeyRing,
         token_audience: str,
         token_client_id: str = _DEFAULT_LOCAL_CLIENT_ID,
@@ -2575,11 +2978,13 @@ class LocalAuth:
         password_hasher: PasswordHasher | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
+        register_routes: bool = True,
     ) -> "LocalAuthConfig[UserT]":
         """Select bearer access/refresh-token local authentication."""
         return LocalAuthConfig(
             mode=LocalAuthMode.TOKENS,
             accounts=accounts,
+            secrets=secrets,
             key_ring=key_ring,
             token_audience=token_audience,
             token_client_id=token_client_id,
@@ -2591,6 +2996,7 @@ class LocalAuth:
             ),
             registration=registration,
             route_prefix=route_prefix,
+            register_routes=register_routes,
         )
 
     @classmethod
@@ -2598,6 +3004,7 @@ class LocalAuth:
         cls,
         *,
         accounts: LocalAccountCapabilities[UserT],
+        secrets: LocalAuthSecrets,
         csrf: CSRFConfig | ExternalCSRF,
         binding: SessionBindingConfig,
         key_ring: LocalKeyRing,
@@ -2608,11 +3015,13 @@ class LocalAuth:
         password_hasher: PasswordHasher | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
+        register_routes: bool = True,
     ) -> "LocalAuthConfig[UserT]":
         """Select distinct native-session and bearer-token local transports."""
         return LocalAuthConfig(
             mode=LocalAuthMode.HYBRID,
             accounts=accounts,
+            secrets=secrets,
             csrf=csrf,
             binding=binding,
             key_ring=key_ring,
@@ -2627,4 +3036,428 @@ class LocalAuth:
             ),
             registration=registration,
             route_prefix=route_prefix,
+            register_routes=register_routes,
         )
+
+
+def _route_response(content: LocalRouteResponse, *, status_code: int) -> Response[LocalRouteResponse]:
+    return Response(content=content, status_code=status_code)
+
+
+def _route_error(outcome: object, *, credentials: bool = False) -> Response[Any]:
+    if isinstance(outcome, VerificationUnavailable):
+        return _route_response(
+            LocalRouteResponse(detail="Authentication service is unavailable."),
+            status_code=HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return _route_response(
+        LocalRouteResponse(detail="Authentication required." if credentials else "The request is invalid."),
+        status_code=HTTP_401_UNAUTHORIZED if credentials else HTTP_400_BAD_REQUEST,
+    )
+
+
+def _principal_account_id(principal: Principal[Any]) -> str | None:
+    return principal.id if principal.is_authenticated else None
+
+
+def requires_local_bearer(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler) -> None:
+    """Require bearer evidence produced by the configured local JWT slot."""
+    context = connection.auth
+    if not isinstance(context, SecurityContext) or not any(evidence.slot == "local" for evidence in context.evidence):
+        raise NotAuthorizedException(detail="Authentication required")
+
+
+class _LocalSessionController(Controller):
+    path = "/"
+    tags = ("Local authentication",)
+
+    @post(
+        "/login",
+        name="local.session.login",
+        status_code=HTTP_200_OK,
+        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        **security(public(), csrf_required=True),
+    )
+    async def login(
+        self,
+        data: JSONBody[LocalCredentials],
+        request: Request[Any, Any, Any],
+        local_auth_services: _LocalAuthServicesDependency,
+    ) -> Response[LocalAccountResponse | LocalRouteResponse]:
+        """Authenticate a password and establish one native session."""
+        result = await local_auth_services.session_login(request, data)
+        if not isinstance(result, LocalAccountResponse):
+            return _route_error(result)
+        return Response(content=result, status_code=HTTP_200_OK)
+
+    @post(
+        "/logout",
+        name="local.session.logout",
+        status_code=HTTP_200_OK,
+        responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
+        **security(required("session")),
+    )
+    async def logout(
+        self, request: Request[Any, Any, Any], local_auth_services: _LocalAuthServicesDependency
+    ) -> Response[LocalRouteResponse]:
+        """Revoke the caller's current session and clear browser authentication."""
+        session_auth = local_auth_services.session_auth
+        if session_auth is None:
+            return _route_error(VerificationUnavailable())
+        result = await session_auth.logout(request)
+        if isinstance(result, VerificationUnavailable):
+            return _route_error(result)
+        return _route_response(LocalRouteResponse(detail="Logged out."), status_code=HTTP_200_OK)
+
+    @get(
+        "/sessions",
+        name="local.session.list",
+        responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
+        **security(required("session")),
+    )
+    async def list_sessions(
+        self,
+        request: Request[Any, Any, Any],
+        principal: NamedDependency[Principal[Any]],
+        local_auth_services: _LocalAuthServicesDependency,
+    ) -> Response[LocalSessionListResponse | LocalRouteResponse]:
+        """List only the authenticated caller's safe session projections."""
+        account_id = _principal_account_id(principal)
+        session_auth = local_auth_services.session_auth
+        if account_id is None or session_auth is None:
+            return _route_error(InvalidCredentials(), credentials=True)
+        current = session_auth.current_authentication(request)
+        try:
+            sessions = await session_auth.list_sessions(
+                account_id, current_session_id=current.session_id if current is not None else None
+            )
+        except Exception:  # noqa: BLE001
+            return _route_error(VerificationUnavailable())
+        return Response(
+            content=LocalSessionListResponse(
+                sessions=tuple(
+                    LocalSessionResponse(
+                        session_id=session.session_id,
+                        current=session.current,
+                        created_at=session.created_at,
+                        last_seen_at=session.last_seen_at,
+                        expires_at=session.expires_at,
+                        display_metadata=dict(session.display_metadata),
+                    )
+                    for session in sessions
+                )
+            ),
+            status_code=HTTP_200_OK,
+        )
+
+    @delete(
+        "/sessions/{session_id:str}",
+        name="local.session.revoke",
+        status_code=HTTP_200_OK,
+        responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
+        **security(required("session")),
+    )
+    async def revoke_session(
+        self,
+        session_id: FromPath[str],
+        request: Request[Any, Any, Any],
+        principal: NamedDependency[Principal[Any]],
+        local_auth_services: _LocalAuthServicesDependency,
+    ) -> Response[LocalRouteResponse]:
+        """Revoke one session qualified by caller ownership."""
+        account_id = _principal_account_id(principal)
+        session_auth = local_auth_services.session_auth
+        if account_id is None or session_auth is None:
+            return _route_error(InvalidCredentials(), credentials=True)
+        result = await session_auth.revoke_session(request, account_id, session_id)
+        if isinstance(result, VerificationUnavailable):
+            return _route_error(result)
+        return _route_response(LocalRouteResponse(detail="Session revoked."), status_code=HTTP_200_OK)
+
+
+class _LocalTokenController(Controller):
+    path = "/"
+    tags = ("Local authentication",)
+
+    @post(
+        "/token",
+        name="local.token.login",
+        status_code=HTTP_200_OK,
+        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        **security(public(), csrf_required=False),
+    )
+    async def login(
+        self, data: JSONBody[LocalCredentials], local_auth_services: _LocalAuthServicesDependency
+    ) -> Response[RefreshTokenResponse | LocalRouteResponse]:
+        """Authenticate a password and issue a local access/refresh pair."""
+        result = await local_auth_services.token_login(data)
+        if not isinstance(result, RefreshTokenResponse):
+            return _route_error(result)
+        return Response(content=result, status_code=HTTP_200_OK)
+
+    @post(
+        "/token/refresh",
+        name="local.token.refresh",
+        status_code=HTTP_200_OK,
+        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        **security(public(), csrf_required=False),
+    )
+    async def refresh(
+        self,
+        data: JSONBody[LocalTokenRequest],
+        local_auth_services: _LocalAuthServicesDependency,
+        idempotency_key: Annotated[str | None, HeaderParameter(name="Idempotency-Key")] = None,
+    ) -> Response[RefreshTokenResponse | LocalRouteResponse]:
+        """Strictly rotate one opaque refresh token."""
+        refresh_tokens = local_auth_services.refresh_tokens
+        if refresh_tokens is None:
+            return _route_error(VerificationUnavailable())
+        result = await refresh_tokens.rotate(data.token, idempotency_key=idempotency_key)
+        if not isinstance(result, RefreshTokenResponse):
+            return _route_error(result)
+        return Response(content=result, status_code=HTTP_200_OK)
+
+    @post(
+        "/token/revoke",
+        name="local.token.revoke",
+        status_code=HTTP_200_OK,
+        guards=(requires_local_bearer,),
+        responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
+        **security(required("bearer"), csrf_required=False),
+    )
+    async def revoke(
+        self,
+        data: JSONBody[LocalTokenRequest],
+        principal: NamedDependency[Principal[Any]],
+        local_auth_services: _LocalAuthServicesDependency,
+    ) -> Response[LocalRouteResponse]:
+        """Revoke the authenticated caller's presented local refresh family."""
+        account_id = _principal_account_id(principal)
+        refresh_tokens = local_auth_services.refresh_tokens
+        if account_id is None or refresh_tokens is None:
+            return _route_error(InvalidCredentials(), credentials=True)
+        result = await refresh_tokens.revoke_for_account(account_id, data.token)
+        if isinstance(result, VerificationUnavailable):
+            return _route_error(result)
+        return _route_response(LocalRouteResponse(detail="Token revoked."), status_code=HTTP_200_OK)
+
+
+class _LocalLifecycleController(Controller):
+    path = "/"
+    tags = ("Local authentication",)
+
+    @post("/password/recovery", name="local.password.recovery", status_code=HTTP_202_ACCEPTED, **security(public()))
+    async def recovery(
+        self, data: JSONBody[LocalIdentifierRequest], local_auth_services: _LocalAuthServicesDependency
+    ) -> Response[LifecycleAccepted]:
+        """Return the common recovery-request response for every identifier."""
+        result = await local_auth_services.recovery.request(data.identifier)
+        return Response(content=result, status_code=HTTP_202_ACCEPTED)
+
+    @post(
+        "/password/reset",
+        name="local.password.reset",
+        status_code=HTTP_200_OK,
+        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        **security(public()),
+    )
+    async def reset(
+        self, data: JSONBody[LocalPasswordResetRequest], local_auth_services: _LocalAuthServicesDependency
+    ) -> Response[LocalRouteResponse]:
+        """Consume one recovery token and replace its account password."""
+        result = await local_auth_services.recovery.reset(data.token, data.password)
+        if isinstance(result, PasswordResetResult) and result.status is PasswordResetStatus.RESET:
+            return _route_response(LocalRouteResponse(detail="Password reset complete."), status_code=HTTP_200_OK)
+        return _route_error(result)
+
+    @post("/verification", name="local.verification.resend", status_code=HTTP_202_ACCEPTED, **security(public()))
+    async def verification(
+        self, data: JSONBody[LocalIdentifierRequest], local_auth_services: _LocalAuthServicesDependency
+    ) -> Response[LifecycleAccepted]:
+        """Return the common verification-request response for every identifier."""
+        result = await local_auth_services.verification.resend(data.identifier)
+        return Response(content=result, status_code=HTTP_202_ACCEPTED)
+
+    @post(
+        "/verification/confirm",
+        name="local.verification.confirm",
+        status_code=HTTP_200_OK,
+        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        **security(public()),
+    )
+    async def confirm_verification(
+        self, data: JSONBody[LocalTokenRequest], local_auth_services: _LocalAuthServicesDependency
+    ) -> Response[LocalRouteResponse]:
+        """Consume one account-verification token."""
+        result = await local_auth_services.verification.consume(data.token)
+        if isinstance(result, ConsumeResult) and result.status is ConsumeStatus.CONSUMED:
+            return _route_response(LocalRouteResponse(detail="Account verified."), status_code=HTTP_200_OK)
+        return _route_error(result)
+
+
+class _LocalRegistrationController(Controller):
+    path = "/"
+    tags = ("Local authentication",)
+
+    @post(
+        "/register",
+        name="local.registration",
+        status_code=HTTP_202_ACCEPTED,
+        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        **security(public()),
+    )
+    async def register(
+        self, data: JSONBody[LocalRegistrationRequest], local_auth_services: _LocalAuthServicesDependency
+    ) -> Response[LifecycleAccepted | LocalRouteResponse]:
+        """Apply the configured public registration policy."""
+        registration = local_auth_services.registration
+        if registration is None:
+            return _route_error(InvalidLifecycleRequest())
+        result = await registration.register(
+            data.identifier, data.password, display_name=data.display_name, invitation_token=None
+        )
+        if isinstance(result, LifecycleAccepted):
+            return Response(content=result, status_code=HTTP_202_ACCEPTED)
+        return _route_error(result)
+
+
+class _LocalInvitationRegistrationController(Controller):
+    path = "/"
+    tags = ("Local authentication",)
+
+    @post(
+        "/register",
+        name="local.registration",
+        status_code=HTTP_202_ACCEPTED,
+        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        **security(public()),
+    )
+    async def register(
+        self, data: JSONBody[LocalInvitationRegistrationRequest], local_auth_services: _LocalAuthServicesDependency
+    ) -> Response[LifecycleAccepted | LocalRouteResponse]:
+        """Apply the configured invite-only registration policy."""
+        registration = local_auth_services.registration
+        if registration is None:
+            return _route_error(InvalidLifecycleRequest())
+        result = await registration.register(
+            data.identifier, data.password, display_name=data.display_name, invitation_token=data.invitation_token
+        )
+        if isinstance(result, LifecycleAccepted):
+            return Response(content=result, status_code=HTTP_202_ACCEPTED)
+        return _route_error(result)
+
+
+class _LocalSessionPasswordController(Controller):
+    path = "/"
+    tags = ("Local authentication",)
+
+    @post(
+        "/password/change",
+        name="local.session.password.change",
+        status_code=HTTP_200_OK,
+        responses=_LOCAL_REAUTHENTICATION_RESPONSES,
+        **security(required("session")),
+    )
+    async def change(
+        self,
+        data: JSONBody[LocalPasswordChangeRequest],
+        request: Request[Any, Any, Any],
+        principal: NamedDependency[Principal[Any]],
+        local_auth_services: _LocalAuthServicesDependency,
+    ) -> Response[LocalRouteResponse]:
+        """Change the session caller's password and rebind its session."""
+        account_id = _principal_account_id(principal)
+        if account_id is None:
+            return _route_error(InvalidCredentials(), credentials=True)
+        result = await local_auth_services.change_session_password(request, account_id, data)
+        return _password_change_response(result)
+
+
+class _LocalTokenPasswordController(Controller):
+    path = "/"
+    tags = ("Local authentication",)
+
+    @post(
+        "/token/password/change",
+        name="local.token.password.change",
+        status_code=HTTP_200_OK,
+        guards=(requires_local_bearer,),
+        responses=_LOCAL_REAUTHENTICATION_RESPONSES,
+        **security(required("bearer"), csrf_required=False),
+    )
+    async def change(
+        self,
+        data: JSONBody[LocalPasswordChangeRequest],
+        principal: NamedDependency[Principal[Any]],
+        local_auth_services: _LocalAuthServicesDependency,
+    ) -> Response[LocalRouteResponse]:
+        """Change the local bearer caller's password."""
+        account_id = _principal_account_id(principal)
+        if account_id is None:
+            return _route_error(InvalidCredentials(), credentials=True)
+        result = await local_auth_services.change_token_password(account_id, data)
+        return _password_change_response(result)
+
+
+class _LocalTokenOnlyPasswordController(Controller):
+    path = "/"
+    tags = ("Local authentication",)
+
+    @post(
+        "/password/change",
+        name="local.token.password.change",
+        status_code=HTTP_200_OK,
+        guards=(requires_local_bearer,),
+        responses=_LOCAL_REAUTHENTICATION_RESPONSES,
+        **security(required("bearer"), csrf_required=False),
+    )
+    async def change(
+        self,
+        data: JSONBody[LocalPasswordChangeRequest],
+        principal: NamedDependency[Principal[Any]],
+        local_auth_services: _LocalAuthServicesDependency,
+    ) -> Response[LocalRouteResponse]:
+        """Change the local bearer caller's password."""
+        account_id = _principal_account_id(principal)
+        if account_id is None:
+            return _route_error(InvalidCredentials(), credentials=True)
+        result = await local_auth_services.change_token_password(account_id, data)
+        return _password_change_response(result)
+
+
+def _password_change_response(result: object) -> Response[LocalRouteResponse]:
+    if isinstance(result, PasswordChangeResult) and result.status is PasswordChangeStatus.CHANGED:
+        return _route_response(LocalRouteResponse(detail="Password changed."), status_code=HTTP_200_OK)
+    if isinstance(result, InvalidCredentials):
+        return _route_error(result)
+    return _route_error(result)
+
+
+def build_local_auth_routes(config: LocalAuthConfig[Any]) -> Router:
+    """Build one native Litestar route tree for an explicit local-auth profile."""
+
+    def provide_local_auth_services() -> LocalAuthServices[Any]:
+        return config.services
+
+    route_handlers: list[type[Controller]] = [_LocalLifecycleController]
+    if config.mode in {LocalAuthMode.SESSION, LocalAuthMode.HYBRID}:
+        route_handlers.extend((_LocalSessionController, _LocalSessionPasswordController))
+    if config.mode in {LocalAuthMode.TOKENS, LocalAuthMode.HYBRID}:
+        route_handlers.append(_LocalTokenController)
+        if config.mode is LocalAuthMode.TOKENS:
+            route_handlers.append(_LocalTokenOnlyPasswordController)
+        else:
+            route_handlers.append(_LocalTokenPasswordController)
+    if config.registration.mode is RegistrationMode.PUBLIC:
+        route_handlers.append(_LocalRegistrationController)
+    elif config.registration.mode is RegistrationMode.INVITE_ONLY:
+        route_handlers.append(_LocalInvitationRegistrationController)
+    return Router(
+        path=config.route_prefix,
+        route_handlers=route_handlers,
+        cache_control=CacheControlHeader(no_store=True),
+        dependencies={
+            "local_auth_services": Provide(provide_local_auth_services, sync_to_thread=False, use_cache=False)
+        },
+        response_headers={"Pragma": "no-cache"},
+    )

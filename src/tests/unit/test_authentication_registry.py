@@ -28,10 +28,11 @@ from argon2.exceptions import VerificationError
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from litestar.connection import ASGIConnection
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
 from litestar.openapi.spec import SecurityScheme
 
 import litestar_security.accounts as accounts_module
+import litestar_security.accounts.local as local_accounts_module
 import litestar_security.accounts.sessions as sessions_module
 from litestar_security.authentication import (
     Authenticated,
@@ -53,7 +54,14 @@ from litestar_security.authentication import (
     security,
 )
 from litestar_security.config import ExternalCSRF, SecurityConfig
-from litestar_security.context import AuthenticationEvidence, AuthorizationSnapshot, CredentialRestrictions, Principal
+from litestar_security.context import (
+    AuthenticationEvidence,
+    AuthorizationSnapshot,
+    CredentialRestrictions,
+    NullSessionHandle,
+    Principal,
+    SecurityContext,
+)
 from litestar_security.providers import jwks as jwks_provider
 from litestar_security.providers import jwt as jwt_provider
 from litestar_security.providers import oidc as oidc_provider
@@ -5144,6 +5152,12 @@ class _CredentialCleanup:
         del token_id, token_digest, event
         return False
 
+    async def revoke_token_for_account(
+        self, account_id: str, token_id: str, token_digest: bytes, *, event: accounts_module.SecurityEvent
+    ) -> bool:
+        del account_id, token_id, token_digest, event
+        return False
+
     async def revoke_for_account(self, account_id: str, *, event: accounts_module.SecurityEvent) -> int:
         self.refresh_revocations.append((account_id, event))
         if "refresh" in self.failures:
@@ -5323,7 +5337,7 @@ async def test_password_change_rebinds_only_current_session_at_new_epoch_and_rev
         proof=_password_proof(),
         current_session_id="session-old",
         replacement_session=_replacement_session(),
-        now=_JWT_NOW,
+        now=_JWT_NOW + timedelta(seconds=1),
     )
 
     assert outcome == accounts_module.PasswordChangeResult(
@@ -6500,6 +6514,89 @@ async def test_native_session_logout_and_account_qualified_revoke_are_explicit_a
 
 
 @pytest.mark.anyio
+async def test_native_session_password_rebind_plan_activates_only_the_committed_record() -> None:
+    store = _NativeSessionStore()
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: _JWT_NOW,
+        entropy=_SessionEntropy(),
+    )
+    session: dict[str, object] = {}
+    connection = _native_session_connection(session)
+    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(current, accounts_module.SessionAuthentication)
+    assert auth.current_authentication(connection) == current
+
+    plan = auth.prepare_password_rebind(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(plan, accounts_module.SessionRebindPlan)
+    assert plan.binding_token not in repr(plan)
+    replacement = replace(plan.command, security_epoch=2)
+    event = accounts_module.SecurityEvent(
+        event_id="event",
+        occurred_at=_JWT_NOW,
+        operation="local.password.session_rebind",
+        outcome="rebound",
+        account_id="account-1",
+    )
+    assert await store.rebind(plan.prior_session_id, replacement, event=event)
+
+    assert await auth.activate_password_rebind(connection, plan, 2)
+    activated = auth.current_authentication(connection)
+    assert activated is not None
+    assert (activated.session_id, activated.security_epoch) == (replacement.session_id, 2)
+    assert _queued_binding_token(connection) == plan.binding_token
+
+    with pytest.raises(ValueError, match="Session rebind plan"):
+        replace(plan, prior_session_id=plan.command.session_id)
+
+    empty_connection = _native_session_connection({})
+    assert isinstance(
+        auth.prepare_password_rebind(empty_connection, cast("accounts_module.LocalAccount[object]", store.account)),
+        VerificationUnavailable,
+    )
+    assert isinstance(
+        replace(auth, entropy=lambda _size: b"").prepare_password_rebind(
+            connection, cast("accounts_module.LocalAccount[object]", store.account)
+        ),
+        VerificationUnavailable,
+    )
+
+    assert not await auth.activate_password_rebind(connection, cast("Any", object()), 2)
+    assert auth.current_authentication(connection) is None
+
+    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(current, accounts_module.SessionAuthentication)
+    failed_plan = auth.prepare_password_rebind(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(failed_plan, accounts_module.SessionRebindPlan)
+
+    async def failing_get(_session_id: str) -> accounts_module.SessionRecord | None:
+        raise OSError
+
+    original_get = store.get
+    store.get = failing_get  # type: ignore[method-assign]
+    assert not await auth.activate_password_rebind(connection, failed_plan, 2)
+    store.get = original_get  # type: ignore[method-assign]
+
+    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(current, accounts_module.SessionAuthentication)
+    missing_plan = auth.prepare_password_rebind(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(missing_plan, accounts_module.SessionRebindPlan)
+    assert not await auth.activate_password_rebind(connection, missing_plan, 2)
+
+    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    assert isinstance(current, accounts_module.SessionAuthentication)
+    mismatch_plan = auth.prepare_password_rebind(
+        connection, cast("accounts_module.LocalAccount[object]", store.account)
+    )
+    assert isinstance(mismatch_plan, accounts_module.SessionRebindPlan)
+    store.records[mismatch_plan.command.session_id] = _NativeSessionStore.record(
+        replace(mismatch_plan.command, security_epoch=3)
+    )
+    assert not await auth.activate_password_rebind(connection, mismatch_plan, 2)
+
+
+@pytest.mark.anyio
 async def test_native_session_lists_safe_summaries_and_websocket_lifecycle_is_read_only() -> None:
     store = _NativeSessionStore()
     auth = accounts_module.NativeSessionAuth(
@@ -7385,6 +7482,22 @@ class _AtomicRefreshStore:
             self.revoked_families.add(record.family_id)
             return True
 
+    async def revoke_token_for_account(
+        self, account_id: str, token_id: str, token_digest: bytes, *, event: accounts_module.SecurityEvent
+    ) -> bool:
+        del event
+        async with self._lock:
+            record = self.tokens.get(token_id)
+            if (
+                record is None
+                or record.account_id != account_id
+                or record.family_id in self.revoked_families
+                or not hmac.compare_digest(record.token_digest, token_digest)
+            ):
+                return False
+            self.revoked_families.add(record.family_id)
+            return True
+
     async def revoke_for_account(self, account_id: str, *, event: accounts_module.SecurityEvent) -> int:
         del event
         async with self._lock:
@@ -7840,7 +7953,8 @@ async def test_refresh_presented_token_revoke_is_exact_and_idempotent() -> None:
     initial = await service.issue(account, now=_JWT_NOW)
     assert isinstance(initial, accounts_module.RefreshTokenResponse)
 
-    assert await service.revoke(initial.refresh_token, now=_JWT_NOW)
+    assert not await service.revoke_for_account("account-2", initial.refresh_token, now=_JWT_NOW)
+    assert await service.revoke_for_account(account.account_id, initial.refresh_token, now=_JWT_NOW)
     assert not await service.revoke(initial.refresh_token, now=_JWT_NOW)
     assert isinstance(await service.revoke("malformed", now=_JWT_NOW), InvalidCredentials)
     assert len(store.revoked_families) == 1
@@ -8253,6 +8367,363 @@ async def test_refresh_revoke_maps_store_and_clock_failures_to_unavailable() -> 
     assert isinstance(
         await replace(service, clock=lambda: 1 / 0).revoke(initial.refresh_token), VerificationUnavailable
     )
+    assert isinstance(await service.revoke_for_account("", initial.refresh_token, now=_JWT_NOW), InvalidCredentials)
+    assert isinstance(
+        await service.revoke_for_account(account.account_id, "malformed", now=_JWT_NOW), InvalidCredentials
+    )
+
+    async def failing_account_revoke(
+        _account_id: str, _token_id: str, _token_digest: bytes, *, event: accounts_module.SecurityEvent
+    ) -> bool:
+        del event
+        raise OSError
+
+    store.revoke_token_for_account = failing_account_revoke  # type: ignore[method-assign]
+    assert isinstance(
+        await service.revoke_for_account(account.account_id, initial.refresh_token, now=_JWT_NOW),
+        VerificationUnavailable,
+    )
+
+    async def malformed_account_revoke(
+        _account_id: str, _token_id: str, _token_digest: bytes, *, event: accounts_module.SecurityEvent
+    ) -> object:
+        del event
+        return object()
+
+    store.revoke_token_for_account = malformed_account_revoke  # type: ignore[method-assign]
+    assert isinstance(
+        await service.revoke_for_account(account.account_id, initial.refresh_token, now=_JWT_NOW),
+        VerificationUnavailable,
+    )
+    assert isinstance(
+        await replace(service, clock=lambda: 1 / 0).revoke_for_account(account.account_id, initial.refresh_token),
+        VerificationUnavailable,
+    )
+
+
+@pytest.mark.anyio
+async def test_generated_local_handlers_map_services_to_typed_http_contracts() -> None:  # noqa: PLR0915
+    class AsyncOutcome:
+        def __init__(self, *outcomes: object) -> None:
+            self.outcomes = list(outcomes)
+
+        async def __call__(self, *_args: object, **_kwargs: object) -> object:
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+    class SessionRoutes:
+        def __init__(self) -> None:
+            success = True
+            self.logout = AsyncOutcome(success, VerificationUnavailable())
+            self.revoke_session = AsyncOutcome(success, VerificationUnavailable())
+            self.list_sessions = AsyncOutcome((), OSError())
+
+        def current_authentication(self, _request: object) -> accounts_module.SessionAuthentication | None:
+            return None
+
+    token = accounts_module.RefreshTokenCodec(pepper=b"p" * 32, entropy=_RefreshEntropy()).issue().refresh_token
+    refresh_response = accounts_module.RefreshTokenResponse(
+        access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
+        refresh_token=token,
+        expires_in=600,
+    )
+    principal = Principal(id="account-1")
+    anonymous = Principal.anonymous()
+    credentials = accounts_module.LocalCredentials(
+        identifier="user@example.com",
+        password="secret",  # noqa: S106 - request DTO fixture
+    )
+    token_request = accounts_module.LocalTokenRequest(token=token)
+    password_request = accounts_module.LocalPasswordChangeRequest(
+        current_password="old",  # noqa: S106 - request DTO fixture
+        password="new-password",  # noqa: S106 - request DTO fixture
+    )
+    session_routes = SessionRoutes()
+    services = SimpleNamespace(
+        session_login=AsyncOutcome(accounts_module.LocalAccountResponse("account-1"), InvalidCredentials()),
+        token_login=AsyncOutcome(refresh_response, InvalidCredentials()),
+        session_auth=session_routes,
+        refresh_tokens=SimpleNamespace(
+            rotate=AsyncOutcome(refresh_response, InvalidCredentials()),
+            revoke_for_account=AsyncOutcome(bool(1), VerificationUnavailable()),
+        ),
+        recovery=SimpleNamespace(
+            request=AsyncOutcome(accounts_module.LifecycleAccepted()),
+            reset=AsyncOutcome(
+                accounts_module.PasswordResetResult(
+                    accounts_module.PasswordResetStatus.RESET, account_id="account-1", security_epoch=2
+                ),
+                accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.INVALID),
+            ),
+        ),
+        verification=SimpleNamespace(
+            resend=AsyncOutcome(accounts_module.LifecycleAccepted()),
+            consume=AsyncOutcome(
+                accounts_module.ConsumeResult(accounts_module.ConsumeStatus.CONSUMED, "account-1", 1),
+                accounts_module.ConsumeResult(accounts_module.ConsumeStatus.INVALID),
+            ),
+        ),
+        registration=SimpleNamespace(
+            register=AsyncOutcome(accounts_module.LifecycleAccepted(), accounts_module.InvalidInvitation())
+        ),
+        change_session_password=AsyncOutcome(
+            accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2),
+            InvalidCredentials(),
+        ),
+        change_token_password=AsyncOutcome(
+            accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2),
+            accounts_module.InvalidLifecycleRequest(),
+        ),
+    )
+    request = cast("Any", SimpleNamespace())
+
+    session_login = cast("Any", local_accounts_module._LocalSessionController.login.fn)  # noqa: SLF001
+    assert (await session_login(None, credentials, request, services)).status_code == 200
+    assert (await session_login(None, credentials, request, services)).status_code == 400
+    session_logout = cast("Any", local_accounts_module._LocalSessionController.logout.fn)  # noqa: SLF001
+    assert (await session_logout(None, request, services)).status_code == 200
+    assert (await session_logout(None, request, services)).status_code == 503
+    services.session_auth = None
+    assert (await session_logout(None, request, services)).status_code == 503
+    services.session_auth = session_routes
+    list_sessions = cast("Any", local_accounts_module._LocalSessionController.list_sessions.fn)  # noqa: SLF001
+    assert (await list_sessions(None, request, principal, services)).status_code == 200
+    assert (await list_sessions(None, request, principal, services)).status_code == 503
+    assert (await list_sessions(None, request, anonymous, services)).status_code == 401
+    revoke_session = cast("Any", local_accounts_module._LocalSessionController.revoke_session.fn)  # noqa: SLF001
+    assert (await revoke_session(None, "session", request, principal, services)).status_code == 200
+    assert (await revoke_session(None, "session", request, principal, services)).status_code == 503
+    services.session_auth = None
+    assert (await revoke_session(None, "session", request, principal, services)).status_code == 401
+    services.session_auth = session_routes
+
+    token_login = cast("Any", local_accounts_module._LocalTokenController.login.fn)  # noqa: SLF001
+    assert (await token_login(None, credentials, services)).status_code == 200
+    assert (await token_login(None, credentials, services)).status_code == 400
+    refresh = cast("Any", local_accounts_module._LocalTokenController.refresh.fn)  # noqa: SLF001
+    assert (await refresh(None, token_request, services, "AAAAAAAAAAAAAAAAAAAAAA")).status_code == 200
+    assert (await refresh(None, token_request, services, None)).status_code == 400
+    refresh_tokens = services.refresh_tokens
+    services.refresh_tokens = None
+    assert (await refresh(None, token_request, services, None)).status_code == 503
+    services.refresh_tokens = refresh_tokens
+    revoke = cast("Any", local_accounts_module._LocalTokenController.revoke.fn)  # noqa: SLF001
+    assert (await revoke(None, token_request, principal, services)).status_code == 200
+    assert (await revoke(None, token_request, principal, services)).status_code == 503
+    assert (await revoke(None, token_request, anonymous, services)).status_code == 401
+
+    lifecycle = local_accounts_module._LocalLifecycleController  # noqa: SLF001
+    identifier = accounts_module.LocalIdentifierRequest(identifier="user@example.com")
+    assert (await cast("Any", lifecycle.recovery.fn)(None, identifier, services)).status_code == 202
+    reset = cast("Any", lifecycle.reset.fn)
+    reset_request = accounts_module.LocalPasswordResetRequest(
+        token=token,
+        password="new-password",  # noqa: S106 - request DTO fixture
+    )
+    assert (await reset(None, reset_request, services)).status_code == 200
+    assert (await reset(None, reset_request, services)).status_code == 400
+    assert (await cast("Any", lifecycle.verification.fn)(None, identifier, services)).status_code == 202
+    confirm = cast("Any", lifecycle.confirm_verification.fn)
+    assert (await confirm(None, token_request, services)).status_code == 200
+    assert (await confirm(None, token_request, services)).status_code == 400
+
+    register = cast("Any", local_accounts_module._LocalRegistrationController.register.fn)  # noqa: SLF001
+    registration = accounts_module.LocalRegistrationRequest(
+        identifier="user@example.com",
+        password="password",  # noqa: S106 - request DTO fixture
+    )
+    assert (await register(None, registration, services)).status_code == 202
+    assert (await register(None, registration, services)).status_code == 400
+    services.registration = None
+    assert (await register(None, registration, services)).status_code == 400
+    services.registration = SimpleNamespace(
+        register=AsyncOutcome(accounts_module.LifecycleAccepted(), accounts_module.InvalidInvitation())
+    )
+    invite_register = cast(
+        "Any",
+        local_accounts_module._LocalInvitationRegistrationController.register.fn,  # noqa: SLF001
+    )
+    invitation = accounts_module.LocalInvitationRegistrationRequest(
+        identifier="user@example.com",
+        password="password",  # noqa: S106 - request DTO fixture
+        invitation_token="invite-secret",  # noqa: S106 - request DTO fixture
+    )
+    assert (await invite_register(None, invitation, services)).status_code == 202
+    assert (await invite_register(None, invitation, services)).status_code == 400
+    services.registration = None
+    assert (await invite_register(None, invitation, services)).status_code == 400
+
+    session_change = cast("Any", local_accounts_module._LocalSessionPasswordController.change.fn)  # noqa: SLF001
+    assert (await session_change(None, password_request, request, principal, services)).status_code == 200
+    assert (await session_change(None, password_request, request, principal, services)).status_code == 400
+    assert (await session_change(None, password_request, request, anonymous, services)).status_code == 401
+    token_change = cast("Any", local_accounts_module._LocalTokenPasswordController.change.fn)  # noqa: SLF001
+    assert (await token_change(None, password_request, principal, services)).status_code == 200
+    assert (await token_change(None, password_request, anonymous, services)).status_code == 401
+    token_only_change = cast("Any", local_accounts_module._LocalTokenOnlyPasswordController.change.fn)  # noqa: SLF001
+    assert (await token_only_change(None, password_request, principal, services)).status_code == 400
+    assert (await token_only_change(None, password_request, anonymous, services)).status_code == 401
+
+    bearer_context = SecurityContext(
+        session=NullSessionHandle(), evidence=(AuthenticationEvidence("bearer", "local", _JWT_NOW),)
+    )
+    local_accounts_module.requires_local_bearer(cast("Any", SimpleNamespace(auth=bearer_context)), cast("Any", None))
+    with pytest.raises(NotAuthorizedException, match="Authentication required"):
+        local_accounts_module.requires_local_bearer(
+            cast("Any", SimpleNamespace(auth=SecurityContext(session=NullSessionHandle()))), cast("Any", None)
+        )
+
+
+@pytest.mark.anyio
+async def test_local_auth_service_graph_composes_existing_services_without_handler_logic() -> None:
+    class AsyncOutcome:
+        def __init__(self, *outcomes: object) -> None:
+            self.outcomes = list(outcomes)
+
+        async def __call__(self, *_args: object, **_kwargs: object) -> object:
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="user@example.com",
+        display_name="User",
+        active=True,
+        verified=True,
+        security_epoch=1,
+    )
+    proof = accounts_module.PasswordReauthenticationProof(
+        account_id="account-1", security_epoch=1, authenticated_at=_JWT_NOW, expires_at=_JWT_NOW + timedelta(minutes=5)
+    )
+    authentication = SimpleNamespace(account_id="account-1", session_id="session-old")
+    plan = SimpleNamespace(prior_session_id="session-old", command=object())
+    changed = accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2)
+    refresh_response = accounts_module.RefreshTokenResponse(
+        access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
+        refresh_token=accounts_module
+        .RefreshTokenCodec(pepper=b"p" * 32, entropy=_RefreshEntropy())
+        .issue()
+        .refresh_token,
+        expires_in=600,
+    )
+    session_auth = SimpleNamespace(
+        establish=AsyncOutcome(
+            VerificationUnavailable(),
+            accounts_module.SessionAuthentication(
+                session_id="c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",
+                binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+                account_id="account-1",
+                security_epoch=1,
+                authenticated_at=_JWT_NOW,
+                expires_at=_JWT_NOW + timedelta(hours=1),
+            ),
+        ),
+        current_authentication=lambda _request: authentication,
+        prepare_password_rebind=lambda _request, _account: plan,
+        activate_password_rebind=AsyncOutcome(bool(1)),
+        logout=AsyncOutcome(bool(0)),
+    )
+    accounts = SimpleNamespace(get_by_id=AsyncOutcome(account, OSError(), None))
+    services = accounts_module.LocalAuthServices(
+        accounts=cast("Any", accounts),
+        password_login=cast("Any", SimpleNamespace(authenticate=AsyncOutcome(InvalidCredentials(), account, account))),
+        password_reauthentication=cast(
+            "Any", SimpleNamespace(verify=AsyncOutcome(InvalidCredentials(), proof, proof, proof, proof, proof))
+        ),
+        password_change=cast("Any", SimpleNamespace(change=AsyncOutcome(changed, changed, changed))),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        session_auth=cast("Any", session_auth),
+        refresh_tokens=cast("Any", SimpleNamespace(issue=AsyncOutcome(refresh_response))),
+    )
+    credentials = accounts_module.LocalCredentials(
+        identifier="user@example.com",
+        password="password",  # noqa: S106 - request DTO fixture
+    )
+    password_request = accounts_module.LocalPasswordChangeRequest(
+        current_password="old",  # noqa: S106 - request DTO fixture
+        password="new-password",  # noqa: S106 - request DTO fixture
+    )
+    request = cast("Any", SimpleNamespace())
+
+    assert isinstance(await services.session_login(request, credentials), InvalidCredentials)
+    assert isinstance(await services.session_login(request, credentials), VerificationUnavailable)
+    assert isinstance(await services.session_login(request, credentials), accounts_module.LocalAccountResponse)
+    no_session = replace(services, session_auth=None)
+    no_session.password_login.authenticate.outcomes.append(account)
+    assert isinstance(await no_session.session_login(request, credentials), VerificationUnavailable)
+
+    services.password_login.authenticate.outcomes.extend((InvalidCredentials(), account))
+    assert isinstance(await services.token_login(credentials), InvalidCredentials)
+    assert await services.token_login(credentials) == refresh_response
+    no_refresh = replace(services, refresh_tokens=None)
+    no_refresh.password_login.authenticate.outcomes.append(account)
+    assert isinstance(await no_refresh.token_login(credentials), VerificationUnavailable)
+
+    assert isinstance(
+        await services.change_session_password(request, "account-1", password_request), InvalidCredentials
+    )
+    compromised = replace(password_request, compromise=True)
+    assert await services.change_session_password(request, "account-1", compromised) == changed
+    assert session_auth.logout.outcomes == []
+    compromised_failure = replace(
+        services,
+        password_change=cast("Any", SimpleNamespace(change=AsyncOutcome(accounts_module.InvalidLifecycleRequest()))),
+    )
+    assert isinstance(
+        await compromised_failure.change_session_password(request, "account-1", compromised),
+        accounts_module.InvalidLifecycleRequest,
+    )
+    assert await services.change_session_password(request, "account-1", password_request) == changed
+    assert session_auth.activate_password_rebind.outcomes == []
+    assert isinstance(
+        await services.change_session_password(request, "account-1", password_request), VerificationUnavailable
+    )
+    assert isinstance(
+        await services.change_session_password(request, "account-1", password_request), InvalidCredentials
+    )
+    assert isinstance(
+        await replace(services, session_auth=None).change_session_password(request, "account-1", password_request),
+        VerificationUnavailable,
+    )
+
+    services.password_reauthentication.verify.outcomes.extend((proof, proof, proof))
+    no_authentication = SimpleNamespace(**vars(session_auth))
+    no_authentication.current_authentication = lambda _request: None
+    assert isinstance(
+        await replace(services, session_auth=cast("Any", no_authentication)).change_session_password(
+            request, "account-1", password_request
+        ),
+        InvalidCredentials,
+    )
+
+    services.accounts.get_by_id.outcomes.append(account)
+    no_plan = SimpleNamespace(**vars(session_auth))
+    no_plan.prepare_password_rebind = lambda _request, _account: VerificationUnavailable()
+    assert isinstance(
+        await replace(services, session_auth=cast("Any", no_plan)).change_session_password(
+            request, "account-1", password_request
+        ),
+        VerificationUnavailable,
+    )
+
+    services.accounts.get_by_id.outcomes.append(account)
+    unchanged_services = replace(
+        services,
+        password_change=cast("Any", SimpleNamespace(change=AsyncOutcome(accounts_module.InvalidLifecycleRequest()))),
+    )
+    assert isinstance(
+        await unchanged_services.change_session_password(request, "account-1", password_request),
+        accounts_module.InvalidLifecycleRequest,
+    )
+
+    services.password_reauthentication.verify.outcomes.extend((InvalidCredentials(), proof))
+    assert isinstance(await services.change_token_password("account-1", password_request), InvalidCredentials)
+    assert await services.change_token_password("account-1", password_request) == changed
 
 
 def test_refresh_codec_rejects_runtime_non_text_token() -> None:

@@ -55,6 +55,20 @@ _REFRESH_SUCCESSOR_ID = "rt_ampqampqampqampqampqag"
 _REFRESH_FAMILY_ID = "rf_a2tra2tra2tra2tra2traw"
 _REFRESH_TOKEN = f"{_REFRESH_ID}.c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M"
 _ACCESS_TOKEN = "e30.e30.YQ"  # noqa: S105 - compact JWT fixture
+
+
+def _local_auth_secrets(*, refresh: bool = False) -> accounts_module.LocalAuthSecrets:
+    return accounts_module.LocalAuthSecrets(
+        purpose_tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        refresh_codec=(accounts_module.RefreshTokenCodec(pepper=b"q" * 32) if refresh else None),
+        refresh_receipts=(
+            accounts_module.RefreshReceiptSealer(active_key=accounts_module.RefreshReceiptKey("test-key", b"r" * 32))
+            if refresh
+            else None
+        ),
+    )
+
+
 _BASE_LOCAL_CAPABILITIES = {
     "compare_and_replace_password",
     "consume_and_reset",
@@ -84,6 +98,7 @@ _REFRESH_CAPABILITIES = {
     "revoke_family",
     "revoke_for_account",
     "revoke_token",
+    "revoke_token_for_account",
     "rotate",
 }
 _PUBLIC_API = (
@@ -789,10 +804,23 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "LocalAccessTokenIssuer",
         "LocalAccount",
         "LocalAccountCapabilities",
+        "LocalAccountResponse",
         "LocalAuth",
         "LocalAuthConfig",
         "LocalAuthMode",
+        "LocalAuthSecrets",
+        "LocalAuthServices",
         "LocalBearerIdentityResolver",
+        "LocalCredentials",
+        "LocalIdentifierRequest",
+        "LocalInvitationRegistrationRequest",
+        "LocalPasswordChangeRequest",
+        "LocalPasswordResetRequest",
+        "LocalRegistrationRequest",
+        "LocalRouteResponse",
+        "LocalSessionListResponse",
+        "LocalSessionResponse",
+        "LocalTokenRequest",
         "LoginMethod",
         "LoginMethodStore",
         "NativeSessionAuth",
@@ -854,6 +882,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "SessionAuthentication",
         "SessionBindingConfig",
         "SessionBindingProof",
+        "SessionRebindPlan",
         "SessionRecord",
         "SessionRegistry",
         "SessionSummary",
@@ -861,7 +890,9 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "TokenPurpose",
         "VerificationTokenService",
         "VerificationTokenStore",
+        "build_local_auth_routes",
         "normalize_identifier",
+        "requires_local_bearer",
     )
 
 
@@ -1561,14 +1592,25 @@ def test_local_auth_profiles_validate_only_structural_enabled_capabilities(local
     registration_store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | {"register"}))
 
     session = accounts_module.LocalAuth.session(
-        accounts=session_store, csrf=csrf, binding=binding, route_prefix="/security/"
+        accounts=session_store, secrets=_local_auth_secrets(), csrf=csrf, binding=binding, route_prefix="/security/"
     )
-    tokens = accounts_module.LocalAuth.tokens(accounts=token_store, key_ring=key_ring, token_audience=f" {audience} ")
+    tokens = accounts_module.LocalAuth.tokens(
+        accounts=token_store,
+        secrets=_local_auth_secrets(refresh=True),
+        key_ring=key_ring,
+        token_audience=f" {audience} ",
+    )
     hybrid = accounts_module.LocalAuth.hybrid(
-        accounts=hybrid_store, csrf=csrf, binding=binding, key_ring=key_ring, token_audience=audience
+        accounts=hybrid_store,
+        secrets=_local_auth_secrets(refresh=True),
+        csrf=csrf,
+        binding=binding,
+        key_ring=key_ring,
+        token_audience=audience,
     )
     registration = accounts_module.LocalAuth.session(
         accounts=registration_store,
+        secrets=_local_auth_secrets(),
         csrf=csrf,
         binding=binding,
         registration=accounts_module.RegistrationPolicy.public(),
@@ -1610,15 +1652,22 @@ def test_local_auth_profiles_report_only_missing_enabled_capabilities(
     audience = "local-client"
 
     if profile == "session":
-        operation = partial(accounts_module.LocalAuth.session, accounts=store, csrf=csrf, binding=binding)
+        operation = partial(
+            accounts_module.LocalAuth.session, accounts=store, secrets=_local_auth_secrets(), csrf=csrf, binding=binding
+        )
     elif profile == "tokens":
         operation = partial(
-            accounts_module.LocalAuth.tokens, accounts=store, key_ring=local_key_ring, token_audience=audience
+            accounts_module.LocalAuth.tokens,
+            accounts=store,
+            secrets=_local_auth_secrets(refresh=True),
+            key_ring=local_key_ring,
+            token_audience=audience,
         )
     else:
         operation = partial(
             accounts_module.LocalAuth.session,
             accounts=store,
+            secrets=_local_auth_secrets(),
             csrf=csrf,
             binding=binding,
             registration=accounts_module.RegistrationPolicy.public(),
@@ -1634,13 +1683,16 @@ def test_local_auth_rejects_transport_inconsistent_custom_session_runtime(local_
     store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES))
     other_store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES))
     runtime = accounts_module.NativeSessionAuth(accounts=store, binding=binding)
-    matching = accounts_module.LocalAuth.session(accounts=store, csrf=csrf, binding=binding, session_auth=runtime)
+    matching = accounts_module.LocalAuth.session(
+        accounts=store, secrets=_local_auth_secrets(), csrf=csrf, binding=binding, session_auth=runtime
+    )
     assert matching.session_auth is runtime
 
     with pytest.raises(ImproperlyConfiguredException, match="Token-only"):
         accounts_module.LocalAuthConfig(
             mode=accounts_module.LocalAuthMode.TOKENS,
             accounts=store,
+            secrets=_local_auth_secrets(refresh=True),
             registration=accounts_module.RegistrationPolicy.disabled(),
             route_prefix="/auth",
             key_ring=local_key_ring,
@@ -1654,7 +1706,9 @@ def test_local_auth_rejects_transport_inconsistent_custom_session_runtime(local_
         ),
     ):
         with pytest.raises(ImproperlyConfiguredException, match="must share"):
-            accounts_module.LocalAuth.session(accounts=store, csrf=csrf, binding=binding, session_auth=mismatched)
+            accounts_module.LocalAuth.session(
+                accounts=store, secrets=_local_auth_secrets(), csrf=csrf, binding=binding, session_auth=mismatched
+            )
 
 
 @pytest.mark.parametrize(
@@ -1693,6 +1747,7 @@ def test_local_auth_config_rejects_incomplete_transport_values(
     kwargs = {
         "mode": accounts_module.LocalAuthMode.HYBRID,
         "accounts": store,
+        "secrets": _local_auth_secrets(refresh=True),
         "registration": accounts_module.RegistrationPolicy.disabled(),
         "route_prefix": "/auth",
         "csrf": csrf,
@@ -1710,6 +1765,7 @@ def test_local_token_profile_builds_one_customizable_runtime_with_safe_defaults(
     store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _REFRESH_CAPABILITIES))
     config = accounts_module.LocalAuth.tokens(
         accounts=store,
+        secrets=_local_auth_secrets(refresh=True),
         key_ring=local_key_ring,
         token_audience="local-api",  # noqa: S106 - public JWT audience
     )
@@ -1742,10 +1798,93 @@ def test_local_token_profile_rejects_invalid_runtime_configuration(
     field_name: str, invalid_value: object, match: str, local_key_ring: LocalKeyRing
 ) -> None:
     store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _REFRESH_CAPABILITIES))
-    kwargs = {"accounts": store, "key_ring": local_key_ring, "token_audience": "local-api", field_name: invalid_value}
+    kwargs = {
+        "accounts": store,
+        "secrets": _local_auth_secrets(refresh=True),
+        "key_ring": local_key_ring,
+        "token_audience": "local-api",
+        field_name: invalid_value,
+    }
 
     with pytest.raises(ImproperlyConfiguredException, match=match):
         accounts_module.LocalAuth.tokens(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"purpose_tokens": object()},
+        {
+            "purpose_tokens": accounts_module.PurposeTokenCodec(b"p" * 32),
+            "refresh_codec": accounts_module.RefreshTokenCodec(b"q" * 32),
+        },
+        {
+            "purpose_tokens": accounts_module.PurposeTokenCodec(b"p" * 32),
+            "refresh_codec": object(),
+            "refresh_receipts": accounts_module.RefreshReceiptSealer(
+                active_key=accounts_module.RefreshReceiptKey("key", b"r" * 32)
+            ),
+        },
+        {
+            "purpose_tokens": accounts_module.PurposeTokenCodec(b"p" * 32),
+            "refresh_codec": accounts_module.RefreshTokenCodec(b"q" * 32),
+            "refresh_receipts": object(),
+        },
+    ],
+)
+def test_local_auth_secrets_reject_incomplete_or_invalid_crypto(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ImproperlyConfiguredException):
+        accounts_module.LocalAuthSecrets(**kwargs)  # type: ignore[arg-type]
+
+
+def test_local_auth_secrets_offer_concise_explicit_transport_factories() -> None:
+    session = accounts_module.LocalAuthSecrets.session(purpose_token_pepper=b"p" * 32)
+    tokens = accounts_module.LocalAuthSecrets.tokens(
+        purpose_token_pepper=b"p" * 32,
+        refresh_token_pepper=b"q" * 32,
+        active_receipt_key_id="active",
+        active_receipt_key=b"r" * 32,
+        retained_receipt_keys=(accounts_module.RefreshReceiptKey("retained", b"s" * 32),),
+    )
+
+    assert session.refresh_codec is None
+    assert session.refresh_receipts is None
+    assert isinstance(tokens.refresh_codec, accounts_module.RefreshTokenCodec)
+    assert tokens.refresh_receipts is not None
+    assert tuple(tokens.refresh_receipts._keys) == ("active", "retained")  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("mode", "secrets", "register_routes", "match"),
+    [
+        (accounts_module.LocalAuthMode.SESSION, object(), True, "secrets"),
+        (accounts_module.LocalAuthMode.SESSION, _local_auth_secrets(), 1, "boolean"),
+        (accounts_module.LocalAuthMode.SESSION, _local_auth_secrets(refresh=True), True, "Session-only"),
+        (accounts_module.LocalAuthMode.TOKENS, _local_auth_secrets(), True, "requires explicit refresh"),
+    ],
+)
+def test_local_auth_config_rejects_invalid_route_and_secret_mode_combinations(
+    mode: accounts_module.LocalAuthMode,
+    secrets: object,
+    register_routes: object,
+    match: str,
+    local_key_ring: LocalKeyRing,
+) -> None:
+    store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES))
+    kwargs: dict[str, object] = {
+        "mode": mode,
+        "accounts": store,
+        "secrets": secrets,
+        "registration": accounts_module.RegistrationPolicy.disabled(),
+        "route_prefix": "/auth",
+        "register_routes": register_routes,
+        "csrf": litestar_security.ExternalCSRF("application", lambda _method, _path, _policy: True),
+        "binding": accounts_module.SessionBindingConfig(pepper=b"b" * 32),
+        "key_ring": local_key_ring,
+        "token_audience": "local-client",
+    }
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        accounts_module.LocalAuthConfig(**kwargs)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

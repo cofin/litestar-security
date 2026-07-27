@@ -37,6 +37,11 @@ from litestar_security._cli import register, security_group
 from litestar_security.accounts import (
     LifecycleAccepted,
     LocalAuth,
+    LocalAuthSecrets,
+    PurposeTokenCodec,
+    RefreshReceiptKey,
+    RefreshReceiptSealer,
+    RefreshTokenCodec,
     RegistrationPolicy,
     SessionBindingConfig,
     SessionSummary,
@@ -175,6 +180,7 @@ def _local_session_accounts() -> Any:
         "consume_and_reset",
         "consume_and_verify",
         "create",
+        "create_family",
         "current_epoch",
         "find_for_login",
         "get",
@@ -182,14 +188,21 @@ def _local_session_accounts() -> Any:
         "get_password_state",
         "issue",
         "list_for_account",
+        "prepare_rotation",
         "rebind",
+        "register",
         "register_login_method",
         "replace_password_and_bump_epoch",
         "revoke",
+        "revoke_family",
+        "revoke_for_account",
         "revoke_login_method",
         "revoke_other_sessions",
         "revoke_session_for_account",
         "revoke_sessions_for_account",
+        "revoke_token",
+        "revoke_token_for_account",
+        "rotate",
         "touch",
     )
     return SimpleNamespace(**{name: lambda *_args, **_kwargs: None for name in capability_names})
@@ -225,8 +238,20 @@ def _native_session_backend(  # noqa: PLR0913
 def _local_session_auth(*, csrf: CSRFConfig | ExternalCSRF, binding: SessionBindingConfig | None = None) -> Any:
     return LocalAuth.session(
         accounts=cast("Any", _local_session_accounts()),
+        secrets=_local_auth_secrets(),
         csrf=csrf,
         binding=binding or SessionBindingConfig(pepper=b"binding-pepper-for-plugin-tests!", max_age=600),
+        register_routes=False,
+    )
+
+
+def _local_auth_secrets(*, refresh: bool = False) -> LocalAuthSecrets:
+    return LocalAuthSecrets(
+        purpose_tokens=PurposeTokenCodec(pepper=b"p" * 32),
+        refresh_codec=RefreshTokenCodec(pepper=b"q" * 32) if refresh else None,
+        refresh_receipts=(
+            RefreshReceiptSealer(active_key=RefreshReceiptKey("test-key", b"r" * 32)) if refresh else None
+        ),
     )
 
 
@@ -775,12 +800,14 @@ def test_disabled_registration_adds_no_route_and_lifecycle_response_uses_native_
             "revoke_for_account",
             "revoke_login_method",
             "revoke_token",
+            "revoke_token_for_account",
             "rotate",
         )
     })
     private_key, _public_key = jwt_key_material["EdDSA"]
     local_auth = LocalAuth.tokens(
         accounts=cast("Any", capabilities),
+        secrets=_local_auth_secrets(refresh=True),
         key_ring=LocalKeyRing(
             issuer="https://issuer.example",
             active_signing_key=SigningKey(key_id="active", algorithm="EdDSA", private_key=private_key),
@@ -824,6 +851,140 @@ def test_disabled_registration_adds_no_route_and_lifecycle_response_uses_native_
 
     with pytest.raises(ImproperlyConfiguredException, match="must be a LocalAuthConfig"):
         SecurityPlugin(SecurityConfig(local_auth=cast("Any", object()))).on_app_init(AppConfig())
+
+
+@pytest.mark.parametrize("registration_mode", ["disabled", "public", "invite"])
+@pytest.mark.parametrize("mode", ["session", "tokens", "hybrid"])
+def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa: PLR0915
+    mode: str, registration_mode: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+) -> None:
+    accounts = cast("Any", _local_session_accounts())
+    registration = {
+        "disabled": RegistrationPolicy.disabled(),
+        "public": RegistrationPolicy.public(),
+        "invite": RegistrationPolicy.invite_only(),
+    }[registration_mode]
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    config_kwargs: dict[str, object] = {
+        "accounts": accounts,
+        "secrets": _local_auth_secrets(refresh=mode != "session"),
+        "registration": registration,
+        "route_prefix": "/identity",
+    }
+    security_config_kwargs: dict[str, object] = {}
+    if mode in {"session", "hybrid"}:
+        config_kwargs.update(
+            csrf=CSRFConfig(secret=token_hex()), binding=SessionBindingConfig(pepper=b"b" * 32, max_age=600)
+        )
+        security_config_kwargs["session_backend"] = _native_session_backend("client")[0]
+    if mode in {"tokens", "hybrid"}:
+        config_kwargs.update(
+            key_ring=LocalKeyRing(
+                issuer="https://local.example",
+                active_signing_key=SigningKey(key_id="active", algorithm="EdDSA", private_key=private_key),
+            ),
+            token_audience="local-client",  # noqa: S106 - public JWT audience
+        )
+    local_auth = getattr(LocalAuth, mode)(**config_kwargs)
+    app = Litestar(
+        route_handlers=[],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, **cast("Any", security_config_kwargs)))],
+    )
+
+    observed = {
+        (method, route_value.path)
+        for route_value in app.routes
+        if isinstance(route_value, HTTPRoute) and route_value.path.startswith("/identity")
+        for method in route_value.route_handler_map
+        if method != "OPTIONS"
+    }
+    expected = {
+        ("POST", "/identity/password/recovery"),
+        ("POST", "/identity/password/reset"),
+        ("POST", "/identity/verification"),
+        ("POST", "/identity/verification/confirm"),
+    }
+    if mode in {"session", "hybrid"}:
+        expected.update({
+            ("POST", "/identity/login"),
+            ("POST", "/identity/logout"),
+            ("GET", "/identity/sessions"),
+            ("DELETE", "/identity/sessions/{session_id:str}"),
+            ("POST", "/identity/password/change"),
+        })
+    if mode in {"tokens", "hybrid"}:
+        expected.update({
+            ("POST", "/identity/token"),
+            ("POST", "/identity/token/refresh"),
+            ("POST", "/identity/token/revoke"),
+            ("POST", "/identity/token/password/change" if mode == "hybrid" else "/identity/password/change"),
+        })
+    if registration_mode != "disabled":
+        expected.add(("POST", "/identity/register"))
+
+    assert observed == expected
+    assert local_auth.build_route_handlers() is local_auth.build_route_handlers()
+    assert not any(word in path for _method, path in observed for word in ("admin", "force", "disable", "other-user"))
+    recovery_operation = app.openapi_schema.paths["/identity/password/recovery"].post
+    assert recovery_operation is not None
+    assert recovery_operation.responses["202"].headers is not None
+    assert set(recovery_operation.responses["202"].headers) == {"cache-control", "Pragma"}
+    schemas = app.openapi_schema.components.schemas if app.openapi_schema.components is not None else None
+    assert schemas is not None
+    if registration_mode == "public":
+        assert "invitation_token" not in schemas["LocalRegistrationRequest"].properties
+    elif registration_mode == "invite":
+        invitation_schema = schemas["LocalInvitationRegistrationRequest"]
+        assert invitation_schema.required is not None
+        assert "invitation_token" in invitation_schema.required
+    if mode in {"tokens", "hybrid"}:
+        token_operation = app.openapi_schema.paths["/identity/token"].post
+        revoke_operation = app.openapi_schema.paths["/identity/token/revoke"].post
+        assert token_operation.security == [{}]
+        assert set(token_operation.responses) == {"200", "400", "503"}
+        assert revoke_operation.security == [{"bearer": []}]
+        assert set(revoke_operation.responses) == {"200", "400", "401", "503"}
+    if mode in {"session", "hybrid"}:
+        login_operation = app.openapi_schema.paths["/identity/login"].post
+        logout_operation = app.openapi_schema.paths["/identity/logout"].post
+        assert login_operation.security == [{}]
+        assert set(login_operation.responses) == {"200", "400", "503"}
+        assert logout_operation.security == [{"LocalSession": []}]
+        assert set(logout_operation.responses) == {"200", "401", "503"}
+
+    plugin = cast("SecurityPlugin[object]", app.plugins.init[0])
+    app_config = AppConfig()
+    plugin._configure_local_auth_routes(app_config)  # noqa: SLF001
+    plugin._configure_local_auth_routes(app_config)  # noqa: SLF001
+    assert app_config.route_handlers == [local_auth.build_route_handlers()[0]]
+    provider = cast("Provide", local_auth.build_route_handlers()[0].dependencies["local_auth_services"])
+    assert provider.dependency() is local_auth.services
+
+
+def test_custom_local_controllers_keep_services_without_generated_routes(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth = LocalAuth.tokens(
+        accounts=cast("Any", _local_session_accounts()),
+        secrets=_local_auth_secrets(refresh=True),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-client",  # noqa: S106 - public JWT audience
+        register_routes=False,
+    )
+    app = Litestar(
+        route_handlers=[],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))],
+    )
+
+    assert local_auth.build_route_handlers() == ()
+    assert local_auth.services.password_login is local_auth.password_login
+    assert not any(path.startswith("/auth") for path in app.openapi_schema.paths)
 
 
 def test_openapi_component_contribution_preserves_callers_and_validates_duplicates() -> None:
@@ -1759,11 +1920,20 @@ def test_local_token_profile_registers_one_composite_bearer_and_native_openapi(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
     capabilities = _local_session_accounts()
-    for name in ("create_family", "prepare_rotation", "revoke_family", "revoke_for_account", "revoke_token", "rotate"):
+    for name in (
+        "create_family",
+        "prepare_rotation",
+        "revoke_family",
+        "revoke_for_account",
+        "revoke_token",
+        "revoke_token_for_account",
+        "rotate",
+    ):
         setattr(capabilities, name, lambda *_args, **_kwargs: None)
     private_key, _public_key = jwt_key_material["EdDSA"]
     local_auth = LocalAuth.tokens(
         accounts=cast("Any", capabilities),
+        secrets=_local_auth_secrets(refresh=True),
         key_ring=LocalKeyRing(
             issuer="https://local.example",
             active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
@@ -1802,12 +1972,21 @@ def test_local_token_profile_extends_one_existing_composite_bearer_owner(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
     capabilities = _local_session_accounts()
-    for name in ("create_family", "prepare_rotation", "revoke_family", "revoke_for_account", "revoke_token", "rotate"):
+    for name in (
+        "create_family",
+        "prepare_rotation",
+        "revoke_family",
+        "revoke_for_account",
+        "revoke_token",
+        "revoke_token_for_account",
+        "rotate",
+    ):
         setattr(capabilities, name, lambda *_args, **_kwargs: None)
     local_private_key, _local_public_key = jwt_key_material["EdDSA"]
     _external_private_key, external_public_key = jwt_key_material["RS256"]
     local_auth = LocalAuth.tokens(
         accounts=cast("Any", capabilities),
+        secrets=_local_auth_secrets(refresh=True),
         key_ring=LocalKeyRing(
             issuer="https://local.example",
             active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=local_private_key),
@@ -1859,17 +2038,32 @@ def test_local_token_profile_extends_one_existing_composite_bearer_owner(
 
 @pytest.mark.parametrize(
     ("owner_kind", "match"),
-    [("slot_only", "exactly one composite bearer owner"), ("standalone", "application's sole composite bearer owner")],
+    [
+        ("slot_only", "exactly one composite bearer owner"),
+        ("standalone", "application's sole composite bearer owner"),
+        ("named_composite", "mechanism to be named 'bearer'"),
+    ],
 )
 def test_local_token_profile_rejects_a_second_bearer_owner(
-    jwt_key_material: Mapping[str, tuple[bytes, bytes]], owner_kind: Literal["slot_only", "standalone"], match: str
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+    owner_kind: Literal["slot_only", "standalone", "named_composite"],
+    match: str,
 ) -> None:
     capabilities = _local_session_accounts()
-    for name in ("create_family", "prepare_rotation", "revoke_family", "revoke_for_account", "revoke_token", "rotate"):
+    for name in (
+        "create_family",
+        "prepare_rotation",
+        "revoke_family",
+        "revoke_for_account",
+        "revoke_token",
+        "revoke_token_for_account",
+        "rotate",
+    ):
         setattr(capabilities, name, lambda *_args, **_kwargs: None)
     private_key, _public_key = jwt_key_material["EdDSA"]
     local_auth = LocalAuth.tokens(
         accounts=cast("Any", capabilities),
+        secrets=_local_auth_secrets(refresh=True),
         key_ring=LocalKeyRing(
             issuer="https://local.example",
             active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
@@ -1877,16 +2071,25 @@ def test_local_token_profile_rejects_a_second_bearer_owner(
         token_audience="local-api",  # noqa: S106 - public JWT audience
     )
 
-    slots = (_CompilerSlot("authorization.bearer"),)
-    mechanisms = (
-        (
-            AuthenticationMechanism(
-                authenticator=_CompilerAuthenticator("bearer", "authorization.bearer"), resolver=_CompilerResolver()
-            ),
+    if owner_kind == "named_composite":
+        assert local_auth.bearer_slot is not None
+        assert local_auth.bearer_resolver is not None
+        physical_slot, composite = CompositeBearerConfig(
+            mechanism_name="access", slots=(local_auth.bearer_slot,)
+        ).build(local_auth.bearer_resolver, scheme_name="access")
+        slots: tuple[Any, ...] = (physical_slot,)
+        mechanisms: tuple[Any, ...] = (composite,)
+    else:
+        slots = (_CompilerSlot("authorization.bearer"),)
+        mechanisms = (
+            (
+                AuthenticationMechanism(
+                    authenticator=_CompilerAuthenticator("bearer", "authorization.bearer"), resolver=_CompilerResolver()
+                ),
+            )
+            if owner_kind == "standalone"
+            else ()
         )
-        if owner_kind == "standalone"
-        else ()
-    )
 
     with pytest.raises(ImproperlyConfiguredException, match=match):
         Litestar(

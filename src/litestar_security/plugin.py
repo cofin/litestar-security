@@ -110,7 +110,15 @@ def _layer_dependencies(layer: object) -> Mapping[str, object] | None:
 class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     """Expose the Litestar Security configuration and CLI integration points."""
 
-    __slots__ = ("_jwks_lifespan", "_middleware", "_providers", "_route_compiler", "_runtime_config", "config")
+    __slots__ = (
+        "_jwks_lifespan",
+        "_local_auth_route_handlers",
+        "_middleware",
+        "_providers",
+        "_route_compiler",
+        "_runtime_config",
+        "config",
+    )
 
     def __init__(self, config: SecurityConfig[UserT] | None = None) -> None:
         """Initialize the plugin."""
@@ -124,10 +132,12 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._runtime_config: SecurityRuntimeConfig[UserT] | None = None
         self._middleware: DefineMiddleware | None = None
         self._jwks_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
+        self._local_auth_route_handlers: tuple[Router, ...] | None = None
 
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
         """Validate ownership and install one typed security runtime."""
         self._configure_local_auth()
+        self._configure_local_auth_routes(app_config)
         self._configure_local_jwks(app_config)
         self._configure_jwks_lifespan(app_config)
         self._validate_dependency_map(app_config.dependencies, "application")
@@ -227,6 +237,11 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                     mechanisms.append(bearer_mechanism)
                 elif len(physical_slots) == len(bearer_mechanisms) == 1:
                     existing = bearer_mechanisms[0]
+                    if local_auth.register_routes and existing.authenticator.name != "bearer":
+                        message = (
+                            "Generated local token routes require the composite bearer mechanism to be named 'bearer'"
+                        )
+                        raise ImproperlyConfiguredException(detail=message)
                     try:
                         extended = extend_composite_bearer(existing, local_auth.bearer_slot, bearer_resolver)
                     except ImproperlyConfiguredException as exc:
@@ -356,6 +371,18 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 message = "Local and security external CSRF settings must be equal"
                 raise ImproperlyConfiguredException(detail=message)
             self.config.external_csrf = local_csrf
+
+    def _configure_local_auth_routes(self, app_config: AppConfig) -> None:
+        local_auth = self.config.local_auth
+        if local_auth is None or not local_auth.register_routes:
+            return
+        route_handlers = self._local_auth_route_handlers
+        if route_handlers is None:
+            route_handlers = local_auth.build_route_handlers()
+            self._local_auth_route_handlers = route_handlers
+        for route_handler in route_handlers:
+            if not any(existing is route_handler for existing in app_config.route_handlers):
+                app_config.route_handlers.append(route_handler)
 
     def _validate_local_session_backend(
         self, app_config: AppConfig, native_sessions: Sequence[tuple[int, DefineMiddleware]]

@@ -5,7 +5,7 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from binascii import Error as BinasciiError
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from hashlib import sha256
@@ -62,6 +62,7 @@ __all__ = (
     "SessionAuthentication",
     "SessionBindingConfig",
     "SessionBindingProof",
+    "SessionRebindPlan",
     "SessionRecord",
     "SessionRegistry",
     "SessionSummary",
@@ -333,6 +334,31 @@ class SessionAuthentication:
             raise ValueError(msg)
         object.__setattr__(self, "authenticated_at", authenticated_at)
         object.__setattr__(self, "expires_at", expires_at)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRebindPlan:
+    """Reveal-once browser state prepared for an atomic password-session rebind."""
+
+    prior_session_id: str
+    command: "CreateSessionCommand"
+    binding_token: str = field(repr=False)
+    authenticated_at: datetime
+
+    def __post_init__(self) -> None:
+        """Require one canonical prior identity and matching replacement material."""
+        authenticated_at = _aware_utc(self.authenticated_at)
+        if (
+            not _valid_identifier(self.prior_session_id)
+            or self.command.__class__ is not CreateSessionCommand
+            or self.command.session_id == self.prior_session_id
+            or self.binding_token.__class__ is not str
+            or self.command.binding_id != self.binding_token.partition(".")[0]
+            or self.command.created_at != authenticated_at
+        ):
+            msg = "Session rebind plan is invalid"
+            raise ValueError(msg)
+        object.__setattr__(self, "authenticated_at", authenticated_at)
 
 
 @dataclass(frozen=True, slots=True)
@@ -750,6 +776,77 @@ class NativeSessionAuth(Generic[UserT]):
             for record in records
             if record.account_id == account_id
         )
+
+    def current_authentication(self, connection: ASGIConnection[Any, Any, Any, Any]) -> SessionAuthentication | None:
+        """Return the strictly decoded current local-session projection."""
+        session = self._session_mapping(connection.scope)
+        return self._decode_authentication(session.get(_SESSION_AUTHENTICATION_KEY)) if session is not None else None
+
+    def prepare_password_rebind(
+        self,
+        connection: ASGIConnection[Any, Any, Any, Any],
+        account: "LocalAccount[UserT]",
+        *,
+        now: datetime | None = None,
+    ) -> SessionRebindPlan | VerificationUnavailable:
+        """Prepare reveal-once browser material without mutating registry or session state."""
+        session = self._writable_http_session(connection.scope)
+        current = self.current_authentication(connection)
+        if (
+            session is None
+            or current is None
+            or not self._valid_login_account(account)
+            or current.account_id != account.account_id
+        ):
+            return VerificationUnavailable()
+        try:
+            occurred_at = _aware_utc(self.clock() if now is None else now)
+            binding_token, proof = self._issue_binding()
+            command = CreateSessionCommand(
+                session_id=_encode_random(self._entropy(_SESSION_ID_BYTES)),
+                binding_id=proof.binding_id,
+                binding_digest=proof.digest,
+                account_id=account.account_id,
+                security_epoch=account.security_epoch,
+                created_at=occurred_at,
+                expires_at=occurred_at + timedelta(seconds=self.binding.max_age),
+            )
+            return SessionRebindPlan(
+                prior_session_id=current.session_id,
+                command=command,
+                binding_token=binding_token,
+                authenticated_at=occurred_at,
+            )
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+
+    async def activate_password_rebind(
+        self, connection: ASGIConnection[Any, Any, Any, Any], plan: SessionRebindPlan, security_epoch: int
+    ) -> bool:
+        """Activate only a replacement record already accepted by the atomic password mutation."""
+        session = self._writable_http_session(connection.scope)
+        if session is None or plan.__class__ is not SessionRebindPlan or not _valid_security_epoch(security_epoch):
+            self._clear_local_state(connection.scope)
+            return False
+        command = replace(plan.command, security_epoch=security_epoch)
+        try:
+            record = await self.accounts.get(command.session_id)
+        except Exception:  # noqa: BLE001
+            record = None
+        if record is None or not self._record_matches_command(record, command):
+            self._clear_local_state(connection.scope)
+            return False
+        authentication = SessionAuthentication(
+            session_id=command.session_id,
+            binding_id=command.binding_id,
+            account_id=command.account_id,
+            security_epoch=command.security_epoch,
+            authenticated_at=plan.authenticated_at,
+            expires_at=command.expires_at,
+        )
+        session[_SESSION_AUTHENTICATION_KEY] = self._encode_authentication(authentication)
+        self._queue_binding_cookie(connection.scope, plan.binding_token)
+        return True
 
     def _issue_binding(self) -> tuple[str, SessionBindingProof]:
         lookup = self._entropy(_LOOKUP_BYTES)
@@ -1535,6 +1632,12 @@ class RefreshTokenFamilyStore(Protocol):
         """Revoke the family owning one exact presented token."""
         ...  # pragma: no cover
 
+    async def revoke_token_for_account(
+        self, account_id: str, token_id: str, token_digest: bytes, *, event: "SecurityEvent"
+    ) -> bool:
+        """Revoke one exact token only when its family belongs to the caller account."""
+        ...  # pragma: no cover
+
     async def revoke_for_account(self, account_id: str, *, event: "SecurityEvent") -> int:
         """Revoke every refresh family for an account."""
         ...  # pragma: no cover
@@ -1810,6 +1913,31 @@ class RefreshTokenService(Generic[UserT]):
                 proof.digest,
                 event=self._event(
                     occurred_at, operation="local.refresh.revoke", outcome="revoked", account_id=None, family_id=None
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+        return revoked if revoked.__class__ is bool else VerificationUnavailable()
+
+    async def revoke_for_account(
+        self, account_id: str, refresh_token: str, *, now: datetime | None = None
+    ) -> bool | InvalidCredentials | VerificationUnavailable:
+        """Revoke one caller-owned refresh family without exposing cross-account state."""
+        proof = self.codec.verify(refresh_token)
+        if not _strict_context_text(account_id) or not isinstance(proof, RefreshTokenProof):
+            return InvalidCredentials()
+        try:
+            occurred_at = _aware_utc(self.clock() if now is None else now)
+            revoked = await self.store.revoke_token_for_account(
+                account_id,
+                proof.token_id,
+                proof.digest,
+                event=self._event(
+                    occurred_at,
+                    operation="local.refresh.revoke",
+                    outcome="revoked",
+                    account_id=account_id,
+                    family_id=None,
                 ),
             )
         except Exception:  # noqa: BLE001
