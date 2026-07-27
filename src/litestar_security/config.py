@@ -15,7 +15,7 @@ from litestar.middleware.session.base import BaseSessionBackend
 from litestar_security.authentication import AuthenticationMechanism, AuthenticationPolicy, CredentialSlot, required
 
 if TYPE_CHECKING:
-    from litestar_security.accounts.local import LocalAuthConfig
+    from litestar_security.accounts._profiles import LocalAuthConfig
     from litestar_security.providers.jwks import JWKSProvider
     from litestar_security.providers.jwt import LocalJWKSConfig
 
@@ -87,7 +87,7 @@ class ExternalCSRF:
         if name_value.__class__ is not str:
             message = "External CSRF integration name must be text"
             raise ImproperlyConfiguredException(detail=message)
-        name = cast("str", name_value).strip()  # type: ignore[redundant-cast]
+        name = cast("str", name_value).strip()  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
         if not name:
             message = "External CSRF integration name must not be blank"
             raise ImproperlyConfiguredException(detail=message)

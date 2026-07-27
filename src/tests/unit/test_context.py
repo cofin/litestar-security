@@ -17,8 +17,8 @@ from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedExce
 import litestar_security
 import litestar_security._openapi as openapi_module
 import litestar_security.accounts as accounts_module
-import litestar_security.accounts.local as local_accounts_module
-import litestar_security.accounts.sessions as sessions_module
+import litestar_security.accounts._purpose_tokens as purpose_tokens_module
+import litestar_security.accounts._receipts as receipts_module
 import litestar_security.authentication as authentication_module
 from litestar_security.context import (
     AuthenticationEvidence,
@@ -108,6 +108,7 @@ _PUBLIC_API = (
     "AuthenticationOutcome",
     "AuthenticationPolicy",
     "AuthenticationRegistry",
+    "AuthorizationDecision",
     "AuthorizationPredicate",
     "AuthorizationSnapshot",
     "CredentialExtraction",
@@ -248,7 +249,7 @@ def _seal_refresh_test_payload(
     ciphertext = AESGCM(key.key).encrypt(
         nonce,
         payload,
-        sessions_module._receipt_aad(context, expiry, key.key_id),  # noqa: SLF001 - exercise public unseal validation
+        receipts_module._receipt_aad(context, expiry, key.key_id),  # noqa: SLF001 - exercise public unseal validation
     )
     return (
         f"rr1.{key.key_id}.{expiry}.{_encode_refresh_test_segment(nonce)}.{_encode_refresh_test_segment(ciphertext)}"
@@ -534,11 +535,11 @@ def test_authorization_guard_construction_rejects_invalid_expressions(factory: o
         factory()  # type: ignore[operator]
 
 
-def test_authorization_guards_are_frozen_hashable_and_expose_stable_private_denial() -> None:
+def test_authorization_guards_are_frozen_hashable_and_expose_stable_denial() -> None:
     guard = guards_all_of(requires_scope("reports:read"), requires_role("admin"))
     connection = _guard_connection(authorization=AuthorizationSnapshot(scopes={"reports:read"}))
 
-    decision = guard._decide(connection)  # noqa: SLF001
+    decision = guard.decide(connection)
 
     assert (decision.granted, decision.code, decision.path) == (False, "missing_role", ("all_of", "1", "role"))
     assert hash(guard)
@@ -1339,7 +1340,7 @@ def test_refresh_receipt_sealer_rejects_invalid_expiry(expiry: object) -> None:
     ],
 )
 def test_refresh_receipt_envelope_parser_rejects_malformed_values(receipt: object) -> None:
-    assert sessions_module._parse_receipt_envelope(receipt) is None  # noqa: SLF001
+    assert receipts_module._parse_receipt_envelope(receipt) is None  # noqa: SLF001
 
 
 @pytest.mark.parametrize(
@@ -1364,7 +1365,7 @@ def test_refresh_receipt_envelope_parser_rejects_malformed_values(receipt: objec
 def test_refresh_receipt_unseal_strictly_validates_decrypted_payload(payload: bytes) -> None:
     key = accounts_module.RefreshReceiptKey("key", b"k" * 32)
     context = accounts_module.RefreshReceiptContext(**_base_refresh_receipt_context())  # type: ignore[arg-type]
-    expiry = sessions_module._receipt_expiry(_ACCOUNT_NOW + timedelta(seconds=30))  # noqa: SLF001
+    expiry = receipts_module._receipt_expiry(_ACCOUNT_NOW + timedelta(seconds=30))  # noqa: SLF001
     sealed = _seal_refresh_test_payload(payload, key=key, context=context, expiry=expiry)
     sealer = accounts_module.RefreshReceiptSealer(active_key=key)
     assert isinstance(sealer.unseal(sealed, context, now=_ACCOUNT_NOW), litestar_security.InvalidCredentials)
@@ -2107,14 +2108,14 @@ def test_purpose_token_codec_generates_strict_redacted_and_bindable_material() -
 def test_purpose_token_codec_rejects_malformed_runtime_values(token: object, monkeypatch: pytest.MonkeyPatch) -> None:
     codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
     calls = 0
-    original = local_accounts_module.hmac_digest
+    original = purpose_tokens_module.hmac_digest
 
     def tracked(key: bytes, message: bytes, digest: str) -> bytes:
         nonlocal calls
         calls += 1
         return original(key, message, digest)
 
-    monkeypatch.setattr(local_accounts_module, "hmac_digest", tracked)
+    monkeypatch.setattr(purpose_tokens_module, "hmac_digest", tracked)
 
     assert codec.proof(token, expected_purpose=accounts_module.TokenPurpose.VERIFICATION) is None
     assert calls == 1

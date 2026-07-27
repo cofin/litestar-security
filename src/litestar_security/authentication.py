@@ -52,26 +52,47 @@ __all__ = (
     "security",
 )
 
+
 CredentialT = TypeVar("CredentialT")
+
+
 ClaimsT = TypeVar("ClaimsT")
+
+
 UserT = TypeVar("UserT")
+
+
 _CredentialT = TypeVar("_CredentialT")
+
+
 _ClaimsT = TypeVar("_ClaimsT")
+
+
 _UserT = TypeVar("_UserT")
+
+
 _RequestCredentialT_contra = TypeVar("_RequestCredentialT_contra", contravariant=True)
+
+
 _ResolverClaimsT_contra = TypeVar("_ResolverClaimsT_contra", contravariant=True)
 
-_AUTHENTICATION_REQUIRED = "Authentication required"
+
 _AUTHENTICATION_UNAVAILABLE = "Authentication service unavailable"
-_RUNTIME_PLAN_OPT_KEY = "litestar_security_plan"
-_SECURITY_POLICY_OPT_KEY = "litestar_security_policy"
+
+
+RUNTIME_PLAN_OPT_KEY = "litestar_security_plan"
+
+
+SECURITY_POLICY_OPT_KEY = "litestar_security_policy"
+
+
 _SECURITY_RESPONSE_HEADERS_SCOPE_KEY = "_litestar_security_response_headers"
+
+
 _NATIVE_EXCEPTION_HANDLER = ExceptionHandlerMiddleware
 
 
-def _queue_security_response_header(  # pyright: ignore[reportUnusedFunction]
-    scope: Scope, header: tuple[bytes, bytes]
-) -> None:
+def queue_security_response_header(scope: Scope, header: tuple[bytes, bytes]) -> None:
     """Queue one encoded header for the next HTTP response start event."""
     if scope["type"] != ScopeType.HTTP:
         return
@@ -80,12 +101,65 @@ def _queue_security_response_header(  # pyright: ignore[reportUnusedFunction]
     headers.append(header)
 
 
-def _normalize_name(value: str, label: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        message = f"{label} must not be blank"
+class AuthenticationPolicy:
+    """Immutable closed request-authentication expression."""
+
+    __slots__ = ()
+
+    def __new__(cls, *_args: object, **_kwargs: object) -> Self:
+        """Require construction through the validated public factories."""
+        if cls is AuthenticationPolicy:
+            message = "Authentication policy must be created by a Litestar Security policy helper"
+            raise ImproperlyConfiguredException(detail=message)
+        return super().__new__(cls)
+
+
+@dataclass(frozen=True, slots=True)
+class PublicPolicy(AuthenticationPolicy):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class OptionalPolicy(AuthenticationPolicy):
+    policy: AuthenticationPolicy
+
+
+@dataclass(frozen=True, slots=True)
+class RouteSecurityDeclaration:
+    policy: AuthenticationPolicy
+    csrf_required: bool | None = None
+
+
+def mechanism(name: str, *scopes: str) -> "MechanismRequirement":
+    """Select a named mechanism and its requested OAuth or OIDC scopes."""
+    return MechanismRequirement(name=name, scopes=tuple(scopes))
+
+
+def public() -> AuthenticationPolicy:
+    """Deliberately skip request credential verification."""
+    return PublicPolicy()
+
+
+def required(*requirements: "str | MechanismRequirement") -> AuthenticationPolicy:
+    """Require an explicit OR expression or the implicit default participants."""
+    if requirements:
+        return any_of(*requirements)
+    return MechanismPolicy(operator="any_of", requirements=(), implicit=True)
+
+
+_AUTHENTICATION_REQUIRED = "Authentication required"
+
+
+def optional(policy: AuthenticationPolicy) -> AuthenticationPolicy:
+    """Allow anonymous access only when a positive policy sees no credential."""
+    _validate_policy(policy)
+    if isinstance(policy, OptionalPolicy):
+        message = "Authentication policy cannot contain a nested optional expression"
         raise ImproperlyConfiguredException(detail=message)
-    return normalized
+    if isinstance(policy, PublicPolicy):
+        message = "Optional authentication requires a positive authentication policy"
+        raise ImproperlyConfiguredException(detail=message)
+    return OptionalPolicy(policy=policy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,87 +180,14 @@ class MechanismRequirement:
         object.__setattr__(self, "scopes", scopes)
 
 
-_PolicyOperator = Literal["any_of", "all_of", "at_least"]
-
-
-class AuthenticationPolicy:
-    """Immutable closed request-authentication expression."""
-
-    __slots__ = ()
-
-    def __new__(cls, *_args: object, **_kwargs: object) -> Self:
-        """Require construction through the validated public factories."""
-        if cls is AuthenticationPolicy:
-            message = "Authentication policy must be created by a Litestar Security policy helper"
-            raise ImproperlyConfiguredException(detail=message)
-        return super().__new__(cls)
-
-
-@dataclass(frozen=True, slots=True)
-class _PublicPolicy(AuthenticationPolicy):
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class _MechanismPolicy(AuthenticationPolicy):
-    operator: _PolicyOperator
-    requirements: tuple[MechanismRequirement, ...]
-    count: int | None = None
-    implicit: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class _OptionalPolicy(AuthenticationPolicy):
-    policy: AuthenticationPolicy
-
-
-@dataclass(frozen=True, slots=True)
-class _RouteSecurityDeclaration:
-    policy: AuthenticationPolicy
-    csrf_required: bool | None = None
-
-
-class _SecurityMetadata(TypedDict):
-    litestar_security_policy: _RouteSecurityDeclaration
-
-
-def mechanism(name: str, *scopes: str) -> MechanismRequirement:
-    """Select a named mechanism and its requested OAuth or OIDC scopes."""
-    return MechanismRequirement(name=name, scopes=tuple(scopes))
-
-
-def public() -> AuthenticationPolicy:
-    """Deliberately skip request credential verification."""
-    return _PublicPolicy()
-
-
-def required(*requirements: str | MechanismRequirement) -> AuthenticationPolicy:
-    """Require an explicit OR expression or the implicit default participants."""
-    if requirements:
-        return any_of(*requirements)
-    return _MechanismPolicy(operator="any_of", requirements=(), implicit=True)
-
-
-def optional(policy: AuthenticationPolicy) -> AuthenticationPolicy:
-    """Allow anonymous access only when a positive policy sees no credential."""
-    _validate_policy(policy)
-    if isinstance(policy, _OptionalPolicy):
-        message = "Authentication policy cannot contain a nested optional expression"
-        raise ImproperlyConfiguredException(detail=message)
-    if isinstance(policy, _PublicPolicy):
-        message = "Optional authentication requires a positive authentication policy"
-        raise ImproperlyConfiguredException(detail=message)
-    return _OptionalPolicy(policy=policy)
-
-
 def any_of(*requirements: str | MechanismRequirement) -> AuthenticationPolicy:
     """Require at least one named authentication mechanism."""
-    return _MechanismPolicy(operator="any_of", requirements=_normalize_requirements(requirements, "any_of"))
+    return MechanismPolicy(operator="any_of", requirements=_normalize_requirements(requirements, "any_of"))
 
 
 def all_of(*requirements: str | MechanismRequirement) -> AuthenticationPolicy:
     """Require every named authentication mechanism."""
-    return _MechanismPolicy(operator="all_of", requirements=_normalize_requirements(requirements, "all_of"))
+    return MechanismPolicy(operator="all_of", requirements=_normalize_requirements(requirements, "all_of"))
 
 
 def at_least(count: int, *requirements: str | MechanismRequirement) -> AuthenticationPolicy:
@@ -195,10 +196,21 @@ def at_least(count: int, *requirements: str | MechanismRequirement) -> Authentic
     if not 1 <= count <= len(normalized):
         message = f"at_least count must be between 1 and {len(normalized)}"
         raise ImproperlyConfiguredException(detail=message)
-    return _MechanismPolicy(operator="at_least", requirements=normalized, count=count)
+    return MechanismPolicy(operator="at_least", requirements=normalized, count=count)
 
 
-def security(policy: AuthenticationPolicy, *, csrf_required: bool | None = None) -> _SecurityMetadata:
+_PolicyOperator = Literal["any_of", "all_of", "at_least"]
+
+
+@dataclass(frozen=True, slots=True)
+class MechanismPolicy(AuthenticationPolicy):
+    operator: _PolicyOperator
+    requirements: tuple[MechanismRequirement, ...]
+    count: int | None = None
+    implicit: bool = False
+
+
+def security(policy: AuthenticationPolicy, *, csrf_required: bool | None = None) -> "_SecurityMetadata":
     """Return typed Litestar metadata for one immutable security declaration.
 
     Spread the result into a route handler decorator, or pass it as ``opt`` on
@@ -207,32 +219,8 @@ def security(policy: AuthenticationPolicy, *, csrf_required: bool | None = None)
     _validate_policy(policy)
     return cast(
         "_SecurityMetadata",
-        {_SECURITY_POLICY_OPT_KEY: _RouteSecurityDeclaration(policy=policy, csrf_required=csrf_required)},
+        {SECURITY_POLICY_OPT_KEY: RouteSecurityDeclaration(policy=policy, csrf_required=csrf_required)},
     )
-
-
-def _validate_policy(policy: object) -> None:
-    if not isinstance(policy, (_PublicPolicy, _MechanismPolicy, _OptionalPolicy)):
-        message = "Authentication policy must be created by a Litestar Security policy helper"
-        raise ImproperlyConfiguredException(detail=message)
-
-
-def _normalize_requirements(
-    requirements: Sequence[str | MechanismRequirement], expression: str
-) -> tuple[MechanismRequirement, ...]:
-    if not requirements:
-        message = f"{expression} authentication policy requires at least one mechanism"
-        raise ImproperlyConfiguredException(detail=message)
-    normalized: list[MechanismRequirement] = []
-    names: set[str] = set()
-    for requirement in requirements:
-        item = mechanism(requirement) if isinstance(requirement, str) else requirement
-        if item.name in names:
-            message = f"Duplicate mechanism requirement: {item.name}"
-            raise ImproperlyConfiguredException(detail=message)
-        names.add(item.name)
-        normalized.append(item)
-    return tuple(normalized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +252,9 @@ class InvalidCredentials:
     code: str = "invalid_credentials"
 
 
+CredentialExtraction: TypeAlias = NoCredentials | PresentedCredential[CredentialT] | InvalidCredentials
+
+
 @dataclass(frozen=True, slots=True)
 class VerificationUnavailable:
     """Indicate that a verifier cannot make a trustworthy decision."""
@@ -272,8 +263,9 @@ class VerificationUnavailable:
     retry_after: int | None = None
 
 
-CredentialExtraction: TypeAlias = NoCredentials | PresentedCredential[CredentialT] | InvalidCredentials
 AuthenticationOutcome: TypeAlias = NoCredentials | Authenticated[ClaimsT] | InvalidCredentials | VerificationUnavailable
+
+
 IdentityResolution: TypeAlias = Principal[UserT] | InvalidCredentials | VerificationUnavailable
 
 
@@ -496,7 +488,7 @@ class SecurityRuntimeConfig(Generic[UserT]):
             return self.plan_lookup(scope)
         route_handler = cast("Mapping[str, object]", scope).get("route_handler")
         opt = cast("Mapping[str, object] | None", getattr(route_handler, "opt", None))
-        if isinstance(opt, Mapping) and isinstance(plan := opt.get(_RUNTIME_PLAN_OPT_KEY), SecurityRuntimePlan):
+        if isinstance(opt, Mapping) and isinstance(plan := opt.get(RUNTIME_PLAN_OPT_KEY), SecurityRuntimePlan):
             return plan
         return self._default_plan
 
@@ -560,6 +552,42 @@ class SecurityMiddlewareWrapper(Generic[UserT]):
             await send(message)
 
         await self._wrapped(scope, receive, send_with_security_headers)
+
+
+def _normalize_name(value: str, label: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        message = f"{label} must not be blank"
+        raise ImproperlyConfiguredException(detail=message)
+    return normalized
+
+
+class _SecurityMetadata(TypedDict):
+    litestar_security_policy: RouteSecurityDeclaration
+
+
+def _validate_policy(policy: object) -> None:
+    if not isinstance(policy, (PublicPolicy, MechanismPolicy, OptionalPolicy)):
+        message = "Authentication policy must be created by a Litestar Security policy helper"
+        raise ImproperlyConfiguredException(detail=message)
+
+
+def _normalize_requirements(
+    requirements: Sequence[str | MechanismRequirement], expression: str
+) -> tuple[MechanismRequirement, ...]:
+    if not requirements:
+        message = f"{expression} authentication policy requires at least one mechanism"
+        raise ImproperlyConfiguredException(detail=message)
+    normalized: list[MechanismRequirement] = []
+    names: set[str] = set()
+    for requirement in requirements:
+        item = mechanism(requirement) if isinstance(requirement, str) else requirement
+        if item.name in names:
+            message = f"Duplicate mechanism requirement: {item.name}"
+            raise ImproperlyConfiguredException(detail=message)
+        names.add(item.name)
+        normalized.append(item)
+    return tuple(normalized)
 
 
 @dataclass(frozen=True, slots=True)

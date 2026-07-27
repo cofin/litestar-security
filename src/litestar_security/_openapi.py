@@ -20,16 +20,16 @@ from litestar.router import Router
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 
 from litestar_security.authentication import (
-    _RUNTIME_PLAN_OPT_KEY,  # pyright: ignore[reportPrivateUsage]
-    _SECURITY_POLICY_OPT_KEY,  # pyright: ignore[reportPrivateUsage]
+    RUNTIME_PLAN_OPT_KEY,
+    SECURITY_POLICY_OPT_KEY,
     AuthenticationPolicy,
     AuthenticationRegistry,
+    MechanismPolicy,
     MechanismRequirement,
+    OptionalPolicy,
+    PublicPolicy,
+    RouteSecurityDeclaration,
     SecurityRuntimePlan,
-    _MechanismPolicy,  # pyright: ignore[reportPrivateUsage]
-    _OptionalPolicy,  # pyright: ignore[reportPrivateUsage]
-    _PublicPolicy,  # pyright: ignore[reportPrivateUsage]
-    _RouteSecurityDeclaration,  # pyright: ignore[reportPrivateUsage]
     mechanism,
     public,
 )
@@ -43,8 +43,8 @@ _CSRF_COVERAGE_OPT_KEY = "litestar_security_csrf"
 _RESERVED_OPT_KEYS = frozenset({
     _CSRF_COVERAGE_OPT_KEY,
     _OPENAPI_SECURITY_OPT_KEY,
-    _RUNTIME_PLAN_OPT_KEY,
-    _SECURITY_POLICY_OPT_KEY,
+    RUNTIME_PLAN_OPT_KEY,
+    SECURITY_POLICY_OPT_KEY,
 })
 _MISSING = object()
 
@@ -73,15 +73,15 @@ class PolicyCompiler(Generic[UserT]):
         return plan
 
     def _compile(self, policy: AuthenticationPolicy, *, csrf_required: bool | None) -> SecurityRuntimePlan:
-        if isinstance(policy, _PublicPolicy):
+        if isinstance(policy, PublicPolicy):
             return SecurityRuntimePlan(authenticate=False, csrf_required=csrf_required)
-        if isinstance(policy, _OptionalPolicy):
+        if isinstance(policy, OptionalPolicy):
             allow_anonymous = True
             expression = policy.policy
         else:
             allow_anonymous = False
             expression = policy
-        if not isinstance(expression, _MechanismPolicy):
+        if not isinstance(expression, MechanismPolicy):
             message = "Authentication policy must be created by a Litestar Security policy helper"
             raise ImproperlyConfiguredException(detail=message)
         requirements = self._requirements(expression)
@@ -108,7 +108,7 @@ class PolicyCompiler(Generic[UserT]):
             csrf_required=csrf_required,
         )
 
-    def _requirements(self, policy: _MechanismPolicy) -> tuple[MechanismRequirement, ...]:
+    def _requirements(self, policy: MechanismPolicy) -> tuple[MechanismRequirement, ...]:
         if policy.implicit:
             if not self.registry.default_mechanism_names:
                 message = "Implicit required authentication needs at least one default-participating mechanism"
@@ -295,7 +295,7 @@ class RouteCompiler(Generic[UserT]):
         self._validate_csrf_metadata(route, route_handler, desired_exclusion=desired_exclusion)
         enforcement = self._resolve_csrf_enforcement(route, route_handler, plan, native=native)
         compiled = replace(plan, csrf_enforcement=enforcement)
-        existing_plan = route_handler.opt.get(_RUNTIME_PLAN_OPT_KEY)
+        existing_plan = route_handler.opt.get(RUNTIME_PLAN_OPT_KEY)
         if existing_plan == compiled:
             return cast("SecurityRuntimePlan", existing_plan)
         if enforcement not in {None, "native"}:
@@ -373,23 +373,23 @@ class RouteCompiler(Generic[UserT]):
 
     def _resolved_declaration(
         self, route: BaseRoute, route_handler: BaseRouteHandler
-    ) -> _RouteSecurityDeclaration | None:
-        value = route_handler.opt.get(_SECURITY_POLICY_OPT_KEY)
+    ) -> RouteSecurityDeclaration | None:
+        value = route_handler.opt.get(SECURITY_POLICY_OPT_KEY)
         if value is None:
             return None
-        if not isinstance(value, _RouteSecurityDeclaration):
+        if not isinstance(value, RouteSecurityDeclaration):
             self._raise_route_error(route, route_handler, "Invalid Litestar Security route policy metadata")
         return value
 
     def _nearest_non_application_declaration(
         self, route: BaseRoute, route_handler: BaseRouteHandler
-    ) -> _RouteSecurityDeclaration | None:
+    ) -> RouteSecurityDeclaration | None:
         for layer in reversed(route_handler.ownership_layers[1:-1]):
             layer_opt = getattr(layer, "opt", None)
-            if not isinstance(layer_opt, Mapping) or _SECURITY_POLICY_OPT_KEY not in layer_opt:
+            if not isinstance(layer_opt, Mapping) or SECURITY_POLICY_OPT_KEY not in layer_opt:
                 continue
-            value = cast("Mapping[str, object]", layer_opt)[_SECURITY_POLICY_OPT_KEY]
-            if not isinstance(value, _RouteSecurityDeclaration):
+            value = cast("Mapping[str, object]", layer_opt)[SECURITY_POLICY_OPT_KEY]
+            if not isinstance(value, RouteSecurityDeclaration):
                 self._raise_route_error(route, route_handler, "Invalid Litestar Security route policy metadata")
             return value
         return None
@@ -447,12 +447,12 @@ class RouteCompiler(Generic[UserT]):
 
     @staticmethod
     def _attach_plan(route: BaseRoute, route_handler: BaseRouteHandler, plan: SecurityRuntimePlan) -> None:
-        existing = route_handler.opt.get(_RUNTIME_PLAN_OPT_KEY)
+        existing = route_handler.opt.get(RUNTIME_PLAN_OPT_KEY)
         if existing is not None:
             if existing != plan:
                 RouteCompiler._raise_route_error(route, route_handler, "Conflicting compiled security runtime plan")
             return
-        route_handler.opt[_RUNTIME_PLAN_OPT_KEY] = plan
+        route_handler.opt[RUNTIME_PLAN_OPT_KEY] = plan
 
     @staticmethod
     def _raise_route_error(route: BaseRoute, route_handler: BaseRouteHandler, detail: str) -> NoReturn:

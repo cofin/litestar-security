@@ -37,14 +37,25 @@ from litestar_security.context import Principal, SecurityContext
 
 __all__ = ("CurrentUser", "PrincipalDependency", "SecurityContextDependency", "SecurityPlugin")
 
+
 UserT = TypeVar("UserT")
 
+
 PrincipalDependency: TypeAlias = NamedDependency[Principal[UserT]]
+
+
 SecurityContextDependency: TypeAlias = NamedDependency[SecurityContext]
+
+
 CurrentUser: TypeAlias = NamedDependency[UserT]
 
+
 _RESERVED_DEPENDENCIES = ("principal", "security_context", "current_user")
+
+
 _SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
 _SIGNATURE_NAMESPACE: Mapping[str, object] = {
     "CurrentUser": CurrentUser,
     "Principal": Principal,
@@ -52,59 +63,6 @@ _SIGNATURE_NAMESPACE: Mapping[str, object] = {
     "SecurityContext": SecurityContext,
     "SecurityContextDependency": SecurityContextDependency,
 }
-
-
-def _provide_principal(scope: Scope) -> Principal[Any]:
-    return cast("Principal[Any]", scope["user"])
-
-
-def _provide_security_context(scope: Scope) -> SecurityContext:
-    return cast("SecurityContext", scope["auth"])
-
-
-def _provide_current_user(scope: Scope) -> object:
-    return cast("Principal[object]", scope["user"]).require_user()
-
-
-def _owner_name(layer: object) -> str:
-    if isinstance(layer, Router):
-        return "router"
-    if isinstance(layer, Controller) or (isinstance(layer, type) and issubclass(layer, Controller)):
-        return "controller"
-    return "handler"
-
-
-def _validate_local_auth(value: object) -> None:
-    from litestar_security.accounts.local import LocalAuthConfig  # noqa: PLC0415
-
-    if not isinstance(value, LocalAuthConfig):
-        message = "Security local authentication must be a LocalAuthConfig"
-        raise ImproperlyConfiguredException(detail=message)
-
-
-def _iter_route_handler_layers(route_handler: object) -> Iterator[object]:
-    if isinstance(route_handler, Router):
-        for route in route_handler.routes:
-            candidates = (
-                *cast("tuple[BaseRouteHandler, ...]", getattr(route, "route_handlers", ())),
-                getattr(route, "route_handler", None),
-            )
-            for handler in candidates:
-                if isinstance(handler, BaseRouteHandler):
-                    yield from handler.ownership_layers
-    elif isinstance(route_handler, type) and issubclass(route_handler, Controller):
-        yield route_handler
-        for name in dir(route_handler):
-            value = getattr(route_handler, name)
-            if isinstance(value, BaseRouteHandler):
-                yield value
-    elif isinstance(route_handler, BaseRouteHandler):
-        yield route_handler
-
-
-def _layer_dependencies(layer: object) -> Mapping[str, object] | None:
-    dependencies = getattr(layer, "dependencies", None)
-    return cast("Mapping[str, object]", dependencies) if isinstance(dependencies, Mapping) else None
 
 
 class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
@@ -206,7 +164,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
 
     def on_cli_init(self, cli: ClickGroup) -> None:
         """Attach the security command group to the Litestar CLI."""
-        from litestar_security._cli import register  # noqa: PLC0415
+        from litestar_security._cli import register  # noqa: PLC0415 - the CLI registrar loads only when the CLI runs
 
         register(cli)
 
@@ -216,7 +174,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             mechanisms = list(self.config.mechanisms)
             local_auth = self.config.local_auth
             if local_auth is not None and local_auth.bearer_slot is not None:
-                from litestar_security.providers.jwt import (  # noqa: PLC0415
+                from litestar_security.providers.jwt import (  # noqa: PLC0415 - deferred to break an import cycle
                     CompositeBearerConfig,
                     extend_composite_bearer,
                 )
@@ -321,7 +279,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
 
     @staticmethod
     def _validate_csrf_config(config: object) -> None:
-        from litestar.config.csrf import CSRFConfig  # noqa: PLC0415
+        from litestar.config.csrf import CSRFConfig  # noqa: PLC0415 - read only when a policy asks
 
         if not isinstance(config, CSRFConfig):
             message = "Native CSRF configuration must be a Litestar CSRFConfig"
@@ -350,9 +308,9 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if local_auth is None:
             return
         _validate_local_auth(local_auth)
-        from litestar.config.csrf import CSRFConfig  # noqa: PLC0415
+        from litestar.config.csrf import CSRFConfig  # noqa: PLC0415 - read only when a policy asks
 
-        from litestar_security.config import ExternalCSRF  # noqa: PLC0415
+        from litestar_security.config import ExternalCSRF  # noqa: PLC0415 - read only when a policy asks
 
         local_csrf = local_auth.csrf
         if isinstance(local_csrf, CSRFConfig):
@@ -413,7 +371,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             message = "Native session, CSRF, and binding cookie names must be distinct"
             raise ImproperlyConfiguredException(detail=message)
         backend_max_age = getattr(backend_config, "max_age", None)
-        if backend_max_age.__class__ is not int or binding.max_age > cast(  # type: ignore[redundant-cast]
+        if backend_max_age.__class__ is not int or binding.max_age > cast(  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
             "int", backend_max_age
         ):
             message = "Session binding lifetime cannot exceed the native session lifetime"
@@ -432,14 +390,14 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     def _configure_local_jwks(self, app_config: AppConfig) -> None:
         if self.config.local_jwks is None:
             return
-        from litestar_security.providers.jwt import build_local_jwks_handler  # noqa: PLC0415
+        from litestar_security.providers.jwt import build_local_jwks_handler  # noqa: PLC0415 - breaks an import cycle
 
         app_config.route_handlers.append(build_local_jwks_handler(self.config.local_jwks))
 
     def _configure_jwks_lifespan(self, app_config: AppConfig) -> None:
         if not self.config.jwks_providers:
             return
-        from litestar_security.providers.jwks import JWKSProvider  # noqa: PLC0415
+        from litestar_security.providers.jwks import JWKSProvider  # noqa: PLC0415 - deferred to break an import cycle
 
         provider_values = cast("tuple[object, ...]", self.config.jwks_providers)
         if not all(isinstance(provider, JWKSProvider) for provider in provider_values):
@@ -470,7 +428,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             self._jwks_lifespan = jwks_lifespan
         lifespan_handlers = cast(
             "list[object]",
-            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType]
+            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType] - third-party callable is untyped at this boundary
         )
         if self._jwks_lifespan not in lifespan_handlers:
             lifespan_handlers.append(self._jwks_lifespan)
@@ -489,3 +447,56 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                     continue
                 seen.add(id(layer))
                 yield (_layer_dependencies(layer), _owner_name(layer))
+
+
+def _provide_principal(scope: Scope) -> Principal[Any]:
+    return cast("Principal[Any]", scope["user"])
+
+
+def _provide_security_context(scope: Scope) -> SecurityContext:
+    return cast("SecurityContext", scope["auth"])
+
+
+def _provide_current_user(scope: Scope) -> object:
+    return cast("Principal[object]", scope["user"]).require_user()
+
+
+def _owner_name(layer: object) -> str:
+    if isinstance(layer, Router):
+        return "router"
+    if isinstance(layer, Controller) or (isinstance(layer, type) and issubclass(layer, Controller)):
+        return "controller"
+    return "handler"
+
+
+def _validate_local_auth(value: object) -> None:
+    from litestar_security.accounts._profiles import LocalAuthConfig  # noqa: PLC0415 - breaks an import cycle
+
+    if not isinstance(value, LocalAuthConfig):
+        message = "Security local authentication must be a LocalAuthConfig"
+        raise ImproperlyConfiguredException(detail=message)
+
+
+def _iter_route_handler_layers(route_handler: object) -> Iterator[object]:
+    if isinstance(route_handler, Router):
+        for route in route_handler.routes:
+            candidates = (
+                *cast("tuple[BaseRouteHandler, ...]", getattr(route, "route_handlers", ())),
+                getattr(route, "route_handler", None),
+            )
+            for handler in candidates:
+                if isinstance(handler, BaseRouteHandler):
+                    yield from handler.ownership_layers
+    elif isinstance(route_handler, type) and issubclass(route_handler, Controller):
+        yield route_handler
+        for name in dir(route_handler):
+            value = getattr(route_handler, name)
+            if isinstance(value, BaseRouteHandler):
+                yield value
+    elif isinstance(route_handler, BaseRouteHandler):
+        yield route_handler
+
+
+def _layer_dependencies(layer: object) -> Mapping[str, object] | None:
+    dependencies = getattr(layer, "dependencies", None)
+    return cast("Mapping[str, object]", dependencies) if isinstance(dependencies, Mapping) else None

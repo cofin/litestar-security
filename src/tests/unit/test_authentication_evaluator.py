@@ -20,13 +20,13 @@ from litestar_security.authentication import (
     SecurityMiddlewareWrapper,
     SecurityRuntimeConfig,
     VerificationUnavailable,
-    _queue_security_response_header,
     all_of,
     any_of,
     at_least,
     mechanism,
     optional,
     public,
+    queue_security_response_header,
     required,
 )
 from litestar_security.context import (
@@ -123,8 +123,8 @@ async def test_security_wrapper_appends_queued_headers_to_every_http_response(st
     second_cookie = (b"set-cookie", b"binding=second; Path=/; HttpOnly")
 
     async def app(scope: Scope, _receive: Receive, send: Send) -> None:
-        _queue_security_response_header(scope, first_cookie)
-        _queue_security_response_header(scope, second_cookie)
+        queue_security_response_header(scope, first_cookie)
+        queue_security_response_header(scope, second_cookie)
         await send({"type": "http.response.start", "status": status, "headers": [existing]})
         await send({"type": "http.response.body", "body": b""})
 
@@ -144,7 +144,7 @@ async def test_security_response_headers_are_not_queued_or_injected_for_websocke
     existing = (b"x-existing", b"value")
 
     async def app(scope: Scope, _receive: Receive, send: Send) -> None:
-        _queue_security_response_header(scope, (b"set-cookie", b"binding=secret"))
+        queue_security_response_header(scope, (b"set-cookie", b"binding=secret"))
         await send({"type": "websocket.accept", "subprotocol": None, "headers": [existing]})
 
     async def capture(message: Message) -> None:

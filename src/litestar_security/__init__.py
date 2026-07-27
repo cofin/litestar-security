@@ -40,6 +40,7 @@ from litestar_security.context import (
     SessionUnavailableError,
 )
 from litestar_security.guards import (
+    AuthorizationDecision,
     AuthorizationPredicate,
     requires_authenticated,
     requires_capability,
@@ -61,6 +62,7 @@ __all__ = (
     "AuthenticationOutcome",
     "AuthenticationPolicy",
     "AuthenticationRegistry",
+    "AuthorizationDecision",
     "AuthorizationPredicate",
     "AuthorizationSnapshot",
     "CredentialExtraction",

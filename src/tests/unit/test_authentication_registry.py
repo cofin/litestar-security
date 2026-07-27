@@ -32,8 +32,8 @@ from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedExce
 from litestar.openapi.spec import SecurityScheme
 
 import litestar_security.accounts as accounts_module
-import litestar_security.accounts.local as local_accounts_module
-import litestar_security.accounts.sessions as sessions_module
+import litestar_security.accounts._controllers as controllers_module
+import litestar_security.accounts._sessions as sessions_module
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -62,9 +62,6 @@ from litestar_security.context import (
     Principal,
     SecurityContext,
 )
-from litestar_security.providers import jwks as jwks_provider
-from litestar_security.providers import jwt as jwt_provider
-from litestar_security.providers import oidc as oidc_provider
 from litestar_security.providers.jwks import (
     AsyncJWKSFetcher,
     CachedJWKSProvider,
@@ -78,6 +75,7 @@ from litestar_security.providers.jwks import (
     WorkerLimits,
     normalize_fetcher,
 )
+from litestar_security.providers.jwks import _documents as jwks_documents
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
     BearerTokenSlot,
@@ -99,7 +97,11 @@ from litestar_security.providers.jwt import (
     normalize_verifier,
     parse_unverified_jwt_route,
 )
+from litestar_security.providers.jwt import _keyring as jwt_keyring
+from litestar_security.providers.jwt import _workers as jwt_workers
 from litestar_security.providers.oidc import DiscoveryPolicy, OIDCDiscoveryClient, OIDCDiscoveryError, OIDCMetadata
+from litestar_security.providers.oidc import _discovery as oidc_discovery
+from litestar_security.providers.oidc import _urls as oidc_urls
 
 _JWT_NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
 _NAIVE_JWT_NOW = datetime(2026, 7, 26)  # noqa: DTZ001 - explicit rejection fixture
@@ -403,7 +405,7 @@ def test_crypto_worker_configuration_rejects_invalid_values(
             "timeout must be finite and positive",
         ),
         (
-            lambda: jwt_provider._LocalJWTSigner(  # noqa: SLF001
+            lambda: jwt_keyring._LocalJWTSigner(  # noqa: SLF001
                 issuer=_JWT_ISSUER, signing_key=signing_key, worker_timeout=inf
             ),
             "timeout must be finite and positive",
@@ -862,6 +864,9 @@ def _jwks_performance_baseline() -> dict[str, Any]:
     return cast("dict[str, Any]", json.loads(baseline_path.read_text(encoding="utf-8")))
 
 
+_PERFORMANCE_TRIALS = 3
+
+
 def _p95(values: list[float]) -> float:
     return sorted(values)[max(0, (len(values) * 95 + 99) // 100 - 1)]
 
@@ -989,27 +994,34 @@ async def test_jwks_performance_fresh_hit_p95_is_relative_to_direct_verification
         verify(selected.key)
         await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
 
-    direct_samples: list[float] = []
-    fresh_samples: list[float] = []
     direct = {("key-1", "EdDSA"): selected}
-    for index in range(300):
-        if index % 2:
-            started = perf_counter_ns()
-            fresh = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
-            assert isinstance(fresh, VerificationKey)
-            verify(fresh.key)
-            fresh_samples.append(float(perf_counter_ns() - started))
-        started = perf_counter_ns()
-        verify(direct[("key-1", "EdDSA")].key)
-        direct_samples.append(float(perf_counter_ns() - started))
-        if not index % 2:
-            started = perf_counter_ns()
-            fresh = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
-            assert isinstance(fresh, VerificationKey)
-            verify(fresh.key)
-            fresh_samples.append(float(perf_counter_ns() - started))
 
-    ratio = _p95(fresh_samples) / _p95(direct_samples)
+    async def measure_ratio() -> float:
+        direct_samples: list[float] = []
+        fresh_samples: list[float] = []
+        for index in range(300):
+            if index % 2:
+                started = perf_counter_ns()
+                fresh = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
+                assert isinstance(fresh, VerificationKey)
+                verify(fresh.key)
+                fresh_samples.append(float(perf_counter_ns() - started))
+            started = perf_counter_ns()
+            verify(direct[("key-1", "EdDSA")].key)
+            direct_samples.append(float(perf_counter_ns() - started))
+            if not index % 2:
+                started = perf_counter_ns()
+                fresh = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
+                assert isinstance(fresh, VerificationKey)
+                verify(fresh.key)
+                fresh_samples.append(float(perf_counter_ns() - started))
+        return _p95(fresh_samples) / _p95(direct_samples)
+
+    # One trial's p95 is tail-sensitive: unrelated CPU contention can inflate the fresh
+    # samples alone and cross the budget without any regression. The median of independent
+    # trials keeps the budget honest while requiring most trials to regress before failing.
+    ratios = sorted([await measure_ratio() for _ in range(_PERFORMANCE_TRIALS)])
+    ratio = ratios[len(ratios) // 2]
     maximum = _jwks_performance_baseline()["budgets"]["fresh_hit_p95_ratio"]["maximum"]
 
     assert ratio <= maximum
@@ -2176,7 +2188,7 @@ async def test_local_signer_runs_crypto_in_a_worker_and_supports_custom_signers(
             del value, attributes
             observations.append(name)
 
-    monkeypatch.setattr(jwt_provider.to_thread, "run_sync", run_sync)
+    monkeypatch.setattr(jwt_workers.to_thread, "run_sync", run_sync)
     ring = LocalKeyRing(
         issuer=_JWT_ISSUER,
         active_signing_key=SigningKey(key_id="active", algorithm="EdDSA", private_key=jwt_key_material["EdDSA"][0]),
@@ -2229,7 +2241,7 @@ async def test_local_signer_runs_crypto_in_a_worker_and_supports_custom_signers(
         message = "private failure detail"
         raise OSError(message)
 
-    monkeypatch.setattr(jwt_provider.to_thread, "run_sync", unavailable)
+    monkeypatch.setattr(jwt_workers.to_thread, "run_sync", unavailable)
     with pytest.raises(RuntimeError, match="Token signing unavailable") as exc_info:
         await ring.build_signer().sign(claims, now=_JWT_NOW)
     assert "private failure detail" not in str(exc_info.value)
@@ -3141,7 +3153,7 @@ async def test_oidc_discovery_default_resolver_deduplicates_getaddrinfo_answers(
         address = (_OIDC_PUBLIC_IP, port)
         return [(object(), object(), object(), "", address), (object(), object(), object(), "", address)]
 
-    monkeypatch.setattr(oidc_provider, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(oidc_urls, "getaddrinfo", fake_getaddrinfo)
     transport = _RecordingMockTransport(lambda _request: _oidc_response())
     client = OIDCDiscoveryClient(
         policy=DiscoveryPolicy(allowed_issuers=frozenset({_OIDC_ISSUER})),
@@ -3152,7 +3164,7 @@ async def test_oidc_discovery_default_resolver_deduplicates_getaddrinfo_answers(
     metadata = await _discover_and_close(client)
 
     assert metadata.issuer == _OIDC_ISSUER
-    assert calls == [("issuer.example", 443, oidc_provider.socket.SOCK_STREAM)]
+    assert calls == [("issuer.example", 443, oidc_urls.socket.SOCK_STREAM)]
 
 
 @pytest.mark.anyio
@@ -3298,7 +3310,7 @@ async def test_oidc_discovery_checks_streaming_capacity_before_extending(monkeyp
                 raise AssertionError(message)
             super().extend(chunk)
 
-    monkeypatch.setattr(oidc_provider, "bytearray", _CapacityCheckedBytearray, raising=False)
+    monkeypatch.setattr(oidc_discovery, "bytearray", _CapacityCheckedBytearray, raising=False)
     policy = DiscoveryPolicy(allowed_issuers=frozenset({_OIDC_ISSUER}), maximum_document_bytes=64)
     response = httpx.Response(
         200, headers={"content-type": "application/json"}, stream=_ChunkedOIDCStream(b"x" * 40, b"x" * 40)
@@ -4304,7 +4316,7 @@ async def test_jwks_rejects_unsupported_prepared_key_type(
             del algorithm
             return SimpleNamespace(key=object())
 
-    monkeypatch.setattr(jwks_provider, "PyJWK", _UnsupportedPyJWK)
+    monkeypatch.setattr(jwks_documents, "PyJWK", _UnsupportedPyJWK)
     fetcher = _RecordingJWKSFetcher(_jwks_response(_verification_jwk(jwt_key_material)))
     provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
 
@@ -4672,7 +4684,7 @@ def test_argon2_hasher_maps_engine_configuration_failure(monkeypatch: pytest.Mon
     def unavailable(**_kwargs: object) -> object:
         raise TypeError
 
-    monkeypatch.setattr("litestar_security.accounts.local._Argon2Engine", unavailable)
+    monkeypatch.setattr("litestar_security.accounts._passwords._Argon2Engine", unavailable)
 
     with pytest.raises(ImproperlyConfiguredException, match="Invalid Argon2"):
         accounts_module.Argon2PasswordHasher()
@@ -7209,7 +7221,7 @@ def test_local_access_token_issuer_rejects_invalid_configuration(kwargs: dict[st
     ],
 )
 @pytest.mark.anyio
-async def test_local_access_token_issuer_maps_invalid_and_unavailable_composition(  # noqa: PLR0913,PLR0917
+async def test_local_access_token_issuer_maps_invalid_and_unavailable_composition(  # noqa: PLR0913
     account: accounts_module.LocalAccount[object],
     signer: _AccessSigner,
     clock: Callable[[], datetime],
@@ -8479,42 +8491,42 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
     )
     request = cast("Any", SimpleNamespace())
 
-    session_login = cast("Any", local_accounts_module._LocalSessionController.login.fn)  # noqa: SLF001
+    session_login = cast("Any", controllers_module._LocalSessionController.login.fn)  # noqa: SLF001
     assert (await session_login(None, credentials, request, services)).status_code == 200
     assert (await session_login(None, credentials, request, services)).status_code == 400
-    session_logout = cast("Any", local_accounts_module._LocalSessionController.logout.fn)  # noqa: SLF001
+    session_logout = cast("Any", controllers_module._LocalSessionController.logout.fn)  # noqa: SLF001
     assert (await session_logout(None, request, services)).status_code == 200
     assert (await session_logout(None, request, services)).status_code == 503
     services.session_auth = None
     assert (await session_logout(None, request, services)).status_code == 503
     services.session_auth = session_routes
-    list_sessions = cast("Any", local_accounts_module._LocalSessionController.list_sessions.fn)  # noqa: SLF001
+    list_sessions = cast("Any", controllers_module._LocalSessionController.list_sessions.fn)  # noqa: SLF001
     assert (await list_sessions(None, request, principal, services)).status_code == 200
     assert (await list_sessions(None, request, principal, services)).status_code == 503
     assert (await list_sessions(None, request, anonymous, services)).status_code == 401
-    revoke_session = cast("Any", local_accounts_module._LocalSessionController.revoke_session.fn)  # noqa: SLF001
+    revoke_session = cast("Any", controllers_module._LocalSessionController.revoke_session.fn)  # noqa: SLF001
     assert (await revoke_session(None, "session", request, principal, services)).status_code == 200
     assert (await revoke_session(None, "session", request, principal, services)).status_code == 503
     services.session_auth = None
     assert (await revoke_session(None, "session", request, principal, services)).status_code == 401
     services.session_auth = session_routes
 
-    token_login = cast("Any", local_accounts_module._LocalTokenController.login.fn)  # noqa: SLF001
+    token_login = cast("Any", controllers_module._LocalTokenController.login.fn)  # noqa: SLF001
     assert (await token_login(None, credentials, services)).status_code == 200
     assert (await token_login(None, credentials, services)).status_code == 400
-    refresh = cast("Any", local_accounts_module._LocalTokenController.refresh.fn)  # noqa: SLF001
+    refresh = cast("Any", controllers_module._LocalTokenController.refresh.fn)  # noqa: SLF001
     assert (await refresh(None, token_request, services, "AAAAAAAAAAAAAAAAAAAAAA")).status_code == 200
     assert (await refresh(None, token_request, services, None)).status_code == 400
     refresh_tokens = services.refresh_tokens
     services.refresh_tokens = None
     assert (await refresh(None, token_request, services, None)).status_code == 503
     services.refresh_tokens = refresh_tokens
-    revoke = cast("Any", local_accounts_module._LocalTokenController.revoke.fn)  # noqa: SLF001
+    revoke = cast("Any", controllers_module._LocalTokenController.revoke.fn)  # noqa: SLF001
     assert (await revoke(None, token_request, principal, services)).status_code == 200
     assert (await revoke(None, token_request, principal, services)).status_code == 503
     assert (await revoke(None, token_request, anonymous, services)).status_code == 401
 
-    lifecycle = local_accounts_module._LocalLifecycleController  # noqa: SLF001
+    lifecycle = controllers_module._LocalLifecycleController  # noqa: SLF001
     identifier = accounts_module.LocalIdentifierRequest(identifier="user@example.com")
     assert (await cast("Any", lifecycle.recovery.fn)(None, identifier, services)).status_code == 202
     reset = cast("Any", lifecycle.reset.fn)
@@ -8529,7 +8541,7 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
     assert (await confirm(None, token_request, services)).status_code == 200
     assert (await confirm(None, token_request, services)).status_code == 400
 
-    register = cast("Any", local_accounts_module._LocalRegistrationController.register.fn)  # noqa: SLF001
+    register = cast("Any", controllers_module._LocalRegistrationController.register.fn)  # noqa: SLF001
     registration = accounts_module.LocalRegistrationRequest(
         identifier="user@example.com",
         password="password",  # noqa: S106 - request DTO fixture
@@ -8543,7 +8555,7 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
     )
     invite_register = cast(
         "Any",
-        local_accounts_module._LocalInvitationRegistrationController.register.fn,  # noqa: SLF001
+        controllers_module._LocalInvitationRegistrationController.register.fn,  # noqa: SLF001
     )
     invitation = accounts_module.LocalInvitationRegistrationRequest(
         identifier="user@example.com",
@@ -8555,23 +8567,23 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
     services.registration = None
     assert (await invite_register(None, invitation, services)).status_code == 400
 
-    session_change = cast("Any", local_accounts_module._LocalSessionPasswordController.change.fn)  # noqa: SLF001
+    session_change = cast("Any", controllers_module._LocalSessionPasswordController.change.fn)  # noqa: SLF001
     assert (await session_change(None, password_request, request, principal, services)).status_code == 200
     assert (await session_change(None, password_request, request, principal, services)).status_code == 400
     assert (await session_change(None, password_request, request, anonymous, services)).status_code == 401
-    token_change = cast("Any", local_accounts_module._LocalTokenPasswordController.change.fn)  # noqa: SLF001
+    token_change = cast("Any", controllers_module._LocalTokenPasswordController.change.fn)  # noqa: SLF001
     assert (await token_change(None, password_request, principal, services)).status_code == 200
     assert (await token_change(None, password_request, anonymous, services)).status_code == 401
-    token_only_change = cast("Any", local_accounts_module._LocalTokenOnlyPasswordController.change.fn)  # noqa: SLF001
+    token_only_change = cast("Any", controllers_module._LocalTokenOnlyPasswordController.change.fn)  # noqa: SLF001
     assert (await token_only_change(None, password_request, principal, services)).status_code == 400
     assert (await token_only_change(None, password_request, anonymous, services)).status_code == 401
 
     bearer_context = SecurityContext(
         session=NullSessionHandle(), evidence=(AuthenticationEvidence("bearer", "local", _JWT_NOW),)
     )
-    local_accounts_module.requires_local_bearer(cast("Any", SimpleNamespace(auth=bearer_context)), cast("Any", None))
+    controllers_module.requires_local_bearer(cast("Any", SimpleNamespace(auth=bearer_context)), cast("Any", None))
     with pytest.raises(NotAuthorizedException, match="Authentication required"):
-        local_accounts_module.requires_local_bearer(
+        controllers_module.requires_local_bearer(
             cast("Any", SimpleNamespace(auth=SecurityContext(session=NullSessionHandle()))), cast("Any", None)
         )
 
