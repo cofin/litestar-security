@@ -18,13 +18,17 @@ from typing import Any, cast
 import httpx
 import jwt
 import pytest
-from anyio import CancelScope, CapacityLimiter, Event, create_task_group, fail_after, get_cancelled_exc_class
+from anyio import CancelScope, CapacityLimiter, Event, create_task_group, fail_after, get_cancelled_exc_class, to_thread
 from anyio.lowlevel import checkpoint
+from argon2 import PasswordHasher as Argon2Engine
+from argon2 import extract_parameters as extract_argon2_parameters
+from argon2.exceptions import VerificationError
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.openapi.spec import SecurityScheme
 
+import litestar_security.accounts as accounts_module
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -4332,3 +4336,601 @@ async def test_jwks_close_is_idempotent_and_prevents_selection_fetch(
     assert isinstance(warmup, VerificationUnavailable)
     assert isinstance(refresh, VerificationUnavailable)
     assert fetcher.requests == []
+
+
+@pytest.mark.anyio
+async def test_argon2_hasher_uses_locked_id_parameters_and_detects_rehash(
+    password_hasher: "accounts_module.Argon2PasswordHasher",
+) -> None:
+    candidate = "correct horse battery staple"
+    encoded = await password_hasher.hash(candidate)
+    current = await password_hasher.verify(encoded, candidate)
+    legacy_engine = Argon2Engine(memory_cost=8_192, time_cost=1, parallelism=1, salt_len=16, hash_len=32)
+    legacy = await to_thread.run_sync(legacy_engine.hash, candidate)
+    legacy_result = await password_hasher.verify(legacy, candidate)
+
+    parameters = extract_argon2_parameters(encoded)
+    assert (
+        parameters.type.name,
+        parameters.version,
+        parameters.memory_cost,
+        parameters.time_cost,
+        parameters.parallelism,
+        parameters.salt_len,
+        parameters.hash_len,
+    ) == ("ID", 19, 19_456, 2, 1, 16, 32)
+    assert (
+        password_hasher.memory_cost,
+        password_hasher.time_cost,
+        password_hasher.parallelism,
+        password_hasher.salt_len,
+        password_hasher.hash_len,
+    ) == (19_456, 2, 1, 16, 32)
+    assert current == accounts_module.PasswordVerificationResult(
+        status=accounts_module.PasswordVerificationStatus.VERIFIED
+    )
+    assert legacy_result.verified
+    assert legacy_result.replacement_hash is not None
+    assert legacy_result.replacement_hash.startswith("$argon2id$v=19$m=19456,t=2,p=1$")
+    assert legacy not in repr(legacy_result)
+    assert legacy_result.replacement_hash not in repr(legacy_result)
+
+
+@pytest.mark.anyio
+async def test_argon2_hasher_supports_strengthening_without_sync_startup_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = Argon2Engine.hash
+
+    def reject_sync_hash(_engine: Argon2Engine, _candidate: str | bytes, **_kwargs: object) -> str:
+        raise AssertionError
+
+    monkeypatch.setattr(Argon2Engine, "hash", reject_sync_hash)
+    default_hasher = accounts_module.Argon2PasswordHasher()
+    monkeypatch.setattr(Argon2Engine, "hash", original)
+    strengthened = await accounts_module.Argon2PasswordHasher.create(time_cost=3)
+
+    assert default_hasher.time_cost == 2
+    assert extract_argon2_parameters(strengthened.dummy_hash).time_cost == 3
+    assert (await strengthened.verify(None, "constant-work candidate")).status is (
+        accounts_module.PasswordVerificationStatus.INVALID
+    )
+
+
+@pytest.mark.parametrize("operation", ["create", "hash"])
+@pytest.mark.anyio
+async def test_argon2_hasher_maps_worker_hash_failures(monkeypatch: pytest.MonkeyPatch, operation: str) -> None:
+    def unavailable(_engine: Argon2Engine, _candidate: str | bytes, **_kwargs: object) -> str:
+        raise RuntimeError
+
+    monkeypatch.setattr(Argon2Engine, "hash", unavailable)
+    operation_call = (
+        accounts_module.Argon2PasswordHasher.create(time_cost=3)
+        if operation == "create"
+        else accounts_module.Argon2PasswordHasher().hash("sufficiently long candidate")
+    )
+
+    with pytest.raises(accounts_module.PasswordHashingUnavailableError):
+        await operation_call
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"memory_cost": 19_455},
+        {"memory_cost": 262_145},
+        {"time_cost": True},
+        {"time_cost": 11},
+        {"parallelism": 9},
+        {"salt_len": 65},
+        {"hash_len": 65},
+        {"worker_limits": object()},
+        {"worker_limits": WorkerLimits(crypto_tokens=54)},
+        {"dummy_hash": "not-an-argon2-hash"},
+    ],
+)
+def test_argon2_hasher_rejects_weak_unsafe_or_mismatched_configuration(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Argon2"):
+        accounts_module.Argon2PasswordHasher(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("memory_cost", [40_000, 999_999_999])
+@pytest.mark.anyio
+async def test_argon2_hasher_rejects_hostile_parameters_before_real_verification(
+    monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher", memory_cost: int
+) -> None:
+    hostile = password_hasher.dummy_hash.replace("m=19456", f"m={memory_cost}")
+    calls: list[str | bytes] = []
+    original = Argon2Engine.verify
+
+    def tracked(engine: Argon2Engine, candidate_hash: str | bytes, candidate: str | bytes) -> bool:
+        calls.append(candidate_hash)
+        return original(engine, candidate_hash, candidate)
+
+    monkeypatch.setattr(Argon2Engine, "verify", tracked)
+
+    result = await password_hasher.verify(hostile, "constant-work candidate")
+
+    assert result.status is accounts_module.PasswordVerificationStatus.MALFORMED
+    assert calls == [password_hasher.dummy_hash]
+    assert hostile not in repr(result)
+
+
+@pytest.mark.anyio
+async def test_argon2_hasher_accepts_exact_utf8_byte_boundary(
+    password_hasher: "accounts_module.Argon2PasswordHasher",
+) -> None:
+    candidate = "a" * 1_024
+
+    encoded = await password_hasher.hash(candidate)
+    result = await password_hasher.verify(encoded, candidate)
+
+    assert result.verified
+
+
+@pytest.mark.anyio
+async def test_argon2_hasher_equalizes_absent_wrong_and_malformed_verification_work(
+    monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher"
+) -> None:
+    presented = "incorrect passphrase"
+    encoded = await password_hasher.hash("correct horse battery staple")
+    calls: list[str | bytes] = []
+    original = Argon2Engine.verify
+
+    def tracked(engine: Argon2Engine, candidate_hash: str | bytes, candidate: str | bytes) -> bool:
+        calls.append(candidate_hash)
+        return original(engine, candidate_hash, candidate)
+
+    monkeypatch.setattr(Argon2Engine, "verify", tracked)
+
+    absent = await password_hasher.verify(None, presented)
+    absent_calls = len(calls)
+    calls.clear()
+    wrong = await password_hasher.verify(encoded, presented)
+    wrong_calls = len(calls)
+    calls.clear()
+    malformed = await password_hasher.verify("not-an-argon2-hash", presented)
+
+    assert absent.status is accounts_module.PasswordVerificationStatus.INVALID
+    assert wrong.status is accounts_module.PasswordVerificationStatus.INVALID
+    assert malformed.status is accounts_module.PasswordVerificationStatus.MALFORMED
+    assert (absent_calls, wrong_calls, len(calls)) == (1, 1, 1)
+    assert all("incorrect passphrase" not in repr(result) for result in (absent, wrong, malformed))
+
+
+@pytest.mark.anyio
+async def test_argon2_hasher_maps_verification_library_failures_to_sanitized_outcomes(
+    monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher"
+) -> None:
+    encoded = await password_hasher.hash("correct horse battery staple")
+    original = Argon2Engine.verify
+
+    def malformed(engine: Argon2Engine, candidate_hash: str | bytes, candidate: str | bytes) -> bool:
+        if candidate_hash == password_hasher.dummy_hash:
+            return original(engine, candidate_hash, candidate)
+        raise VerificationError
+
+    monkeypatch.setattr(Argon2Engine, "verify", malformed)
+
+    result = await password_hasher.verify(encoded, "constant-work candidate")
+
+    assert result.status is accounts_module.PasswordVerificationStatus.MALFORMED
+
+    def malformed_dummy(_engine: Argon2Engine, _candidate_hash: str | bytes, _candidate: str | bytes) -> bool:
+        raise VerificationError
+
+    monkeypatch.setattr(Argon2Engine, "verify", malformed_dummy)
+
+    with pytest.raises(accounts_module.PasswordHashingUnavailableError):
+        await password_hasher.verify(None, "constant-work candidate")
+
+
+@pytest.mark.anyio
+async def test_argon2_hasher_maps_unexpected_dummy_failure_to_unavailable(
+    monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher"
+) -> None:
+    def unavailable(_engine: Argon2Engine, _candidate_hash: str | bytes, _candidate: str | bytes) -> bool:
+        raise RuntimeError
+
+    monkeypatch.setattr(Argon2Engine, "verify", unavailable)
+
+    with pytest.raises(accounts_module.PasswordHashingUnavailableError):
+        await password_hasher.verify("not-an-argon2-hash", "constant-work candidate")
+
+
+@pytest.mark.parametrize("encoded_hash", [object(), "a" * 1_025])
+@pytest.mark.anyio
+async def test_argon2_hasher_treats_invalid_hash_runtime_shapes_as_malformed(
+    password_hasher: "accounts_module.Argon2PasswordHasher", encoded_hash: object
+) -> None:
+    result = await password_hasher.verify(encoded_hash, "constant-work candidate")  # type: ignore[arg-type]
+
+    assert result.status is accounts_module.PasswordVerificationStatus.MALFORMED
+
+
+@pytest.mark.anyio
+async def test_argon2_hasher_rejects_oversized_or_invalid_text_before_workers(
+    monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher"
+) -> None:
+    worker_calls = 0
+    original = Argon2Engine.verify
+
+    def tracked(engine: Argon2Engine, candidate_hash: str | bytes, candidate: str | bytes) -> bool:
+        nonlocal worker_calls
+        worker_calls += 1
+        return original(engine, candidate_hash, candidate)
+
+    monkeypatch.setattr(Argon2Engine, "verify", tracked)
+
+    oversized = await password_hasher.verify(None, "é" * 513)
+    invalid_unicode = await password_hasher.verify(None, "\ud800")
+
+    assert oversized.status is accounts_module.PasswordVerificationStatus.TOO_LONG
+    assert invalid_unicode.status is accounts_module.PasswordVerificationStatus.INVALID
+    assert worker_calls == 0
+    with pytest.raises(ValueError, match="1,024 UTF-8 bytes"):
+        await password_hasher.hash("a" * 1_025)
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        await password_hasher.hash("\ud800")
+    with pytest.raises(ValueError, match="must be text"):
+        await password_hasher.hash(object())  # type: ignore[arg-type]
+
+
+def test_argon2_hasher_maps_engine_configuration_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable(**_kwargs: object) -> object:
+        raise TypeError
+
+    monkeypatch.setattr("litestar_security.accounts.local._Argon2Engine", unavailable)
+
+    with pytest.raises(ImproperlyConfiguredException, match="Invalid Argon2"):
+        accounts_module.Argon2PasswordHasher()
+
+
+@pytest.mark.anyio
+async def test_argon2_hasher_bounds_concurrency_and_maps_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    workers = WorkerLimits(crypto_tokens=2, timeout=1)
+    hasher = accounts_module.Argon2PasswordHasher(worker_limits=workers)
+    active = 0
+    maximum_active = 0
+    lock = ThreadLock()
+
+    def slow_verify(_engine: Argon2Engine, _candidate_hash: str | bytes, _candidate: str | bytes) -> bool:
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        sleep(0.03)
+        with lock:
+            active -= 1
+        return True
+
+    monkeypatch.setattr(Argon2Engine, "verify", slow_verify)
+    results: list[accounts_module.PasswordVerificationResult] = []
+
+    async def verify() -> None:
+        results.append(await hasher.verify(None, "constant-work password"))
+
+    async with create_task_group() as task_group:
+        for _ in range(6):
+            task_group.start_soon(verify)
+
+    assert maximum_active == 2
+    assert len(results) == 6
+    assert all(result.status is accounts_module.PasswordVerificationStatus.INVALID for result in results)
+
+    active = 0
+    maximum_active = 0
+    timeout_hasher = accounts_module.Argon2PasswordHasher(worker_limits=WorkerLimits(crypto_tokens=2, timeout=0.001))
+    completed = Event()
+    timed_out = 0
+    ticker_iterations = 0
+
+    async def timed_verify() -> None:
+        nonlocal timed_out
+        with pytest.raises(accounts_module.PasswordHashingUnavailableError):
+            await timeout_hasher.verify(None, "constant-work password")
+        timed_out += 1
+
+    async def run_timeout_batch() -> None:
+        async with create_task_group() as batch:
+            for _ in range(100):
+                batch.start_soon(timed_verify)
+        completed.set()
+
+    async def ticker() -> None:
+        nonlocal ticker_iterations
+        while not completed.is_set():
+            ticker_iterations += 1
+            await checkpoint()
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(run_timeout_batch)
+        task_group.start_soon(ticker)
+
+    assert (timed_out, active, maximum_active) == (100, 0, 2)
+    assert ticker_iterations > 0
+
+
+class _PasswordStore:
+    def __init__(
+        self,
+        encoded_hash: str | None = "current-hash",
+        *,
+        fail_read: bool = False,
+        fail_replace: bool = False,
+        replace_result: object = True,
+    ) -> None:
+        self.encoded_hash = encoded_hash
+        self.fail_read = fail_read
+        self.fail_replace = fail_replace
+        self.replace_result = replace_result
+        self.replacements: list[tuple[str, str, str, accounts_module.SecurityEvent]] = []
+
+    async def get_password_hash(self, _account_id: str) -> str | None:
+        if self.fail_read:
+            raise OSError
+        return self.encoded_hash
+
+    async def compare_and_replace_password(
+        self, account_id: str, expected_hash: str, password_hash: str, *, event: accounts_module.SecurityEvent
+    ) -> bool:
+        if self.fail_replace:
+            raise OSError
+        self.replacements.append((account_id, expected_hash, password_hash, event))
+        return cast("bool", self.replace_result)
+
+    async def replace_password_and_bump_epoch(
+        self, account_id: str, password_hash: str, *, expected_epoch: int, event: accounts_module.SecurityEvent
+    ) -> accounts_module.PasswordChangeResult:
+        del account_id, password_hash, event
+        return accounts_module.PasswordChangeResult(
+            accounts_module.PasswordChangeStatus.CHANGED, security_epoch=expected_epoch + 1
+        )
+
+
+class _PasswordHasher:
+    def __init__(
+        self, result: accounts_module.PasswordVerificationResult | None = None, *, unavailable: bool = False
+    ) -> None:
+        self.result = result or accounts_module.PasswordVerificationResult(
+            accounts_module.PasswordVerificationStatus.INVALID
+        )
+        self.unavailable = unavailable
+        self.calls: list[tuple[str | None, str]] = []
+
+    async def hash(self, password: str) -> str:
+        return f"hashed:{password}"
+
+    async def verify(self, encoded_hash: str | None, password: str) -> accounts_module.PasswordVerificationResult:
+        self.calls.append((encoded_hash, password))
+        if self.unavailable:
+            raise accounts_module.PasswordHashingUnavailableError
+        return self.result
+
+
+class _SecurityEvents:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.events: list[accounts_module.SecurityEvent] = []
+
+    async def emit(self, event: accounts_module.SecurityEvent) -> None:
+        if self.fail:
+            raise OSError
+        self.events.append(event)
+
+
+@pytest.mark.parametrize("failure", ["invalid", "unavailable", "store"])
+@pytest.mark.anyio
+async def test_password_reauthentication_maps_every_failure_to_domain_outcome(failure: str) -> None:
+    store = _PasswordStore(fail_read=failure == "store")
+    hasher = _PasswordHasher(unavailable=failure == "unavailable")
+    service = accounts_module.PasswordReauthenticationService(accounts=store, hasher=hasher)
+
+    outcome = await service.verify("account-1", "presented secret", now=_JWT_NOW)
+
+    assert isinstance(outcome, VerificationUnavailable if failure in {"unavailable", "store"} else InvalidCredentials)
+    assert store.replacements == []
+    assert "presented secret" not in repr(service)
+    assert "presented secret" not in repr(outcome)
+
+
+@pytest.mark.parametrize(
+    ("status", "encoded_hash"),
+    [
+        (accounts_module.PasswordVerificationStatus.INVALID, "current-hash"),
+        (accounts_module.PasswordVerificationStatus.MALFORMED, "malformed-hash"),
+        (accounts_module.PasswordVerificationStatus.TOO_LONG, "current-hash"),
+        (accounts_module.PasswordVerificationStatus.INVALID, None),
+    ],
+)
+@pytest.mark.anyio
+async def test_password_reauthentication_collapses_credential_failures_without_rehash(
+    status: accounts_module.PasswordVerificationStatus, encoded_hash: str | None
+) -> None:
+    store = _PasswordStore(encoded_hash)
+    hasher = _PasswordHasher(accounts_module.PasswordVerificationResult(status))
+    service = accounts_module.PasswordReauthenticationService(accounts=store, hasher=hasher)
+
+    outcome = await service.verify("account-1", "presented secret", now=_JWT_NOW)
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert store.replacements == []
+
+
+@pytest.mark.parametrize("sink_mode", ["default", "available", "failure"])
+@pytest.mark.anyio
+async def test_password_reauthentication_emits_sanitized_malformed_hash_event(
+    sink_mode: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = _PasswordStore("malformed-secret-hash")
+    hasher = _PasswordHasher(
+        accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.MALFORMED)
+    )
+    events = _SecurityEvents(fail=sink_mode == "failure")
+    event_options = {} if sink_mode == "default" else {"events": events}
+    service = accounts_module.PasswordReauthenticationService(
+        accounts=store, hasher=hasher, event_ids=lambda: "event-1", **event_options
+    )
+
+    outcome = await service.verify("account-1", "presented secret", now=_JWT_NOW)
+
+    assert isinstance(outcome, InvalidCredentials)
+    if sink_mode == "default":
+        assert isinstance(service.events, accounts_module.NoOpSecurityEventSink)
+    if sink_mode == "available":
+        assert len(events.events) == 1
+        event = events.events[0]
+        assert (event.event_id, event.operation, event.outcome, event.account_id) == (
+            "event-1",
+            "local.password.verify",
+            "malformed_hash",
+            "account-1",
+        )
+        rendered = repr(event)
+        assert "presented secret" not in rendered
+        assert "malformed-secret-hash" not in rendered
+    if sink_mode == "failure":
+        assert "Security event sink failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("replace_result", "fail_replace", "outcome_type"),
+    [
+        (True, False, AuthenticationEvidence),
+        (False, False, AuthenticationEvidence),
+        (object(), False, VerificationUnavailable),
+        (True, True, VerificationUnavailable),
+    ],
+)
+@pytest.mark.anyio
+async def test_password_reauthentication_locks_atomic_rehash_outcomes(
+    replace_result: object, *, fail_replace: bool, outcome_type: type[object]
+) -> None:
+    store = _PasswordStore(replace_result=replace_result, fail_replace=fail_replace)
+    replacement = "$argon2id$replacement-secret"
+    hasher = _PasswordHasher(
+        accounts_module.PasswordVerificationResult(
+            accounts_module.PasswordVerificationStatus.VERIFIED, replacement_hash=replacement
+        )
+    )
+    service = accounts_module.PasswordReauthenticationService(accounts=store, hasher=hasher)
+
+    outcome = await service.verify("account-1", "presented secret", now=_JWT_NOW)
+
+    assert isinstance(outcome, outcome_type)
+    if not fail_replace:
+        assert len(store.replacements) == 1
+        assert store.replacements[0][1:3] == ("current-hash", replacement)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"evidence_ttl": timedelta(0)},
+        {"evidence_ttl": timedelta(minutes=6)},
+        {"clock": None},
+        {"events": object()},
+        {"event_ids": None},
+        {"accounts": object()},
+        {"hasher": object()},
+    ],
+)
+def test_password_reauthentication_rejects_invalid_configuration(kwargs: dict[str, object]) -> None:
+    values = {"accounts": _PasswordStore(), "hasher": _PasswordHasher(), **kwargs}
+
+    with pytest.raises(ImproperlyConfiguredException, match="Password reauthentication"):
+        accounts_module.PasswordReauthenticationService(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("source", ["argument", "clock"])
+@pytest.mark.anyio
+async def test_password_reauthentication_rejects_naive_time_as_unavailable(source: str) -> None:
+    naive = _JWT_NOW.replace(tzinfo=None)
+    service = accounts_module.PasswordReauthenticationService(
+        accounts=_PasswordStore(),
+        hasher=_PasswordHasher(
+            accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.VERIFIED)
+        ),
+        clock=lambda: naive,
+    )
+
+    outcome = await service.verify("account-1", "presented secret", now=naive if source == "argument" else None)
+
+    assert isinstance(outcome, VerificationUnavailable)
+
+
+@pytest.mark.parametrize("account_id", [" ", object()])
+@pytest.mark.anyio
+async def test_password_reauthentication_rejects_invalid_account_ids_without_port_calls(account_id: object) -> None:
+    hasher = _PasswordHasher()
+    service = accounts_module.PasswordReauthenticationService(accounts=_PasswordStore(), hasher=hasher)
+
+    outcome = await service.verify(account_id, "presented secret", now=_JWT_NOW)  # type: ignore[arg-type]
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert hasher.calls == []
+
+
+@pytest.mark.anyio
+async def test_password_reauthentication_uses_an_aware_default_clock() -> None:
+    service = accounts_module.PasswordReauthenticationService(
+        accounts=_PasswordStore(),
+        hasher=_PasswordHasher(
+            accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.VERIFIED)
+        ),
+    )
+    before = datetime.now(timezone.utc)
+
+    outcome = await service.verify("account-1", "presented secret")
+
+    after = datetime.now(timezone.utc)
+    assert isinstance(outcome, AuthenticationEvidence)
+    assert before <= outcome.authenticated_at <= after
+    assert outcome.expires_at == outcome.authenticated_at + timedelta(minutes=5)
+
+
+@pytest.mark.anyio
+async def test_password_reauthentication_logs_blank_event_ids_without_changing_decision(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = accounts_module.PasswordReauthenticationService(
+        accounts=_PasswordStore("malformed-hash"),
+        hasher=_PasswordHasher(
+            accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.MALFORMED)
+        ),
+        events=_SecurityEvents(),
+        event_ids=lambda: " ",
+    )
+
+    outcome = await service.verify("account-1", "presented secret", now=_JWT_NOW)
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert "Security event sink failed" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_password_reauthentication_returns_fresh_evidence_and_rehashes_atomically() -> None:
+    replacement = "$argon2id$replacement-secret"
+    store = _PasswordStore()
+    hasher = _PasswordHasher(
+        accounts_module.PasswordVerificationResult(
+            accounts_module.PasswordVerificationStatus.VERIFIED, replacement_hash=replacement
+        )
+    )
+    service = accounts_module.PasswordReauthenticationService(accounts=store, hasher=hasher)
+
+    outcome = await service.verify(" account-1 ", "presented secret", now=_JWT_NOW)
+
+    assert outcome == AuthenticationEvidence(
+        mechanism="password",
+        slot="password",
+        authenticated_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+        methods=frozenset({"password"}),
+        amr=("pwd",),
+    )
+    assert hasher.calls == [("current-hash", "presented secret")]
+    assert len(store.replacements) == 1
+    account_id, expected_hash, new_hash, event = store.replacements[0]
+    assert (account_id, expected_hash, new_hash) == ("account-1", "current-hash", replacement)
+    assert (event.operation, event.outcome, event.account_id) == ("local.password.rehash", "updated", "account-1")
+    assert "presented secret" not in repr(event)
+    assert replacement not in repr(event)

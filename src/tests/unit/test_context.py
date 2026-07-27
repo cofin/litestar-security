@@ -681,6 +681,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
     accounts = import_module("litestar_security.accounts")
     assert accounts.__all__ == (
         "AccountLookup",
+        "Argon2PasswordHasher",
         "ConsumeResult",
         "ConsumeStatus",
         "CreateSessionCommand",
@@ -691,12 +692,21 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "LocalAuthMode",
         "LoginMethod",
         "LoginMethodStore",
+        "NoOpSecurityEventSink",
         "NotificationCommand",
         "PasswordChangeResult",
         "PasswordChangeStatus",
         "PasswordCredentialStore",
+        "PasswordHasher",
+        "PasswordHashingUnavailableError",
+        "PasswordPolicy",
+        "PasswordPolicyResult",
+        "PasswordPolicyViolation",
+        "PasswordReauthenticationService",
         "PasswordResetResult",
         "PasswordResetStatus",
+        "PasswordVerificationResult",
+        "PasswordVerificationStatus",
         "RecoveryTokenStore",
         "RefreshRotationStatus",
         "RefreshTokenFamilyStore",
@@ -712,12 +722,14 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "RotateRefreshResult",
         "SecurityEpochStore",
         "SecurityEvent",
+        "SecurityEventSink",
         "SessionAuthentication",
         "SessionBindingConfig",
         "SessionRecord",
         "SessionRegistry",
         "TokenIssue",
         "VerificationTokenStore",
+        "normalize_identifier",
     )
 
 
@@ -1068,6 +1080,122 @@ def test_registration_policy_requires_an_explicit_mode() -> None:
     assert accounts_module.RegistrationPolicy.invite_only() == accounts_module.RegistrationPolicy(
         accounts_module.RegistrationMode.INVITE_ONLY
     )
+
+
+@pytest.mark.parametrize(
+    ("password", "identifier", "violations"),
+    [
+        ("a" * 14, None, {accounts_module.PasswordPolicyViolation.TOO_SHORT}),
+        ("a" * 129, None, {accounts_module.PasswordPolicyViolation.TOO_LONG}),
+        ("\ud800" * 15, None, {accounts_module.PasswordPolicyViolation.INVALID_TEXT}),
+        (
+            "é" * 513,
+            None,
+            {accounts_module.PasswordPolicyViolation.TOO_LONG, accounts_module.PasswordPolicyViolation.TOO_MANY_BYTES},
+        ),
+        (" USER@EXAMPLE.COM ", "user@example.com", {accounts_module.PasswordPolicyViolation.MATCHES_IDENTIFIER}),
+        ("known compromised passphrase", None, {accounts_module.PasswordPolicyViolation.COMPROMISED}),
+    ],
+)
+def test_password_policy_reports_only_secret_free_violations(
+    password: str, identifier: str | None, violations: set["accounts_module.PasswordPolicyViolation"]
+) -> None:
+    policy = accounts_module.PasswordPolicy(compromised=lambda candidate: candidate == "known compromised passphrase")
+
+    result = policy.check(password, normalized_identifier=identifier)
+
+    assert result.violations == frozenset(violations)
+    assert not result.accepted
+    assert password not in repr(policy)
+    assert password not in repr(result)
+
+
+def test_password_policy_defaults_allow_unicode_spaces_and_long_passphrases() -> None:
+    policy = accounts_module.PasswordPolicy()
+    accepted = ("correct horse battery staple", "   spaced passphrase   ", "🦄 unicode passphrase", "é" * 128)
+
+    assert (policy.minimum_length, policy.maximum_length, policy.maximum_bytes) == (15, 128, 1_024)
+    assert all(policy.check(password).accepted for password in accepted)
+    assert policy.check("sufficiently long candidate", normalized_identifier="another@example.com").accepted
+    assert accounts_module.normalize_identifier("  Usér@EXAMPLE.COM  ") == "usér@example.com"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"minimum_length": 0},
+        {"minimum_length": True},
+        {"maximum_length": 14},
+        {"maximum_bytes": 0},
+        {"maximum_bytes": 1_025},
+        {"normalizer": None},
+        {"compromised": object()},
+    ],
+)
+def test_password_policy_rejects_invalid_configuration(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Password policy"):
+        accounts_module.PasswordPolicy(**kwargs)  # type: ignore[arg-type]
+
+
+def test_password_policy_skips_compromised_hook_for_invalid_candidates_and_validates_its_result() -> None:
+    candidates: list[str] = []
+
+    def compromised(candidate: str) -> object:
+        candidates.append(candidate)
+        return object()
+
+    policy = accounts_module.PasswordPolicy(compromised=compromised)  # type: ignore[arg-type]
+
+    assert policy.check("short").violations == frozenset({accounts_module.PasswordPolicyViolation.TOO_SHORT})
+    assert candidates == []
+    with pytest.raises(ImproperlyConfiguredException, match="must return bool"):
+        policy.check("sufficiently long candidate")
+    assert candidates == ["sufficiently long candidate"]
+    assert (
+        accounts_module
+        .PasswordPolicy(compromised=lambda _candidate: False)
+        .check("sufficiently long candidate")
+        .accepted
+    )
+
+
+def test_password_policy_handles_invalid_runtime_text_and_normalizer_failures() -> None:
+    invalid_text = accounts_module.PasswordPolicy().check(object())  # type: ignore[arg-type]
+    invalid_normalizer = accounts_module.PasswordPolicy(
+        normalizer=lambda _value: (_ for _ in ()).throw(ValueError)
+    ).check("sufficiently long candidate", normalized_identifier="user@example.com")
+
+    assert invalid_text.violations == frozenset({accounts_module.PasswordPolicyViolation.INVALID_TEXT})
+    assert invalid_normalizer.violations == frozenset({accounts_module.PasswordPolicyViolation.INVALID_TEXT})
+    with pytest.raises(ValueError, match="requires text"):
+        accounts_module.normalize_identifier(object())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("status", "replacement_hash"),
+    [
+        (accounts_module.PasswordVerificationStatus.VERIFIED, None),
+        (accounts_module.PasswordVerificationStatus.VERIFIED, "replacement-secret"),
+        (accounts_module.PasswordVerificationStatus.INVALID, None),
+        (accounts_module.PasswordVerificationStatus.MALFORMED, None),
+        (accounts_module.PasswordVerificationStatus.TOO_LONG, None),
+    ],
+)
+def test_password_verification_results_are_discriminated_and_redacted(
+    status: "accounts_module.PasswordVerificationStatus", replacement_hash: str | None
+) -> None:
+    result = accounts_module.PasswordVerificationResult(status=status, replacement_hash=replacement_hash)
+
+    assert result.verified is (status is accounts_module.PasswordVerificationStatus.VERIFIED)
+    assert "replacement-secret" not in repr(result)
+    assert not hasattr(result, "__dict__")
+
+
+def test_password_verification_result_rejects_replacement_for_failure() -> None:
+    with pytest.raises(ValueError, match="replacement"):
+        accounts_module.PasswordVerificationResult(
+            status=accounts_module.PasswordVerificationStatus.INVALID, replacement_hash="replacement-secret"
+        )
 
 
 def test_security_config_is_typed_and_slotted() -> None:
