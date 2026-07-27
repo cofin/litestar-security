@@ -11,6 +11,9 @@ what the operation settled on, not whether the request succeeded.
 
 __all__ = (
     "LOGIN",
+    "MFA_RECOVERY_CONSUME",
+    "MFA_RECOVERY_REPLACE",
+    "MFA_TOTP_REMOVE",
     "OUTCOME_ATTEMPTED",
     "OUTCOME_CHANGED",
     "OUTCOME_CREATED",
@@ -82,6 +85,9 @@ SESSION_REVOKE_ALL_SUFFIX = ".session_revoke_all"
 # separate budgets would let an attacker double their allowance by alternating
 # between the two routes.
 LOGIN = "local.login"
+MFA_RECOVERY_CONSUME = "local.mfa.recovery.consume"
+MFA_RECOVERY_REPLACE = "local.mfa.recovery.replace"
+MFA_TOTP_REMOVE = "local.mfa.totp.remove"
 PASSWORD_RESET = "local.password.reset"
 VERIFICATION_RESEND = "local.verification.resend"
 

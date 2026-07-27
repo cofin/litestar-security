@@ -7175,6 +7175,7 @@ class _MFAStore:
     def __init__(self) -> None:
         self.enrollments: dict[str, accounts_module.PendingTOTPEnrollment] = {}
         self.methods: dict[str, accounts_module.TOTPMethod] = {}
+        self.recovery_codes: dict[bytes, accounts_module.RecoveryCodeDigest] = {}
         self.lock = asyncio.Lock()
         self.fail = False
 
@@ -7223,6 +7224,56 @@ class _MFAStore:
                 return False
             self.methods[method_id] = replace(method, last_accepted_counter=accepted_counter, last_used_at=now)
             return True
+
+    async def replace_recovery_codes(
+        self, account_id: str, codes: tuple[accounts_module.RecoveryCodeDigest, ...], *, now: datetime
+    ) -> None:
+        del now
+        if self.fail:
+            raise OSError
+        async with self.lock:
+            self.recovery_codes = {code.digest: code for code in codes if code.account_id == account_id}
+
+    async def consume_recovery_code(self, account_id: str, digest: bytes, *, now: datetime) -> bool:
+        del now
+        if self.fail:
+            raise OSError
+        async with self.lock:
+            match = next(
+                (
+                    stored_digest
+                    for stored_digest in self.recovery_codes
+                    if hmac.compare_digest(stored_digest, digest)
+                    and self.recovery_codes[stored_digest].account_id == account_id
+                ),
+                None,
+            )
+            if match is None:
+                return False
+            del self.recovery_codes[match]
+            return True
+
+
+class _RecoveryLoginMethods:
+    def __init__(
+        self, status: accounts_module.RevokeLoginMethodStatus = accounts_module.RevokeLoginMethodStatus.REVOKED
+    ) -> None:
+        self.status = status
+        self.events: list[accounts_module.SecurityEvent] = []
+
+    async def register_login_method(
+        self, account_id: str, method: accounts_module.LoginMethod, *, event: accounts_module.SecurityEvent
+    ) -> None:
+        del account_id, method
+        self.events.append(event)
+
+    async def revoke_login_method(
+        self, account_id: str, method_id: str, *, require_remaining: bool = True, event: accounts_module.SecurityEvent
+    ) -> accounts_module.RevokeLoginMethodResult:
+        del account_id, method_id
+        assert require_remaining
+        self.events.append(event)
+        return accounts_module.RevokeLoginMethodResult(self.status)
 
 
 def _mfa_service(
@@ -7377,6 +7428,155 @@ async def test_totp_protector_and_store_failures_are_sanitized(failure: str) -> 
     outcome = await service.activate_totp("account-1", enrollment.enrollment_id, code)
     assert isinstance(outcome, VerificationUnavailable)
     assert "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" not in repr(outcome)
+
+
+@pytest.mark.anyio
+async def test_recovery_codes_are_reveal_once_digest_only_and_atomically_consumed() -> None:
+    store = _MFAStore()
+    service = _mfa_service(store, _MFAProtector())
+    service.recovery_peppers = (accounts_module.RecoveryCodePepper(key_version="v1", key=b"p" * 32),)
+    entropy_counter = iter(range(1, 11))
+    service.recovery_entropy = lambda length: next(entropy_counter).to_bytes(length, "big")
+
+    issued = await service.generate_recovery_codes("account-1")
+
+    assert isinstance(issued, accounts_module.RecoveryCodes)
+    assert len(issued.codes) == 10
+    assert len(set(issued.codes)) == 10
+    assert all(code.startswith("rc_v1_") and len(code) == 38 for code in issued.codes)
+    assert issued.codes[0] not in repr(issued)
+    assert issued.codes[0].encode() not in repr(store.recovery_codes).encode()
+    outcomes: list[object] = []
+
+    async def consume() -> None:
+        outcomes.append(await service.consume_recovery_code("account-1", issued.codes[0]))
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(consume)
+        task_group.start_soon(consume)
+
+    assert sum(isinstance(outcome, AuthenticationEvidence) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, InvalidCredentials) for outcome in outcomes) == 1
+
+
+@pytest.mark.anyio
+async def test_recovery_regeneration_invalidates_old_codes_and_pepper_versions_are_explicit() -> None:
+    entropy_values = iter((b"\x01" * 16, b"\x02" * 16, b"\x03" * 16))
+    store = _MFAStore()
+    service = _mfa_service(store, _MFAProtector())
+    v1 = accounts_module.RecoveryCodePepper(key_version="v1", key=b"p" * 32)
+    v2 = accounts_module.RecoveryCodePepper(key_version="v2", key=b"q" * 32)
+    service.recovery_peppers = (v1,)
+    service.recovery_code_count = 1
+    service.recovery_entropy = lambda _length: next(entropy_values)
+    first = await service.generate_recovery_codes("account-1")
+    assert isinstance(first, accounts_module.RecoveryCodes)
+    service.recovery_peppers = (v2, v1)
+    assert isinstance(await service.consume_recovery_code("account-1", first.codes[0]), AuthenticationEvidence)
+    service.recovery_peppers = (v1,)
+    stale = await service.generate_recovery_codes("account-1")
+    assert isinstance(stale, accounts_module.RecoveryCodes)
+    service.recovery_peppers = (v2, v1)
+    second = await service.generate_recovery_codes("account-1")
+    assert isinstance(second, accounts_module.RecoveryCodes)
+    assert second.codes[0].startswith("rc_v2_")
+    assert isinstance(await service.consume_recovery_code("account-1", stale.codes[0]), InvalidCredentials)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (accounts_module.RevokeLoginMethodStatus.REVOKED, accounts_module.RevokeLoginMethodStatus.REVOKED),
+        (accounts_module.RevokeLoginMethodStatus.FINAL_METHOD, accounts_module.RevokeLoginMethodStatus.FINAL_METHOD),
+    ],
+)
+@pytest.mark.anyio
+async def test_totp_removal_delegates_atomic_final_method_safety_and_redacts_events(
+    status: accounts_module.RevokeLoginMethodStatus, expected: accounts_module.RevokeLoginMethodStatus
+) -> None:
+    login_methods = _RecoveryLoginMethods(status)
+    service = _mfa_service(_MFAStore(), _MFAProtector())
+    service.login_methods = login_methods
+
+    outcome = await service.remove_totp_method("account-1", "method-1")
+
+    assert isinstance(outcome, accounts_module.RevokeLoginMethodResult)
+    assert outcome.status is expected
+    assert len(login_methods.events) == 1
+    assert login_methods.events[0].operation == "local.mfa.totp.remove"
+    assert "secret" not in repr(login_methods.events[0]).lower()
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_type"),
+    [
+        ("unconfigured", VerificationUnavailable),
+        ("duplicate_entropy", VerificationUnavailable),
+        ("store_replace", VerificationUnavailable),
+        ("malformed", InvalidCredentials),
+        ("unknown_version", InvalidCredentials),
+        ("store_consume", VerificationUnavailable),
+    ],
+)
+@pytest.mark.anyio
+async def test_recovery_failures_are_generic_and_never_leak_codes(case: str, expected_type: type[object]) -> None:
+    store = _MFAStore()
+    service = _mfa_service(store, _MFAProtector())
+    pepper = accounts_module.RecoveryCodePepper(key_version="v1", key=b"p" * 32)
+    if case != "unconfigured":
+        service.recovery_peppers = (pepper,)
+    service.recovery_code_count = 1
+    service.recovery_entropy = lambda length: b"\x01" * length
+    if case == "duplicate_entropy":
+        service.recovery_code_count = 2
+    if case == "store_replace":
+        store.fail = True
+    if case in {"unconfigured", "duplicate_entropy", "store_replace"}:
+        outcome = await service.generate_recovery_codes("account-1")
+    else:
+        issued = await service.generate_recovery_codes("account-1")
+        assert isinstance(issued, accounts_module.RecoveryCodes)
+        code = (
+            "malformed"
+            if case == "malformed"
+            else issued.codes[0].replace("rc_v1_", "rc_old_")
+            if case == "unknown_version"
+            else issued.codes[0]
+        )
+        if case == "store_consume":
+            store.fail = True
+        outcome = await service.consume_recovery_code("account-1", code)
+
+    assert isinstance(outcome, expected_type)
+    assert "01010101" not in repr(outcome)
+
+
+@pytest.mark.anyio
+async def test_recovery_audit_failure_cannot_reverse_settled_generation_or_consumption() -> None:
+    store = _MFAStore()
+    service = _mfa_service(store, _MFAProtector())
+    service.events = _SecurityEvents(fail=True)
+    service.recovery_peppers = (accounts_module.RecoveryCodePepper(key_version="v1", key=b"p" * 32),)
+    service.recovery_code_count = 1
+    service.recovery_entropy = lambda length: b"\x01" * length
+
+    issued = await service.generate_recovery_codes("account-1")
+
+    assert isinstance(issued, accounts_module.RecoveryCodes)
+    assert isinstance(await service.consume_recovery_code("account-1", issued.codes[0]), AuthenticationEvidence)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"key_version": " ", "key": b"p" * 32},
+        {"key_version": "bad_version", "key": b"p" * 32},
+        {"key_version": "v1", "key": b"short"},
+    ],
+)
+def test_recovery_pepper_rejects_ambiguous_or_short_keys(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Recovery-code pepper"):
+        accounts_module.RecoveryCodePepper(**kwargs)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

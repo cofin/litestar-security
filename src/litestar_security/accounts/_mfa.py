@@ -6,13 +6,29 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha1, sha256, sha512
 from hmac import compare_digest
-from secrets import token_urlsafe
+from hmac import new as new_hmac
+from secrets import token_bytes, token_urlsafe
 from typing import Literal, Protocol, cast, runtime_checkable
 
 import pyotp
 from litestar.exceptions import ImproperlyConfiguredException
 
-from litestar_security.accounts._internal import aware_utc_time, strict_context_text, utc_now
+from litestar_security.accounts._internal import aware_utc_time, new_event_id, strict_context_text, utc_now
+from litestar_security.accounts._operations import (
+    MFA_RECOVERY_CONSUME,
+    MFA_RECOVERY_REPLACE,
+    MFA_TOTP_REMOVE,
+    OUTCOME_REVOKED,
+    OUTCOME_UPDATED,
+    OUTCOME_VERIFIED,
+)
+from litestar_security.accounts._records import (
+    NoOpSecurityEventSink,
+    RevokeLoginMethodResult,
+    SecurityEvent,
+    SecurityEventSink,
+)
+from litestar_security.accounts._stores import LoginMethodStore
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
 
@@ -21,6 +37,9 @@ __all__ = (
     "MFAStore",
     "PendingTOTPEnrollment",
     "ProtectedSecret",
+    "RecoveryCodeDigest",
+    "RecoveryCodePepper",
+    "RecoveryCodes",
     "SecretProtector",
     "TOTPEnrollment",
     "TOTPMethod",
@@ -31,6 +50,12 @@ _MINIMUM_SECRET_BITS = 160
 _MAXIMUM_DRIFT_STEPS = 10
 _MAXIMUM_PERIOD_SECONDS = 300
 _MAXIMUM_ENROLLMENT_TTL = timedelta(hours=1)
+_RECOVERY_CODE_BYTES = 16
+_RECOVERY_CODE_COUNT = 10
+_MAXIMUM_RECOVERY_CODE_COUNT = 100
+_MINIMUM_PEPPER_BYTES = 32
+_MAXIMUM_PEPPER_VERSION_LENGTH = 16
+_RECOVERY_CODE_PARTS = 3
 _ALGORITHMS = {"SHA1": sha1, "SHA256": sha256, "SHA512": sha512}
 
 
@@ -192,6 +217,55 @@ class TOTPEnrollment:
     expires_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class RecoveryCodePepper:
+    """Versioned HMAC key for non-recoverable recovery-code digests."""
+
+    key_version: str
+    key: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        """Require a stable version and at least 256 bits of key material."""
+        key = cast("object", self.key)
+        if (
+            not strict_context_text(self.key_version)
+            or "_" in self.key_version
+            or len(self.key_version) > _MAXIMUM_PEPPER_VERSION_LENGTH
+            or not isinstance(key, bytes)
+            or len(key) < _MINIMUM_PEPPER_BYTES
+        ):
+            message = "Recovery-code pepper requires a short version and at least 32 key bytes"
+            raise ImproperlyConfiguredException(detail=message)
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryCodeDigest:
+    """Stored recovery-code digest carrying no recoverable credential."""
+
+    account_id: str
+    pepper_version: str
+    digest: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        """Require exact HMAC-SHA-256 output and stable bindings."""
+        digest = cast("object", self.digest)
+        if (
+            not strict_context_text(self.account_id)
+            or not strict_context_text(self.pepper_version)
+            or not isinstance(digest, bytes)
+            or len(digest) != sha256().digest_size
+        ):
+            message = "Recovery-code digest requires account, version, and SHA-256 output"
+            raise ValueError(message)
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryCodes:
+    """Reveal-once recovery-code response."""
+
+    codes: tuple[str, ...] = field(repr=False)
+
+
 @runtime_checkable
 class MFAStore(Protocol):
     """Persist TOTP lifecycle through atomic replay boundaries."""
@@ -256,6 +330,34 @@ class MFAStore(Protocol):
         """
         ...  # pragma: no cover
 
+    async def replace_recovery_codes(
+        self, account_id: str, codes: tuple[RecoveryCodeDigest, ...], *, now: datetime
+    ) -> None:
+        """Atomically replace every recovery code for an account.
+
+        Args:
+            account_id: The owning account.
+            codes: The complete replacement set of HMAC digests.
+            now: The commit timestamp.
+        """
+        ...  # pragma: no cover
+
+    async def consume_recovery_code(self, account_id: str, digest: bytes, *, now: datetime) -> bool:
+        """Atomically compare in constant time and consume one digest.
+
+        Implementations must compare the supplied digest in constant time and
+        remove exactly one matching unused record in the same transaction.
+
+        Args:
+            account_id: The expected owner.
+            digest: The HMAC digest to compare.
+            now: The commit timestamp.
+
+        Returns:
+            ``True`` only for the single winning consumption.
+        """
+        ...  # pragma: no cover
+
 
 @dataclass(slots=True)
 class MFAService:
@@ -270,6 +372,12 @@ class MFAService:
         default=lambda: pyotp.random_base32(length=32), repr=False, compare=False
     )
     identifiers: Callable[[], str] = field(default=lambda: token_urlsafe(18), repr=False, compare=False)
+    login_methods: LoginMethodStore | None = field(default=None, repr=False, compare=False)
+    recovery_peppers: tuple[RecoveryCodePepper, ...] = field(default=(), repr=False)
+    recovery_code_count: int = _RECOVERY_CODE_COUNT
+    recovery_entropy: Callable[[int], bytes] = field(default=token_bytes, repr=False, compare=False)
+    events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
+    event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate structural capabilities and stable issuer configuration."""
@@ -284,6 +392,7 @@ class MFAService:
         if not strict_context_text(self.issuer):
             message = "MFA issuer must be non-blank text"
             raise ImproperlyConfiguredException(detail=message)
+        self.recovery_peppers = tuple(self.recovery_peppers)
 
     async def begin_totp_enrollment(self, account_id: str, *, label: str) -> TOTPEnrollment | VerificationUnavailable:
         """Create and persist one reveal-once TOTP enrollment.
@@ -383,12 +492,114 @@ class MFAService:
             return VerificationUnavailable()
         return AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=now, methods=frozenset({"totp"}))
 
+    async def generate_recovery_codes(self, account_id: str) -> RecoveryCodes | VerificationUnavailable:
+        """Atomically replace and reveal one set of recovery codes.
+
+        Args:
+            account_id: The account receiving the replacement set.
+
+        Returns:
+            Reveal-once codes or a sanitized operational failure.
+        """
+        try:
+            now = aware_utc_time(self.clock())
+            peppers = _validate_recovery_configuration(self.recovery_peppers, self.recovery_code_count)
+            active = peppers[0]
+            codes = _generate_recovery_codes(active.key_version, self.recovery_code_count, self.recovery_entropy)
+            digests = tuple(
+                RecoveryCodeDigest(
+                    account_id=account_id, pepper_version=active.key_version, digest=_recovery_digest(active, code)
+                )
+                for code in codes
+            )
+            await self.store.replace_recovery_codes(account_id, digests, now=now)
+        except Exception:  # noqa: BLE001 - sanitize application store, clock, and entropy failures
+            return VerificationUnavailable()
+        await self._emit_event(
+            operation=MFA_RECOVERY_REPLACE, outcome=OUTCOME_UPDATED, account_id=account_id, occurred_at=now
+        )
+        return RecoveryCodes(codes=codes)
+
+    async def consume_recovery_code(
+        self, account_id: str, code: str
+    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        """Verify and atomically consume one recovery code.
+
+        Args:
+            account_id: The expected code owner.
+            code: The reveal-once recovery credential.
+
+        Returns:
+            Recovery evidence, generic invalid credentials, or operational failure.
+        """
+        try:
+            now = aware_utc_time(self.clock())
+            version = _recovery_code_version(code)
+            pepper = next((candidate for candidate in self.recovery_peppers if candidate.key_version == version), None)
+            if pepper is None:
+                return InvalidCredentials()
+            digest = _recovery_digest(pepper, code)
+            if not await self.store.consume_recovery_code(account_id, digest, now=now):
+                return InvalidCredentials()
+        except (TypeError, ValueError):
+            return InvalidCredentials()
+        except Exception:  # noqa: BLE001 - sanitize application store and clock failures
+            return VerificationUnavailable()
+        await self._emit_event(
+            operation=MFA_RECOVERY_CONSUME, outcome=OUTCOME_VERIFIED, account_id=account_id, occurred_at=now
+        )
+        return AuthenticationEvidence(
+            mechanism="recovery-code", slot="mfa", authenticated_at=now, methods=frozenset({"recovery-code"})
+        )
+
+    async def remove_totp_method(
+        self, account_id: str, method_id: str
+    ) -> RevokeLoginMethodResult | VerificationUnavailable:
+        """Remove a TOTP method through the shared final-method-safe operation.
+
+        Args:
+            account_id: The owning account.
+            method_id: The TOTP method to remove.
+
+        Returns:
+            The atomic revocation result or sanitized operational failure.
+        """
+        login_methods = self.login_methods
+        if login_methods is None:
+            return VerificationUnavailable()
+        try:
+            now = aware_utc_time(self.clock())
+            event = SecurityEvent(
+                event_id=self.event_ids(),
+                occurred_at=now,
+                operation=MFA_TOTP_REMOVE,
+                outcome=OUTCOME_REVOKED,
+                account_id=account_id,
+            )
+            return await login_methods.revoke_login_method(account_id, method_id, require_remaining=True, event=event)
+        except Exception:  # noqa: BLE001 - sanitize application login-method store failures
+            return VerificationUnavailable()
+
     async def _recover_secret(self, account_id: str, method_id: str, protected: ProtectedSecret) -> str:
         associated_data = _totp_associated_data(account_id, method_id, protected.key_version)
         plaintext = await self.secret_protector.unprotect(protected, associated_data=associated_data)
         secret = plaintext.decode("ascii")
         _validate_secret(secret)
         return secret
+
+    async def _emit_event(self, *, operation: str, outcome: str, account_id: str, occurred_at: datetime) -> None:
+        try:
+            await self.events.emit(
+                SecurityEvent(
+                    event_id=self.event_ids(),
+                    occurred_at=occurred_at,
+                    operation=operation,
+                    outcome=outcome,
+                    account_id=account_id,
+                )
+            )
+        except Exception:  # noqa: BLE001 - observational audit failure cannot change a settled decision
+            return
 
 
 def _validate_secret(secret: str) -> None:
@@ -435,3 +646,56 @@ def _totp_associated_data(account_id: str, method_id: str, key_version: str) -> 
     if not all(strict_context_text(value) and "\x00" not in value for value in values):
         raise ValueError
     return b"\x00".join(value.encode("utf-8") for value in values)
+
+
+def _validate_recovery_configuration(
+    peppers: tuple[RecoveryCodePepper, ...], count: int
+) -> tuple[RecoveryCodePepper, ...]:
+    if (
+        not peppers
+        or len({pepper.key_version for pepper in peppers}) != len(peppers)
+        or count.__class__ is not int
+        or not 1 <= count <= _MAXIMUM_RECOVERY_CODE_COUNT
+    ):
+        raise ValueError
+    return peppers
+
+
+def _generate_recovery_codes(key_version: str, count: int, entropy: Callable[[int], bytes]) -> tuple[str, ...]:
+    codes: list[str] = []
+    attempts = 0
+    while len(codes) < count and attempts < count * 4:
+        attempts += 1
+        value = entropy(_RECOVERY_CODE_BYTES)
+        value_object = cast("object", value)
+        if not isinstance(value_object, bytes) or len(value_object) != _RECOVERY_CODE_BYTES:
+            raise ValueError
+        code = f"rc_{key_version}_{value.hex().upper()}"
+        if code not in codes:
+            codes.append(code)
+    if len(codes) != count:
+        raise ValueError
+    return tuple(codes)
+
+
+def _recovery_code_version(code: str) -> str:
+    code_value = cast("object", code)
+    if not isinstance(code_value, str) or code_value.__class__ is not str:
+        raise TypeError
+    parts = code_value.split("_")
+    if (
+        len(parts) != _RECOVERY_CODE_PARTS
+        or parts[0] != "rc"
+        or not strict_context_text(parts[1])
+        or len(parts[2]) != _RECOVERY_CODE_BYTES * 2
+        or parts[2] != parts[2].upper()
+        or any(character not in "0123456789ABCDEF" for character in parts[2])
+    ):
+        raise ValueError
+    return parts[1]
+
+
+def _recovery_digest(pepper: RecoveryCodePepper, code: str) -> bytes:
+    _recovery_code_version(code)
+    payload = b"litestar-security:recovery-code:v1\x00" + code.encode("ascii")
+    return new_hmac(pepper.key, payload, sha256).digest()
