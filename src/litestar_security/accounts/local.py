@@ -1,6 +1,7 @@
 """Backend-agnostic local-account contracts and explicit transport profiles."""
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from binascii import Error as BinasciiError
 from collections.abc import Mapping  # noqa: TC003 - Litestar resolves public annotations at runtime
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -12,7 +13,7 @@ from logging import getLogger
 from secrets import token_bytes
 from time import perf_counter
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 from unicodedata import normalize
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -33,12 +34,28 @@ from litestar_security.accounts.sessions import (
     SessionBindingConfig,
     SessionRegistry,
 )
-from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
+from litestar_security.authentication import (
+    Authenticated,
+    AuthenticationOutcome,
+    InvalidCredentials,
+    VerificationUnavailable,
+)
 from litestar_security.config import ExternalCSRF, WorkerLimits
-from litestar_security.providers.jwt import LocalKeyRing
+from litestar_security.context import AuthorizationSnapshot, Principal
+from litestar_security.providers.jwt import (
+    BearerSlotSelector,
+    BearerTokenSlot,
+    JWTClaims,
+    JWTValidationConfig,
+    JWTVerifier,
+    LocalKeyRing,
+    TokenSigner,
+    build_access_token_claims,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from collections.abc import Set as AbstractSet
 
     from argon2 import Parameters
 
@@ -50,11 +67,14 @@ __all__ = (
     "InvalidInvitation",
     "InvalidLifecycleRequest",
     "LifecycleAccepted",
+    "LocalAccessToken",
+    "LocalAccessTokenIssuer",
     "LocalAccount",
     "LocalAccountCapabilities",
     "LocalAuth",
     "LocalAuthConfig",
     "LocalAuthMode",
+    "LocalBearerIdentityResolver",
     "LoginMethod",
     "LoginMethodStore",
     "NoOpSecurityEventSink",
@@ -66,6 +86,7 @@ __all__ = (
     "PasswordCredentialStore",
     "PasswordHasher",
     "PasswordHashingUnavailableError",
+    "PasswordLoginService",
     "PasswordPolicy",
     "PasswordPolicyResult",
     "PasswordPolicyViolation",
@@ -107,6 +128,12 @@ _EMPTY_CORRELATION: "Mapping[str, str]" = MappingProxyType({})
 _ASCII_CONTROL_LIMIT = 32
 _MAXIMUM_PASSWORD_BYTES = 1_024
 _DEFAULT_REAUTHENTICATION_TTL = timedelta(minutes=5)
+_DEFAULT_ACCESS_TOKEN_LIFETIME = timedelta(minutes=10)
+_MINIMUM_ACCESS_TOKEN_LIFETIME = timedelta(seconds=30)
+_MAXIMUM_ACCESS_TOKEN_LIFETIME = timedelta(hours=1)
+_DEFAULT_LOCAL_CLIENT_ID = "local"
+_MAXIMUM_ACCESS_TOKEN_BYTES = 16_384
+_COMPACT_JWT_SEGMENTS = 3
 _DUMMY_PASSWORD = b"litestar-security constant-work password"
 _DEFAULT_DUMMY_HASH = (
     "$argon2id$v=19$m=19456,t=2,p=1$1jpw6PiEXNroO450O0ENlg$k5iQe1zKB0ogyhtm3Mlb9jKlwlPcJ5YeD5GJQ9faW+E"
@@ -242,6 +269,8 @@ class LocalAccount(Generic[UserT]):
             not _strict_text(self.account_id)
             or not _strict_text(self.normalized_identifier)
             or not _valid_security_epoch(self.security_epoch)
+            or self.active.__class__ is not bool
+            or self.verified.__class__ is not bool
         ):
             msg = "Local account requires stable identifiers and a valid security epoch"
             raise ValueError(msg)
@@ -2027,7 +2056,7 @@ class PasswordReauthenticationService:
             msg = "Password reauthentication event id factory must be callable"
             raise ImproperlyConfiguredException(detail=msg)
 
-    async def verify(
+    async def verify(  # noqa: PLR0911 - preserve explicit sanitized outcomes at each security boundary
         self, account_id: str, password: str, *, now: datetime | None = None
     ) -> PasswordReauthenticationProof | InvalidCredentials | VerificationUnavailable:
         """Return an account- and epoch-bound proof or one sanitized domain outcome."""
@@ -2036,10 +2065,20 @@ class PasswordReauthenticationService:
             return InvalidCredentials()
         try:
             authenticated_at = _aware_utc_time(self.clock() if now is None else now)
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+        read_unavailable = False
+        try:
             state = await self.accounts.get_password_state(normalized_account_id)
-            encoded_hash = state.password_hash if state is not None else None
+        except Exception:  # noqa: BLE001
+            state = None
+            read_unavailable = True
+        encoded_hash = state.password_hash if state is not None else None
+        try:
             result = await self.hasher.verify(encoded_hash, password)
         except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+        if read_unavailable:
             return VerificationUnavailable()
         if not result.verified or encoded_hash is None or state is None:
             if result.status is PasswordVerificationStatus.MALFORMED:
@@ -2089,6 +2128,257 @@ class PasswordReauthenticationService:
 
 
 @dataclass(frozen=True, slots=True)
+class PasswordLoginService(Generic[UserT]):
+    """Authenticate one normalized identifier with exactly one password-work class."""
+
+    accounts: AccountLookup[UserT] = field(repr=False)
+    hasher: PasswordHasher = field(repr=False)
+    normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
+    _reauthentication: PasswordReauthenticationService = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate the minimal lookup and password capabilities once."""
+        accounts_value: object = object.__getattribute__(self, "accounts")
+        hasher_value: object = object.__getattribute__(self, "hasher")
+        normalizer_value: object = object.__getattribute__(self, "normalizer")
+        if not isinstance(accounts_value, AccountLookup) or not isinstance(accounts_value, PasswordCredentialStore):
+            msg = "Password login accounts must implement AccountLookup and PasswordCredentialStore"
+            raise ImproperlyConfiguredException(detail=msg)
+        if not isinstance(hasher_value, PasswordHasher):
+            msg = "Password login hasher must implement PasswordHasher"
+            raise ImproperlyConfiguredException(detail=msg)
+        if not callable(normalizer_value):
+            msg = "Password login normalizer must be callable"
+            raise ImproperlyConfiguredException(detail=msg)
+        object.__setattr__(
+            self,
+            "_reauthentication",
+            PasswordReauthenticationService(
+                accounts=cast("PasswordCredentialStore", accounts_value), hasher=self.hasher
+            ),
+        )
+
+    async def authenticate(
+        self, identifier: str, password: str, *, now: datetime | None = None
+    ) -> LocalAccount[UserT] | InvalidCredentials | VerificationUnavailable:
+        """Return an active verified account after lookup and constant password work."""
+        account: LocalAccount[UserT] | None = None
+        lookup_unavailable = False
+        try:
+            normalized_identifier = self.normalizer(identifier)
+            if normalized_identifier:
+                account = await self.accounts.find_for_login(normalized_identifier)
+        except Exception:  # noqa: BLE001
+            lookup_unavailable = True
+        if account is None:
+            try:
+                await self.hasher.verify(None, password)
+            except Exception:  # noqa: BLE001
+                return VerificationUnavailable()
+            return VerificationUnavailable() if lookup_unavailable else InvalidCredentials()
+        password_result = await self._reauthentication.verify(account.account_id, password, now=now)
+        if not isinstance(password_result, PasswordReauthenticationProof):
+            return password_result
+        if (
+            not account.active
+            or not account.verified
+            or password_result.account_id != account.account_id
+            or password_result.security_epoch != account.security_epoch
+        ):
+            return InvalidCredentials()
+        return account
+
+
+@dataclass(frozen=True, slots=True)
+class LocalAccessToken:
+    """Secret-safe response from one local access-token issuance."""
+
+    access_token: str = field(repr=False)
+    expires_in: int
+    token_type: Literal["Bearer"] = field(default="Bearer", init=False)
+
+    def __post_init__(self) -> None:
+        """Require one compact credential and a bounded whole-second lifetime."""
+        token_value: object = self.access_token
+        if (
+            not _valid_compact_access_token(token_value)
+            or self.expires_in.__class__ is not int
+            or not int(_MINIMUM_ACCESS_TOKEN_LIFETIME.total_seconds())
+            <= self.expires_in
+            <= int(_MAXIMUM_ACCESS_TOKEN_LIFETIME.total_seconds())
+        ):
+            msg = "Local access token requires a compact credential and bounded expiry"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class LocalAccessTokenIssuer(Generic[UserT]):
+    """Compose minimal local claims with one Chapter 3 signer."""
+
+    signer: TokenSigner = field(repr=False)
+    issuer: str
+    audience: str
+    client_id: str = _DEFAULT_LOCAL_CLIENT_ID
+    lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME
+    clock: "Callable[[], datetime]" = field(default=_utc_now, repr=False, compare=False)
+    token_ids: "Callable[[], str]" = field(default=_new_event_id, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate server-owned claims and the configured access-token lifetime."""
+        signer_value: object = object.__getattribute__(self, "signer")
+        clock_value: object = object.__getattribute__(self, "clock")
+        token_ids_value: object = object.__getattribute__(self, "token_ids")
+        if not isinstance(signer_value, TokenSigner):
+            msg = "Local access-token issuer signer must implement TokenSigner"
+            raise ImproperlyConfiguredException(detail=msg)
+        for value, name in ((self.issuer, "issuer"), (self.audience, "audience"), (self.client_id, "client id")):
+            if not _strict_claim_text(value):
+                msg = f"Local access-token {name} must be non-empty normalized text"
+                raise ImproperlyConfiguredException(detail=msg)
+        _validate_access_token_lifetime(self.lifetime)
+        if not callable(clock_value) or not callable(token_ids_value):
+            msg = "Local access-token clock and token id factory must be callable"
+            raise ImproperlyConfiguredException(detail=msg)
+
+    async def issue(
+        self, account: LocalAccount[UserT], *, scopes: "AbstractSet[str]" = frozenset(), now: datetime | None = None
+    ) -> LocalAccessToken | InvalidCredentials | VerificationUnavailable:
+        """Issue one short-lived epoch-bound token without serializing application data."""
+        account_value: object = account
+        if (
+            not isinstance(account_value, LocalAccount)  # pyright: ignore[reportUnnecessaryIsInstance]
+            or not account_value.active
+            or not account_value.verified
+        ):
+            return InvalidCredentials()
+        try:
+            issued_at = _aware_utc_time(self.clock() if now is None else now)
+            token_id = self.token_ids()
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+        try:
+            claims = build_access_token_claims(
+                issuer=self.issuer,
+                audience=self.audience,
+                subject=account_value.account_id,
+                client_id=self.client_id,
+                security_epoch=account_value.security_epoch,
+                now=issued_at,
+                lifetime=self.lifetime,
+                scopes=scopes,
+                jti=token_id,
+            )
+        except (TypeError, ValueError):
+            return InvalidCredentials()
+        try:
+            token = await self.signer.sign(claims, now=issued_at)
+            return LocalAccessToken(access_token=token, expires_in=int(self.lifetime.total_seconds()))
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+
+
+@dataclass(slots=True)
+class _LocalAccessVerifier:
+    """Promote only application-issued local scopes into authorization grants."""
+
+    config: JWTValidationConfig
+    verifier: JWTVerifier[JWTClaims] = field(repr=False)
+
+    async def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[JWTClaims]:
+        outcome = await self.verifier.verify(token, now=now)
+        if not isinstance(outcome, Authenticated):
+            return outcome
+        return replace(outcome, grants=AuthorizationSnapshot(scopes=outcome.claims.scopes))
+
+
+@dataclass(frozen=True, slots=True)
+class LocalBearerIdentityResolver(Generic[UserT]):
+    """Resolve verified local JWT claims through exact account and epoch state."""
+
+    accounts: AccountLookup[UserT] = field(repr=False)
+    _epochs: SecurityEpochValidator = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Require account and authoritative security-epoch lookup capabilities."""
+        accounts_value: object = object.__getattribute__(self, "accounts")
+        if not isinstance(accounts_value, AccountLookup) or not isinstance(accounts_value, SecurityEpochStore):
+            msg = "Local bearer resolver accounts must implement AccountLookup and SecurityEpochStore"
+            raise ImproperlyConfiguredException(detail=msg)
+        object.__setattr__(self, "_epochs", SecurityEpochValidator(store=cast("SecurityEpochStore", accounts_value)))
+
+    async def resolve(self, claims: JWTClaims) -> Principal[UserT] | InvalidCredentials | VerificationUnavailable:
+        """Return a principal only for an active account at the exact current epoch."""
+        epoch = claims.raw.get("se")
+        if not _valid_security_epoch(epoch):
+            return InvalidCredentials()
+        try:
+            account = await self.accounts.get_by_id(claims.subject)
+        except Exception:  # noqa: BLE001
+            return VerificationUnavailable()
+        if (
+            account is None
+            or account.account_id != claims.subject
+            or not account.active
+            or not account.verified
+            or account.security_epoch != epoch
+        ):
+            return InvalidCredentials()
+        epoch_result = await self._epochs.validate(claims.subject, cast("int", epoch))
+        if epoch_result is not None:
+            return epoch_result
+        return Principal(id=account.account_id, display_name=account.display_name, user=account.user)
+
+
+def _validate_access_token_lifetime(value: object) -> None:
+    if not isinstance(value, timedelta):
+        msg = "Local access-token lifetime must be a timedelta"
+        raise ImproperlyConfiguredException(detail=msg)
+    if value < _MINIMUM_ACCESS_TOKEN_LIFETIME:
+        msg = "Local access-token lifetime must be at least 30 seconds"
+        raise ImproperlyConfiguredException(detail=msg)
+    if value > _MAXIMUM_ACCESS_TOKEN_LIFETIME:
+        msg = "Local access-token lifetime must be at most one hour"
+        raise ImproperlyConfiguredException(detail=msg)
+    if value.microseconds:
+        msg = "Local access-token lifetime must use whole seconds"
+        raise ImproperlyConfiguredException(detail=msg)
+
+
+def _strict_claim_text(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.__class__ is str
+        and bool(value)
+        and value == value.strip()
+        and normalize("NFC", value) == value
+        and all(not character.isspace() and ord(character) >= _ASCII_CONTROL_LIMIT for character in value)
+    )
+
+
+def _valid_compact_access_token(value: object) -> bool:
+    if not isinstance(value, str) or value.__class__ is not str:
+        return False
+    segments = value.split(".")
+    structurally_valid = (
+        _strict_text(value)
+        and len(value.encode("ascii", errors="ignore")) == len(value)
+        and len(value) <= _MAXIMUM_ACCESS_TOKEN_BYTES
+        and len(segments) == _COMPACT_JWT_SEGMENTS
+        and all(segments)
+    )
+    if not structurally_valid:
+        return False
+    try:
+        return all(
+            urlsafe_b64encode(urlsafe_b64decode(f"{segment}{'=' * (-len(segment) % 4)}")).rstrip(b"=").decode("ascii")
+            == segment
+            for segment in segments
+        )
+    except (BinasciiError, UnicodeEncodeError, ValueError):
+        return False
+
+
+@dataclass(frozen=True, slots=True)
 class LocalAuthConfig(Generic[UserT]):
     """Explicit local-authentication transport and capability selection."""
 
@@ -2100,7 +2390,18 @@ class LocalAuthConfig(Generic[UserT]):
     binding: SessionBindingConfig | None = field(default=None, repr=False)
     key_ring: LocalKeyRing | None = field(default=None, repr=False)
     token_audience: str | None = None
+    token_client_id: str = _DEFAULT_LOCAL_CLIENT_ID
+    access_token_lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME
+    password_hasher: PasswordHasher = field(default_factory=Argon2PasswordHasher, repr=False, compare=False)
     session_auth: NativeSessionAuth[UserT] | None = field(default=None, repr=False, compare=False)
+    password_login: PasswordLoginService[UserT] = field(init=False, repr=False, compare=False)
+    access_token_issuer: LocalAccessTokenIssuer[UserT] | None = field(
+        init=False, default=None, repr=False, compare=False
+    )
+    bearer_slot: BearerTokenSlot | None = field(init=False, default=None, repr=False, compare=False)
+    bearer_resolver: LocalBearerIdentityResolver[UserT] | None = field(
+        init=False, default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         """Validate transport-specific values and structural capabilities."""
@@ -2109,6 +2410,10 @@ class LocalAuthConfig(Generic[UserT]):
             raise ImproperlyConfiguredException(detail=msg)
         if self.registration.__class__ is not RegistrationPolicy:
             msg = "Local authentication registration must be a RegistrationPolicy"
+            raise ImproperlyConfiguredException(detail=msg)
+        password_hasher_value: object = object.__getattribute__(self, "password_hasher")
+        if not isinstance(password_hasher_value, PasswordHasher):
+            msg = "Local authentication password_hasher must implement PasswordHasher"
             raise ImproperlyConfiguredException(detail=msg)
         if self.route_prefix.__class__ is not str:
             msg = "Local authentication route prefix must be an absolute non-root path"
@@ -2135,9 +2440,20 @@ class LocalAuthConfig(Generic[UserT]):
             if not isinstance(self.key_ring, LocalKeyRing) or not audience:
                 msg = "Token local authentication requires an explicit key ring and audience"
                 raise ImproperlyConfiguredException(detail=msg)
+            client_id_value: object = object.__getattribute__(self, "token_client_id")
+            client_id = client_id_value.strip() if isinstance(client_id_value, str) else ""
+            if not client_id:
+                msg = "Token local authentication client id must be non-empty text"
+                raise ImproperlyConfiguredException(detail=msg)
+            _validate_access_token_lifetime(self.access_token_lifetime)
             object.__setattr__(self, "token_audience", audience)
+            object.__setattr__(self, "token_client_id", client_id)
         self._validate_capabilities()
+        object.__setattr__(
+            self, "password_login", PasswordLoginService(accounts=self.accounts, hasher=self.password_hasher)
+        )
         self._configure_session_auth()
+        self._configure_token_auth()
 
     def _configure_session_auth(self) -> None:
         if self.mode not in {LocalAuthMode.SESSION, LocalAuthMode.HYBRID}:
@@ -2179,6 +2495,43 @@ class LocalAuthConfig(Generic[UserT]):
             msg = f"Local authentication account capabilities missing for {self.mode.value}: {', '.join(missing)}"
             raise ImproperlyConfiguredException(detail=msg)
 
+    def _configure_token_auth(self) -> None:
+        if self.mode not in {LocalAuthMode.TOKENS, LocalAuthMode.HYBRID}:
+            return
+        key_ring = cast("LocalKeyRing", self.key_ring)
+        audience = cast("str", self.token_audience)
+        validation = JWTValidationConfig(
+            issuer=key_ring.issuer,
+            audiences=frozenset({audience}),
+            algorithms=frozenset(key.algorithm for key in key_ring.all_verification_keys),
+            required_claims=frozenset({"se"}),
+            maximum_lifetime=self.access_token_lifetime,
+        )
+        verifier = _LocalAccessVerifier(
+            config=validation, verifier=key_ring.build_verifier(validation, mechanism_name="bearer", slot_name="local")
+        )
+        object.__setattr__(
+            self,
+            "access_token_issuer",
+            LocalAccessTokenIssuer(
+                signer=key_ring.build_signer(),
+                issuer=key_ring.issuer,
+                audience=audience,
+                client_id=self.token_client_id,
+                lifetime=self.access_token_lifetime,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "bearer_slot",
+            BearerTokenSlot(
+                name="local",
+                selector=BearerSlotSelector(issuers=frozenset({key_ring.issuer}), audiences=frozenset({audience})),
+                verifier=verifier,
+            ),
+        )
+        object.__setattr__(self, "bearer_resolver", LocalBearerIdentityResolver(accounts=self.accounts))
+
 
 _DISABLED_REGISTRATION = RegistrationPolicy.disabled()
 
@@ -2194,6 +2547,7 @@ class LocalAuth:
         csrf: CSRFConfig | ExternalCSRF,
         binding: SessionBindingConfig,
         session_auth: NativeSessionAuth[UserT] | None = None,
+        password_hasher: PasswordHasher | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
     ) -> "LocalAuthConfig[UserT]":
@@ -2204,17 +2558,21 @@ class LocalAuth:
             csrf=csrf,
             binding=binding,
             session_auth=session_auth,
+            password_hasher=Argon2PasswordHasher() if password_hasher is None else password_hasher,
             registration=registration,
             route_prefix=route_prefix,
         )
 
     @classmethod
-    def tokens(
+    def tokens(  # noqa: PLR0913
         cls,
         *,
         accounts: LocalAccountCapabilities[UserT],
         key_ring: LocalKeyRing,
         token_audience: str,
+        token_client_id: str = _DEFAULT_LOCAL_CLIENT_ID,
+        access_token_lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME,
+        password_hasher: PasswordHasher | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
     ) -> "LocalAuthConfig[UserT]":
@@ -2224,6 +2582,13 @@ class LocalAuth:
             accounts=accounts,
             key_ring=key_ring,
             token_audience=token_audience,
+            token_client_id=token_client_id,
+            access_token_lifetime=access_token_lifetime,
+            password_hasher=(
+                Argon2PasswordHasher(worker_limits=key_ring.worker_limits)
+                if password_hasher is None
+                else password_hasher
+            ),
             registration=registration,
             route_prefix=route_prefix,
         )
@@ -2237,7 +2602,10 @@ class LocalAuth:
         binding: SessionBindingConfig,
         key_ring: LocalKeyRing,
         token_audience: str,
+        token_client_id: str = _DEFAULT_LOCAL_CLIENT_ID,
+        access_token_lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME,
         session_auth: NativeSessionAuth[UserT] | None = None,
+        password_hasher: PasswordHasher | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
     ) -> "LocalAuthConfig[UserT]":
@@ -2249,7 +2617,14 @@ class LocalAuth:
             binding=binding,
             key_ring=key_ring,
             token_audience=token_audience,
+            token_client_id=token_client_id,
+            access_token_lifetime=access_token_lifetime,
             session_auth=session_auth,
+            password_hasher=(
+                Argon2PasswordHasher(worker_limits=key_ring.worker_limits)
+                if password_hasher is None
+                else password_hasher
+            ),
             registration=registration,
             route_prefix=route_prefix,
         )

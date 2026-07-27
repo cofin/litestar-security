@@ -34,6 +34,7 @@ __all__ = (
     "AuthenticationRegistry",
     "CredentialExtraction",
     "CredentialSlot",
+    "IdentityResolution",
     "IdentityResolver",
     "InvalidCredentials",
     "MechanismRequirement",
@@ -273,6 +274,7 @@ class VerificationUnavailable:
 
 CredentialExtraction: TypeAlias = NoCredentials | PresentedCredential[CredentialT] | InvalidCredentials
 AuthenticationOutcome: TypeAlias = NoCredentials | Authenticated[ClaimsT] | InvalidCredentials | VerificationUnavailable
+IdentityResolution: TypeAlias = Principal[UserT] | InvalidCredentials | VerificationUnavailable
 
 
 class CredentialSlot(Protocol[_CredentialT]):
@@ -302,8 +304,8 @@ class RequestAuthenticator(Protocol[_RequestCredentialT_contra, _ClaimsT]):
 class IdentityResolver(Protocol[_ResolverClaimsT_contra, _UserT]):
     """Async mapping from verified claims to one application principal."""
 
-    async def resolve(self, claims: _ResolverClaimsT_contra) -> Principal[_UserT]:
-        """Resolve verified claims into a stable principal."""
+    async def resolve(self, claims: _ResolverClaimsT_contra) -> IdentityResolution[_UserT]:
+        """Resolve verified claims into a principal or sanitized resolution outcome."""
         ...  # pragma: no cover
 
 
@@ -661,11 +663,18 @@ class _AuthenticationEvaluator(Generic[UserT]):
     async def _resolve(
         self, outcomes: Sequence[tuple[str, AuthenticationOutcome[Any]]]
     ) -> list[_ResolvedAuthentication[UserT]]:
-        resolved: list[_ResolvedAuthentication[UserT]] = []
+        resolutions: list[tuple[str, Authenticated[Any], IdentityResolution[UserT]]] = []
         for name, outcome in outcomes:
             authenticated = cast("Authenticated[Any]", outcome)
             mechanism = self.registry.get_mechanism(name)
-            principal = await mechanism.resolver.resolve(authenticated.claims)
+            resolutions.append((name, authenticated, await mechanism.resolver.resolve(authenticated.claims)))
+        if any(isinstance(resolution, VerificationUnavailable) for _, _, resolution in resolutions):
+            raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
+        if any(isinstance(resolution, InvalidCredentials) for _, _, resolution in resolutions):
+            raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+        resolved: list[_ResolvedAuthentication[UserT]] = []
+        for name, authenticated, resolution in resolutions:
+            principal = cast("Principal[UserT]", resolution)
             if not principal.is_authenticated:
                 raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
             resolved.append(_ResolvedAuthentication(name=name, outcome=authenticated, principal=principal))

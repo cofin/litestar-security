@@ -32,6 +32,7 @@ from litestar_security.providers.jwt import (
     VerificationKeySet,
     build_access_token_claims,
     build_local_jwks_handler,
+    extend_composite_bearer,
     normalize_signer,
     normalize_verifier,
 )
@@ -70,6 +71,7 @@ __all__ = (
     "WorkerLimits",
     "build_access_token_claims",
     "build_local_jwks_handler",
+    "extend_composite_bearer",
     "normalize_fetcher",
     "normalize_signer",
     "normalize_verifier",

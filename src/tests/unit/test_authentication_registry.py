@@ -6,7 +6,7 @@ import gzip
 import hmac
 import json
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 from math import inf, nan
 from pathlib import Path
@@ -85,6 +85,7 @@ from litestar_security.providers.jwt import (
     VerificationKey,
     VerificationKeySet,
     build_access_token_claims,
+    extend_composite_bearer,
     normalize_signer,
     normalize_verifier,
     parse_unverified_jwt_route,
@@ -1386,7 +1387,18 @@ async def test_composite_bearer_selects_exactly_one_trust_slot(issuer: str, audi
         scopes=frozenset({"reports:read"}), roles=frozenset({"analyst"}), tenant_ids=frozenset({"tenant-1"})
     )
     authenticated = Authenticated(
-        claims="user-1",
+        claims=JWTClaims(
+            issuer=_JWT_ISSUER,
+            subject="user-1",
+            audiences=frozenset({_JWT_AUDIENCE}),
+            expires_at=_JWT_NOW + timedelta(minutes=10),
+            issued_at=_JWT_NOW,
+            not_before=None,
+            token_id="token-1",  # noqa: S106
+            client_id="client-1",
+            scopes=frozenset(),
+            raw={},
+        ),
         evidence=AuthenticationEvidence(
             mechanism="provider",
             slot="provider-slot",
@@ -1479,6 +1491,7 @@ async def test_composite_bearer_cryptographically_isolates_same_kid_trust_domain
 
         assert isinstance(outcome, Authenticated)
         assert outcome.claims.issuer == issuer
+        assert outcome.claims.bearer_slot == name
         assert outcome.evidence.slot == name
 
     cross_domain_token = _encode_jwt(
@@ -1651,6 +1664,63 @@ def test_composite_bearer_builds_one_native_registry_mechanism() -> None:
     assert registry.mechanism_names == ("bearer",)
     assert mechanism_value.scheme_name == "bearer"
     assert mechanism_value.security_scheme == SecurityScheme(type="http", scheme="bearer", bearer_format="JWT")
+
+
+@pytest.mark.anyio
+async def test_composite_bearer_extension_dispatches_local_and_external_identity_resolvers() -> None:
+    class ClaimsResolver:
+        def __init__(self, prefix: str) -> None:
+            self.prefix = prefix
+            self.calls: list[str] = []
+
+        async def resolve(self, claims: JWTClaims) -> Principal[object]:
+            self.calls.append(claims.subject)
+            return Principal(id=f"{self.prefix}:{claims.subject}")
+
+    external_resolver = ClaimsResolver("external")
+    local_resolver = ClaimsResolver("local")
+    external_slot = BearerTokenSlot(
+        name="external",
+        selector=BearerSlotSelector(
+            issuers=frozenset({"https://external.example"}), audiences=frozenset({"external-api"})
+        ),
+        verifier=_recording_jwt_verifier(
+            InvalidCredentials(), issuer="https://external.example", audiences=frozenset({"external-api"})
+        ),  # type: ignore[arg-type]
+    )
+    physical_slot, mechanism_value = CompositeBearerConfig(mechanism_name="bearer", slots=(external_slot,)).build(
+        external_resolver
+    )
+    local_slot = BearerTokenSlot(
+        name="local",
+        selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER}), audiences=frozenset({_JWT_AUDIENCE})),
+        verifier=_recording_jwt_verifier(InvalidCredentials()),  # type: ignore[arg-type]
+    )
+
+    extended = extend_composite_bearer(mechanism_value, local_slot, local_resolver)
+    base_claims = JWTClaims(
+        issuer=_JWT_ISSUER,
+        subject="user-1",
+        audiences=frozenset({_JWT_AUDIENCE}),
+        expires_at=_JWT_NOW + timedelta(minutes=10),
+        issued_at=_JWT_NOW,
+        not_before=None,
+        token_id="token-1",  # noqa: S106
+        client_id="client-1",
+        scopes=frozenset(),
+        raw={},
+    )
+
+    local = await extended.resolver.resolve(replace(base_claims, bearer_slot="local"))
+    external = await extended.resolver.resolve(replace(base_claims, bearer_slot="external"))
+
+    assert isinstance(local, Principal)
+    assert isinstance(external, Principal)
+    assert (local.id, external.id) == ("local:user-1", "external:user-1")
+    assert local_resolver.calls == ["user-1"]
+    assert external_resolver.calls == ["user-1"]
+    assert physical_slot.name == "authorization.bearer"
+    assert tuple(slot.name for slot in extended.authenticator.config.slots) == ("external", "local")  # type: ignore[attr-defined]
 
 
 @pytest.mark.anyio
@@ -2057,7 +2127,7 @@ def test_access_token_claim_builder_is_deterministic_minimal_and_validated() -> 
         ({"not_before": _NAIVE_JWT_NOW}, "timezone-aware"),
         ({"not_before": _JWT_NOW + timedelta(minutes=6)}, "expiry"),
         ({"jti": " "}, "identifier"),
-        ({"scopes": frozenset({" "})}, "identifier"),
+        ({"scopes": frozenset({" "})}, "scope"),
     ],
 )
 def test_access_token_claim_builder_rejects_invalid_inputs(overrides: dict[str, object], match: str) -> None:
@@ -2476,6 +2546,7 @@ async def test_pyjwt_verifier_rejects_hmac_rsa_algorithm_confusion(
         ({"scope": "reports:read reports:read"}, frozenset()),
         ({"scp": "reports:read"}, frozenset({"scope"})),
         ({"scp": ["reports:read", 7]}, frozenset({"scope"})),
+        ({"scp": ["admin read"]}, frozenset({"scope"})),
         ({"scp": ["reports:read"], "scope": "profile"}, frozenset()),
         ({}, frozenset({"iss"})),
         ({}, frozenset({"sub"})),
@@ -2505,6 +2576,7 @@ async def test_pyjwt_verifier_rejects_hmac_rsa_algorithm_confusion(
         "duplicate-scope",
         "string-scp",
         "mixed-scp",
+        "space-containing-scp-member",
         "ambiguous-scope-claims",
         "missing-issuer",
         "missing-subject",
@@ -6671,3 +6743,390 @@ def test_native_session_http_cleanup_without_mutable_native_session_only_expires
 
     assert isinstance(outcome, InvalidCredentials)
     assert _queued_binding_token(connection) == ""
+
+
+class _LocalAccessStore(_PasswordStore):
+    def __init__(
+        self,
+        account: accounts_module.LocalAccount[object] | None,
+        *,
+        fail_lookup: bool = False,
+        fail_password_read: bool = False,
+        fail_epoch: bool = False,
+    ) -> None:
+        super().__init__(
+            fail_read=fail_password_read, security_epoch=account.security_epoch if account is not None else 1
+        )
+        self.account = account
+        self.fail_lookup = fail_lookup
+        self.fail_epoch = fail_epoch
+        self.login_lookups: list[str] = []
+        self.id_lookups: list[str] = []
+
+    async def find_for_login(self, normalized_identifier: str) -> accounts_module.LocalAccount[object] | None:
+        self.login_lookups.append(normalized_identifier)
+        if self.fail_lookup:
+            raise OSError
+        return self.account
+
+    async def get_by_id(self, account_id: str) -> accounts_module.LocalAccount[object] | None:
+        self.id_lookups.append(account_id)
+        if self.fail_lookup:
+            raise OSError
+        return self.account if self.account is not None and self.account.account_id == account_id else None
+
+    async def current_epoch(self, account_id: str) -> int | None:
+        if self.fail_epoch:
+            raise OSError
+        return await super().current_epoch(account_id)
+
+
+def _local_access_account(
+    *, active: bool = True, verified: bool = True, security_epoch: int = 3
+) -> accounts_module.LocalAccount[object]:
+    return accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Local Person",
+        active=active,
+        verified=verified,
+        security_epoch=security_epoch,
+        user={"safe": "application object"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("account", "fail_lookup", "fail_password_read", "hasher_unavailable", "expected_type"),
+    [
+        (_local_access_account(), False, False, False, accounts_module.LocalAccount),
+        (None, False, False, False, InvalidCredentials),
+        (_local_access_account(active=False), False, False, False, InvalidCredentials),
+        (_local_access_account(verified=False), False, False, False, InvalidCredentials),
+        (_local_access_account(), True, False, False, VerificationUnavailable),
+        (_local_access_account(), False, True, False, VerificationUnavailable),
+        (_local_access_account(), False, False, True, VerificationUnavailable),
+    ],
+)
+@pytest.mark.anyio
+async def test_password_login_is_constant_work_and_returns_structured_outcomes(
+    account: accounts_module.LocalAccount[object] | None,
+    fail_lookup: bool,  # noqa: FBT001
+    fail_password_read: bool,  # noqa: FBT001
+    hasher_unavailable: bool,  # noqa: FBT001
+    expected_type: type[object],
+) -> None:
+    store = _LocalAccessStore(account, fail_lookup=fail_lookup, fail_password_read=fail_password_read)
+    hasher = _PasswordHasher(
+        accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.VERIFIED),
+        unavailable=hasher_unavailable,
+    )
+    service = accounts_module.PasswordLoginService(accounts=store, hasher=hasher)
+
+    outcome = await service.authenticate(" Person@Example.com ", "presented secret", now=_JWT_NOW)
+
+    assert isinstance(outcome, expected_type)
+    assert len(hasher.calls) == 1
+    assert hasher.calls[0][1] == "presented secret"
+    if account is None or fail_lookup or fail_password_read:
+        assert hasher.calls[0][0] is None
+
+
+@pytest.mark.parametrize("scope", ["admin read", "admin\tread", '"quoted', "back\\slash", "é"])
+def test_access_token_claims_reject_non_oauth_scope_tokens(scope: str) -> None:
+    with pytest.raises(ValueError, match="scope"):
+        build_access_token_claims(
+            issuer=_JWT_ISSUER,
+            audience=_JWT_AUDIENCE,
+            subject="account-1",
+            client_id="local",
+            security_epoch=1,
+            now=_JWT_NOW,
+            lifetime=timedelta(minutes=10),
+            scopes=frozenset({scope}),
+        )
+
+
+@pytest.mark.anyio
+async def test_local_access_issue_cross_verifies_exact_minimal_claims_without_generic_scope_grants(
+    local_key_ring: LocalKeyRing,
+) -> None:
+    account = _local_access_account()
+    issuer = accounts_module.LocalAccessTokenIssuer(
+        signer=local_key_ring.build_signer(),
+        issuer=local_key_ring.issuer,
+        audience=_JWT_AUDIENCE,
+        client_id="local-web",
+        clock=lambda: _JWT_NOW,
+        token_ids=lambda: "access-token-1",
+    )
+
+    issued = await issuer.issue(account, scopes=frozenset({"write", "read"}))
+
+    assert isinstance(issued, accounts_module.LocalAccessToken)
+    assert (issued.token_type, issued.expires_in) == ("Bearer", 600)
+    assert "access_token" not in repr(issued)
+    verifier = local_key_ring.build_verifier(
+        JWTValidationConfig(
+            issuer=local_key_ring.issuer,
+            audiences=frozenset({_JWT_AUDIENCE}),
+            algorithms=frozenset(key.algorithm for key in local_key_ring.all_verification_keys),
+            required_claims=frozenset({"se"}),
+            maximum_lifetime=timedelta(minutes=10),
+        ),
+        mechanism_name="bearer",
+        slot_name="local",
+    )
+    outcome = await verifier.verify(issued.access_token, now=_JWT_NOW)
+
+    assert isinstance(outcome, Authenticated)
+    assert outcome.grants == AuthorizationSnapshot()
+    assert outcome.claims.raw == {
+        "iss": local_key_ring.issuer,
+        "sub": "account-1",
+        "aud": _JWT_AUDIENCE,
+        "exp": int((_JWT_NOW + timedelta(minutes=10)).timestamp()),
+        "iat": int(_JWT_NOW.timestamp()),
+        "client_id": "local-web",
+        "jti": "access-token-1",
+        "se": 3,
+        "scope": "read write",
+    }
+    serialized_claims = json.dumps(dict(outcome.claims.raw))
+    for forbidden in ("person@example.com", "Local Person", "application object", "password", "roles", "team"):
+        assert forbidden not in serialized_claims
+
+
+@pytest.mark.parametrize(
+    ("account", "fail_lookup", "fail_epoch", "epoch", "expected_type"),
+    [
+        (_local_access_account(), False, False, 3, Principal),
+        (None, False, False, 3, InvalidCredentials),
+        (_local_access_account(active=False), False, False, 3, InvalidCredentials),
+        (_local_access_account(verified=False), False, False, 3, InvalidCredentials),
+        (_local_access_account(), True, False, 3, VerificationUnavailable),
+        (_local_access_account(), False, True, 3, VerificationUnavailable),
+        (_local_access_account(), False, False, 2, InvalidCredentials),
+    ],
+)
+@pytest.mark.anyio
+async def test_local_bearer_identity_resolution_checks_account_and_exact_epoch(
+    account: accounts_module.LocalAccount[object] | None,
+    fail_lookup: bool,  # noqa: FBT001
+    fail_epoch: bool,  # noqa: FBT001
+    epoch: int,
+    expected_type: type[object],
+) -> None:
+    store = _LocalAccessStore(account, fail_lookup=fail_lookup, fail_epoch=fail_epoch)
+    resolver = accounts_module.LocalBearerIdentityResolver(accounts=store)
+    claims = JWTClaims(
+        issuer=_JWT_ISSUER,
+        subject="account-1",
+        audiences=frozenset({_JWT_AUDIENCE}),
+        expires_at=_JWT_NOW + timedelta(minutes=10),
+        issued_at=_JWT_NOW,
+        not_before=None,
+        token_id="access-token-1",  # noqa: S106 - public JWT identifier
+        client_id="local",
+        scopes=frozenset(),
+        raw={"se": epoch},
+    )
+
+    outcome = await resolver.resolve(claims)
+
+    assert isinstance(outcome, expected_type)
+    if isinstance(outcome, Principal):
+        assert (outcome.id, outcome.display_name, outcome.user) == (
+            "account-1",
+            "Local Person",
+            {"safe": "application object"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"accounts": object()}, "AccountLookup"),
+        ({"hasher": object()}, "PasswordHasher"),
+        ({"normalizer": None}, "normalizer"),
+    ],
+)
+def test_password_login_rejects_invalid_configuration(kwargs: dict[str, object], match: str) -> None:
+    values = {"accounts": _LocalAccessStore(_local_access_account()), "hasher": _PasswordHasher(), **kwargs}
+
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        accounts_module.PasswordLoginService(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("identifier", "unavailable", "expected_type"),
+    [(" ", False, InvalidCredentials), ("person@example.com", True, VerificationUnavailable)],
+)
+@pytest.mark.anyio
+async def test_password_login_dummy_work_handles_empty_identifiers_and_worker_failure(
+    identifier: str,
+    unavailable: bool,  # noqa: FBT001
+    expected_type: type[object],
+) -> None:
+    hasher = _PasswordHasher(unavailable=unavailable)
+    service = accounts_module.PasswordLoginService(accounts=_LocalAccessStore(None), hasher=hasher)
+
+    outcome = await service.authenticate(identifier, "presented secret", now=_JWT_NOW)
+
+    assert isinstance(outcome, expected_type)
+    assert hasher.calls == [(None, "presented secret")]
+
+
+@pytest.mark.parametrize(
+    ("token", "expires_in"),
+    [
+        (cast("Any", object()), 600),
+        ("not-compact", 600),
+        ("a..c", 600),
+        ("a.b.c", 600),
+        ("e30.%.YQ", 600),
+        ("é.b.c", 600),
+        ("e30.e30.YQ", True),
+        ("e30.e30.YQ", 29),
+        ("e30.e30.YQ", 3_601),
+    ],
+)
+def test_local_access_token_rejects_invalid_response_values(token: object, expires_in: int) -> None:
+    with pytest.raises(ValueError, match="bounded expiry"):
+        accounts_module.LocalAccessToken(access_token=token, expires_in=expires_in)  # type: ignore[arg-type]
+
+
+class _AccessSigner:
+    def __init__(self, token: str = "e30.e30.YQ", *, fail: bool = False) -> None:  # noqa: S107
+        self.token = token
+        self.fail = fail
+
+    async def sign(self, _claims: Mapping[str, object], *, now: datetime) -> str:
+        del now
+        if self.fail:
+            raise OSError
+        return self.token
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"signer": object()}, "TokenSigner"),
+        ({"issuer": " "}, "issuer"),
+        ({"audience": "bad audience"}, "audience"),
+        ({"client_id": "e\u0301"}, "client id"),
+        ({"lifetime": object()}, "timedelta"),
+        ({"clock": None}, "clock"),
+        ({"token_ids": None}, "token id"),
+    ],
+)
+def test_local_access_token_issuer_rejects_invalid_configuration(kwargs: dict[str, object], match: str) -> None:
+    values = {
+        "signer": _AccessSigner(),
+        "issuer": _JWT_ISSUER,
+        "audience": _JWT_AUDIENCE,
+        "client_id": "local",
+        **kwargs,
+    }
+
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        accounts_module.LocalAccessTokenIssuer(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("account", "signer", "clock", "token_ids", "scopes", "expected_type"),
+    [
+        (
+            _local_access_account(active=False),
+            _AccessSigner(),
+            lambda: _JWT_NOW,
+            lambda: "token",
+            frozenset(),
+            InvalidCredentials,
+        ),
+        (
+            _local_access_account(),
+            _AccessSigner(),
+            lambda: 1 / 0,
+            lambda: "token",
+            frozenset(),
+            VerificationUnavailable,
+        ),
+        (
+            _local_access_account(),
+            _AccessSigner(),
+            lambda: _JWT_NOW,
+            lambda: 1 / 0,
+            frozenset(),
+            VerificationUnavailable,
+        ),
+        (
+            _local_access_account(),
+            _AccessSigner(),
+            lambda: _JWT_NOW,
+            lambda: "token",
+            frozenset({"bad scope"}),
+            InvalidCredentials,
+        ),
+        (
+            _local_access_account(),
+            _AccessSigner(fail=True),
+            lambda: _JWT_NOW,
+            lambda: "token",
+            frozenset(),
+            VerificationUnavailable,
+        ),
+        (
+            _local_access_account(),
+            _AccessSigner("malformed"),
+            lambda: _JWT_NOW,
+            lambda: "token",
+            frozenset(),
+            VerificationUnavailable,
+        ),
+    ],
+)
+@pytest.mark.anyio
+async def test_local_access_token_issuer_maps_invalid_and_unavailable_composition(  # noqa: PLR0913,PLR0917
+    account: accounts_module.LocalAccount[object],
+    signer: _AccessSigner,
+    clock: Callable[[], datetime],
+    token_ids: Callable[[], str],
+    scopes: frozenset[str],
+    expected_type: type[object],
+) -> None:
+    service = accounts_module.LocalAccessTokenIssuer(
+        signer=signer, issuer=_JWT_ISSUER, audience=_JWT_AUDIENCE, clock=clock, token_ids=token_ids
+    )
+
+    outcome = await service.issue(account, scopes=scopes)
+
+    assert isinstance(outcome, expected_type)
+
+
+def test_local_bearer_resolver_rejects_missing_capabilities() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="AccountLookup and SecurityEpochStore"):
+        accounts_module.LocalBearerIdentityResolver(accounts=object())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("epoch", [None, True, -1, 1.0, "1"])
+@pytest.mark.anyio
+async def test_local_bearer_resolver_rejects_malformed_epoch_without_lookup(epoch: object) -> None:
+    store = _LocalAccessStore(_local_access_account())
+    resolver = accounts_module.LocalBearerIdentityResolver(accounts=store)
+    claims = JWTClaims(
+        issuer=_JWT_ISSUER,
+        subject="account-1",
+        audiences=frozenset({_JWT_AUDIENCE}),
+        expires_at=_JWT_NOW + timedelta(minutes=10),
+        issued_at=_JWT_NOW,
+        not_before=None,
+        token_id="public-token-id",  # noqa: S106
+        client_id="local",
+        scopes=frozenset(),
+        raw={"se": cast("Any", epoch)},
+    )
+
+    outcome = await resolver.resolve(claims)
+
+    assert isinstance(outcome, InvalidCredentials)
+    assert store.id_lookups == []

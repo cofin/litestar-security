@@ -63,11 +63,13 @@ from litestar_security.providers.jwt import (
     JWTClaims,
     JWTValidationConfig,
     JWTVerifier,
+    LocalKeyRing,
     PyJWTVerifier,
+    SigningKey,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from litestar.connection import ASGIConnection
     from litestar.types import ASGIApp, Message, Receive, Scope, Send
@@ -598,7 +600,7 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  #
         user=object(),
     )
     records: dict[str, SessionRecord] = {}
-    state = SimpleNamespace(epoch=1, touches=0)
+    state = SimpleNamespace(epoch=1, fail_epoch=False, fail_lookup=False, touches=0)
 
     async def create(command: CreateSessionCommand, **_kwargs: object) -> SessionRecord:
         record = SessionRecord(
@@ -619,9 +621,13 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  #
         return records.get(session_id)
 
     async def get_account(account_id: str) -> LocalAccount[object] | None:
+        if state.fail_lookup:
+            raise OSError
         return account if account_id == account.account_id else None
 
     async def current_epoch(account_id: str) -> int | None:
+        if state.fail_epoch:
+            raise OSError
         return cast("int", state.epoch) if account_id == account.account_id else None
 
     async def list_for_account(account_id: str) -> list[SessionRecord]:
@@ -690,15 +696,69 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  #
             rebind=rebind,
             register_login_method=unused,
             replace_password_and_bump_epoch=unused,
+            revoke_family=unused,
+            revoke_for_account=unused,
             revoke_login_method=unused,
             revoke_other_sessions=revoke_other_sessions,
             revoke_session_for_account=revoke_session_for_account,
             revoke_sessions_for_account=revoke_sessions_for_account,
             state=state,
             touch=touch,
+            rotate=unused,
         ),
         account,
     )
+
+
+@pytest.mark.anyio
+async def test_local_access_token_runtime_enforces_scope_account_and_epoch(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    accounts, account = _native_local_accounts()
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth = LocalAuth.tokens(
+        accounts=cast("Any", accounts),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-api",  # noqa: S106 - public JWT audience
+    )
+    issuer = local_auth.access_token_issuer
+    assert issuer is not None
+    issued = await issuer.issue(account, scopes=frozenset({"reports:read"}), now=datetime.now(timezone.utc))
+    assert not isinstance(issued, (InvalidCredentials, VerificationUnavailable))
+    bearer_slot = local_auth.bearer_slot
+    assert bearer_slot is not None
+    invalid_verification = await bearer_slot.verifier.verify("malformed", now=datetime.now(timezone.utc))
+    assert isinstance(invalid_verification, InvalidCredentials)
+
+    @get("/", opt=security(required("bearer")), guards=[requires_scope("reports:read")])
+    async def handler(request: Request) -> dict[str, object]:
+        return {
+            "id": request.user.id,
+            "slot": request.auth.evidence[0].slot,
+            "scopes": sorted(request.auth.authorization.scopes),
+        }
+
+    app = Litestar(
+        route_handlers=[handler], openapi_config=None, plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))]
+    )
+    headers = {"Authorization": f"Bearer {issued.access_token}"}
+    async with AsyncTestClient(app=app) as client:
+        authenticated = await client.get("/", headers=headers)
+        malformed = await client.get("/", headers={"Authorization": "Bearer malformed"})
+        accounts.state.epoch = 2
+        invalidated = await client.get("/", headers=headers)
+        accounts.state.epoch = 1
+        accounts.state.fail_epoch = True
+        unavailable = await client.get("/", headers=headers)
+
+    assert authenticated.status_code == 200
+    assert authenticated.json() == {"id": "account-1", "slot": "local", "scopes": ["reports:read"]}
+    assert malformed.status_code == HTTP_401_UNAUTHORIZED
+    assert invalidated.status_code == HTTP_401_UNAUTHORIZED
+    assert unavailable.status_code == HTTP_503_SERVICE_UNAVAILABLE
 
 
 @pytest.mark.parametrize("backend_kind", ["client", "server"])

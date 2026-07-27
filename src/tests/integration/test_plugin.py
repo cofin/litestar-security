@@ -70,6 +70,7 @@ from litestar_security.providers.jwt import (
     JWTValidationConfig,
     LocalJWKSConfig,
     LocalKeyRing,
+    PyJWTVerifier,
     SigningKey,
     VerificationKey,
 )
@@ -1749,6 +1750,146 @@ def test_local_session_owned_and_existing_backends_have_registry_and_openapi_par
         assert runtime.owned_session_backend.backend is backend
     else:
         assert app.middleware.index(native_middleware) < app.middleware.index(security_middleware)
+
+
+def test_local_token_profile_registers_one_composite_bearer_and_native_openapi(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    capabilities = _local_session_accounts()
+    for name in ("revoke_family", "revoke_for_account", "rotate"):
+        setattr(capabilities, name, lambda *_args, **_kwargs: None)
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth = LocalAuth.tokens(
+        accounts=cast("Any", capabilities),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-api",  # noqa: S106 - public JWT audience
+    )
+
+    @get("/token")
+    async def token_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[token_handler],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))],
+    )
+    security_middleware = next(
+        item
+        for item in app.middleware
+        if isinstance(item, DefineMiddleware) and item.middleware is SecurityMiddlewareWrapper
+    )
+    registry = security_middleware.kwargs["config"].registry
+    bearer = registry.get_mechanism("bearer")
+
+    assert registry.slot_names == ("authorization.bearer",)
+    assert registry.mechanism_names == ("bearer",)
+    assert bearer.scheme_name == "bearer"
+    assert _operation_security(app, "/token") == [{"bearer": []}]
+    assert app.openapi_schema.components is not None
+    assert app.openapi_schema.components.security_schemes == {
+        "bearer": SecurityScheme(type="http", scheme="bearer", bearer_format="JWT")
+    }
+
+
+def test_local_token_profile_extends_one_existing_composite_bearer_owner(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    capabilities = _local_session_accounts()
+    for name in ("revoke_family", "revoke_for_account", "rotate"):
+        setattr(capabilities, name, lambda *_args, **_kwargs: None)
+    local_private_key, _local_public_key = jwt_key_material["EdDSA"]
+    _external_private_key, external_public_key = jwt_key_material["RS256"]
+    local_auth = LocalAuth.tokens(
+        accounts=cast("Any", capabilities),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=local_private_key),
+        ),
+        token_audience="local-api",  # noqa: S106
+    )
+    external_slot = BearerTokenSlot(
+        name="oidc",
+        selector=BearerSlotSelector(issuers=frozenset({"https://oidc.example"}), audiences=frozenset({"oidc-api"})),
+        verifier=PyJWTVerifier(
+            config=JWTValidationConfig(
+                issuer="https://oidc.example", audiences=frozenset({"oidc-api"}), algorithms=frozenset({"RS256"})
+            ),
+            key=external_public_key,
+        ),
+    )
+    physical_slot, mechanism_value = CompositeBearerConfig(mechanism_name="bearer", slots=(external_slot,)).build(
+        cast("Any", _CompilerResolver()), scheme_name="bearer"
+    )
+
+    @get("/token")
+    async def token_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[token_handler],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[
+            SecurityPlugin(SecurityConfig(slots=(physical_slot,), mechanisms=(mechanism_value,), local_auth=local_auth))
+        ],
+    )
+    middleware = next(
+        item
+        for item in app.middleware
+        if isinstance(item, DefineMiddleware) and item.middleware is SecurityMiddlewareWrapper
+    )
+    registry = middleware.kwargs["config"].registry
+    bearer = registry.get_mechanism("bearer")
+
+    assert registry.slot_names == ("authorization.bearer",)
+    assert registry.mechanism_names == ("bearer",)
+    assert tuple(slot.name for slot in bearer.authenticator.config.slots) == ("oidc", "local")  # type: ignore[attr-defined]
+    assert _operation_security(app, "/token") == [{"bearer": []}]
+    assert app.openapi_schema.components is not None
+    assert app.openapi_schema.components.security_schemes == {
+        "bearer": SecurityScheme(type="http", scheme="bearer", bearer_format="JWT")
+    }
+
+
+@pytest.mark.parametrize(
+    ("owner_kind", "match"),
+    [("slot_only", "exactly one composite bearer owner"), ("standalone", "application's sole composite bearer owner")],
+)
+def test_local_token_profile_rejects_a_second_bearer_owner(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]], owner_kind: Literal["slot_only", "standalone"], match: str
+) -> None:
+    capabilities = _local_session_accounts()
+    for name in ("revoke_family", "revoke_for_account", "rotate"):
+        setattr(capabilities, name, lambda *_args, **_kwargs: None)
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth = LocalAuth.tokens(
+        accounts=cast("Any", capabilities),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-api",  # noqa: S106 - public JWT audience
+    )
+
+    slots = (_CompilerSlot("authorization.bearer"),)
+    mechanisms = (
+        (
+            AuthenticationMechanism(
+                authenticator=_CompilerAuthenticator("bearer", "authorization.bearer"), resolver=_CompilerResolver()
+            ),
+        )
+        if owner_kind == "standalone"
+        else ()
+    )
+
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        Litestar(
+            route_handlers=[],
+            plugins=[SecurityPlugin(SecurityConfig(slots=slots, mechanisms=mechanisms, local_auth=local_auth))],
+        )
 
 
 def test_duplicate_native_sessions_fail_startup() -> None:

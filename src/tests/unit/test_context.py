@@ -41,7 +41,7 @@ from litestar_security.guards import (
     requires_team_role,
     requires_tenant,
 )
-from litestar_security.providers.jwt import LocalKeyRing
+from litestar_security.providers.jwt import BearerTokenSlot, LocalKeyRing
 
 _DUPLICATE_GUARD = requires_authenticated()
 _ACCOUNT_NOW = datetime(2026, 7, 27, tzinfo=timezone.utc)
@@ -85,6 +85,7 @@ _PUBLIC_API = (
     "CredentialSlot",
     "CurrentUser",
     "ExternalCSRF",
+    "IdentityResolution",
     "IdentityResolver",
     "InvalidCredentials",
     "LitestarSessionHandle",
@@ -645,6 +646,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "WorkerLimits",
         "build_access_token_claims",
         "build_local_jwks_handler",
+        "extend_composite_bearer",
         "normalize_fetcher",
         "normalize_signer",
         "normalize_verifier",
@@ -692,11 +694,14 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "InvalidInvitation",
         "InvalidLifecycleRequest",
         "LifecycleAccepted",
+        "LocalAccessToken",
+        "LocalAccessTokenIssuer",
         "LocalAccount",
         "LocalAccountCapabilities",
         "LocalAuth",
         "LocalAuthConfig",
         "LocalAuthMode",
+        "LocalBearerIdentityResolver",
         "LoginMethod",
         "LoginMethodStore",
         "NativeSessionAuth",
@@ -710,6 +715,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "PasswordCredentialStore",
         "PasswordHasher",
         "PasswordHashingUnavailableError",
+        "PasswordLoginService",
         "PasswordPolicy",
         "PasswordPolicyResult",
         "PasswordPolicyViolation",
@@ -999,6 +1005,22 @@ def test_account_password_session_and_refresh_contracts_share_one_strict_epoch_d
     assert not accounts_module.RotateRefreshResult(accounts_module.RefreshRotationStatus.EXPIRED).family_revoked
 
 
+@pytest.mark.parametrize(("field_name", "value"), [("active", 1), ("verified", "false")])
+def test_local_account_requires_exact_boolean_state(field_name: str, value: object) -> None:
+    values = {
+        "account_id": "account-1",
+        "normalized_identifier": "user@example.com",
+        "display_name": None,
+        "active": True,
+        "verified": True,
+        "security_epoch": 1,
+    }
+    values[field_name] = value
+
+    with pytest.raises(ValueError, match="Local account"):
+        accounts_module.LocalAccount(**values)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     ("authenticated_at", "expires_at", "match"),
     [
@@ -1169,6 +1191,48 @@ def test_local_auth_config_rejects_incomplete_transport_values(
 
     with pytest.raises(ImproperlyConfiguredException, match=match):
         accounts_module.LocalAuthConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def test_local_token_profile_builds_one_customizable_runtime_with_safe_defaults(local_key_ring: LocalKeyRing) -> None:
+    store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _REFRESH_CAPABILITIES))
+    config = accounts_module.LocalAuth.tokens(
+        accounts=store,
+        key_ring=local_key_ring,
+        token_audience="local-api",  # noqa: S106 - public JWT audience
+    )
+
+    assert config.token_client_id == "local"  # noqa: S105 - public JWT client identifier
+    assert config.access_token_lifetime == timedelta(minutes=10)
+    assert isinstance(config.password_hasher, accounts_module.Argon2PasswordHasher)
+    assert config.password_hasher.worker_limits is local_key_ring.worker_limits
+    assert isinstance(config.password_login, accounts_module.PasswordLoginService)
+    assert isinstance(config.access_token_issuer, accounts_module.LocalAccessTokenIssuer)
+    assert isinstance(config.bearer_slot, BearerTokenSlot)
+    assert config.bearer_slot.name == "local"
+    assert isinstance(config.bearer_resolver, accounts_module.LocalBearerIdentityResolver)
+    assert config.password_login.accounts is store
+    assert config.bearer_resolver.accounts is store
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value", "match"),
+    [
+        ("token_client_id", " ", "client id"),
+        ("token_client_id", object(), "client id"),
+        ("access_token_lifetime", timedelta(seconds=29), "30 seconds"),
+        ("access_token_lifetime", timedelta(hours=1, microseconds=1), "one hour"),
+        ("access_token_lifetime", timedelta(seconds=30, microseconds=1), "whole seconds"),
+        ("password_hasher", object(), "PasswordHasher"),
+    ],
+)
+def test_local_token_profile_rejects_invalid_runtime_configuration(
+    field_name: str, invalid_value: object, match: str, local_key_ring: LocalKeyRing
+) -> None:
+    store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _REFRESH_CAPABILITIES))
+    kwargs = {"accounts": store, "key_ring": local_key_ring, "token_audience": "local-api", field_name: invalid_value}
+
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        accounts_module.LocalAuth.tokens(**kwargs)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

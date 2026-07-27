@@ -205,6 +205,37 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             slots = list(self.config.slots)
             mechanisms = list(self.config.mechanisms)
             local_auth = self.config.local_auth
+            if local_auth is not None and local_auth.bearer_slot is not None:
+                from litestar_security.providers.jwt import (  # noqa: PLC0415
+                    CompositeBearerConfig,
+                    extend_composite_bearer,
+                )
+
+                bearer_resolver = local_auth.bearer_resolver
+                if bearer_resolver is None:  # pragma: no cover - LocalAuthConfig invariant
+                    message = "Local token authentication resolver is unavailable"
+                    raise ImproperlyConfiguredException(detail=message)
+                physical_slots = tuple(slot for slot in slots if slot.name == "authorization.bearer")
+                bearer_mechanisms = tuple(
+                    mechanism for mechanism in mechanisms if mechanism.authenticator.slot == "authorization.bearer"
+                )
+                if not physical_slots and not bearer_mechanisms:
+                    bearer_slot, bearer_mechanism = CompositeBearerConfig(
+                        mechanism_name="bearer", slots=(local_auth.bearer_slot,)
+                    ).build(bearer_resolver, scheme_name="bearer")
+                    slots.append(bearer_slot)
+                    mechanisms.append(bearer_mechanism)
+                elif len(physical_slots) == len(bearer_mechanisms) == 1:
+                    existing = bearer_mechanisms[0]
+                    try:
+                        extended = extend_composite_bearer(existing, local_auth.bearer_slot, bearer_resolver)
+                    except ImproperlyConfiguredException as exc:
+                        message = "Local token authentication requires the application's sole composite bearer owner"
+                        raise ImproperlyConfiguredException(detail=message) from exc
+                    mechanisms[mechanisms.index(existing)] = extended
+                else:
+                    message = "Local token authentication requires exactly one composite bearer owner"
+                    raise ImproperlyConfiguredException(detail=message)
             if local_auth is not None and local_auth.session_auth is not None:
                 session_auth = local_auth.session_auth
                 slots.append(session_auth)

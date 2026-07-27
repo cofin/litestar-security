@@ -41,6 +41,7 @@ from litestar_security.authentication import (
     AuthenticationOutcome,
     CredentialExtraction,
     CredentialSlot,
+    IdentityResolution,
     IdentityResolver,
     InvalidCredentials,
     NoCredentials,
@@ -70,6 +71,7 @@ __all__ = (
     "VerificationKeySet",
     "build_access_token_claims",
     "build_local_jwks_handler",
+    "extend_composite_bearer",
     "normalize_signer",
     "normalize_verifier",
 )
@@ -204,6 +206,7 @@ class JWTClaims:
     client_id: str | None
     scopes: frozenset[str]
     raw: Mapping[str, JSONValue]
+    bearer_slot: str | None = None
 
     def __post_init__(self) -> None:
         """Freeze nested collections at the verified-claims boundary."""
@@ -617,7 +620,7 @@ def build_access_token_claims(  # noqa: PLR0913
         if not_before >= expires_at:
             _raise_value("Access-token not-before must precede expiry")
     token_id = _strict_identifier_value(jti if jti is not None else token_urlsafe(32))
-    normalized_scopes = frozenset(_strict_identifier_value(scope) for scope in scopes)
+    normalized_scopes = frozenset(_strict_scope_value(scope) for scope in scopes)
     claims: dict[str, JSONValue] = {
         "iss": issuer,
         "sub": subject,
@@ -986,6 +989,42 @@ class CompositeBearerConfig:
         return credential_slot, mechanism
 
 
+@dataclass(frozen=True, slots=True)
+class _SelectedBearerResolver(Generic[UserT]):
+    selected_slot: str
+    selected: IdentityResolver[JWTClaims, UserT] = field(repr=False)
+    fallback: IdentityResolver[JWTClaims, UserT] = field(repr=False)
+
+    async def resolve(self, claims: JWTClaims) -> IdentityResolution[UserT]:
+        resolver = self.selected if claims.bearer_slot == self.selected_slot else self.fallback
+        return await resolver.resolve(claims)
+
+
+def extend_composite_bearer(
+    mechanism: AuthenticationMechanism[str, JWTClaims, UserT],
+    slot: BearerTokenSlot,
+    resolver: IdentityResolver[JWTClaims, UserT],
+) -> AuthenticationMechanism[str, JWTClaims, UserT]:
+    """Extend one library-built composite while preserving one physical bearer owner."""
+    authenticator = mechanism.authenticator
+    if not isinstance(authenticator, _CompositeBearerAuthenticator):
+        _raise_config("Existing bearer mechanism was not built by CompositeBearerConfig")
+    config = CompositeBearerConfig(
+        mechanism_name=authenticator.config.mechanism_name,
+        slots=(*authenticator.config.slots, slot),
+        maximum_token_bytes=authenticator.config.maximum_token_bytes,
+    )
+    return AuthenticationMechanism(
+        authenticator=_CompositeBearerAuthenticator(
+            config=config, clock=authenticator.clock, participates_by_default=authenticator.participates_by_default
+        ),
+        resolver=_SelectedBearerResolver(selected_slot=slot.name, selected=resolver, fallback=mechanism.resolver),
+        scheme_name=mechanism.scheme_name,
+        security_scheme=mechanism.security_scheme,
+        session_capable=mechanism.session_capable,
+    )
+
+
 @dataclass(slots=True)
 class _BearerCredentialSlot:
     maximum_token_bytes: int
@@ -1052,7 +1091,10 @@ class _CompositeBearerAuthenticator:
             return InvalidCredentials()
         if not isinstance(outcome, Authenticated):
             return outcome
-        return replace(outcome, evidence=replace(outcome.evidence, mechanism=self.name, slot=selected.name))
+        claims = replace(outcome.claims, bearer_slot=selected.name)
+        return replace(
+            outcome, claims=claims, evidence=replace(outcome.evidence, mechanism=self.name, slot=selected.name)
+        )
 
 
 def _selector_matches(selector: BearerSlotSelector, route: UnverifiedJWTRoute) -> bool:
@@ -1192,11 +1234,11 @@ def _normalize_scopes(payload: Mapping[str, JSONValue]) -> frozenset[str] | None
         if (
             not scope_values
             or len(scope_values) != len(frozenset(scope_values))
-            or any(not _is_strict_identifier(value) for value in scope_values)
+            or any(not _is_scope_token(value) for value in scope_values)
         ):
             return None
         return frozenset(scope_values)
-    if isinstance(scp, (list, tuple)) and all(isinstance(value, str) and _is_strict_identifier(value) for value in scp):
+    if isinstance(scp, (list, tuple)) and all(isinstance(value, str) and _is_scope_token(value) for value in scp):
         scp_values = cast("Sequence[str]", scp)
         return frozenset(scp_values) if len(scp_values) == len(frozenset(scp_values)) else None
     return None
@@ -1428,7 +1470,7 @@ def _validate_local_access_claims(
         _raise_value("Invalid local access-token claims")
     scope = payload.get("scope")
     if scope is not None and (
-        not isinstance(scope, str) or any(not _is_strict_identifier(value) for value in scope.split(" "))
+        not isinstance(scope, str) or any(not _is_scope_token(value) for value in scope.split(" "))
     ):
         _raise_value("Invalid local access-token claims")
     return payload
@@ -1461,6 +1503,16 @@ def _strict_identifier_value(value: str) -> str:
     ):
         _raise_value("Access-token identifiers must be non-empty normalized strings")
     return identifier
+
+
+def _strict_scope_value(value: str) -> str:
+    scope: object = value
+    if (
+        not isinstance(scope, str)  # pyright: ignore[reportUnnecessaryIsInstance]
+        or not _is_scope_token(scope)
+    ):
+        _raise_value("Access-token scope values must be OAuth scope tokens")
+    return scope
 
 
 def _strict_key_id(value: str) -> str:
@@ -1546,6 +1598,12 @@ def _is_strict_identifier(value: str) -> bool:
         and value == value.strip()
         and unicodedata.normalize("NFC", value) == value
         and all(not unicodedata.category(character).startswith("C") for character in value)
+    )
+
+
+def _is_scope_token(value: str) -> bool:
+    return bool(value) and all(
+        character == "!" or "#" <= character <= "[" or "]" <= character <= "~" for character in value
     )
 
 

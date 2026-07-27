@@ -594,3 +594,22 @@ async def test_presented_credential_cannot_normalize_back_to_missing() -> None:
 
     assert [authenticator.calls for authenticator in authenticators] == [1]
     assert [resolver.calls for resolver in resolvers] == [0]
+
+
+@pytest.mark.anyio
+async def test_identity_resolution_unavailable_wins_over_invalid_after_all_resolvers_run() -> None:
+    events: list[str] = []
+    evaluator, _, _, resolvers = _evaluator(
+        [
+            ("a", PresentedCredential("a"), _success("a", "slot-a"), Principal(id="unused-a")),
+            ("b", PresentedCredential("b"), _success("b", "slot-b"), Principal(id="unused-b")),
+        ],
+        events,
+    )
+    resolvers[0].principal = cast("Principal[object]", InvalidCredentials())
+    resolvers[1].principal = cast("Principal[object]", VerificationUnavailable())
+
+    with pytest.raises(ServiceUnavailableException, match="service unavailable"):
+        await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True)
+
+    assert [resolver.calls for resolver in resolvers] == [1, 1]
