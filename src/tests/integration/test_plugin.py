@@ -27,7 +27,7 @@ from litestar.middleware.session.server_side import ServerSideSessionConfig
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.controller import OpenAPIController
 from litestar.openapi.plugins import JsonRenderPlugin
-from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme
+from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme, Tag
 from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 from litestar.testing import TestClient
@@ -35,6 +35,7 @@ from litestar.testing import TestClient
 from litestar_security import SecurityConfig, SecurityPlugin
 from litestar_security._cli import register, security_group
 from litestar_security.accounts import (
+    LOCAL_AUTH_TAGS,
     LifecycleAccepted,
     LocalAuth,
     LocalAuthSecrets,
@@ -963,6 +964,64 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
     assert len(app_config.lifespan) == 1
     provider = cast("Provide", local_auth.build_route_handlers()[0].dependencies["local_auth_services"])
     assert provider.dependency() is local_auth.services
+
+
+def test_generated_local_routes_are_grouped_documented_and_uniquely_identified(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth = LocalAuth.hybrid(
+        accounts=cast("Any", _local_session_accounts()),
+        secrets=_local_auth_secrets(refresh=True),
+        csrf=CSRFConfig(secret=token_hex()),
+        binding=SessionBindingConfig(pepper=b"b" * 32, max_age=600),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-client",  # noqa: S106 - public JWT audience
+        registration=RegistrationPolicy.public(),
+    )
+    caller_tag = Tag(name="Local sessions", description="Caller owns this description.")
+    app = Litestar(
+        route_handlers=[],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0", tags=[caller_tag]),
+        plugins=[
+            SecurityPlugin(SecurityConfig(local_auth=local_auth, session_backend=_native_session_backend("client")[0]))
+        ],
+    )
+
+    declared = {tag.name: tag for tag in app.openapi_schema.tags or ()}
+    assert set(declared) == {tag.name for tag in LOCAL_AUTH_TAGS}
+    assert declared["Local sessions"] is caller_tag
+    assert all(tag.description for tag in declared.values())
+
+    operations = [
+        operation
+        for path_item in app.openapi_schema.paths.values()
+        for operation in (path_item.get, path_item.post, path_item.delete)
+        if operation is not None
+    ]
+    generated = [operation for operation in operations if (operation.operation_id or "").startswith("Local")]
+    assert len(generated) == 14
+    assert len({operation.operation_id for operation in generated}) == len(generated)
+    assert all(operation.summary and operation.description for operation in generated)
+    assert all(len(operation.tags or ()) == 1 for operation in generated)
+    assert {tag for operation in generated for tag in operation.tags or ()} == set(declared)
+
+    schemas = app.openapi_schema.components.schemas if app.openapi_schema.components is not None else None
+    assert schemas is not None
+    documented = ("LocalCredentials", "LocalPasswordChangeRequest", "LocalSessionResponse", "LocalRouteResponse")
+    assert all(all(prop.description for prop in (schemas[name].properties or {}).values()) for name in documented)
+
+    by_id = {operation.operation_id: operation for operation in generated}
+    assert by_id["LocalSessionLogin"].tags == ["Local sessions"]
+    assert by_id["LocalTokenRefresh"].tags == ["Local tokens"]
+    assert by_id["LocalRegister"].tags == ["Local registration"]
+    assert by_id["LocalPasswordRecovery"].tags == ["Local passwords"]
+    assert by_id["LocalVerificationConfirm"].tags == ["Local verification"]
+    assert by_id["LocalPasswordChange"].tags == ["Local passwords"]
+    assert by_id["LocalTokenPasswordChange"].tags == ["Local passwords"]
 
 
 def test_custom_local_controllers_keep_services_without_generated_routes(

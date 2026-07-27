@@ -15,7 +15,7 @@ from litestar.exceptions import ImproperlyConfiguredException, LitestarDeprecati
 from litestar.handlers.base import BaseRouteHandler
 from litestar.handlers.http_handlers import HTTPRouteHandler
 from litestar.openapi.config import OpenAPIConfig
-from litestar.openapi.spec import Components, Reference, SecurityRequirement, SecurityScheme
+from litestar.openapi.spec import Components, Reference, SecurityRequirement, SecurityScheme, Tag
 from litestar.router import Router
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 
@@ -191,6 +191,22 @@ def prepare_openapi_config(config: OpenAPIConfig, schemes: OpenAPISchemeSet) -> 
     with catch_warnings():
         simplefilter("ignore", LitestarDeprecationWarning)
         return replace(config, components=[*components, Components(security_schemes=contribution)])
+
+
+def merge_openapi_tags(config: OpenAPIConfig, tags: Sequence[Tag]) -> OpenAPIConfig:
+    """Copy an OpenAPI config with descriptions for undeclared generated-route tag groups.
+
+    A tag description is documentation rather than policy, so a name the application
+    already declared keeps the application's version instead of raising: the generated
+    routes still land in that group, described the way its owner chose.
+    """
+    declared = {tag.name for tag in config.tags or ()}
+    contribution = [tag for tag in tags if tag.name not in declared]
+    if not contribution:
+        return config
+    with catch_warnings():
+        simplefilter("ignore", LitestarDeprecationWarning)
+        return replace(config, tags=[*(config.tags or ()), *contribution])
 
 
 @dataclass(slots=True)

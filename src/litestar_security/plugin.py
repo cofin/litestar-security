@@ -23,7 +23,7 @@ from litestar.router import Router
 from litestar.routes import BaseRoute
 from litestar.types import Scope
 
-from litestar_security._openapi import OpenAPISchemeSet, RouteCompiler, prepare_openapi_config
+from litestar_security._openapi import OpenAPISchemeSet, RouteCompiler, merge_openapi_tags, prepare_openapi_config
 from litestar_security.authentication import (
     AuthenticationMechanism,
     AuthenticationRegistry,
@@ -127,7 +127,11 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         openapi_config = app_config.openapi_config
         if openapi_config is not None:
             schemes = OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", runtime.registry))
-            app_config.openapi_config = openapi_config = prepare_openapi_config(openapi_config, schemes)
+            openapi_config = prepare_openapi_config(openapi_config, schemes)
+            local_auth = self.config.local_auth
+            if local_auth is not None:
+                openapi_config = merge_openapi_tags(openapi_config, local_auth.openapi_tags())
+            app_config.openapi_config = openapi_config
         if self._route_compiler is None:
             self._route_compiler = RouteCompiler(
                 registry=runtime.registry,

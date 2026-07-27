@@ -5,7 +5,7 @@ from litestar_security.accounts._access_tokens import (
     LocalAccessTokenIssuer,
     LocalBearerIdentityResolver,
 )
-from litestar_security.accounts._controllers import build_local_auth_routes, requires_local_bearer
+from litestar_security.accounts._controllers import LOCAL_AUTH_TAGS, build_local_auth_routes, requires_local_bearer
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._passwords import (
     Argon2PasswordHasher,
@@ -137,6 +137,7 @@ from litestar_security.accounts._stores import (
 
 __all__ = (
     "DEFAULT_RATE_LIMIT_POLICIES",
+    "LOCAL_AUTH_TAGS",
     "RATE_LIMIT_STORE_NAME",
     "REFRESH_RESPONSE_HEADERS",
     "AccountLookup",

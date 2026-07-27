@@ -795,6 +795,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
     accounts = import_module("litestar_security.accounts")
     assert accounts.__all__ == (
         "DEFAULT_RATE_LIMIT_POLICIES",
+        "LOCAL_AUTH_TAGS",
         "RATE_LIMIT_STORE_NAME",
         "REFRESH_RESPONSE_HEADERS",
         "AccountLookup",

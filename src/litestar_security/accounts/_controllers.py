@@ -9,6 +9,7 @@ from litestar.di import NamedDependency, Provide
 from litestar.exceptions import NotAuthorizedException
 from litestar.handlers import BaseRouteHandler
 from litestar.openapi.datastructures import ResponseSpec
+from litestar.openapi.spec import Tag
 from litestar.params import FromPath, HeaderParameter, JSONBody, SkipValidation
 from litestar.status_codes import (
     HTTP_200_OK,
@@ -50,7 +51,55 @@ from litestar_security.accounts._schemas import (
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required, security
 from litestar_security.context import Principal, SecurityContext
 
-__all__ = ("build_local_auth_routes", "requires_local_bearer")
+__all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "requires_local_bearer")
+
+
+_SESSIONS_TAG = "Local sessions"
+_TOKENS_TAG = "Local tokens"
+_REGISTRATION_TAG = "Local registration"
+_PASSWORDS_TAG = "Local passwords"
+_VERIFICATION_TAG = "Local verification"
+
+
+# Declaration order is display order: a reader meets the two ways to log in before
+# the flows that repair an account they cannot log in to.
+LOCAL_AUTH_TAGS: tuple[Tag, ...] = (
+    Tag(
+        name=_SESSIONS_TAG,
+        description=(
+            "Cookie-based login for browser clients, plus the caller's own session inventory. "
+            "Every route here is scoped to the authenticated caller: there is no administrative view."
+        ),
+    ),
+    Tag(
+        name=_TOKENS_TAG,
+        description=(
+            "Bearer login for non-browser clients. Refresh tokens rotate strictly, so replaying a "
+            "consumed token revokes its whole family rather than returning a new pair."
+        ),
+    ),
+    Tag(
+        name=_REGISTRATION_TAG,
+        description=(
+            "Self-service account creation under the configured registration policy. The response is "
+            "identical whether or not the identifier was already taken, so it never confirms an account."
+        ),
+    ),
+    Tag(
+        name=_PASSWORDS_TAG,
+        description=(
+            "Password change for an authenticated caller and the recovery flow for one who cannot sign in. "
+            "Both raise the account security epoch, which invalidates credentials issued before the change."
+        ),
+    ),
+    Tag(
+        name=_VERIFICATION_TAG,
+        description=(
+            "Account-verification token issue and consumption. Requesting a token returns the same response "
+            "for every identifier, so it never confirms an account."
+        ),
+    ),
+)
 
 
 _LOCAL_BAD_REQUEST_RESPONSES = {
@@ -140,11 +189,18 @@ def _principal_account_id(principal: Principal[Any]) -> str | None:
 
 class _LocalSessionController(Controller):
     path = "/"
-    tags = ("Local authentication",)
+    tags = (_SESSIONS_TAG,)
 
     @post(
         "/login",
         name="local.session.login",
+        operation_id="LocalSessionLogin",
+        summary="Session login",
+        description=(
+            "Verify a password and establish one native session. A rejected identifier and a rejected "
+            "password are reported identically."
+        ),
+        response_description="The signed-in account projection.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
         **security(public(), csrf_required=True),
@@ -164,6 +220,10 @@ class _LocalSessionController(Controller):
     @post(
         "/logout",
         name="local.session.logout",
+        operation_id="LocalSessionLogout",
+        summary="Session logout",
+        description="Revoke the caller's current session and clear its browser credentials.",
+        response_description="The session was revoked.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
         **security(required("session")),
@@ -183,6 +243,13 @@ class _LocalSessionController(Controller):
     @get(
         "/sessions",
         name="local.session.list",
+        operation_id="LocalSessionList",
+        summary="List sessions",
+        description=(
+            "List the caller's own active sessions, with the session used for this request flagged as "
+            "current. A caller can never see another account's sessions."
+        ),
+        response_description="The caller's active sessions.",
         responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
         **security(required("session")),
     )
@@ -224,6 +291,13 @@ class _LocalSessionController(Controller):
     @delete(
         "/sessions/{session_id:str}",
         name="local.session.revoke",
+        operation_id="LocalSessionRevoke",
+        summary="Revoke session",
+        description=(
+            "Revoke one of the caller's own sessions. Revoking a session the caller does not own is "
+            "reported the same way as revoking one that does not exist."
+        ),
+        response_description="The session was revoked.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
         **security(required("session")),
@@ -248,11 +322,18 @@ class _LocalSessionController(Controller):
 
 class _LocalTokenController(Controller):
     path = "/"
-    tags = ("Local authentication",)
+    tags = (_TOKENS_TAG,)
 
     @post(
         "/token",
         name="local.token.login",
+        operation_id="LocalTokenLogin",
+        summary="Token login",
+        description=(
+            "Verify a password and issue an access and refresh token pair. This route shares its rate-limit "
+            "budget with session login, so alternating between the two does not widen the allowance."
+        ),
+        response_description="A newly issued access and refresh token pair.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
         **security(public(), csrf_required=False),
@@ -272,6 +353,14 @@ class _LocalTokenController(Controller):
     @post(
         "/token/refresh",
         name="local.token.refresh",
+        operation_id="LocalTokenRefresh",
+        summary="Rotate refresh token",
+        description=(
+            "Exchange one opaque refresh token for a new pair. Rotation is strict: presenting a token that "
+            "was already consumed revokes the whole family. Retry a lost response with the same "
+            "`Idempotency-Key` to receive the original pair instead of tripping that reuse detection."
+        ),
+        response_description="A newly rotated access and refresh token pair.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
         **security(public(), csrf_required=False),
@@ -297,6 +386,13 @@ class _LocalTokenController(Controller):
     @post(
         "/token/revoke",
         name="local.token.revoke",
+        operation_id="LocalTokenRevoke",
+        summary="Revoke refresh token",
+        description=(
+            "Revoke the presented refresh token and the rest of its family. The caller must hold a valid "
+            "access token for the account that owns the token."
+        ),
+        response_description="The token family was revoked.",
         status_code=HTTP_200_OK,
         guards=(requires_local_bearer,),
         responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
@@ -320,14 +416,24 @@ class _LocalTokenController(Controller):
 
 
 class _LocalLifecycleController(Controller):
+    # No controller tag: Litestar unions tags up the ownership chain, so one declared
+    # here would widen every handler rather than let recovery and verification group
+    # separately. Each handler owns its group instead.
     path = "/"
-    tags = ("Local authentication",)
 
     @post(
         "/password/recovery",
         name="local.password.recovery",
+        operation_id="LocalPasswordRecovery",
+        summary="Request password recovery",
+        description=(
+            "Request a recovery token for an identifier. The response is identical whether or not the "
+            "account exists, so it never confirms one."
+        ),
+        response_description="The request was accepted for processing.",
         status_code=HTTP_202_ACCEPTED,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        tags=(_PASSWORDS_TAG,),
         **security(public()),
     )
     async def recovery(
@@ -347,8 +453,16 @@ class _LocalLifecycleController(Controller):
     @post(
         "/password/reset",
         name="local.password.reset",
+        operation_id="LocalPasswordReset",
+        summary="Reset password",
+        description=(
+            "Consume one recovery token and replace the account password. The token is single-use, and a "
+            "successful reset raises the account security epoch, invalidating every credential issued before it."
+        ),
+        response_description="The password was replaced.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        tags=(_PASSWORDS_TAG,),
         **security(public()),
     )
     async def reset(
@@ -368,8 +482,16 @@ class _LocalLifecycleController(Controller):
     @post(
         "/verification",
         name="local.verification.resend",
+        operation_id="LocalVerificationResend",
+        summary="Request account verification",
+        description=(
+            "Request a verification token for an identifier. The response is identical whether or not the "
+            "account exists or is already verified, so it never confirms one."
+        ),
+        response_description="The request was accepted for processing.",
         status_code=HTTP_202_ACCEPTED,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        tags=(_VERIFICATION_TAG,),
         **security(public()),
     )
     async def verification(
@@ -389,8 +511,13 @@ class _LocalLifecycleController(Controller):
     @post(
         "/verification/confirm",
         name="local.verification.confirm",
+        operation_id="LocalVerificationConfirm",
+        summary="Confirm account verification",
+        description="Consume one single-use verification token and mark its account verified.",
+        response_description="The account was verified.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        tags=(_VERIFICATION_TAG,),
         **security(public()),
     )
     async def confirm_verification(
@@ -405,11 +532,18 @@ class _LocalLifecycleController(Controller):
 
 class _LocalRegistrationController(Controller):
     path = "/"
-    tags = ("Local authentication",)
+    tags = (_REGISTRATION_TAG,)
 
     @post(
         "/register",
         name="local.registration",
+        operation_id="LocalRegister",
+        summary="Register",
+        description=(
+            "Create an account under the public registration policy. The response is identical whether or "
+            "not the identifier was already taken, so it never confirms an existing account."
+        ),
+        response_description="The registration was accepted for processing.",
         status_code=HTTP_202_ACCEPTED,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
         **security(public()),
@@ -438,11 +572,18 @@ class _LocalRegistrationController(Controller):
 
 class _LocalInvitationRegistrationController(Controller):
     path = "/"
-    tags = ("Local authentication",)
+    tags = (_REGISTRATION_TAG,)
 
     @post(
         "/register",
         name="local.registration",
+        operation_id="LocalRegister",
+        summary="Register with an invitation",
+        description=(
+            "Create an account with a single-use invitation token under the invite-only registration "
+            "policy. The response is identical for a rejected token and a taken identifier."
+        ),
+        response_description="The registration was accepted for processing.",
         status_code=HTTP_202_ACCEPTED,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
         **security(public()),
@@ -471,11 +612,18 @@ class _LocalInvitationRegistrationController(Controller):
 
 class _LocalSessionPasswordController(Controller):
     path = "/"
-    tags = ("Local authentication",)
+    tags = (_PASSWORDS_TAG,)
 
     @post(
         "/password/change",
         name="local.session.password.change",
+        operation_id="LocalPasswordChange",
+        summary="Change password",
+        description=(
+            "Replace the caller's password after re-verifying the current one. The caller's own session is "
+            "rebound and stays usable; every other session and credential for the account is invalidated."
+        ),
+        response_description="The password was replaced.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_REAUTHENTICATION_RESPONSES,
         **security(required("session")),
@@ -497,11 +645,18 @@ class _LocalSessionPasswordController(Controller):
 
 class _LocalTokenPasswordController(Controller):
     path = "/"
-    tags = ("Local authentication",)
+    tags = (_PASSWORDS_TAG,)
 
     @post(
         "/token/password/change",
         name="local.token.password.change",
+        operation_id="LocalTokenPasswordChange",
+        summary="Change password (bearer)",
+        description=(
+            "Replace the password of the account named by the caller's access token, after re-verifying "
+            "the current one. Every credential for the account, including the caller's own, is invalidated."
+        ),
+        response_description="The password was replaced.",
         status_code=HTTP_200_OK,
         guards=(requires_local_bearer,),
         responses=_LOCAL_REAUTHENTICATION_RESPONSES,
@@ -523,11 +678,20 @@ class _LocalTokenPasswordController(Controller):
 
 class _LocalTokenOnlyPasswordController(Controller):
     path = "/"
-    tags = ("Local authentication",)
+    tags = (_PASSWORDS_TAG,)
 
+    # Token-only deployments have no session route to collide with, so password change
+    # keeps the same path and operation id it has under a session profile.
     @post(
         "/password/change",
         name="local.token.password.change",
+        operation_id="LocalPasswordChange",
+        summary="Change password",
+        description=(
+            "Replace the password of the account named by the caller's access token, after re-verifying "
+            "the current one. Every credential for the account, including the caller's own, is invalidated."
+        ),
+        response_description="The password was replaced.",
         status_code=HTTP_200_OK,
         guards=(requires_local_bearer,),
         responses=_LOCAL_REAUTHENTICATION_RESPONSES,

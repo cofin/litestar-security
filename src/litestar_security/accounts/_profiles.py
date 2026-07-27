@@ -63,6 +63,7 @@ from litestar_security.config import ExternalCSRF
 from litestar_security.providers.jwt import BearerSlotSelector, BearerTokenSlot, JWTValidationConfig, LocalKeyRing
 
 if TYPE_CHECKING:
+    from litestar.openapi.spec import Tag
     from litestar.stores.registry import StoreRegistry
 
 __all__ = ("LocalAuth", "LocalAuthConfig", "LocalAuthSecrets", "LocalAuthServices", "trusted_client_key")
@@ -584,6 +585,14 @@ class LocalAuthConfig(Generic[UserT]):
 
             object.__setattr__(self, "_route_handlers", (build_local_auth_routes(self),))
         return cast("tuple[Router, ...]", self._route_handlers)
+
+    def openapi_tags(self) -> "tuple[Tag, ...]":
+        """Return the documented tag groups the generated routes are filed under."""
+        if not self.register_routes:
+            return ()
+        from litestar_security.accounts._controllers import LOCAL_AUTH_TAGS  # noqa: PLC0415 - cycle break
+
+        return LOCAL_AUTH_TAGS
 
 
 class LocalAuth:
