@@ -30,17 +30,27 @@ from webauthn.helpers.structs import (
     UserVerificationRequirement,
 )
 
-from litestar_security.accounts._internal import aware_utc_time, strict_context_text, utc_now
+from litestar_security.accounts._internal import aware_utc_time, new_event_id, strict_context_text, utc_now
+from litestar_security.accounts._operations import OUTCOME_CLONE_RISK, OUTCOME_REVOKED, PASSKEY_ASSERT, PASSKEY_REMOVE
+from litestar_security.accounts._records import (
+    NoOpSecurityEventSink,
+    RevokeLoginMethodResult,
+    SecurityEvent,
+    SecurityEventSink,
+)
+from litestar_security.accounts._stores import LoginMethodStore
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
 
 __all__ = (
     "AssertionRecordResult",
     "AuthenticationVerification",
+    "CloneRiskPolicy",
     "InvalidWebAuthnResponseError",
     "PasskeyCredential",
     "PasskeyService",
     "PasskeyStore",
+    "PasskeySummary",
     "PyWebAuthnVerifier",
     "RegistrationVerification",
     "UserVerification",
@@ -70,6 +80,13 @@ class AssertionRecordResult(str, Enum):
     RECORDED = "recorded"
     CONFLICT = "conflict"
     CLONE_RISK = "clone_risk"
+
+
+class CloneRiskPolicy(str, Enum):
+    """Response to a suspicious non-increasing non-zero counter."""
+
+    REJECT = "reject"
+    AUDIT_ONLY = "audit_only"
 
 
 class InvalidWebAuthnResponseError(ValueError):
@@ -163,12 +180,15 @@ class PasskeyCredential:
     created_at: datetime
     version: int = 0
     display_name: str | None = None
+    suspect: bool = False
+    last_used_at: datetime | None = None
 
     def __post_init__(self) -> None:
         """Validate strict ownership, flags, counters, and metadata."""
         credential_id = cast("object", self.credential_id)
         public_key = cast("object", self.public_key)
         created_at = aware_utc_time(self.created_at)
+        last_used_at = aware_utc_time(self.last_used_at) if self.last_used_at is not None else None
         if (
             not isinstance(credential_id, bytes)
             or not credential_id
@@ -182,11 +202,26 @@ class PasskeyCredential:
             or self.backup_eligible.__class__ is not bool
             or self.backup_state.__class__ is not bool
             or self.user_verified.__class__ is not bool
+            or self.suspect.__class__ is not bool
             or (not self.backup_eligible and self.backup_state)
         ):
             message = "Passkey credential requires valid ownership, key, counter, and backup flags"
             raise ValueError(message)
         object.__setattr__(self, "created_at", created_at)
+        object.__setattr__(self, "last_used_at", last_used_at)
+
+
+@dataclass(frozen=True, slots=True)
+class PasskeySummary:
+    """Safe credential metadata for account-management responses."""
+
+    credential_id: str
+    display_name: str | None
+    backup_eligible: bool
+    backup_state: bool
+    suspect: bool
+    created_at: datetime
+    last_used_at: datetime | None
 
 
 @runtime_checkable
@@ -268,6 +303,32 @@ class PasskeyStore(Protocol):
 
         Returns:
             Structured recording status.
+        """
+        ...  # pragma: no cover
+
+    async def list_credentials(self, account_id: str) -> tuple[PasskeyCredential, ...]:
+        """List credentials owned by one account.
+
+        Args:
+            account_id: The owning account.
+
+        Returns:
+            Immutable credential records for projection to safe summaries.
+        """
+        ...  # pragma: no cover
+
+    async def rename_credential(
+        self, account_id: str, credential_id: bytes, display_name: str
+    ) -> PasskeyCredential | None:
+        """Atomically rename one credential only for its owner.
+
+        Args:
+            account_id: The expected owner.
+            credential_id: The credential to rename.
+            display_name: The replacement safe metadata.
+
+        Returns:
+            The updated credential, or ``None``.
         """
         ...  # pragma: no cover
 
@@ -432,6 +493,10 @@ class PasskeyService:
     verifier: WebAuthnVerifier = field(default_factory=PyWebAuthnVerifier, repr=False)
     clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
     challenge_entropy: Callable[[int], bytes] = field(default=token_bytes, repr=False, compare=False)
+    clone_risk_policy: CloneRiskPolicy = CloneRiskPolicy.REJECT
+    login_methods: LoginMethodStore | None = field(default=None, repr=False, compare=False)
+    events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
+    event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate structural capabilities and exact relying-party configuration."""
@@ -535,7 +600,7 @@ class PasskeyService:
             return VerificationUnavailable()
         return credential
 
-    async def verify_authentication(
+    async def verify_authentication(  # noqa: PLR0911 - each protocol or persistence rejection has a distinct safe outcome
         self, account_id: str, *, binding: bytes, response: str
     ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
         """Consume, verify, and atomically record one assertion."""
@@ -568,21 +633,35 @@ class PasskeyService:
                 or (not verified.backup_eligible and verified.backup_state)
             ):
                 return InvalidCredentials()
+            clone_risk = (
+                credential.sign_count > 0
+                and verified.sign_count > 0
+                and verified.sign_count <= credential.sign_count
+            )
             result = await self.store.record_assertion(
                 credential.credential_id,
                 expected_version=credential.version,
                 sign_count=verified.sign_count,
                 backup_eligible=verified.backup_eligible,
                 backup_state=verified.backup_state,
-                clone_risk=False,
+                clone_risk=clone_risk,
                 now=now,
             )
-            if result is not AssertionRecordResult.RECORDED:
+            if result is AssertionRecordResult.CONFLICT:
                 return InvalidCredentials()
         except InvalidWebAuthnResponseError:
             return InvalidCredentials()
         except Exception:  # noqa: BLE001 - sanitize application stores and dependency failures
             return VerificationUnavailable()
+        if result is AssertionRecordResult.CLONE_RISK:
+            await self._emit_event(
+                operation=PASSKEY_ASSERT,
+                outcome=OUTCOME_CLONE_RISK,
+                account_id=account_id,
+                occurred_at=now,
+            )
+            if self.clone_risk_policy is CloneRiskPolicy.REJECT:
+                return InvalidCredentials()
         traits = {"phishing-resistant"}
         if verified.user_verified and record.user_verification is UserVerification.REQUIRED:
             traits.add("user-verified")
@@ -593,6 +672,71 @@ class PasskeyService:
             methods=frozenset({"passkey"}),
             traits=frozenset(traits),
         )
+
+    async def list_credentials(
+        self, account_id: str
+    ) -> tuple[PasskeySummary, ...] | VerificationUnavailable:
+        """List safe credential metadata for one owner."""
+        try:
+            credentials = await self.store.list_credentials(account_id)
+            return tuple(
+                _credential_summary(credential)
+                for credential in credentials
+                if credential.account_id == account_id
+            )
+        except Exception:  # noqa: BLE001 - sanitize application store failures
+            return VerificationUnavailable()
+
+    async def rename_credential(
+        self, account_id: str, credential_id: bytes, display_name: str
+    ) -> PasskeySummary | None | VerificationUnavailable:
+        """Rename one credential through its owner-checked store operation."""
+        if not strict_context_text(display_name):
+            return None
+        try:
+            credential = await self.store.rename_credential(account_id, credential_id, display_name.strip())
+        except Exception:  # noqa: BLE001 - sanitize application store failures
+            return VerificationUnavailable()
+        return _credential_summary(credential) if credential is not None else None
+
+    async def remove_credential(
+        self, account_id: str, credential_id: bytes
+    ) -> RevokeLoginMethodResult | VerificationUnavailable:
+        """Remove one credential through the shared final-method-safe operation."""
+        login_methods = self.login_methods
+        if login_methods is None:
+            return VerificationUnavailable()
+        try:
+            now = aware_utc_time(self.clock())
+            method_id = f"pk_{urlsafe_b64encode(credential_id).rstrip(b'=').decode('ascii')}"
+            event = SecurityEvent(
+                event_id=self.event_ids(),
+                occurred_at=now,
+                operation=PASSKEY_REMOVE,
+                outcome=OUTCOME_REVOKED,
+                account_id=account_id,
+            )
+            return await login_methods.revoke_login_method(
+                account_id, method_id, require_remaining=True, event=event
+            )
+        except Exception:  # noqa: BLE001 - sanitize application login-method store failures
+            return VerificationUnavailable()
+
+    async def _emit_event(
+        self, *, operation: str, outcome: str, account_id: str, occurred_at: datetime
+    ) -> None:
+        try:
+            await self.events.emit(
+                SecurityEvent(
+                    event_id=self.event_ids(),
+                    occurred_at=occurred_at,
+                    operation=operation,
+                    outcome=outcome,
+                    account_id=account_id,
+                )
+            )
+        except Exception:  # noqa: BLE001 - observational audit failure cannot change a settled decision
+            return
 
     async def _begin(
         self, *, account_id: str, binding: bytes, purpose: str, options: Callable[[bytes], str]
@@ -628,3 +772,16 @@ def _binding_digest(binding: bytes) -> bytes:
     if not isinstance(value, bytes) or not value:
         raise ValueError
     return sha256(value).digest()
+
+
+def _credential_summary(credential: PasskeyCredential) -> PasskeySummary:
+    identifier = urlsafe_b64encode(credential.credential_id).rstrip(b"=").decode("ascii")
+    return PasskeySummary(
+        credential_id=identifier,
+        display_name=credential.display_name,
+        backup_eligible=credential.backup_eligible,
+        backup_state=credential.backup_state,
+        suspect=credential.suspect,
+        created_at=credential.created_at,
+        last_used_at=credential.last_used_at,
+    )

@@ -7636,22 +7636,66 @@ class _PasskeyStore:
         clone_risk: bool,
         now: datetime,
     ) -> accounts_module.AssertionRecordResult:
-        del sign_count, backup_eligible, backup_state, clone_risk, now
+        del now
         credential = self.credentials.get(credential_id)
         if self.fail:
             raise OSError
-        if credential is None or credential.version != expected_version:
+        if (
+            credential is None
+            or credential.version != expected_version
+            or credential.backup_eligible != backup_eligible
+        ):
             return accounts_module.AssertionRecordResult.CONFLICT
+        self.credentials[credential_id] = replace(
+            credential,
+            sign_count=sign_count,
+            backup_state=backup_state,
+            suspect=clone_risk,
+            version=credential.version + 1,
+            last_used_at=_JWT_NOW,
+        )
+        if clone_risk:
+            return accounts_module.AssertionRecordResult.CLONE_RISK
         return accounts_module.AssertionRecordResult.RECORDED
+
+    async def list_credentials(self, account_id: str) -> tuple[accounts_module.PasskeyCredential, ...]:
+        if self.fail:
+            raise OSError
+        return tuple(
+            credential for credential in self.credentials.values() if credential.account_id == account_id
+        )
+
+    async def rename_credential(
+        self, account_id: str, credential_id: bytes, display_name: str
+    ) -> accounts_module.PasskeyCredential | None:
+        if self.fail:
+            raise OSError
+        credential = self.credentials.get(credential_id)
+        if credential is None or credential.account_id != account_id:
+            return None
+        renamed = replace(credential, display_name=display_name, version=credential.version + 1)
+        self.credentials[credential_id] = renamed
+        return renamed
 
 
 class _WebAuthnVerifier:
     challenge = b"c" * 32
     expected_credential_id = b"credential-1"
 
-    def __init__(self, *, failure: str | None = None, user_verified: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        failure: str | None = None,
+        user_verified: bool = True,
+        sign_count: int = 1,
+        backup_eligible: bool = False,
+        backup_state: bool = False,
+    ) -> None:
         self.failure = failure
         self.user_verified = user_verified
+        self.sign_count = sign_count
+        self.backup_eligible = backup_eligible
+        self.backup_state = backup_state
 
     def registration_options(self, **kwargs: object) -> str:
         assert kwargs["challenge"] == self.challenge
@@ -7680,9 +7724,9 @@ class _WebAuthnVerifier:
         return accounts_module.RegistrationVerification(
             credential_id=self.expected_credential_id,
             public_key=b"public-key",
-            sign_count=0,
-            backup_eligible=False,
-            backup_state=False,
+            sign_count=self.sign_count,
+            backup_eligible=self.backup_eligible,
+            backup_state=self.backup_state,
             user_verified=self.user_verified,
             aaguid="00000000-0000-0000-0000-000000000000",
             attestation_format="none",
@@ -7694,9 +7738,9 @@ class _WebAuthnVerifier:
             raise accounts_module.InvalidWebAuthnResponseError
         return accounts_module.AuthenticationVerification(
             credential_id=self.expected_credential_id,
-            sign_count=1,
-            backup_eligible=False,
-            backup_state=False,
+            sign_count=self.sign_count,
+            backup_eligible=self.backup_eligible,
+            backup_state=self.backup_state,
             user_verified=self.user_verified,
         )
 
@@ -7833,6 +7877,122 @@ async def test_passkey_authentication_verifies_owner_and_emits_normalized_assura
     assert isinstance(evidence, AuthenticationEvidence)
     assert evidence.methods == frozenset({"passkey"})
     assert evidence.traits == frozenset({"phishing-resistant", "user-verified"})
+
+
+def _stored_passkey(
+    *,
+    sign_count: int = 0,
+    backup_eligible: bool = False,
+    backup_state: bool = False,
+) -> accounts_module.PasskeyCredential:
+    return accounts_module.PasskeyCredential(
+        credential_id=b"credential-1",
+        account_id="account-1",
+        public_key=b"public-key",
+        sign_count=sign_count,
+        backup_eligible=backup_eligible,
+        backup_state=backup_state,
+        user_verified=True,
+        aaguid="00000000-0000-0000-0000-000000000000",
+        attestation_format="none",
+        created_at=_JWT_NOW,
+    )
+
+
+@pytest.mark.parametrize(
+    ("stored_count", "new_count", "policy", "expected_type", "suspect"),
+    [
+        (0, 0, accounts_module.CloneRiskPolicy.REJECT, AuthenticationEvidence, False),
+        (0, 1, accounts_module.CloneRiskPolicy.REJECT, AuthenticationEvidence, False),
+        (1, 2, accounts_module.CloneRiskPolicy.REJECT, AuthenticationEvidence, False),
+        (1, 1, accounts_module.CloneRiskPolicy.REJECT, InvalidCredentials, True),
+        (2, 1, accounts_module.CloneRiskPolicy.REJECT, InvalidCredentials, True),
+        (2, 1, accounts_module.CloneRiskPolicy.AUDIT_ONLY, AuthenticationEvidence, True),
+    ],
+)
+@pytest.mark.anyio
+async def test_passkey_counter_policy_persists_clone_risk_before_assurance(
+    stored_count: int,
+    new_count: int,
+    policy: accounts_module.CloneRiskPolicy,
+    expected_type: type[object],
+    suspect: bool,  # noqa: FBT001
+) -> None:
+    store = _PasskeyStore()
+    store.credentials[b"credential-1"] = _stored_passkey(sign_count=stored_count)
+    service = _passkey_service(store=store, verifier=_WebAuthnVerifier(sign_count=new_count))
+    service.clone_risk_policy = policy
+    binding = b"session-binding"
+    assert isinstance(
+        await service.begin_authentication("account-1", binding=binding),
+        accounts_module.WebAuthnOptions,
+    )
+
+    outcome = await service.verify_authentication(
+        "account-1", binding=binding, response='{"id":"credential"}'
+    )
+
+    assert isinstance(outcome, expected_type)
+    assert store.credentials[b"credential-1"].suspect is suspect
+
+
+@pytest.mark.parametrize(
+    ("stored_be", "stored_bs", "new_be", "new_bs", "expected_type"),
+    [
+        (False, False, False, False, AuthenticationEvidence),
+        (True, False, True, True, AuthenticationEvidence),
+        (True, True, True, False, AuthenticationEvidence),
+        (True, False, False, False, InvalidCredentials),
+        (False, False, False, True, InvalidCredentials),
+    ],
+)
+@pytest.mark.anyio
+async def test_passkey_backup_eligibility_is_immutable_and_state_may_transition(
+    stored_be: bool,  # noqa: FBT001
+    stored_bs: bool,  # noqa: FBT001
+    new_be: bool,  # noqa: FBT001
+    new_bs: bool,  # noqa: FBT001
+    expected_type: type[object],
+) -> None:
+    store = _PasskeyStore()
+    store.credentials[b"credential-1"] = _stored_passkey(
+        backup_eligible=stored_be, backup_state=stored_bs
+    )
+    verifier = _WebAuthnVerifier(
+        backup_eligible=new_be, backup_state=new_bs
+    )
+    service = _passkey_service(store=store, verifier=verifier)
+    binding = b"session-binding"
+    assert isinstance(
+        await service.begin_authentication("account-1", binding=binding),
+        accounts_module.WebAuthnOptions,
+    )
+
+    outcome = await service.verify_authentication(
+        "account-1", binding=binding, response='{"id":"credential"}'
+    )
+
+    assert isinstance(outcome, expected_type)
+
+
+@pytest.mark.anyio
+async def test_passkey_listing_rename_and_removal_are_safe_and_final_method_guarded() -> None:
+    store = _PasskeyStore()
+    store.credentials[b"credential-1"] = _stored_passkey()
+    login_methods = _RecoveryLoginMethods(accounts_module.RevokeLoginMethodStatus.FINAL_METHOD)
+    service = _passkey_service(store=store)
+    service.login_methods = login_methods
+
+    summaries = await service.list_credentials("account-1")
+    renamed = await service.rename_credential("account-1", b"credential-1", "Work key")
+    removal = await service.remove_credential("account-1", b"credential-1")
+
+    assert len(summaries) == 1
+    assert not hasattr(summaries[0], "public_key")
+    assert renamed is not None
+    assert renamed.display_name == "Work key"
+    assert isinstance(removal, accounts_module.RevokeLoginMethodResult)
+    assert removal.status is accounts_module.RevokeLoginMethodStatus.FINAL_METHOD
 
 
 @pytest.mark.parametrize(
