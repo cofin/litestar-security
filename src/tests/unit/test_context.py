@@ -853,16 +853,19 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
 
     providers = import_module("litestar_security.providers")
     assert providers.__all__ == (
+        "APIKeyClaims",
         "APIKeyCodec",
         "APIKeyConfig",
         "APIKeyGenerationError",
         "APIKeyProof",
         "APIKeyRecord",
+        "APIKeyService",
         "APIKeyStore",
         "APIKeyUsageSink",
         "AsyncJWKSFetcher",
         "BearerSlotSelector",
         "BearerTokenSlot",
+        "BufferedAPIKeyUsage",
         "CachedJWKSProvider",
         "CompositeBearerConfig",
         "DiscoveryPolicy",
@@ -927,13 +930,16 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         jwks_module.__all__, jwt_module.__all__, oidc_module.__all__, oauth_exports
     ) == set(providers.__all__)
     assert api_key_module.__all__ == (
+        "APIKeyClaims",
         "APIKeyCodec",
         "APIKeyConfig",
         "APIKeyGenerationError",
         "APIKeyProof",
         "APIKeyRecord",
+        "APIKeyService",
         "APIKeyStore",
         "APIKeyUsageSink",
+        "BufferedAPIKeyUsage",
         "IssuedAPIKey",
     )
     assert jwks_module.__all__ == (

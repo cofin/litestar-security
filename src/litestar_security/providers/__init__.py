@@ -1,13 +1,16 @@
 """Curated authentication provider contracts."""
 
 from litestar_security.providers.api_key import (
+    APIKeyClaims,
     APIKeyCodec,
     APIKeyConfig,
     APIKeyGenerationError,
     APIKeyProof,
     APIKeyRecord,
+    APIKeyService,
     APIKeyStore,
     APIKeyUsageSink,
+    BufferedAPIKeyUsage,
     IssuedAPIKey,
 )
 from litestar_security.providers.jwks import (
@@ -68,16 +71,19 @@ from litestar_security.providers.oidc import (
 )
 
 __all__ = (
+    "APIKeyClaims",
     "APIKeyCodec",
     "APIKeyConfig",
     "APIKeyGenerationError",
     "APIKeyProof",
     "APIKeyRecord",
+    "APIKeyService",
     "APIKeyStore",
     "APIKeyUsageSink",
     "AsyncJWKSFetcher",
     "BearerSlotSelector",
     "BearerTokenSlot",
+    "BufferedAPIKeyUsage",
     "CachedJWKSProvider",
     "CompositeBearerConfig",
     "DiscoveryPolicy",

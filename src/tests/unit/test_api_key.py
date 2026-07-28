@@ -11,13 +11,23 @@ from typing import TYPE_CHECKING
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException
 
-from litestar_security.context import CredentialRestrictions
+from litestar_security.authentication import (
+    Authenticated,
+    InvalidCredentials,
+    NoCredentials,
+    PresentedCredential,
+    VerificationUnavailable,
+)
+from litestar_security.context import CredentialRestrictions, Principal
 from litestar_security.providers.api_key import (
+    APIKeyClaims,
     APIKeyCodec,
     APIKeyConfig,
     APIKeyProof,
     APIKeyRecord,
+    APIKeyService,
     APIKeyStore,
+    BufferedAPIKeyUsage,
     IssuedAPIKey,
 )
 
@@ -36,8 +46,14 @@ class _MemoryAPIKeyStore:
     def __init__(self) -> None:
         self.records: dict[str, APIKeyRecord] = {}
         self._lock = asyncio.Lock()
+        self.get_calls: list[str] = []
+        self.fail_get = False
 
     async def get(self, key_id: str) -> APIKeyRecord | None:
+        self.get_calls.append(key_id)
+        if self.fail_get:
+            message = "store detail"
+            raise RuntimeError(message)
         return self.records.get(key_id)
 
     async def create(self, record: APIKeyRecord) -> None:
@@ -66,6 +82,38 @@ class _MemoryAPIKeyStore:
     async def revoke(self, *, key_id: str, now: datetime) -> None:
         async with self._lock:
             self.records[key_id] = replace(self.records[key_id], revoked_at=now, overlap_until=None)
+
+
+class _Resolver:
+    def __init__(self) -> None:
+        self.claims: list[APIKeyClaims] = []
+
+    async def resolve(self, claims: APIKeyClaims) -> Principal[str]:
+        self.claims.append(claims)
+        return Principal(id=claims.subject_id, user=claims.subject_id)
+
+
+class _UsageSink:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, datetime]] = []
+        self.fail = False
+
+    async def record(self, *, key_id: str, used_at: datetime) -> None:
+        self.calls.append((key_id, used_at))
+        if self.fail:
+            message = "usage detail"
+            raise RuntimeError(message)
+
+
+class _Metrics:
+    def __init__(self) -> None:
+        self.increments: list[str] = []
+
+    def increment(self, name: str, **_kwargs: object) -> None:
+        self.increments.append(name)
+
+    def observe(self, _name: str, _value: float, **_kwargs: object) -> None:
+        return None
 
 
 def _codec(
@@ -270,7 +318,15 @@ def test_record_rejects_invalid_storage_state(overrides: dict[str, object]) -> N
 
 @pytest.mark.parametrize(
     "arguments",
-    [{"pepper": b"short"}, {"prefix": ""}, {"prefix": "bad_prefix"}, {"usage_write_interval": timedelta(0)}],
+    [
+        {"pepper": b"short"},
+        {"prefix": ""},
+        {"prefix": "bad_prefix"},
+        {"header_name": "bad header"},
+        {"usage_write_interval": timedelta(0)},
+        {"usage_buffer_capacity": 0},
+        {"usage_buffer_capacity": 1_000_001},
+    ],
 )
 def test_config_rejects_unsafe_values(arguments: dict[str, object]) -> None:
     store = _MemoryAPIKeyStore()
@@ -347,3 +403,220 @@ async def test_store_conformance_create_duplicate_rotate_overlap_and_revoke() ->
     assert revoked is not None
     assert revoked.revoked_at == _NOW + timedelta(minutes=1)
     assert revoked.overlap_until is None
+
+
+def _api_key_runtime(
+    store: _MemoryAPIKeyStore, *, sink: _UsageSink | None = None
+) -> tuple[object, object, APIKeyService, _Resolver]:
+    resolver = _Resolver()
+    entropy_calls = 0
+
+    def entropy(length: int) -> bytes:
+        nonlocal entropy_calls
+        entropy_calls += 1
+        return bytes([entropy_calls]) * length
+
+    slot, mechanism, service = APIKeyConfig(store=store, pepper=_PEPPER, usage_sink=sink).build(
+        resolver, clock=lambda: _NOW, entropy=entropy
+    )
+    return slot, mechanism, service, resolver
+
+
+@pytest.mark.parametrize(
+    ("headers", "outcome"),
+    [
+        ([], NoCredentials),
+        ([(b"x-api-key", b"one"), (b"X-API-Key", b"two")], InvalidCredentials),
+        ([(b"x-api-key", b"")], InvalidCredentials),
+        ([(b"x-api-key", b"\xff")], InvalidCredentials),
+        ([(b"x-api-key", b"has space")], InvalidCredentials),
+    ],
+)
+def test_api_key_slot_rejects_ambiguous_or_malformed_headers(
+    headers: list[tuple[bytes, bytes]], outcome: type[object]
+) -> None:
+    slot, _, _, _ = _api_key_runtime(_MemoryAPIKeyStore())
+
+    extraction = slot.extract(type("Connection", (), {"scope": {"headers": headers}})())
+
+    assert isinstance(extraction, outcome)
+
+
+def test_api_key_slot_accepts_one_canonical_header() -> None:
+    slot, _, _, _ = _api_key_runtime(_MemoryAPIKeyStore())
+
+    extraction = slot.extract(type("Connection", (), {"scope": {"headers": [(b"x-api-key", b"opaque")]}})())
+
+    assert extraction == PresentedCredential("opaque")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("state", ["malformed", "unknown", "mismatch", "expired", "revoked", "unavailable"])
+async def test_api_key_authenticator_preserves_structured_failures_and_lookup_bounds(state: str) -> None:
+    store = _MemoryAPIKeyStore()
+    slot, mechanism, _, _ = _api_key_runtime(store)
+    issued, record = _codec().issue(subject_id="subject-1", expires_at=_NOW + timedelta(minutes=5))
+    credential = issued.value
+    if state not in {"malformed", "unknown"}:
+        store.records[record.key_id] = record
+    if state == "malformed":
+        credential = "not-a-key"
+    elif state == "unknown":
+        pass
+    elif state == "mismatch":
+        store.records[record.key_id] = replace(record, digest=b"x" * 32)
+    elif state == "expired":
+        store.records[record.key_id] = replace(record, expires_at=_NOW)
+    elif state == "revoked":
+        store.records[record.key_id] = replace(record, revoked_at=_NOW)
+    elif state == "unavailable":
+        store.fail_get = True
+
+    outcome = await mechanism.authenticator.authenticate(
+        credential, type("Connection", (), {"scope": {"headers": []}})()
+    )
+
+    assert isinstance(outcome, VerificationUnavailable if state == "unavailable" else InvalidCredentials)
+    assert len(store.get_calls) == (0 if state == "malformed" else 1)
+    assert slot.name == "api-key"
+
+
+@pytest.mark.anyio
+async def test_api_key_authentication_is_one_lookup_and_defers_usage_persistence() -> None:
+    store = _MemoryAPIKeyStore()
+    sink = _UsageSink()
+    _, mechanism, service, resolver = _api_key_runtime(store, sink=sink)
+    issued, record = _codec().issue(
+        subject_id="subject-1",
+        restrictions=CredentialRestrictions(scopes=frozenset({"reports:read"})),
+        expires_at=_NOW + timedelta(minutes=5),
+    )
+    store.records[record.key_id] = record
+
+    outcome = await mechanism.authenticator.authenticate(
+        issued.value, type("Connection", (), {"scope": {"headers": []}})()
+    )
+
+    assert isinstance(outcome, Authenticated)
+    assert outcome.claims == APIKeyClaims(key_id=record.key_id, subject_id="subject-1")
+    assert outcome.restrictions == record.restrictions
+    assert outcome.evidence.mechanism == "api-key"
+    assert outcome.evidence.slot == "api-key"
+    assert outcome.evidence.expires_at == record.expires_at
+    assert outcome.evidence.methods == frozenset({"api-key"})
+    assert store.get_calls == [record.key_id]
+    assert sink.calls == []
+    assert await mechanism.resolver.resolve(outcome.claims) == Principal(id="subject-1", user="subject-1")
+    assert resolver.claims == [outcome.claims]
+    await service.flush_usage()
+    assert sink.calls == [(record.key_id, _NOW)]
+    await service.close()
+
+
+@pytest.mark.anyio
+async def test_api_key_service_issues_rotates_and_revokes_through_atomic_store_ports() -> None:
+    store = _MemoryAPIKeyStore()
+    _, _, service, _ = _api_key_runtime(store)
+    issued = await service.issue(subject_id="subject-1", expires_at=_NOW + timedelta(hours=1))
+    current = store.records[issued.key_id]
+
+    replacement = await service.rotate(
+        current_key_id=current.key_id,
+        subject_id=current.subject_id,
+        restrictions=current.restrictions,
+        expires_at=_NOW + timedelta(hours=2),
+        overlap=timedelta(minutes=5),
+    )
+
+    assert store.records[current.key_id].revoked_at == _NOW
+    assert store.records[current.key_id].overlap_until == _NOW + timedelta(minutes=5)
+    assert replacement.key_id in store.records
+    await service.revoke(replacement.key_id)
+    assert store.records[replacement.key_id].revoked_at == _NOW
+    assert store.records[replacement.key_id].overlap_until is None
+
+
+@pytest.mark.anyio
+async def test_api_key_runtime_defaults_and_absent_usage_are_safe() -> None:
+    store = _MemoryAPIKeyStore()
+    resolver = _Resolver()
+    slot, mechanism, service = APIKeyConfig(store=store, pepper=_PEPPER).build(
+        resolver, entropy=lambda length: b"d" * length
+    )
+    issued = await service.issue(subject_id="subject-1")
+    outcome = await mechanism.authenticator.authenticate(
+        issued.value, type("Connection", (), {"scope": {"headers": []}})()
+    )
+
+    assert isinstance(outcome, Authenticated)
+    assert isinstance(
+        slot.extract(type("Connection", (), {"scope": {"headers": [(b"x-api-key", issued.value.encode())]}})()),
+        PresentedCredential,
+    )
+    await service.flush_usage()
+    await service.close()
+    await service.revoke(issued.key_id)
+
+
+@pytest.mark.anyio
+async def test_api_key_runtime_rejects_invalid_rotation_clock_and_builder_inputs() -> None:
+    store = _MemoryAPIKeyStore()
+    _, _, service, resolver = _api_key_runtime(store)
+
+    with pytest.raises(ValueError, match="overlap"):
+        await service.rotate(current_key_id="missing", subject_id="subject-1", overlap=timedelta(microseconds=-1))
+    with pytest.raises(ImproperlyConfiguredException):
+        APIKeyConfig(store=store, pepper=_PEPPER).build(resolver, clock=None)  # type: ignore[arg-type]
+
+    config = APIKeyConfig(store=store, pepper=_PEPPER)
+    _, mechanism, _ = config.build(
+        resolver,
+        clock=lambda: datetime(2026, 7, 28),  # noqa: DTZ001 - intentional naive rejection fixture
+        entropy=lambda length: b"e" * length,
+    )
+    issued, record = APIKeyCodec(pepper=_PEPPER, entropy=lambda length: b"e" * length).issue(subject_id="subject-1")
+    store.records[record.key_id] = record
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await mechanism.authenticator.authenticate(issued.value, type("Connection", (), {"scope": {"headers": []}})())
+
+
+@pytest.mark.parametrize(
+    ("arguments", "error"),
+    [
+        ({"sink": object()}, ValueError),
+        ({"interval": timedelta(0)}, ValueError),
+        ({"capacity": 1.5}, TypeError),
+        ({"capacity": 0}, ValueError),
+        ({"metrics": object()}, TypeError),
+    ],
+)
+def test_usage_buffer_rejects_invalid_configuration(arguments: dict[str, object], error: type[Exception]) -> None:
+    values: dict[str, object] = {"sink": _UsageSink(), "interval": timedelta(minutes=5)}
+    values.update(arguments)
+
+    with pytest.raises(error):
+        BufferedAPIKeyUsage(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_usage_buffer_coalesces_bounds_flushes_and_isolates_sink_failure() -> None:
+    sink = _UsageSink()
+    metrics = _Metrics()
+    usage = BufferedAPIKeyUsage(sink=sink, interval=timedelta(minutes=5), capacity=2, metrics=metrics)
+    for _ in range(100):
+        usage.observe("key-a", _NOW)
+    usage.observe("key-b", _NOW)
+    usage.observe("key-c", _NOW)
+
+    await usage.flush()
+
+    assert sink.calls == [("key-a", _NOW), ("key-b", _NOW)]
+    assert metrics.increments.count("security.api_key.usage_coalesced") == 99
+    assert "security.api_key.usage_dropped" in metrics.increments
+    usage.observe("key-a", _NOW + timedelta(minutes=4))
+    await usage.flush()
+    assert sink.calls == [("key-a", _NOW), ("key-b", _NOW)]
+    usage.observe("key-a", _NOW + timedelta(minutes=5))
+    sink.fail = True
+    await usage.close()
+    assert "security.api_key.usage_failure" in metrics.increments

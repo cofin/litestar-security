@@ -9,11 +9,20 @@ from hashlib import sha256
 from hmac import compare_digest
 from hmac import new as hmac_new
 from secrets import token_bytes
-from typing import Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast, runtime_checkable
 
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.context import CredentialRestrictions
+
+if TYPE_CHECKING:
+    from litestar_security.authentication import AuthenticationMechanism, CredentialSlot, IdentityResolver
+    from litestar_security.config import SecurityMetrics
+    from litestar_security.providers.api_key._runtime import APIKeyClaims, APIKeyService
+
+from litestar_security.config import NoOpSecurityMetrics
+
+UserT = TypeVar("UserT")
 
 __all__ = (
     "APIKeyCodec",
@@ -34,11 +43,16 @@ _SECRET_CHARACTERS = 43
 _DIGEST_BYTES = 32
 _MINIMUM_PEPPER_BYTES = 32
 _MAXIMUM_PREFIX_CHARACTERS = 32
+_MAXIMUM_USAGE_BUFFER_CAPACITY = 1_000_000
 _KEY_COMPONENTS = 3
 _ASCII_CONTROL_LIMIT = 32
 _DOMAIN = b"litestar-security:api-key:v1\x00"
 _BASE64URL_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 _PREFIX_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,7 +276,9 @@ class APIKeyConfig:
     pepper: bytes = field(repr=False, metadata={"sensitive": True})
     usage_sink: APIKeyUsageSink | None = None
     usage_write_interval: timedelta = timedelta(minutes=5)
+    usage_buffer_capacity: int = 1024
     prefix: str = "lsk"
+    header_name: str = "X-API-Key"
 
     def __post_init__(self) -> None:
         """Reject weak peppers, malformed namespaces, and invalid ports."""
@@ -275,7 +291,10 @@ class APIKeyConfig:
             or (usage_sink is not None and not isinstance(usage_sink, APIKeyUsageSink))
             or self.usage_write_interval.__class__ is not timedelta
             or self.usage_write_interval <= timedelta(0)
+            or self.usage_buffer_capacity.__class__ is not int
+            or not 1 <= self.usage_buffer_capacity <= _MAXIMUM_USAGE_BUFFER_CAPACITY
             or not _valid_prefix(self.prefix)
+            or not _valid_header_name(self.header_name)
         ):
             raise ImproperlyConfiguredException(detail="API-key configuration is invalid")
 
@@ -285,7 +304,49 @@ class APIKeyConfig:
         Returns:
             Public configuration values with the pepper redacted.
         """
-        return {"pepper": "<redacted>", "usage_write_interval": self.usage_write_interval, "prefix": self.prefix}
+        return {
+            "pepper": "<redacted>",
+            "usage_write_interval": self.usage_write_interval,
+            "usage_buffer_capacity": self.usage_buffer_capacity,
+            "prefix": self.prefix,
+            "header_name": self.header_name,
+        }
+
+    def build(
+        self,
+        resolver: "IdentityResolver[APIKeyClaims, UserT]",
+        *,
+        clock: "Callable[[], datetime]" = _utc_now,
+        entropy: "Callable[[int], bytes]" = token_bytes,
+        metrics: "SecurityMetrics | None" = None,
+        participates_by_default: bool = True,
+    ) -> "tuple[CredentialSlot[str], AuthenticationMechanism[str, APIKeyClaims, UserT], APIKeyService]":
+        """Build one physical slot, mechanism, and lifecycle service.
+
+        Args:
+            resolver: Application identity resolver for verified API-key claims.
+            clock: Time source for authentication and mutations.
+            entropy: Random-byte source used only for issuance.
+            metrics: Optional vendor-neutral usage metrics.
+            participates_by_default: Include API keys in implicit protection.
+
+        Returns:
+            The slot, authentication mechanism, and lifecycle service.
+        """
+        from litestar_security.providers.api_key._runtime import (  # noqa: PLC0415 - breaks config/runtime cycle
+            build_api_key_runtime,
+        )
+
+        if not callable(clock) or not callable(entropy) or participates_by_default.__class__ is not bool:
+            raise ImproperlyConfiguredException(detail="API-key runtime configuration is invalid")
+        return build_api_key_runtime(
+            self,
+            resolver,
+            clock=clock,
+            entropy=entropy,
+            metrics=NoOpSecurityMetrics() if metrics is None else metrics,
+            participates_by_default=participates_by_default,
+        )
 
 
 class APIKeyGenerationError(RuntimeError):
@@ -408,6 +469,15 @@ def _valid_prefix(value: object) -> bool:
         and value.__class__ is str
         and 1 <= len(value) <= _MAXIMUM_PREFIX_CHARACTERS
         and all(character in _PREFIX_ALPHABET for character in value)
+    )
+
+
+def _valid_header_name(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.__class__ is str
+        and bool(value)
+        and all(character.isascii() and (character.isalnum() or character == "-") for character in value)
     )
 
 

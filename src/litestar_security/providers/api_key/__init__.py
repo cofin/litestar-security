@@ -10,14 +10,18 @@ from litestar_security.providers.api_key._api_key import (
     APIKeyUsageSink,
     IssuedAPIKey,
 )
+from litestar_security.providers.api_key._runtime import APIKeyClaims, APIKeyService, BufferedAPIKeyUsage
 
 __all__ = (
+    "APIKeyClaims",
     "APIKeyCodec",
     "APIKeyConfig",
     "APIKeyGenerationError",
     "APIKeyProof",
     "APIKeyRecord",
+    "APIKeyService",
     "APIKeyStore",
     "APIKeyUsageSink",
+    "BufferedAPIKeyUsage",
     "IssuedAPIKey",
 )
