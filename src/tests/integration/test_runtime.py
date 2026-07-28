@@ -96,7 +96,12 @@ from litestar_security.providers.jwt import (
     PyJWTVerifier,
     SigningKey,
 )
-from litestar_security.websocket import WebSocketSecurityConfig
+from litestar_security.websocket import (
+    InMemoryWebSocketTicketStore,
+    WebSocketSecurityConfig,
+    WebSocketTicketService,
+    websocket_policy_fingerprint,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -1533,6 +1538,73 @@ async def test_public_websocket_and_http_install_the_same_anonymous_context_with
     assert all(
         isinstance(principal, Principal) and isinstance(context, SecurityContext) for principal, context in observed
     )
+
+
+@pytest.mark.anyio
+async def test_matching_one_time_ticket_authenticates_cross_origin_websocket_once() -> None:
+    store = InMemoryWebSocketTicketStore()
+    slot = _Slot(NoCredentials())
+    authenticator = _Authenticator(NoCredentials())
+
+    @websocket("/ws", name="reports.socket")
+    async def handler(socket: WebSocket) -> None:
+        await socket.accept()
+        await socket.send_json({
+            "subject": socket.user.id,
+            "mechanisms": [evidence.mechanism for evidence in socket.auth.evidence],
+        })
+        await socket.close()
+
+    app = Litestar(
+        route_handlers=[handler],
+        openapi_config=None,
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(
+                    slots=(slot,),  # type: ignore[arg-type]
+                    mechanisms=(
+                        AuthenticationMechanism(
+                            authenticator=authenticator,  # type: ignore[arg-type]
+                            resolver=_Resolver(),
+                        ),
+                    ),
+                    websocket=WebSocketSecurityConfig(
+                        allowed_origins=frozenset({"https://browser.example"}), ticket_store=store
+                    ),
+                )
+            )
+        ],
+    )
+    now = datetime.now(timezone.utc)
+    service = WebSocketTicketService(store=store, clock=lambda: now)
+    compiled_handler = next(
+        route.route_handler
+        for route in app.routes
+        if getattr(route, "path", None) == "/ws"  # type: ignore[attr-defined]
+    )
+    plan = compiled_handler.opt["litestar_security_plan"]
+
+    issued = await service.issue(
+        principal=Principal(id="subject-1"),
+        context=SecurityContext(session=NullSessionHandle()),
+        route_name="reports.socket",
+        origin="https://browser.example",
+        policy_fingerprint=websocket_policy_fingerprint(plan),
+    )
+    async with AsyncTestClient(app=app) as client:
+        session = await client.websocket_connect(
+            f"/ws?ticket={issued.value}", headers={"Origin": "https://browser.example"}
+        )
+        with session as socket:
+            message = socket.receive_json()
+        replay_session = await client.websocket_connect(
+            f"/ws?ticket={issued.value}", headers={"Origin": "https://browser.example"}
+        )
+        with pytest.raises(WebSocketDisconnect) as replay, replay_session:
+            pass
+
+    assert message == {"subject": "subject-1", "mechanisms": ["websocket-ticket"]}
+    assert replay.value.code == 4401
 
 
 @pytest.mark.parametrize(

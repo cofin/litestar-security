@@ -2,18 +2,25 @@
 
 from collections.abc import Iterator
 from dataclasses import FrozenInstanceError, replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import anyio
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException, WebSocketException
 
+from litestar_security.context import CredentialRestrictions, NullSessionHandle, Principal, SecurityContext
 from litestar_security.websocket import (
+    InMemoryWebSocketTicketStore,
+    IssuedWebSocketTicket,
     WebSocketCloseCodes,
     WebSocketHandshake,
     WebSocketSecurityConfig,
+    WebSocketTicketService,
     extract_websocket_handshake,
 )
+
+_NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
 
 
 def _connection(*, headers: tuple[tuple[bytes, bytes], ...] = (), query_string: bytes = b"") -> SimpleNamespace:
@@ -307,3 +314,123 @@ def test_close_codes_can_be_customized_without_swapping_meanings() -> None:
     codes = WebSocketCloseCodes(unauthenticated=4501, unauthorized=4503, verification_unavailable=1013)
 
     assert replace(WebSocketSecurityConfig(), close_codes=codes).close_codes is codes
+
+
+@pytest.mark.anyio
+async def test_websocket_ticket_is_digest_only_one_time_and_exactly_bound() -> None:
+    store = InMemoryWebSocketTicketStore()
+    service = WebSocketTicketService(
+        store=store,
+        ttl=timedelta(seconds=30),
+        clock=lambda: _NOW,
+        entropy=lambda length: b"i" * length if length == 16 else b"s" * length,
+    )
+    restrictions = CredentialRestrictions(scopes=frozenset({"reports:read"}))
+
+    issued = await service.issue(
+        principal=Principal(id="subject-1"),
+        context=SecurityContext(session=NullSessionHandle()),
+        route_name="reports.socket",
+        origin="https://trusted.example",
+        policy_fingerprint="f" * 64,
+        restrictions=restrictions,
+    )
+
+    assert isinstance(issued, IssuedWebSocketTicket)
+    assert issued.value not in repr(issued)
+    assert all(issued.value.encode() not in repr(record).encode() for record in store.records)
+    consumed = await service.consume(
+        issued.value, route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+    )
+    replay = await service.consume(
+        issued.value, route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+    )
+
+    assert consumed is not None
+    assert consumed.subject_id == "subject-1"
+    assert consumed.restrictions == restrictions
+    assert replay is None
+
+
+@pytest.mark.anyio
+async def test_websocket_ticket_is_consumed_before_later_binding_failure() -> None:
+    service = WebSocketTicketService(
+        store=InMemoryWebSocketTicketStore(),
+        clock=lambda: _NOW,
+        entropy=lambda length: b"i" * length if length == 16 else b"s" * length,
+    )
+    issued = await service.issue(
+        principal=Principal(id="subject-1"),
+        context=SecurityContext(session=NullSessionHandle()),
+        route_name="reports.socket",
+        origin="https://trusted.example",
+        policy_fingerprint="f" * 64,
+    )
+
+    mismatch = await service.consume(
+        issued.value, route_name="other.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+    )
+    retry = await service.consume(
+        issued.value, route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+    )
+
+    assert mismatch is None
+    assert retry is None
+
+
+@pytest.mark.anyio
+async def test_websocket_ticket_atomic_double_consume_has_one_winner() -> None:
+    async def consume(service: WebSocketTicketService, value: str, results: list[object]) -> None:
+        results.append(
+            await service.consume(
+                value, route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+            )
+        )
+
+    for _ in range(100):
+        service = WebSocketTicketService(
+            store=InMemoryWebSocketTicketStore(),
+            clock=lambda: _NOW,
+            entropy=lambda length: b"i" * length if length == 16 else b"s" * length,
+        )
+        issued = await service.issue(
+            principal=Principal(id="subject-1"),
+            context=SecurityContext(session=NullSessionHandle()),
+            route_name="reports.socket",
+            origin="https://trusted.example",
+            policy_fingerprint="f" * 64,
+        )
+        results: list[object] = []
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(consume, service, issued.value, results)
+            task_group.start_soon(consume, service, issued.value, results)
+
+        assert sum(result is not None for result in results) == 1
+
+
+@pytest.mark.anyio
+async def test_websocket_ticket_expiry_boundary_is_exclusive_and_deletes_record() -> None:
+    current = [_NOW]
+    store = InMemoryWebSocketTicketStore()
+    service = WebSocketTicketService(
+        store=store,
+        ttl=timedelta(seconds=30),
+        clock=lambda: current[0],
+        entropy=lambda length: b"i" * length if length == 16 else b"s" * length,
+    )
+    issued = await service.issue(
+        principal=Principal(id="subject-1"),
+        context=SecurityContext(session=NullSessionHandle()),
+        route_name="reports.socket",
+        origin="https://trusted.example",
+        policy_fingerprint="f" * 64,
+    )
+    current[0] = issued.expires_at
+
+    consumed = await service.consume(
+        issued.value, route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+    )
+
+    assert consumed is None
+    assert store.records == ()

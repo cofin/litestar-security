@@ -2,7 +2,7 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Generic, Literal, Protocol, TypeAlias, TypeVar, cast
 
@@ -33,7 +33,16 @@ from litestar_security.context import (
     SessionHandle,
     intersect_authorization,
 )
-from litestar_security.websocket import WebSocketSecurityConfig, close_websocket, extract_websocket_handshake
+from litestar_security.websocket import (
+    WebSocketHandshake,
+    WebSocketSecurityConfig,
+    WebSocketTicketRecord,
+    WebSocketTicketService,
+    WebSocketTicketUnavailableError,
+    close_websocket,
+    extract_websocket_handshake,
+    websocket_policy_fingerprint,
+)
 
 __all__ = (
     "Authenticated",
@@ -689,10 +698,21 @@ class SecurityMiddleware(Generic[UserT]):
             for slot_name, extraction in extracted
         )
         try:
-            extract_websocket_handshake(
+            handshake = extract_websocket_handshake(
                 connection, config=self.config.websocket, uses_cookie_credentials=uses_cookie_credentials
             )
-            if plan.authenticate:
+            if handshake.ticket is not None:
+                principal, context = await self._authenticate_ticket(
+                    scope=scope,
+                    connection=connection,
+                    handshake=handshake,
+                    session=session,
+                    plan=plan,
+                    extracted=extracted,
+                )
+                scope["user"] = principal
+                scope["auth"] = context
+            elif plan.authenticate:
                 principal, context = await self.evaluator.evaluate(connection, session, plan=plan, extracted=extracted)
                 scope["user"] = principal
                 scope["auth"] = context
@@ -709,7 +729,7 @@ class SecurityMiddleware(Generic[UserT]):
                 send, code=self.config.websocket.close_codes.unauthenticated, reason="authentication_required"
             )
             return
-        except ServiceUnavailableException:
+        except (ServiceUnavailableException, WebSocketTicketUnavailableError):
             await close_websocket(
                 send, code=self.config.websocket.close_codes.verification_unavailable, reason="verification_unavailable"
             )
@@ -739,6 +759,73 @@ class SecurityMiddleware(Generic[UserT]):
             await close_websocket(
                 send, code=self.config.websocket.close_codes.unauthorized, reason="authorization_denied"
             )
+
+    async def _authenticate_ticket(  # noqa: PLR0913 - explicit routed inputs prevent reparsing and hidden state
+        self,
+        *,
+        scope: Scope,
+        connection: ASGIConnection[Any, Any, Any, Any],
+        handshake: WebSocketHandshake,
+        session: SessionHandle,
+        plan: SecurityRuntimePlan,
+        extracted: Sequence[tuple[str, CredentialExtraction[Any]]],
+    ) -> tuple[Principal[UserT], SecurityContext]:
+        ticket_store = self.config.websocket.ticket_store
+        route_handler = cast("Mapping[str, object]", scope).get("route_handler")
+        route_name = cast("str | None", getattr(route_handler, "name", None)) or cast(
+            "str", getattr(route_handler, "handler_name", "")
+        )
+        if ticket_store is None or handshake.origin is None or not route_name or handshake.ticket is None:
+            raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+        ticket = await WebSocketTicketService(store=ticket_store, ttl=self.config.websocket.ticket_ttl).consume(
+            handshake.ticket,
+            route_name=route_name,
+            origin=handshake.origin,
+            policy_fingerprint=websocket_policy_fingerprint(plan),
+        )
+        if ticket is None:
+            raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+        non_ticket_plan = replace(plan, required=False, alternatives=(), allow_anonymous=True)
+        principal, context = await self.evaluator.evaluate(
+            connection, session, plan=non_ticket_plan, extracted=extracted
+        )
+        return await self._merge_ticket(ticket, principal=principal, context=context, session=session)
+
+    async def _merge_ticket(
+        self,
+        ticket: WebSocketTicketRecord,
+        *,
+        principal: Principal[UserT],
+        context: SecurityContext,
+        session: SessionHandle,
+    ) -> tuple[Principal[UserT], SecurityContext]:
+        if principal.is_authenticated:
+            if principal.id != ticket.subject_id:
+                raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+            authorization = intersect_authorization(context.authorization, (ticket.restrictions,))
+        else:
+            principal = Principal[UserT](id=ticket.subject_id)
+            resolver = self.config.registry.authorization_resolver
+            if resolver is None:
+                authorization = AuthorizationSnapshot()
+            else:
+                resolution = await resolver.resolve(principal)
+                if isinstance(resolution, VerificationUnavailable):
+                    raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
+                if isinstance(resolution, InvalidCredentials):
+                    raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+                authorization = resolution
+            authorization = intersect_authorization(authorization, (ticket.restrictions,))
+        evidence = AuthenticationEvidence(
+            mechanism="websocket-ticket",
+            slot=self.config.websocket.ticket_query_parameter,
+            authenticated_at=ticket.issued_at,
+            expires_at=ticket.expires_at,
+            methods=frozenset({"websocket-ticket"}),
+        )
+        return principal, SecurityContext(
+            session=session, evidence=(*context.evidence, evidence), authorization=authorization
+        )
 
 
 class SecurityMiddlewareWrapper(Generic[UserT]):
