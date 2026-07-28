@@ -36,7 +36,16 @@ from litestar_security.providers.jwt import (
     normalize_signer,
     normalize_verifier,
 )
-from litestar_security.providers.oidc import DiscoveryPolicy, OIDCDiscoveryClient, OIDCDiscoveryError, OIDCMetadata
+from litestar_security.providers.oidc import (
+    DiscoveryPolicy,
+    OIDCDiscoveryClient,
+    OIDCDiscoveryError,
+    OIDCMetadata,
+    OIDCProvider,
+    google_oidc_provider,
+    keycloak_oidc_provider,
+    oidc_provider,
+)
 
 __all__ = (
     "AsyncJWKSFetcher",
@@ -60,6 +69,7 @@ __all__ = (
     "OIDCDiscoveryClient",
     "OIDCDiscoveryError",
     "OIDCMetadata",
+    "OIDCProvider",
     "SecurityMetrics",
     "SigningKey",
     "SyncJWKSFetcher",
@@ -72,7 +82,10 @@ __all__ = (
     "build_access_token_claims",
     "build_local_jwks_handler",
     "extend_composite_bearer",
+    "google_oidc_provider",
+    "keycloak_oidc_provider",
     "normalize_fetcher",
     "normalize_signer",
     "normalize_verifier",
+    "oidc_provider",
 )

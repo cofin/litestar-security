@@ -207,6 +207,8 @@ class ProviderIdentity:
     email: str | None
     email_verified: bool
     raw_claims: Mapping[str, object] = field(repr=False)
+    acr: str | None = None
+    amr: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Require stable identity keys and freeze verified raw claims."""
@@ -218,6 +220,10 @@ class ProviderIdentity:
             or (self.display_name is not None and not _strict_text(self.display_name))
             or (self.email is not None and not _strict_text(self.email))
             or self.email_verified.__class__ is not bool
+            or (self.acr is not None and not _strict_text(self.acr))
+            or self.amr.__class__ is not tuple
+            or any(not _strict_text(method) for method in self.amr)
+            or len(self.amr) != len(set(self.amr))
             or not isinstance(raw_claims, Mapping)
             or any(not _strict_text(key) for key in self.raw_claims)
         ):
@@ -258,11 +264,15 @@ class OAuthProvider(Protocol):
         """
         ...  # pragma: no cover
 
-    async def resolve_identity(self, tokens: ProviderTokenSet) -> ProviderIdentity:
+    async def resolve_identity(
+        self, tokens: ProviderTokenSet, *, transaction: OAuthTransaction, now: datetime | None = None
+    ) -> ProviderIdentity:
         """Resolve a verified identity from validated tokens.
 
         Args:
             tokens: Validated provider tokens.
+            transaction: The consumed transaction binding this identity lookup.
+            now: The authoritative verification time.
 
         Returns:
             The verified provider identity.

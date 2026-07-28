@@ -867,6 +867,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "OIDCDiscoveryClient",
         "OIDCDiscoveryError",
         "OIDCMetadata",
+        "OIDCProvider",
         "SecurityMetrics",
         "SigningKey",
         "SyncJWKSFetcher",
@@ -879,9 +880,12 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "build_access_token_claims",
         "build_local_jwks_handler",
         "extend_composite_bearer",
+        "google_oidc_provider",
+        "keycloak_oidc_provider",
         "normalize_fetcher",
         "normalize_signer",
         "normalize_verifier",
+        "oidc_provider",
     )
     jwks_module = import_module("litestar_security.providers.jwks")
     jwt_module = import_module("litestar_security.providers.jwt")
