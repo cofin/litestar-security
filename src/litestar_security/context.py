@@ -422,10 +422,12 @@ class SecurityContext:
     session: SessionHandle
     evidence: tuple[AuthenticationEvidence, ...] = ()
     authorization: AuthorizationSnapshot = field(default_factory=AuthorizationSnapshot)
+    restrictions: tuple[CredentialRestrictions, ...] = ()
 
     def __post_init__(self) -> None:
         """Freeze caller-supplied evidence iterables."""
         object.__setattr__(self, "evidence", tuple(self.evidence))
+        object.__setattr__(self, "restrictions", tuple(self.restrictions))
 
     @property
     def expires_at(self) -> datetime | None:

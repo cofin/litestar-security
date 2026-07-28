@@ -120,6 +120,7 @@ _PUBLIC_API = (
     "AuthorizationPredicate",
     "AuthorizationResolver",
     "AuthorizationSnapshot",
+    "AuthorizationSnapshotRefresher",
     "CredentialExtraction",
     "CredentialRestrictions",
     "CredentialSlot",
@@ -128,7 +129,9 @@ _PUBLIC_API = (
     "GitHubOAuthProvider",
     "IdentityResolution",
     "IdentityResolver",
+    "InMemoryWebSocketTicketStore",
     "InvalidCredentials",
+    "IssuedWebSocketTicket",
     "LitestarSessionHandle",
     "MFAConfig",
     "MechanismRequirement",
@@ -154,6 +157,13 @@ _PUBLIC_API = (
     "SessionUnavailableError",
     "TokenVault",
     "VerificationUnavailable",
+    "WebSocketBinding",
+    "WebSocketCloseCodes",
+    "WebSocketRevocationSource",
+    "WebSocketSecurityConfig",
+    "WebSocketTicketRecord",
+    "WebSocketTicketService",
+    "WebSocketTicketStore",
     "__project__",
     "__version__",
     "all_of",
@@ -164,6 +174,7 @@ _PUBLIC_API = (
     "guard_at_least",
     "guard_one_of",
     "intersect_authorization",
+    "issue_websocket_ticket",
     "mechanism",
     "optional",
     "public",
@@ -176,6 +187,7 @@ _PUBLIC_API = (
     "requires_team_role",
     "requires_tenant",
     "security",
+    "websocket_policy_fingerprint",
 )
 
 
@@ -822,6 +834,7 @@ def test_native_handle_rejects_operations_when_session_disappears() -> None:
 def test_websocket_native_session_is_read_only() -> None:
     scope = {"type": "websocket", "session": {"existing": "value"}}
     handle = LitestarSessionHandle(scope=scope)  # type: ignore[arg-type]
+    original_session = dict(scope["session"])  # type: ignore[arg-type]
 
     assert handle.is_available
     assert not handle.can_persist
@@ -829,6 +842,7 @@ def test_websocket_native_session_is_read_only() -> None:
     for mutation in (lambda: handle.set("key", "value"), lambda: handle.pop("existing"), handle.clear):
         with pytest.raises(SessionPersistenceUnavailableError, match="cannot persist"):
             mutation()
+        assert scope["session"] == original_session
 
 
 def test_package_root_exports_only_foundational_contract() -> None:
@@ -2691,6 +2705,7 @@ def test_security_config_is_typed_and_slotted() -> None:
         "api_key",
         "iap",
         "service_token",
+        "websocket",
         "authorization_resolver",
         "jwks_providers",
         "jwks_warmup_failure",

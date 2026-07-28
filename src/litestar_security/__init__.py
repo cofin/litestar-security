@@ -62,6 +62,20 @@ from litestar_security.guards import any_of as guard_any_of
 from litestar_security.guards import at_least as guard_at_least
 from litestar_security.guards import one_of as guard_one_of
 from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency, SecurityPlugin
+from litestar_security.websocket import (
+    AuthorizationSnapshotRefresher,
+    InMemoryWebSocketTicketStore,
+    IssuedWebSocketTicket,
+    WebSocketBinding,
+    WebSocketCloseCodes,
+    WebSocketRevocationSource,
+    WebSocketSecurityConfig,
+    WebSocketTicketRecord,
+    WebSocketTicketService,
+    WebSocketTicketStore,
+    issue_websocket_ticket,
+    websocket_policy_fingerprint,
+)
 
 if TYPE_CHECKING:
     from litestar_security.providers.oauth import (
@@ -87,6 +101,7 @@ __all__ = (
     "AuthorizationPredicate",
     "AuthorizationResolver",
     "AuthorizationSnapshot",
+    "AuthorizationSnapshotRefresher",
     "CredentialExtraction",
     "CredentialRestrictions",
     "CredentialSlot",
@@ -95,7 +110,9 @@ __all__ = (
     "GitHubOAuthProvider",
     "IdentityResolution",
     "IdentityResolver",
+    "InMemoryWebSocketTicketStore",
     "InvalidCredentials",
+    "IssuedWebSocketTicket",
     "LitestarSessionHandle",
     "MFAConfig",
     "MechanismRequirement",
@@ -121,6 +138,13 @@ __all__ = (
     "SessionUnavailableError",
     "TokenVault",
     "VerificationUnavailable",
+    "WebSocketBinding",
+    "WebSocketCloseCodes",
+    "WebSocketRevocationSource",
+    "WebSocketSecurityConfig",
+    "WebSocketTicketRecord",
+    "WebSocketTicketService",
+    "WebSocketTicketStore",
     "__project__",
     "__version__",
     "all_of",
@@ -131,6 +155,7 @@ __all__ = (
     "guard_at_least",
     "guard_one_of",
     "intersect_authorization",
+    "issue_websocket_ticket",
     "mechanism",
     "optional",
     "public",
@@ -143,6 +168,7 @@ __all__ = (
     "requires_team_role",
     "requires_tenant",
     "security",
+    "websocket_policy_fingerprint",
 )
 
 _OAUTH_EXPORTS = frozenset({

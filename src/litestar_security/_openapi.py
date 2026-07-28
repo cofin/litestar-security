@@ -34,6 +34,7 @@ from litestar_security.authentication import (
     public,
 )
 from litestar_security.config import ExternalCSRF
+from litestar_security.websocket import WebSocketSecurityConfig
 
 __all__ = ()
 
@@ -265,6 +266,7 @@ class RouteCompiler(Generic[UserT]):
     max_openapi_combinations: int = 32
     csrf_exclude_key: str | None = None
     external_csrf: ExternalCSRF | None = None
+    websocket_config: WebSocketSecurityConfig = field(default_factory=WebSocketSecurityConfig)
     _policy_compiler: PolicyCompiler[UserT] = field(init=False, repr=False)
     _schemes: OpenAPISchemeSet | None = field(init=False, repr=False)
 
@@ -296,7 +298,14 @@ class RouteCompiler(Generic[UserT]):
                 self._compile_http_handler(route, route_handler)
             return
         if isinstance(route, WebSocketRoute):
-            self._attach_plan(route, route.route_handler, self._effective_plan(route, route.route_handler))
+            plan = self._effective_plan(route, route.route_handler)
+            if not self.websocket_config.allowed_origins and any(
+                self.registry.get_mechanism(name).session_capable for name in plan.participant_names or ()
+            ):
+                self._raise_route_error(
+                    route, route.route_handler, "Session-capable security requires a trusted WebSocket Origin"
+                )
+            self._attach_plan(route, route.route_handler, plan)
             return
         asgi_route = cast("ASGIRoute", route)
         declaration = self._resolved_declaration(asgi_route, asgi_route.route_handler)

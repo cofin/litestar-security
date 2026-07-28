@@ -171,6 +171,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                     app_config.csrf_config.exclude_from_csrf_key if app_config.csrf_config is not None else None
                 ),
                 external_csrf=self.config.external_csrf,
+                websocket_config=self.config.websocket,
             )
         app_config.dependencies.update(self._providers)
         for name, value in _SIGNATURE_NAMESPACE.items():
@@ -288,7 +289,9 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 owned_session = OwnedSessionBackend(
                     middleware=DefineMiddleware(SessionMiddleware, backend=backend), backend=backend
                 )
-            self._runtime_config = SecurityRuntimeConfig(registry=registry, owned_session_backend=owned_session)
+            self._runtime_config = SecurityRuntimeConfig(
+                registry=registry, owned_session_backend=owned_session, websocket=self.config.websocket
+            )
             self._middleware = DefineMiddleware(SecurityMiddlewareWrapper, config=self._runtime_config)
         return self._runtime_config, cast("DefineMiddleware", self._middleware)
 
