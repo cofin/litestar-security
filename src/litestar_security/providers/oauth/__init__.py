@@ -1,5 +1,22 @@
 """OAuth authorization transaction and provider lifecycle contracts."""
 
+from litestar_security.providers.oauth._accounts import (
+    AccountLinkError,
+    InvalidProviderGrant,
+    LinkedProviderAccount,
+    MemoryOAuthAccountStore,
+    MemoryTokenVault,
+    OAuthAccountError,
+    OAuthAccountService,
+    OAuthAccountStore,
+    OAuthLinkProof,
+    OAuthLoginResolution,
+    ProviderTokenReference,
+    StoredProviderTokens,
+    TokenVault,
+    UnlinkResult,
+    UnlinkStatus,
+)
 from litestar_security.providers.oauth._provider import (
     GitHubOAuthProvider,
     OAuthClientAuth,
@@ -30,12 +47,22 @@ from litestar_security.providers.oauth._transactions import (
 )
 
 __all__ = (
+    "AccountLinkError",
     "GitHubOAuthProvider",
     "InvalidOAuthCallback",
+    "InvalidProviderGrant",
+    "LinkedProviderAccount",
+    "MemoryOAuthAccountStore",
     "MemoryOAuthTransactionStore",
+    "MemoryTokenVault",
+    "OAuthAccountError",
+    "OAuthAccountService",
+    "OAuthAccountStore",
     "OAuthClientAuth",
     "OAuthEndpointConfig",
     "OAuthHTTPPolicy",
+    "OAuthLinkProof",
+    "OAuthLoginResolution",
     "OAuthOperation",
     "OAuthProvider",
     "OAuthProviderClient",
@@ -50,8 +77,13 @@ __all__ = (
     "ProtectedOAuthSecret",
     "ProviderGrant",
     "ProviderIdentity",
+    "ProviderTokenReference",
     "ProviderTokenSet",
     "SecretStr",
+    "StoredProviderTokens",
+    "TokenVault",
+    "UnlinkResult",
+    "UnlinkStatus",
     "oauth_binding_cookie",
     "pkce_s256",
 )
