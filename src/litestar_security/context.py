@@ -18,6 +18,7 @@ __all__ = (
     "LitestarSessionHandle",
     "NullSessionHandle",
     "Principal",
+    "ResourcePermission",
     "SecurityContext",
     "SessionHandle",
     "SessionPersistenceUnavailableError",
@@ -272,6 +273,19 @@ class Principal(Generic[UserT]):
         if self.user is None:
             raise NotAuthorizedException(detail="Authentication required")
         return self.user
+
+
+@dataclass(frozen=True, slots=True)
+class ResourcePermission:
+    """Credential or application permission scoped to one resource."""
+
+    resource_id: str
+    scopes: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        """Normalize the resource identifier and immutable scope set."""
+        object.__setattr__(self, "resource_id", _normalize_text(self.resource_id, "Resource id"))
+        object.__setattr__(self, "scopes", _normalize_values(self.scopes, "Resource scope"))
 
 
 @dataclass(frozen=True, slots=True)

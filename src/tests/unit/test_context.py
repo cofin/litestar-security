@@ -31,6 +31,7 @@ from litestar_security.context import (
     LitestarSessionHandle,
     NullSessionHandle,
     Principal,
+    ResourcePermission,
     SecurityContext,
     SessionHandle,
     SessionPersistenceUnavailableError,
@@ -142,6 +143,7 @@ _PUBLIC_API = (
     "Principal",
     "PrincipalDependency",
     "RequestAuthenticator",
+    "ResourcePermission",
     "SecurityConfig",
     "SecurityContext",
     "SecurityContextDependency",
@@ -708,6 +710,16 @@ def test_credential_restrictions_normalize_sets_and_preserve_empty() -> None:
     assert restrictions.tenant_ids == frozenset({"tenant-1"})
 
 
+def test_resource_permission_is_immutable_and_normalized() -> None:
+    permission = ResourcePermission(resource_id=" report-1 ", scopes={" read "})
+
+    assert permission == ResourcePermission(resource_id="report-1", scopes=frozenset({"read"}))
+    with pytest.raises(ValueError, match="must not be blank"):
+        ResourcePermission(resource_id="", scopes=frozenset())
+    with pytest.raises(ValueError, match="must not be blank"):
+        ResourcePermission(resource_id="report-1", scopes={""})
+
+
 @pytest.mark.parametrize(
     "kwargs", [{"scopes": {" "}}, {"roles": {""}}, {"capabilities": {" "}}, {"team_ids": {""}}, {"tenant_ids": {" "}}]
 )
@@ -882,6 +894,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "JWTClaims",
         "JWTValidationConfig",
         "JWTVerifier",
+        "KeycloakClaims",
         "LocalJWKSConfig",
         "LocalKeyRing",
         "NoOpSecurityMetrics",
@@ -896,6 +909,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "OIDCMetadata",
         "OIDCProvider",
         "SecurityMetrics",
+        "ServiceTokenConfig",
         "SigningKey",
         "SyncJWKSFetcher",
         "SyncJWTVerifier",
@@ -910,6 +924,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "extend_composite_bearer",
         "google_oidc_provider",
         "keycloak_oidc_provider",
+        "map_keycloak_claims",
         "normalize_fetcher",
         "normalize_signer",
         "normalize_verifier",
