@@ -35,10 +35,13 @@ if TYPE_CHECKING:
     from litestar.types import Message, Send
 
 __all__ = (
+    "AuthorizationSnapshotRefresher",
     "InMemoryWebSocketTicketStore",
     "IssuedWebSocketTicket",
+    "WebSocketBinding",
     "WebSocketCloseCodes",
     "WebSocketHandshake",
+    "WebSocketRevocationSource",
     "WebSocketSecurityConfig",
     "WebSocketTicketRecord",
     "WebSocketTicketService",

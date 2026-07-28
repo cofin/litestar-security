@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+import anyio
 import jwt
 import pytest
 from litestar import Controller, Litestar, Request, Response, Router, WebSocket, get, post, websocket
@@ -14,7 +15,12 @@ from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
 from litestar.di import NamedDependency, Provide
 from litestar.enums import ScopeType
-from litestar.exceptions import NotAuthorizedException, ServiceUnavailableException, WebSocketDisconnect
+from litestar.exceptions import (
+    NotAuthorizedException,
+    PermissionDeniedException,
+    ServiceUnavailableException,
+    WebSocketDisconnect,
+)
 from litestar.middleware import DefineMiddleware
 from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
 from litestar.middleware.session.base import BaseSessionBackend, SessionMiddleware
@@ -80,9 +86,11 @@ from litestar_security.config import ExternalCSRF
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
+    CredentialRestrictions,
     NullSessionHandle,
     Principal,
     SecurityContext,
+    SessionPersistenceUnavailableError,
 )
 from litestar_security.guards import requires_scope
 from litestar_security.providers.jwt import (
@@ -99,6 +107,7 @@ from litestar_security.providers.jwt import (
 from litestar_security.websocket import (
     InMemoryWebSocketTicketStore,
     WebSocketSecurityConfig,
+    WebSocketTicketRecord,
     WebSocketTicketService,
     websocket_policy_fingerprint,
 )
@@ -187,11 +196,13 @@ class _MemorySessionBackend(BaseSessionBackend[Any]):
     def __init__(self) -> None:
         super().__init__(_SessionConfig())
         self.stored: dict[str, object] = {}
+        self.store_calls = 0
 
     def get_session_id(self, _connection: ASGIConnection) -> None:
         return None
 
     async def store_in_message(self, scope_session: object, _message: Message, _connection: ASGIConnection) -> None:
+        self.store_calls += 1
         self.stored = dict(cast("dict[str, object]", scope_session))
 
     async def load_from_connection(self, _connection: ASGIConnection) -> dict[str, Any]:
@@ -269,6 +280,23 @@ class _RouteHandler:
     def __post_init__(self) -> None:
         self.opt = self.opt or {}
         self.fn = self.fn or (lambda: None)
+
+
+@dataclass
+class _WebSocketRouteHandler(_RouteHandler):
+    handler_name: str = "socket"
+    guards_present: bool = False
+    authorization_error: Exception | None = None
+    authorization_calls: int = 0
+
+    def resolve_guards(self) -> tuple[object, ...]:
+        return (object(),) if self.guards_present else ()
+
+    async def authorize_connection(self, *, connection: object) -> None:
+        del connection
+        self.authorization_calls += 1
+        if self.authorization_error is not None:
+            raise self.authorization_error
 
 
 @pytest.mark.anyio
@@ -1511,6 +1539,238 @@ def test_websocket_native_guard_denial_closes_before_handler_and_di() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("scope_changes", "websocket_config", "expected_code", "expected_reason"),
+    [
+        (
+            {"headers": [(b"origin", b"https://wrong.example")]},
+            WebSocketSecurityConfig(allowed_origins=frozenset({"https://trusted.example"})),
+            4403,
+            "origin_denied",
+        ),
+        (
+            {"headers": [(b"origin", b"https://trusted.example")], "query_string": b"ticket=not-configured"},
+            WebSocketSecurityConfig(allowed_origins=frozenset({"https://trusted.example"})),
+            4401,
+            "authentication_required",
+        ),
+    ],
+)
+async def test_websocket_transport_failures_are_mapped_before_application(
+    scope_changes: dict[str, object],
+    websocket_config: WebSocketSecurityConfig,
+    expected_code: int,
+    expected_reason: str,
+) -> None:
+    messages: list[Message] = []
+    app_called = False
+
+    async def app(_scope: Scope, _receive: Receive, _send: Send) -> None:
+        nonlocal app_called
+        app_called = True
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    runtime, _, _ = _runtime()
+    runtime = replace(runtime, websocket=websocket_config)
+    scope = _scope("websocket", route_handler=_WebSocketRouteHandler())
+    scope.update(cast("dict[str, Any]", scope_changes))
+    await SecurityMiddleware(app=app, config=runtime)(scope, _receive, send)
+
+    assert messages == [{"type": "websocket.close", "code": expected_code, "reason": expected_reason}]
+    assert app_called is False
+
+
+@pytest.mark.anyio
+async def test_websocket_revocation_hook_receives_secret_free_session_binding() -> None:
+    observed: list[object] = []
+    success = Authenticated(
+        claims="subject-1",
+        evidence=AuthenticationEvidence(mechanism="bearer", slot="authorization.bearer", authenticated_at=_NOW),
+    )
+
+    class RevocationSource:
+        async def wait(self, binding: object) -> None:
+            observed.append(binding)
+
+    runtime, _, _ = _runtime(success)
+    runtime = replace(runtime, websocket=WebSocketSecurityConfig(revocation_source=RevocationSource()))
+
+    async def app(_scope: Scope, _receive: Receive, _send: Send) -> None:
+        await anyio.sleep_forever()
+
+    messages: list[Message] = []
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    scope = _scope("websocket", route_handler=_WebSocketRouteHandler())
+    scope["session"] = {"_litestar_security": {"session_id": "session-1"}}
+    await SecurityMiddleware(app=app, config=runtime)(scope, _receive, send)
+
+    binding = observed[0]
+    assert binding.subject_id == "subject-1"
+    assert binding.session_id == "session-1"
+    assert binding.credential_ids == frozenset({"bearer:authorization.bearer"})
+    assert messages == [{"type": "websocket.close", "code": 4401, "reason": "credential_revoked"}]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("snapshot", "expected_message", "guards_present"),
+    [
+        (AuthorizationSnapshot(scopes={"reports:read"}), None, True),
+        (AuthorizationSnapshot(scopes={"reports:read"}), None, False),
+        (object(), {"type": "websocket.close", "code": 1013, "reason": "verification_unavailable"}, True),
+    ],
+)
+async def test_websocket_authorization_refresh_replaces_snapshot_and_rechecks_guards(
+    snapshot: object,
+    expected_message: dict[str, object] | None,
+    guards_present: bool,  # noqa: FBT001 - parametrized guard-state matrix
+) -> None:
+    refreshed = anyio.Event()
+    sleep_calls = 0
+    success = Authenticated(
+        claims="subject-1",
+        evidence=AuthenticationEvidence(mechanism="bearer", slot="authorization.bearer", authenticated_at=_NOW),
+    )
+
+    class Refresher:
+        async def refresh(self, **_kwargs: object) -> object:
+            refreshed.set()
+            return snapshot
+
+    async def sleeper(_delay: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            await anyio.sleep_forever()
+
+    runtime, _, _ = _runtime(success)
+    runtime = replace(
+        runtime,
+        websocket=WebSocketSecurityConfig(
+            refresh_interval=timedelta(seconds=1), snapshot_refresher=Refresher(), sleeper=sleeper
+        ),
+    )
+    route_handler = _WebSocketRouteHandler(guards_present=guards_present)
+    observed_scope: list[Scope] = []
+
+    async def app(scope: Scope, _receive: Receive, _send: Send) -> None:
+        observed_scope.append(scope)
+        await refreshed.wait()
+        if expected_message is not None:
+            await anyio.sleep_forever()
+
+    messages: list[Message] = []
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    await SecurityMiddleware(app=app, config=runtime)(_scope("websocket", route_handler=route_handler), _receive, send)
+
+    assert messages == ([] if expected_message is None else [expected_message])
+    if expected_message is None:
+        assert observed_scope[0]["auth"].authorization == snapshot
+        assert route_handler.authorization_calls == int(guards_present)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("error", [NotAuthorizedException(), PermissionDeniedException()])
+async def test_websocket_handler_authorization_exceptions_map_to_4403(error: Exception) -> None:
+    async def app(_scope: Scope, _receive: Receive, _send: Send) -> None:
+        raise error
+
+    messages: list[Message] = []
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    runtime, _, _ = _runtime()
+    await SecurityMiddleware(app=app, config=runtime)(
+        _scope("websocket", route_handler=_WebSocketRouteHandler()), _receive, send
+    )
+
+    assert messages == [{"type": "websocket.close", "code": 4403, "reason": "authorization_denied"}]
+
+
+def _runtime_ticket_record() -> WebSocketTicketRecord:
+    return WebSocketTicketRecord(
+        ticket_id="aWlpaWlpaWlpaWlpaWlpaQ",
+        digest=b"d" * 32,
+        subject_id="subject-1",
+        route_name="socket",
+        origin="https://trusted.example",
+        restrictions=CredentialRestrictions(scopes=frozenset({"reports:read"})),
+        policy_fingerprint="f" * 64,
+        issued_at=_NOW,
+        expires_at=_NOW + timedelta(seconds=30),
+    )
+
+
+@pytest.mark.anyio
+async def test_websocket_ticket_merge_requires_the_same_authenticated_subject() -> None:
+    runtime, _, _ = _runtime()
+
+    async def app(_scope: Scope, _receive: Receive, _send: Send) -> None:
+        return None
+
+    middleware = SecurityMiddleware(app=app, config=runtime)
+    context = SecurityContext(
+        session=NullSessionHandle(), authorization=AuthorizationSnapshot(scopes={"reports:read", "reports:write"})
+    )
+    principal, merged = await middleware._merge_ticket(  # noqa: SLF001 - exercises the ticket/runtime merge boundary
+        _runtime_ticket_record(), principal=Principal(id="subject-1"), context=context, session=context.session
+    )
+
+    assert principal.id == "subject-1"
+    assert merged.authorization.scopes == frozenset({"reports:read"})
+    with pytest.raises(NotAuthorizedException):
+        await middleware._merge_ticket(  # noqa: SLF001 - exercises the ticket/runtime merge boundary
+            _runtime_ticket_record(), principal=Principal(id="other-subject"), context=context, session=context.session
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("resolution", "expected_error"),
+    [
+        (AuthorizationSnapshot(scopes={"reports:read", "reports:write"}), None),
+        (VerificationUnavailable(), ServiceUnavailableException),
+        (InvalidCredentials(), NotAuthorizedException),
+    ],
+)
+async def test_anonymous_websocket_ticket_uses_authorization_resolver(
+    resolution: object, expected_error: type[Exception] | None
+) -> None:
+    class Resolver:
+        async def resolve(self, _principal: Principal[object]) -> object:
+            return resolution
+
+    runtime = SecurityRuntimeConfig(registry=AuthenticationRegistry(authorization_resolver=Resolver()))
+
+    async def app(_scope: Scope, _receive: Receive, _send: Send) -> None:
+        return None
+
+    middleware = SecurityMiddleware(app=app, config=runtime)
+    context = SecurityContext(session=NullSessionHandle())
+    if expected_error is not None:
+        with pytest.raises(expected_error):
+            await middleware._merge_ticket(  # noqa: SLF001 - exercises the ticket/runtime merge boundary
+                _runtime_ticket_record(), principal=Principal(id=None), context=context, session=context.session
+            )
+        return
+
+    principal, merged = await middleware._merge_ticket(  # noqa: SLF001 - exercises the ticket/runtime merge boundary
+        _runtime_ticket_record(), principal=Principal(id=None), context=context, session=context.session
+    )
+    assert principal.id == "subject-1"
+    assert merged.authorization.scopes == frozenset({"reports:read"})
+
+
+@pytest.mark.anyio
 async def test_public_websocket_and_http_install_the_same_anonymous_context_with_async_client() -> None:
     observed: list[tuple[Principal[object], SecurityContext]] = []
 
@@ -1540,6 +1800,96 @@ async def test_public_websocket_and_http_install_the_same_anonymous_context_with
     assert all(
         isinstance(principal, Principal) and isinstance(context, SecurityContext) for principal, context in observed
     )
+
+
+def test_websocket_native_session_is_read_only_and_never_persisted() -> None:
+    backend = _MemorySessionBackend()
+    backend.stored = {"existing": "value"}
+
+    @websocket("/ws", opt=security(public()))
+    async def websocket_handler(socket: WebSocket) -> None:
+        assert socket.auth.session.is_available
+        assert not socket.auth.session.can_persist
+        assert socket.auth.session.get("existing") == "value"
+        for mutation in (
+            lambda: socket.auth.session.set("new", "value"),
+            lambda: socket.auth.session.pop("existing"),
+            socket.auth.session.clear,
+        ):
+            with pytest.raises(SessionPersistenceUnavailableError, match="cannot persist"):
+                mutation()
+        await socket.accept()
+        await socket.send_json({"existing": socket.auth.session.get("existing")})
+        await socket.close()
+
+    app = Litestar(
+        route_handlers=[websocket_handler],
+        openapi_config=None,
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(
+                    session_backend=backend,
+                    websocket=WebSocketSecurityConfig(allowed_origins=frozenset({"http://testserver.local"})),
+                )
+            )
+        ],
+    )
+    with TestClient(app) as client, client.websocket_connect("/ws") as socket:
+        assert socket.receive_json() == {"existing": "value"}
+
+    assert backend.stored == {"existing": "value"}
+    assert backend.store_calls == 0
+
+
+def test_websocket_message_loop_performs_security_work_once() -> None:
+    slot = _Slot(PresentedCredential("subject"))
+    authenticator = _Authenticator(
+        Authenticated(
+            claims="subject",
+            evidence=AuthenticationEvidence(
+                mechanism="bearer", slot="authorization.bearer", authenticated_at=datetime.now(timezone.utc)
+            ),
+        )
+    )
+
+    class CountingResolver:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def resolve(self, claims: str) -> Principal[object]:
+            self.calls += 1
+            return Principal(id=claims)
+
+    resolver = CountingResolver()
+
+    @websocket("/ws")
+    async def websocket_handler(socket: WebSocket) -> None:
+        await socket.accept()
+        for _ in range(2):
+            await socket.send_text(await socket.receive_text())
+        await socket.close()
+
+    app = Litestar(
+        route_handlers=[websocket_handler],
+        openapi_config=None,
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(
+                    slots=(slot,),  # type: ignore[arg-type]
+                    mechanisms=(
+                        AuthenticationMechanism(authenticator=authenticator, resolver=resolver),  # type: ignore[arg-type]
+                    ),
+                    websocket=WebSocketSecurityConfig(),
+                )
+            )
+        ],
+    )
+    with TestClient(app) as client, client.websocket_connect("/ws") as socket:
+        for value in ("first", "second"):
+            socket.send_text(value)
+            assert socket.receive_text() == value
+
+    assert (slot.calls, authenticator.calls, resolver.calls) == (1, 1, 1)
 
 
 @pytest.mark.anyio

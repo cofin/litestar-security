@@ -98,6 +98,7 @@ from litestar_security.providers.jwt import (
     VerificationKey,
 )
 from litestar_security.providers.oidc import ServiceTokenConfig
+from litestar_security.websocket import WebSocketSecurityConfig
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -1323,6 +1324,23 @@ def test_websocket_compiles_runtime_only_and_explicit_asgi_policy_fails() -> Non
     )
 
     assert not anonymous_route.route_handler.opt["litestar_security_plan"].authenticate
+
+
+def test_session_capable_websocket_requires_trusted_origin_at_startup() -> None:
+    @websocket("/socket", opt=security(required("session")))
+    async def socket_handler(socket: WebSocket) -> None:
+        del socket
+
+    config = _compiler_config(names=("session",), session_names=frozenset({"session"}))
+    with pytest.raises(ImproperlyConfiguredException, match=r"trusted WebSocket Origin.*websocket /socket"):
+        Litestar(route_handlers=[socket_handler], openapi_config=None, plugins=[SecurityPlugin(config)])
+
+    configured = _compiler_config(names=("session",), session_names=frozenset({"session"}))
+    configured.websocket = WebSocketSecurityConfig(allowed_origins=frozenset({"https://app.example.com"}))
+    app = Litestar(route_handlers=[socket_handler], openapi_config=None, plugins=[SecurityPlugin(configured)])
+    socket_route = next(route_value for route_value in app.routes if isinstance(route_value, WebSocketRoute))
+
+    assert socket_route.route_handler.opt["litestar_security_plan"].participant_names == frozenset({"session"})
 
 
 def test_asgi_default_dynamic_registration_and_receive_route_are_idempotent() -> None:

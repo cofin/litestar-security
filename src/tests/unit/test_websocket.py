@@ -14,16 +14,20 @@ from litestar.exceptions import (
     WebSocketException,
 )
 
+import litestar_security.websocket as websocket_module
 from litestar_security.context import CredentialRestrictions, NullSessionHandle, Principal, SecurityContext
 from litestar_security.websocket import (
     InMemoryWebSocketTicketStore,
     IssuedWebSocketTicket,
+    WebSocketBinding,
     WebSocketCloseCodes,
     WebSocketCloseCoordinator,
     WebSocketHandshake,
     WebSocketSecurityConfig,
+    WebSocketTicketRecord,
     WebSocketTicketService,
     extract_websocket_handshake,
+    issue_websocket_ticket,
     supervise_websocket_lifetime,
 )
 
@@ -96,10 +100,14 @@ def test_websocket_config_rejects_malformed_origin_collections(allowed_origins: 
         ({"ticket_query_parameter": ""}, "query parameter"),
         ({"ticket_query_parameter": object()}, "query parameter"),
         ({"ticket_query_parameter": " token "}, "query parameter"),
+        ({"ticket_query_parameter": "tick&et"}, "query parameter"),
         ({"ticket_query_parameter": "access_token"}, "reserved"),
         ({"ticket_query_parameter": "ToKeN"}, "reserved"),
         ({"refresh_interval": timedelta(0)}, "refresh interval"),
         ({"refresh_interval": timedelta(seconds=1)}, "snapshot refresher"),
+        ({"ticket_store": object()}, "ticket store"),
+        ({"snapshot_refresher": object()}, "snapshot refresher"),
+        ({"revocation_source": object()}, "revocation source"),
     ],
 )
 def test_websocket_config_rejects_invalid_lifetime_and_query_settings(kwargs: dict[str, object], match: str) -> None:
@@ -327,6 +335,236 @@ def test_close_codes_can_be_customized_without_swapping_meanings() -> None:
     assert replace(WebSocketSecurityConfig(), close_codes=codes).close_codes is codes
 
 
+@pytest.mark.parametrize("field_name", ["clock", "sleeper"])
+def test_websocket_config_rejects_non_callable_runtime_hooks(field_name: str) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="clock and sleeper"):
+        WebSocketSecurityConfig(**{field_name: None})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"connection_id": ""}, "binding"),
+        ({"subject_id": " subject"}, "binding"),
+        ({"route_name": "\n"}, "binding"),
+        ({"credential_ids": frozenset({""})}, "binding"),
+        ({"session_id": ""}, "binding"),
+    ],
+)
+def test_websocket_binding_validates_and_freezes_identifiers(kwargs: dict[str, object], match: str) -> None:
+    values = {
+        "connection_id": "connection-1",
+        "subject_id": "subject-1",
+        "credential_ids": {"bearer:authorization"},  # type: ignore[dict-item]
+        "session_id": "session-1",
+        "route_name": "reports.socket",
+        **kwargs,
+    }
+    if kwargs:
+        with pytest.raises(ValueError, match=match):
+            WebSocketBinding(**values)  # type: ignore[arg-type]
+    else:  # pragma: no cover - parametrization always supplies one invalid field
+        assert WebSocketBinding(**values).credential_ids == frozenset({"bearer:authorization"})  # type: ignore[arg-type]
+
+    binding = WebSocketBinding(
+        connection_id="connection-1",
+        subject_id="subject-1",
+        credential_ids={"bearer:authorization"},  # type: ignore[arg-type]
+        session_id=None,
+        route_name="reports.socket",
+    )
+    assert binding.credential_ids == frozenset({"bearer:authorization"})
+
+
+def _ticket_record(**changes: object) -> WebSocketTicketRecord:
+    values = {
+        "ticket_id": "aWlpaWlpaWlpaWlpaWlpaQ",
+        "digest": b"d" * 32,
+        "subject_id": "subject-1",
+        "route_name": "reports.socket",
+        "origin": "https://trusted.example",
+        "restrictions": CredentialRestrictions(),
+        "policy_fingerprint": "f" * 64,
+        "issued_at": _NOW,
+        "expires_at": _NOW + timedelta(seconds=30),
+        **changes,
+    }
+    return WebSocketTicketRecord(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"ticket_id": "bad"},
+        {"digest": bytearray(32)},
+        {"digest": b"short"},
+        {"subject_id": ""},
+        {"route_name": ""},
+        {"restrictions": object()},
+        {"policy_fingerprint": ""},
+        {"expires_at": _NOW},
+        {"expires_at": _NOW + timedelta(minutes=3)},
+    ],
+)
+def test_websocket_ticket_record_rejects_invalid_storage_values(changes: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="record is invalid"):
+        _ticket_record(**changes)
+
+
+def test_issued_websocket_ticket_rejects_invalid_value_and_naive_expiry() -> None:
+    with pytest.raises(ValueError, match="Issued WebSocket ticket"):
+        IssuedWebSocketTicket(value="invalid", expires_at=_NOW)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        _ticket_record(issued_at=_NOW.replace(tzinfo=None))
+
+
+@pytest.mark.anyio
+async def test_websocket_ticket_store_rejects_duplicate_and_digest_mismatch() -> None:
+    store = InMemoryWebSocketTicketStore()
+    record = _ticket_record()
+    await store.create(record)
+    with pytest.raises(ValueError, match="already exists"):
+        await store.create(record)
+    assert await store.consume(ticket_id=record.ticket_id, digest=b"x" * 32, now=_NOW) is None
+    assert store.records == (record,)
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"store": object()}, {"ttl": 30}, {"ttl": timedelta(0)}, {"clock": None}, {"entropy": None}]
+)
+def test_websocket_ticket_service_rejects_invalid_configuration(kwargs: dict[str, object]) -> None:
+    values = {"store": InMemoryWebSocketTicketStore(), **kwargs}
+    with pytest.raises(ImproperlyConfiguredException, match="service configuration"):
+        WebSocketTicketService(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_websocket_ticket_service_rejects_anonymous_invalid_and_unavailable_inputs() -> None:
+    service = WebSocketTicketService(store=InMemoryWebSocketTicketStore(), clock=lambda: _NOW)
+    issue_kwargs = {"route_name": "reports.socket", "origin": "https://trusted.example", "policy_fingerprint": "f" * 64}
+    with pytest.raises(ValueError, match="authenticated"):
+        await service.issue(
+            principal=Principal(id=None), context=SecurityContext(session=NullSessionHandle()), **issue_kwargs
+        )
+    with pytest.raises(ValueError, match="authenticated"):
+        await service.issue(
+            principal=Principal(id="subject-1"),
+            context=object(),  # type: ignore[arg-type]
+            **issue_kwargs,
+        )
+    assert (
+        await service.consume(
+            object(), route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+        )
+        is None
+    )
+
+    class BrokenStore:
+        async def create(self, record: WebSocketTicketRecord) -> None:
+            del record
+
+        async def consume(self, **kwargs: object) -> None:
+            del kwargs
+            raise RuntimeError
+
+    broken = WebSocketTicketService(store=BrokenStore(), clock=lambda: _NOW)
+    with pytest.raises(websocket_module.WebSocketTicketUnavailableError):
+        await broken.consume(
+            "wst.aWlpaWlpaWlpaWlpaWlpaQ.c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",
+            route_name="reports.socket",
+            origin="https://trusted.example",
+            policy_fingerprint="f" * 64,
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("entropy", [lambda _length: b"bad", lambda _length: object()])
+async def test_websocket_ticket_service_rejects_invalid_entropy(entropy: object) -> None:
+    service = WebSocketTicketService(
+        store=InMemoryWebSocketTicketStore(),
+        clock=lambda: _NOW,
+        entropy=entropy,  # type: ignore[arg-type]
+    )
+    with pytest.raises(ValueError, match="entropy is unavailable"):
+        await service.issue(
+            principal=Principal(id="subject-1"),
+            context=SecurityContext(session=NullSessionHandle()),
+            route_name="reports.socket",
+            origin="https://trusted.example",
+            policy_fingerprint="f" * 64,
+        )
+
+
+@pytest.mark.anyio
+async def test_websocket_ticket_service_sanitizes_entropy_failure() -> None:
+    def unavailable(_length: int) -> bytes:
+        raise RuntimeError
+
+    service = WebSocketTicketService(store=InMemoryWebSocketTicketStore(), clock=lambda: _NOW, entropy=unavailable)
+    with pytest.raises(ValueError, match="entropy is unavailable"):
+        await service.issue(
+            principal=Principal(id="subject-1"),
+            context=SecurityContext(session=NullSessionHandle()),
+            route_name="reports.socket",
+            origin="https://trusted.example",
+            policy_fingerprint="f" * 64,
+        )
+
+
+@pytest.mark.anyio
+async def test_issue_websocket_ticket_helper_issues_bound_ticket() -> None:
+    issued = await issue_websocket_ticket(
+        principal=Principal(id="subject-1"),
+        context=SecurityContext(session=NullSessionHandle()),
+        route_name="reports.socket",
+        origin="https://trusted.example",
+        policy_fingerprint="f" * 64,
+        restrictions=CredentialRestrictions(),
+        store=InMemoryWebSocketTicketStore(),
+        clock=lambda: _NOW,
+    )
+    assert issued.expires_at == _NOW + timedelta(seconds=30)
+
+
+@pytest.mark.parametrize("value", [b"bytes", "wrong.parts", "bad." + "a" * 22 + "." + "b" * 43])
+def test_issued_ticket_rejects_noncanonical_proofs(value: object) -> None:
+    with pytest.raises(ValueError, match="Issued WebSocket ticket"):
+        IssuedWebSocketTicket(value=value, expires_at=_NOW)  # type: ignore[arg-type]
+
+
+def test_private_ticket_encoding_defenses_reject_invalid_values() -> None:
+    with pytest.raises(ValueError, match="entropy"):
+        websocket_module._encode_ticket_segment(bytearray(16))  # type: ignore[attr-defined,arg-type]  # noqa: SLF001
+    assert (
+        websocket_module._decode_ticket_segment(  # type: ignore[attr-defined]  # noqa: SLF001
+            "a" * 21, expected_bytes=16, expected_characters=22
+        )
+        is None
+    )
+
+
+def test_websocket_policy_fingerprint_is_stable_for_default_shape() -> None:
+    plan = SimpleNamespace(
+        authenticate=True,
+        required=True,
+        allow_anonymous=False,
+        participant_names=frozenset({"bearer"}),
+        alternatives=((SimpleNamespace(name="bearer", scopes=("reports:read",)),),),
+    )
+    assert websocket_module.websocket_policy_fingerprint(plan) == websocket_module.websocket_policy_fingerprint(plan)
+
+
+@pytest.mark.anyio
+async def test_close_websocket_sends_sanitized_event() -> None:
+    messages: list[dict[str, object]] = []
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    await websocket_module.close_websocket(send, code=4401, reason="authentication_required")  # type: ignore[arg-type]
+    assert messages == [{"type": "websocket.close", "code": 4401, "reason": "authentication_required"}]
+
+
 @pytest.mark.anyio
 async def test_websocket_ticket_is_digest_only_one_time_and_exactly_bound() -> None:
     store = InMemoryWebSocketTicketStore()
@@ -530,6 +768,72 @@ async def test_websocket_simultaneous_terminal_causes_emit_one_close() -> None:
 
 
 @pytest.mark.anyio
+async def test_websocket_coordinator_ignores_events_after_close_and_duplicate_accept() -> None:
+    messages: list[dict[str, object]] = []
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    coordinator = WebSocketCloseCoordinator(send)  # type: ignore[arg-type]
+    await coordinator.send({"type": "websocket.accept"})  # type: ignore[arg-type]
+    await coordinator.send({"type": "websocket.accept"})  # type: ignore[arg-type]
+    await coordinator.send({"type": "websocket.send", "text": "open"})  # type: ignore[arg-type]
+    await coordinator.send({"type": "websocket.close", "code": 4401})  # type: ignore[arg-type]
+    await coordinator.send({"type": "websocket.send", "text": "late"})  # type: ignore[arg-type]
+
+    assert messages == [
+        {"type": "websocket.accept"},
+        {"type": "websocket.send", "text": "open"},
+        {"type": "websocket.close", "code": 4401},
+    ]
+
+
+@pytest.mark.anyio
+async def test_websocket_supervisor_default_path_creates_no_tasks() -> None:
+    called = False
+
+    async def handler() -> None:
+        nonlocal called
+        called = True
+
+    async def send(_message: dict[str, object]) -> None:
+        return None
+
+    await supervise_websocket_lifetime(
+        handler,
+        expires_at=None,
+        coordinator=WebSocketCloseCoordinator(send),  # type: ignore[arg-type]
+        unauthenticated_close_code=4401,
+    )
+
+    assert called
+
+
+@pytest.mark.anyio
+async def test_websocket_already_expired_closes_without_starting_handler() -> None:
+    messages: list[dict[str, object]] = []
+    handler_called = False
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    async def handler() -> None:
+        nonlocal handler_called
+        handler_called = True
+
+    await supervise_websocket_lifetime(
+        handler,
+        expires_at=_NOW,
+        coordinator=WebSocketCloseCoordinator(send),  # type: ignore[arg-type]
+        unauthenticated_close_code=4401,
+        clock=lambda: _NOW,
+    )
+
+    assert messages == [{"type": "websocket.close", "code": 4401, "reason": "credential_expired"}]
+    assert handler_called is False
+
+
+@pytest.mark.anyio
 async def test_websocket_revocation_event_closes_and_cancels_handler() -> None:
     messages: list[dict[str, object]] = []
     cleaned = anyio.Event()
@@ -556,6 +860,30 @@ async def test_websocket_revocation_event_closes_and_cancels_handler() -> None:
 
     assert messages == [{"type": "websocket.close", "code": 4401, "reason": "credential_revoked"}]
     assert cleaned.is_set()
+
+
+@pytest.mark.anyio
+async def test_websocket_revocation_outage_closes_as_unavailable() -> None:
+    messages: list[dict[str, object]] = []
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    async def handler() -> None:
+        await anyio.sleep_forever()
+
+    async def unavailable() -> None:
+        raise RuntimeError
+
+    await supervise_websocket_lifetime(
+        handler,
+        expires_at=None,
+        coordinator=WebSocketCloseCoordinator(send),  # type: ignore[arg-type]
+        unauthenticated_close_code=4401,
+        revocation_wait=unavailable,
+    )
+
+    assert messages == [{"type": "websocket.close", "code": 1013, "reason": "verification_unavailable"}]
 
 
 @pytest.mark.anyio
