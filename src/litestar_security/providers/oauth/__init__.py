@@ -1,5 +1,16 @@
 """OAuth authorization transaction and provider lifecycle contracts."""
 
+from litestar_security.providers.oauth._provider import (
+    OAuthClientAuth,
+    OAuthEndpointConfig,
+    OAuthHTTPPolicy,
+    OAuthProvider,
+    OAuthProviderClient,
+    OAuthProviderError,
+    ProviderGrant,
+    ProviderIdentity,
+    ProviderTokenSet,
+)
 from litestar_security.providers.oauth._transactions import (
     InvalidOAuthCallback,
     MemoryOAuthTransactionStore,
@@ -20,7 +31,13 @@ from litestar_security.providers.oauth._transactions import (
 __all__ = (
     "InvalidOAuthCallback",
     "MemoryOAuthTransactionStore",
+    "OAuthClientAuth",
+    "OAuthEndpointConfig",
+    "OAuthHTTPPolicy",
     "OAuthOperation",
+    "OAuthProvider",
+    "OAuthProviderClient",
+    "OAuthProviderError",
     "OAuthRedirectPolicy",
     "OAuthTransaction",
     "OAuthTransactionProtector",
@@ -29,6 +46,9 @@ __all__ = (
     "OAuthTransactionStore",
     "OAuthTransactionUnavailable",
     "ProtectedOAuthSecret",
+    "ProviderGrant",
+    "ProviderIdentity",
+    "ProviderTokenSet",
     "SecretStr",
     "oauth_binding_cookie",
     "pkce_s256",

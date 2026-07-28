@@ -927,6 +927,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "argon2-cffi" },
+    { name = "httpx" },
     { name = "litestar" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "pyotp" },
@@ -982,6 +983,7 @@ tests = [
 [package.metadata]
 requires-dist = [
     { name = "argon2-cffi", specifier = ">=25.1,<26" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "litestar", specifier = ">=2.24.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.13" },
     { name = "pyotp", specifier = ">=2.10,<3" },

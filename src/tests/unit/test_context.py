@@ -838,7 +838,8 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     declared = tuple(requirement.lower().replace(" ", "") for requirement in requires("litestar-security") or ())
 
     assert any(requirement.startswith("pyjwt[crypto]") and ">=2.13" in requirement for requirement in declared)
-    assert all(not requirement.startswith("httpx") for requirement in declared)
+    httpx_requirements = tuple(requirement for requirement in declared if requirement.startswith("httpx"))
+    assert httpx_requirements == ("httpx>=0.28.1",)
     assert all(not requirement.startswith("cryptography") for requirement in declared)
     for dependency in ("cryptography", "jwt"):
         assert import_module(dependency)
