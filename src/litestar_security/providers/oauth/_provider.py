@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from types import MappingProxyType
 from typing import NoReturn, Protocol, cast, runtime_checkable
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import httpx
 from litestar.exceptions import ImproperlyConfiguredException
@@ -20,6 +20,7 @@ from litestar_security.providers._internal import reject_non_finite, unique_obje
 from litestar_security.providers.oauth._transactions import OAuthTransaction, OAuthTransactionStart, SecretStr
 
 __all__ = (
+    "GitHubOAuthProvider",
     "OAuthClientAuth",
     "OAuthEndpointConfig",
     "OAuthHTTPPolicy",
@@ -46,7 +47,15 @@ _MAXIMUM_TCP_PORT = 65_535
 _SCOPE_ASCII_MINIMUM = 0x21
 _SCOPE_ASCII_MAXIMUM = 0x7E
 _HTTP_OK = 200
+_HTTP_NO_CONTENT = 204
 _BEARER_TOKEN_TYPE = "Bearer"  # noqa: S105 - standardized OAuth token type, not a credential
+_GITHUB_ISSUER = "https://github.com"
+_GITHUB_API = "https://api.github.com"
+_GITHUB_TOKEN_ENDPOINT = "https://github.com/login/oauth/access_token"  # noqa: S105 - endpoint, not a credential
+_GITHUB_ACCEPT = "application/vnd.github+json"
+_GITHUB_API_VERSION = "2022-11-28"
+_GITHUB_REQUIRED_SCOPES = frozenset({"read:user", "user:email"})
+_GITHUB_MAXIMUM_RETRY_AFTER = 86_400
 _RESERVED_AUTHORIZATION_PARAMETERS = frozenset({
     "client_id",
     "code_challenge",
@@ -229,7 +238,7 @@ class ProviderIdentity:
         ):
             message = "Provider identity is invalid"
             raise ValueError(message)
-        object.__setattr__(self, "raw_claims", MappingProxyType(dict(self.raw_claims)))
+        object.__setattr__(self, "raw_claims", _freeze_mapping(self.raw_claims))
 
 
 @runtime_checkable
@@ -304,8 +313,9 @@ class OAuthProvider(Protocol):
 class OAuthProviderError(RuntimeError):
     """Stable secret-free provider request failure."""
 
-    def __init__(self, *, closed: bool = False) -> None:
+    def __init__(self, *, closed: bool = False, retry_after: int | None = None) -> None:
         """Initialize a closed-client or generic request failure."""
+        self.retry_after = retry_after
         super().__init__("OAuth provider client is closed" if closed else "OAuth provider request failed")
 
 
@@ -545,6 +555,198 @@ class OAuthProviderClient:
             raise OAuthProviderError(closed=True)
 
 
+class GitHubOAuthProvider:
+    """GitHub OAuth specialization using current profile and verified-email APIs."""
+
+    __slots__ = ("oauth",)
+
+    def __init__(
+        self,
+        *,
+        client_id: str,
+        client_secret: SecretStr,
+        scopes: frozenset[str] = _GITHUB_REQUIRED_SCOPES,
+        policy: OAuthHTTPPolicy | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        """Create a GitHub provider with fixed authorization and API endpoints.
+
+        Args:
+            client_id: Registered GitHub OAuth application identifier.
+            client_secret: Protected GitHub OAuth application secret.
+            scopes: Allowlisted request scopes.
+            policy: Bounded shared HTTP policy.
+            transport: Optional application or test transport.
+        """
+        self.oauth = OAuthProviderClient(
+            OAuthEndpointConfig(
+                name="github",
+                client_id=client_id,
+                client_secret=client_secret,
+                client_auth=OAuthClientAuth.CLIENT_SECRET_BASIC,
+                authorization_endpoint="https://github.com/login/oauth/authorize",
+                token_endpoint=_GITHUB_TOKEN_ENDPOINT,
+                revocation_endpoint=None,
+                allowed_scopes=frozenset(scopes),
+                required_scopes=_GITHUB_REQUIRED_SCOPES,
+            ),
+            policy=policy,
+            transport=transport,
+        )
+
+    @property
+    def name(self) -> str:
+        """Return GitHub's stable local provider name."""
+        return self.oauth.name
+
+    def build_authorization_url(self, start: OAuthTransactionStart) -> str:
+        """Build the GitHub Authorization Code plus PKCE URL.
+
+        Args:
+            start: The bound transaction start values.
+
+        Returns:
+            The fixed GitHub authorization URL.
+        """
+        return self.oauth.build_authorization_url(start)
+
+    async def exchange_code(
+        self, *, code: SecretStr, transaction: OAuthTransaction, now: datetime | None = None
+    ) -> ProviderTokenSet:
+        """Exchange a GitHub authorization code.
+
+        Args:
+            code: The callback code.
+            transaction: The consumed transaction.
+            now: The authoritative response time.
+
+        Returns:
+            The validated GitHub token set.
+        """
+        return await self.oauth.exchange_code(code=code, transaction=transaction, now=now)
+
+    async def resolve_identity(
+        self, tokens: ProviderTokenSet, *, transaction: OAuthTransaction, now: datetime | None = None
+    ) -> ProviderIdentity:
+        """Re-fetch GitHub profile and verified email for this login.
+
+        Args:
+            tokens: The validated GitHub token set.
+            transaction: The consumed transaction.
+            now: The authoritative identity resolution time.
+
+        Returns:
+            Identity keyed only by GitHub's stable numeric user ID.
+
+        Raises:
+            OAuthProviderError: If the transaction, scopes, or API responses are invalid.
+        """
+        _response_time(now)
+        if (
+            tokens.__class__ is not ProviderTokenSet
+            or transaction.__class__ is not OAuthTransaction
+            or transaction.provider != self.name
+            or transaction.expected_issuer != _GITHUB_ISSUER
+            or not _GITHUB_REQUIRED_SCOPES.issubset(tokens.scopes)
+        ):
+            _raise_provider()
+        profile = await self._api_json("/user", tokens.access_token)
+        emails = await self._api_json("/user/emails", tokens.access_token)
+        if not isinstance(profile, Mapping) or not isinstance(emails, list):
+            _raise_provider()
+        profile_document = cast("Mapping[str, object]", profile)
+        user_id = profile_document.get("id")
+        login = profile_document.get("login")
+        name = profile_document.get("name")
+        if (
+            not isinstance(user_id, int)
+            or isinstance(user_id, bool)
+            or user_id < 1
+            or not _strict_text(login)
+            or (name is not None and not _strict_text(name))
+        ):
+            _raise_provider()
+        email = _github_verified_email(cast("list[object]", emails))
+        raw_claims = dict(profile_document)
+        raw_claims["verified_email"] = email
+        return ProviderIdentity(
+            provider=self.name,
+            issuer=_GITHUB_ISSUER,
+            subject=str(user_id),
+            display_name=cast("str", name) if name is not None else cast("str", login),
+            email=email,
+            email_verified=email is not None,
+            raw_claims=raw_claims,
+        )
+
+    async def refresh(self, refresh_token: SecretStr, *, now: datetime | None = None) -> ProviderTokenSet:
+        """Refresh an expiring GitHub user token.
+
+        Args:
+            refresh_token: The protected GitHub refresh credential.
+            now: The authoritative response time.
+
+        Returns:
+            The rotated GitHub token set.
+        """
+        return await self.oauth.refresh(refresh_token, now=now)
+
+    async def revoke(self, token: SecretStr, *, token_type_hint: str | None) -> None:
+        """Delete one GitHub OAuth application token grant.
+
+        Args:
+            token: The access token to delete.
+            token_type_hint: Must be ``access_token`` when supplied.
+
+        Raises:
+            OAuthProviderError: If deletion fails.
+        """
+        self.oauth._require_open()  # pyright: ignore[reportPrivateUsage] # noqa: SLF001 - specialization shares its composed transport lifecycle
+        if token.__class__ is not SecretStr or token_type_hint not in {None, "access_token"}:
+            _raise_provider()
+        secret = cast("SecretStr", self.oauth.config.client_secret)
+        try:
+            async with self.oauth._client.stream(  # pyright: ignore[reportPrivateUsage] # noqa: SLF001 - specialization shares its composed hardened client
+                "DELETE",
+                f"{_GITHUB_API}/applications/{quote(self.oauth.config.client_id, safe='')}/token",
+                auth=httpx.BasicAuth(self.oauth.config.client_id, secret.get_secret_value()),
+                json={"access_token": token.get_secret_value()},
+                headers=_github_headers(),
+            ) as response:
+                if response.status_code != _HTTP_NO_CONTENT:
+                    _raise_github_response(response)
+                await _read_bounded(response, self.oauth.policy.maximum_response_bytes)
+        except OAuthProviderError:
+            raise
+        except Exception:  # noqa: BLE001 - sanitize transport failures
+            raise OAuthProviderError from None
+
+    async def aclose(self) -> None:
+        """Close the shared owned GitHub HTTP client."""
+        await self.oauth.aclose()
+
+    async def _api_json(self, path: str, token: SecretStr) -> object:
+        self.oauth._require_open()  # pyright: ignore[reportPrivateUsage] # noqa: SLF001 - specialization shares its composed transport lifecycle
+        try:
+            async with self.oauth._client.stream(  # pyright: ignore[reportPrivateUsage] # noqa: SLF001 - specialization shares its composed hardened client
+                "GET",
+                f"{_GITHUB_API}{path}",
+                headers={**_github_headers(), "Authorization": f"Bearer {token.get_secret_value()}"},
+            ) as response:
+                if response.status_code != _HTTP_OK:
+                    _raise_github_response(response)
+                body = await _read_bounded(response, self.oauth.policy.maximum_response_bytes)
+                if response.headers.get("content-type", "").partition(";")[0].strip().lower() != "application/json":
+                    _raise_provider()
+            value = json.loads(body, object_pairs_hook=unique_object, parse_constant=reject_non_finite)
+            validate_depth(value, maximum=_MAXIMUM_JSON_DEPTH)
+        except OAuthProviderError:
+            raise
+        except Exception:  # noqa: BLE001 - sanitize transport and provider response failures
+            raise OAuthProviderError from None
+        return value
+
+
 async def _read_bounded(response: httpx.Response, maximum: int) -> bytes:
     content_length = response.headers.get("content-length")
     if content_length is not None:
@@ -559,6 +761,42 @@ async def _read_bounded(response: httpx.Response, maximum: int) -> bytes:
         if len(body) > maximum:
             _raise_provider()
     return bytes(body)
+
+
+def _github_verified_email(values: list[object]) -> str | None:
+    verified: list[tuple[bool, str]] = []
+    for value in values:
+        if not isinstance(value, Mapping):
+            _raise_provider()
+        record = cast("Mapping[str, object]", value)
+        email = record.get("email")
+        is_verified = record.get("verified")
+        is_primary = record.get("primary")
+        if not _strict_text(email):
+            _raise_provider()
+        verified_value = _exact_bool(is_verified)
+        primary_value = _exact_bool(is_primary)
+        if verified_value:
+            verified.append((primary_value, cast("str", email)))
+    if not verified:
+        return None
+    verified.sort(key=lambda candidate: not candidate[0])
+    return verified[0][1]
+
+
+def _github_headers() -> dict[str, str]:
+    return {"Accept": _GITHUB_ACCEPT, "Accept-Encoding": "identity", "X-GitHub-Api-Version": _GITHUB_API_VERSION}
+
+
+def _raise_github_response(response: httpx.Response) -> NoReturn:
+    retry_after: int | None = None
+    if response.status_code in {httpx.codes.FORBIDDEN, httpx.codes.TOO_MANY_REQUESTS}:
+        value = response.headers.get("retry-after")
+        if value is not None and value.isascii() and value.isdigit():
+            parsed = int(value)
+            if 1 <= parsed <= _GITHUB_MAXIMUM_RETRY_AFTER:
+                retry_after = parsed
+    raise OAuthProviderError(retry_after=retry_after)
 
 
 def _parse_token_document(content_type: str, body: bytes) -> dict[str, object]:
@@ -687,8 +925,31 @@ def _aware_time(value: object) -> bool:
     return isinstance(value, datetime) and value.tzinfo is not None and value.utcoffset() is not None
 
 
+def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+    return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
+
+
+def _freeze_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        mapping = cast("Mapping[object, object]", value)
+        if any(not _strict_text(key) for key in mapping):
+            message = "Provider identity is invalid"
+            raise ValueError(message)
+        return MappingProxyType({cast("str", key): _freeze_value(item) for key, item in mapping.items()})
+    if isinstance(value, (list, tuple)):
+        items = cast("list[object] | tuple[object, ...]", value)
+        return tuple(_freeze_value(item) for item in items)
+    return value
+
+
 def _positive_finite(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+
+
+def _exact_bool(value: object) -> bool:
+    if not isinstance(value, bool) or value.__class__ is not bool:
+        _raise_provider()
+    return value
 
 
 def _raise_provider() -> NoReturn:

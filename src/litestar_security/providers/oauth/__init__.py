@@ -1,6 +1,7 @@
 """OAuth authorization transaction and provider lifecycle contracts."""
 
 from litestar_security.providers.oauth._provider import (
+    GitHubOAuthProvider,
     OAuthClientAuth,
     OAuthEndpointConfig,
     OAuthHTTPPolicy,
@@ -29,6 +30,7 @@ from litestar_security.providers.oauth._transactions import (
 )
 
 __all__ = (
+    "GitHubOAuthProvider",
     "InvalidOAuthCallback",
     "MemoryOAuthTransactionStore",
     "OAuthClientAuth",
