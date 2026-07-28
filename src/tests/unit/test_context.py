@@ -853,6 +853,13 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
 
     providers = import_module("litestar_security.providers")
     assert providers.__all__ == (
+        "APIKeyCodec",
+        "APIKeyConfig",
+        "APIKeyGenerationError",
+        "APIKeyProof",
+        "APIKeyRecord",
+        "APIKeyStore",
+        "APIKeyUsageSink",
         "AsyncJWKSFetcher",
         "BearerSlotSelector",
         "BearerTokenSlot",
@@ -860,6 +867,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "CompositeBearerConfig",
         "DiscoveryPolicy",
         "GitHubOAuthProvider",
+        "IssuedAPIKey",
         "JSONValue",
         "JWKSCacheEntry",
         "JWKSCachePolicy",
@@ -902,6 +910,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "normalize_verifier",
         "oidc_provider",
     )
+    api_key_module = import_module("litestar_security.providers.api_key")
     jwks_module = import_module("litestar_security.providers.jwks")
     jwt_module = import_module("litestar_security.providers.jwt")
     oidc_module = import_module("litestar_security.providers.oidc")
@@ -914,8 +923,18 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "OAuthRouteService",
         "TokenVault",
     }
-    assert set(jwks_module.__all__).union(jwt_module.__all__, oidc_module.__all__, oauth_exports) == set(
-        providers.__all__
+    assert set(api_key_module.__all__).union(
+        jwks_module.__all__, jwt_module.__all__, oidc_module.__all__, oauth_exports
+    ) == set(providers.__all__)
+    assert api_key_module.__all__ == (
+        "APIKeyCodec",
+        "APIKeyConfig",
+        "APIKeyGenerationError",
+        "APIKeyProof",
+        "APIKeyRecord",
+        "APIKeyStore",
+        "APIKeyUsageSink",
+        "IssuedAPIKey",
     )
     assert jwks_module.__all__ == (
         "AsyncJWKSFetcher",
