@@ -11,7 +11,7 @@ from typing import cast
 from urllib.parse import parse_qsl
 
 import httpx
-from anyio import Event, Lock
+from anyio import Event, Lock, create_task_group
 
 from litestar_security.accounts import (
     AssertionRecordResult,
@@ -24,7 +24,7 @@ from litestar_security.accounts import (
     TOTPMethod,
     WebAuthnChallenge,
 )
-from litestar_security.providers.api_key import APIKeyRecord
+from litestar_security.providers.api_key import APIKeyRecord, APIKeyStore
 from litestar_security.providers.oauth import (
     MemoryOAuthAccountStore,
     MemoryOAuthTransactionStore,
@@ -55,6 +55,9 @@ __all__ = (
     "MemoryOAuthTransactionStore",
     "MemoryTokenVault",
     "OAuthHTTPRequest",
+    "StoreConformanceFactories",
+    "assert_api_key_store_conformance",
+    "assert_security_backend_conformance",
 )
 
 _DEFAULT_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -449,6 +452,97 @@ class InMemorySecurityBackend:
         error = self._failpoints.get(operation)
         if error is not None:
             raise error
+
+
+@dataclass(frozen=True, slots=True)
+class StoreConformanceFactories:
+    """Isolated zero-argument factories for explicitly enabled capabilities."""
+
+    api_key_store: Callable[[], APIKeyStore] | None = None
+
+
+async def assert_api_key_store_conformance(  # noqa: C901 - one scenario keeps each API-key invariant in order
+    factory: Callable[[], APIKeyStore],
+) -> None:
+    """Assert API-key isolation and atomic rotation behavior.
+
+    Args:
+        factory: Isolated zero-argument store factory.
+
+    Returns:
+        None when every invariant holds.
+
+    Raises:
+        AssertionError: If ``APIKeyStore`` isolation, lookup, or atomic rotation is violated.
+    """
+    store = factory()
+    isolated = factory()
+    if store is isolated:
+        message = "APIKeyStore factory invariant: each call must return isolated state"
+        raise AssertionError(message)
+    current = _conformance_api_key_record("a2tra2tra2tra2tr")
+    replacements = (_conformance_api_key_record("ZmZmZmZmZmZmZmZm"), _conformance_api_key_record("Z2dnZ2dnZ2dnZ2dn"))
+    await store.create(current)
+    if await store.get(current.key_id) != current or await isolated.get(current.key_id) is not None:
+        message = "APIKeyStore.create/get isolation invariant: created records must be exact and factory-local"
+        raise AssertionError(message)
+    outcomes: list[bool] = []
+
+    async def rotate(replacement: APIKeyRecord) -> None:
+        try:
+            await store.rotate(
+                current_key_id=current.key_id,
+                replacement=replacement,
+                overlap_until=_DEFAULT_NOW + timedelta(seconds=30),
+                now=_DEFAULT_NOW,
+            )
+        except Exception:  # noqa: BLE001 - conformance accepts implementation-specific conflict exceptions
+            outcomes.append(False)
+        else:
+            outcomes.append(True)
+
+    async with create_task_group() as task_group:
+        for replacement in replacements:
+            task_group.start_soon(rotate, replacement)
+    if outcomes.count(True) != 1:
+        message = (
+            "APIKeyStore.rotate atomicity invariant: two contenders must produce one atomic winner "
+            f"(observed {outcomes.count(True)})"
+        )
+        raise AssertionError(message)
+    persisted_records: list[APIKeyRecord | None] = []
+    for replacement in replacements:
+        persisted_records.append(  # noqa: PERF401 - sequential awaited protocol calls
+            await store.get(replacement.key_id)
+        )
+    persisted = tuple(persisted_records)
+    if sum(record is not None for record in persisted) != 1:
+        message = "APIKeyStore.rotate partial-write invariant: exactly one successor must be persisted"
+        raise AssertionError(message)
+    current_after = await store.get(current.key_id)
+    if current_after is None or current_after.revoked_at != _DEFAULT_NOW:
+        message = "APIKeyStore.rotate current-state invariant: the winning transition must revoke the current key"
+        raise AssertionError(message)
+
+
+async def assert_security_backend_conformance(factories: StoreConformanceFactories) -> None:
+    """Run only the conformance scenarios whose factories were supplied.
+
+    Args:
+        factories: Explicit feature factories to exercise.
+
+    Returns:
+        None when every enabled feature passes.
+
+    Raises:
+        AssertionError: If any enabled feature violates its public protocol.
+    """
+    if factories.api_key_store is not None:
+        await assert_api_key_store_conformance(factories.api_key_store)
+
+
+def _conformance_api_key_record(key_id: str) -> APIKeyRecord:
+    return APIKeyRecord(key_id=key_id, subject_id="conformance-subject", digest=b"d" * 32)
 
 
 @dataclass(frozen=True, slots=True)
