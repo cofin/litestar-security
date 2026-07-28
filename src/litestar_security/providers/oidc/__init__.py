@@ -2,5 +2,22 @@
 
 from litestar_security.providers.oidc._discovery import DiscoveryPolicy, OIDCDiscoveryClient, OIDCMetadata
 from litestar_security.providers.oidc._internal import OIDCDiscoveryError
+from litestar_security.providers.oidc._logout import OIDCJWTLogoutTokenConsumer
+from litestar_security.providers.oidc._provider import (
+    OIDCProvider,
+    google_oidc_provider,
+    keycloak_oidc_provider,
+    oidc_provider,
+)
 
-__all__ = ("DiscoveryPolicy", "OIDCDiscoveryClient", "OIDCDiscoveryError", "OIDCMetadata")
+__all__ = (
+    "DiscoveryPolicy",
+    "OIDCDiscoveryClient",
+    "OIDCDiscoveryError",
+    "OIDCJWTLogoutTokenConsumer",
+    "OIDCMetadata",
+    "OIDCProvider",
+    "google_oidc_provider",
+    "keycloak_oidc_provider",
+    "oidc_provider",
+)

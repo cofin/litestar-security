@@ -260,7 +260,7 @@ class LocalAuthServices(Generic[UserT]):
             return VerificationUnavailable()
         return await refresh_tokens.issue(account)
 
-    async def passkey_login(  # noqa: PLR0911 - transport selection preserves distinct safe failures
+    async def passkey_login(
         self,
         request: Request[Any, Any, Any],
         account_id: str,
@@ -279,6 +279,28 @@ class LocalAuthServices(Generic[UserT]):
         Returns:
             The established session projection, issued token pair, or a
             sanitized rejection.
+        """
+        return await self.verified_login(request, account_id, transport=transport, evidence=evidence)
+
+    async def verified_login(  # noqa: PLR0911 - transport selection preserves distinct safe failures
+        self,
+        request: Request[Any, Any, Any],
+        account_id: str,
+        *,
+        transport: str | None,
+        evidence: AuthenticationEvidence,
+    ) -> LocalAccountResponse | RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+        """Establish a local transport after externally verified authentication.
+
+        Args:
+            request: Request whose native session may be established.
+            account_id: Account resolved by the verified authentication method.
+            transport: ``session`` or ``tokens`` when both are configured.
+            evidence: Fully verified evidence to preserve in local credentials.
+
+        Returns:
+            The established session projection, issued token pair, or sanitized
+            rejection.
         """
         try:
             account = await self.accounts.get_by_id(account_id)

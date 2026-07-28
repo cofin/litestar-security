@@ -123,6 +123,7 @@ _PUBLIC_API = (
     "CredentialSlot",
     "CurrentUser",
     "ExternalCSRF",
+    "GitHubOAuthProvider",
     "IdentityResolution",
     "IdentityResolver",
     "InvalidCredentials",
@@ -131,6 +132,11 @@ _PUBLIC_API = (
     "MechanismRequirement",
     "NoCredentials",
     "NullSessionHandle",
+    "OAuthAccountService",
+    "OAuthAccountStore",
+    "OAuthConfig",
+    "OAuthProvider",
+    "OAuthRouteService",
     "PasskeyConfig",
     "PresentedCredential",
     "Principal",
@@ -143,6 +149,7 @@ _PUBLIC_API = (
     "SessionHandle",
     "SessionPersistenceUnavailableError",
     "SessionUnavailableError",
+    "TokenVault",
     "VerificationUnavailable",
     "__project__",
     "__version__",
@@ -838,7 +845,8 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     declared = tuple(requirement.lower().replace(" ", "") for requirement in requires("litestar-security") or ())
 
     assert any(requirement.startswith("pyjwt[crypto]") and ">=2.13" in requirement for requirement in declared)
-    assert all(not requirement.startswith("httpx") for requirement in declared)
+    httpx_requirements = tuple(requirement for requirement in declared if requirement.startswith("httpx"))
+    assert httpx_requirements == ("httpx>=0.28.1",)
     assert all(not requirement.startswith("cryptography") for requirement in declared)
     for dependency in ("cryptography", "jwt"):
         assert import_module(dependency)
@@ -851,6 +859,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "CachedJWKSProvider",
         "CompositeBearerConfig",
         "DiscoveryPolicy",
+        "GitHubOAuthProvider",
         "JSONValue",
         "JWKSCacheEntry",
         "JWKSCachePolicy",
@@ -863,29 +872,51 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "LocalJWKSConfig",
         "LocalKeyRing",
         "NoOpSecurityMetrics",
+        "OAuthAccountService",
+        "OAuthAccountStore",
+        "OAuthConfig",
+        "OAuthProvider",
+        "OAuthRouteService",
         "OIDCDiscoveryClient",
         "OIDCDiscoveryError",
+        "OIDCJWTLogoutTokenConsumer",
         "OIDCMetadata",
+        "OIDCProvider",
         "SecurityMetrics",
         "SigningKey",
         "SyncJWKSFetcher",
         "SyncJWTVerifier",
         "SyncTokenSigner",
         "TokenSigner",
+        "TokenVault",
         "VerificationKey",
         "VerificationKeySet",
         "WorkerLimits",
         "build_access_token_claims",
         "build_local_jwks_handler",
         "extend_composite_bearer",
+        "google_oidc_provider",
+        "keycloak_oidc_provider",
         "normalize_fetcher",
         "normalize_signer",
         "normalize_verifier",
+        "oidc_provider",
     )
     jwks_module = import_module("litestar_security.providers.jwks")
     jwt_module = import_module("litestar_security.providers.jwt")
     oidc_module = import_module("litestar_security.providers.oidc")
-    assert set(jwks_module.__all__).union(jwt_module.__all__, oidc_module.__all__) == set(providers.__all__)
+    oauth_exports = {
+        "GitHubOAuthProvider",
+        "OAuthAccountService",
+        "OAuthAccountStore",
+        "OAuthConfig",
+        "OAuthProvider",
+        "OAuthRouteService",
+        "TokenVault",
+    }
+    assert set(jwks_module.__all__).union(jwt_module.__all__, oidc_module.__all__, oauth_exports) == set(
+        providers.__all__
+    )
     assert jwks_module.__all__ == (
         "AsyncJWKSFetcher",
         "CachedJWKSProvider",
@@ -2608,6 +2639,7 @@ def test_security_config_is_typed_and_slotted() -> None:
         "session_backend",
         "local_auth",
         "local_jwks",
+        "oauth",
         "mfa",
         "passkeys",
         "jwks_providers",

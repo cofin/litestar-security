@@ -590,6 +590,7 @@ def _jwt_config(
     algorithm: str,
     *,
     access_token_profile: bool = True,
+    subject_required: bool = True,
     required_claims: frozenset[str] = frozenset({"iss", "sub", "aud", "exp", "iat"}),
     maximum_lifetime: timedelta | None = timedelta(hours=1),
 ) -> JWTValidationConfig:
@@ -599,6 +600,7 @@ def _jwt_config(
         algorithms=frozenset({algorithm}),
         required_claims=required_claims,
         access_token_profile=access_token_profile,
+        subject_required=subject_required,
         maximum_lifetime=maximum_lifetime,
     )
 
@@ -2798,6 +2800,31 @@ async def test_pyjwt_verifier_accepts_valid_public_jwk(jwt_key_material: Mapping
     assert isinstance(outcome, Authenticated)
 
 
+@pytest.mark.anyio
+async def test_pyjwt_verifier_accepts_subject_optional_logout_profile(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    signing_key, verification_key = jwt_key_material["HS256"]
+    payload = _jwt_claims()
+    payload.pop("sub")
+    payload["sid"] = "provider-session-1"
+    config = _jwt_config(
+        "HS256",
+        access_token_profile=False,
+        subject_required=False,
+        required_claims=frozenset({"iss", "aud", "exp", "iat", "jti"}),
+    )
+    verifier = PyJWTVerifier(config=config, key=verification_key, require_key_id=False)
+
+    outcome = await verifier.verify(
+        _encode_jwt(signing_key, "HS256", claims=payload, include_key_id=False), now=_JWT_NOW
+    )
+
+    assert isinstance(outcome, Authenticated)
+    assert outcome.claims.subject is None
+    assert outcome.claims.raw["sid"] == "provider-session-1"
+
+
 @pytest.mark.parametrize(
     ("algorithm", "prepared_key"),
     [
@@ -2830,6 +2857,8 @@ def test_pyjwt_verifier_rejects_incompatible_prepared_backend_keys(
         {"maximum_lifetime": timedelta(0)},
         {"required_claims": frozenset({" "})},
         {"token_types": frozenset()},
+        {"subject_required": 1},
+        {"subject_required": False},
     ],
 )
 def test_jwt_validation_config_rejects_unsafe_or_ambiguous_values(kwargs: dict[str, object]) -> None:

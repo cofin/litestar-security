@@ -1,9 +1,11 @@
 """Deterministic conformance helpers for security integration test suites."""
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from hmac import compare_digest
+from urllib.parse import parse_qsl
 
+import httpx
 from anyio import Lock
 
 from litestar_security.accounts import (
@@ -17,14 +19,116 @@ from litestar_security.accounts import (
     TOTPMethod,
     WebAuthnChallenge,
 )
+from litestar_security.providers.oauth import (
+    MemoryOAuthAccountStore,
+    MemoryOAuthTransactionStore,
+    MemoryTokenVault,
+    OAuthTransaction,
+    OAuthTransactionStart,
+    ProviderIdentity,
+    ProviderTokenSet,
+    SecretStr,
+)
 
 __all__ = (
     "FakeClock",
+    "FakeOAuthHTTPTransport",
+    "FakeOAuthProvider",
     "InMemoryMFAStore",
     "InMemoryPasskeyStore",
     "InMemoryStepUpStore",
     "InMemoryWebAuthnChallengeStore",
+    "MemoryOAuthAccountStore",
+    "MemoryOAuthTransactionStore",
+    "MemoryTokenVault",
+    "OAuthHTTPRequest",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthHTTPRequest:
+    """Secret-free projection of one provider HTTP request."""
+
+    method: str
+    url: str
+    header_names: frozenset[str]
+    form_fields: frozenset[str]
+
+
+class FakeOAuthHTTPTransport(httpx.AsyncBaseTransport):
+    """Deterministic queued HTTPX transport for provider conformance tests."""
+
+    def __init__(self, responses: list[httpx.Response]) -> None:
+        """Initialize with responses consumed in order.
+
+        Args:
+            responses: Provider responses to return.
+        """
+        self.responses = list(responses)
+        self.requests: list[OAuthHTTPRequest] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        """Record one request and return the next response."""
+        self.requests.append(
+            OAuthHTTPRequest(
+                method=request.method,
+                url=str(request.url),
+                header_names=frozenset(name.lower() for name in request.headers if name.lower() != "authorization"),
+                form_fields=frozenset(
+                    key for key, _value in parse_qsl(request.content.decode(), keep_blank_values=True)
+                ),
+            )
+        )
+        if not self.responses:
+            message = "Fake OAuth HTTP responses exhausted"
+            raise AssertionError(message)
+        response = self.responses.pop(0)
+        return httpx.Response(response.status_code, headers=response.headers, content=response.content, request=request)
+
+
+class FakeOAuthProvider:
+    """Deterministic async provider with public lifecycle call history."""
+
+    def __init__(self, *, name: str, tokens: ProviderTokenSet, identity: ProviderIdentity) -> None:
+        """Initialize fixed provider results."""
+        self.name = name
+        self.tokens = tokens
+        self.identity = identity
+        self.calls: list[str] = []
+
+    def build_authorization_url(self, start: OAuthTransactionStart) -> str:
+        """Return a deterministic URL."""
+        self.calls.append("authorize")
+        return f"https://provider.example/authorize?state={start.state.get_secret_value()}"
+
+    async def exchange_code(
+        self, *, code: SecretStr, transaction: OAuthTransaction, now: datetime | None = None
+    ) -> ProviderTokenSet:
+        """Return configured exchange tokens."""
+        del code, transaction, now
+        self.calls.append("exchange")
+        return self.tokens
+
+    async def resolve_identity(
+        self, tokens: ProviderTokenSet, *, transaction: OAuthTransaction, now: datetime | None = None
+    ) -> ProviderIdentity:
+        """Return the configured identity."""
+        del tokens, transaction, now
+        self.calls.append("identity")
+        return self.identity
+
+    async def refresh(
+        self, refresh_token: SecretStr, *, current_scopes: frozenset[str] | None = None, now: datetime | None = None
+    ) -> ProviderTokenSet:
+        """Return configured refresh tokens."""
+        del refresh_token, current_scopes, now
+        self.calls.append("refresh")
+        return self.tokens
+
+    async def revoke(self, token: SecretStr, *, token_type_hint: str | None) -> None:
+        """Record deterministic revocation."""
+        del token, token_type_hint
+        self.calls.append("revoke")
 
 
 class FakeClock:

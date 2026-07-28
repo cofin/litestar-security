@@ -223,7 +223,7 @@ class LocalBearerIdentityResolver(Generic[UserT]):
             the epoch has moved on, or ``VerificationUnavailable`` when a lookup failed.
         """
         epoch = claims.raw.get("se")
-        if not valid_security_epoch(epoch):
+        if claims.subject is None or not valid_security_epoch(epoch):
             return InvalidCredentials()
         try:
             account = await self.accounts.get_by_id(claims.subject)
