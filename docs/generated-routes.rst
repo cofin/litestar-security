@@ -118,3 +118,58 @@ mount your own controllers against ``local_auth.services``:
 
 No tag descriptions are contributed in that case, because no operations are
 generated to file under them.
+
+MFA, passkeys, and step-up
+==========================
+
+``MFAConfig`` and ``PasskeyConfig`` add a second route bundle under the same
+``/auth`` prefix. It contains TOTP enrollment and activation, recovery-code
+replacement, passkey registration and authentication, safe credential
+inventory and removal, and ``POST /auth/step-up/{purpose}``. Generated MFA
+routes require an explicit recovery-code pepper ring and login-method store;
+passkey routes require the same shared viability boundary. Startup rejects a
+route configuration that could activate a factor without recording it for
+final-method-safe removal. Factor creation, login-method registration, and the
+durable event are one application-store atomic operation.
+
+Step-up grants are short-lived, single-use values returned in JSON. The stored
+record contains only a digest and is bound to the authenticated principal,
+current security epoch, exact purpose, and current session or token transport.
+A grant for one operation cannot authorize another operation.
+
+All secret- and challenge-bearing responses set ``Cache-Control: no-store`` and
+``Pragma: no-cache``. Generated schemas describe the typed camel-case JSON
+models without embedding sample TOTP secrets, recovery codes, browser
+credential responses, or public verification keys.
+
+Passkey authentication options include a reveal-once ``binding`` alongside the
+browser options. Return that value unchanged in the verification request; it is
+redacted from representations and binds the public ceremony without relying on
+an existing cookie or token.
+
+Passkey authentication establishes the local transport selected by the
+application profile. Session-capable profiles compile the unsafe verification
+route with CSRF enforcement; token-only profiles do not require a browser CSRF
+cookie. A hybrid profile exposes distinct
+``/passkeys/authentication/session/verify`` and
+``/passkeys/authentication/tokens/verify`` routes so CSRF policy is fixed by the
+route rather than selected by an untrusted request field.
+
+The synchronous WebAuthn adapter runs through a bounded worker limiter and
+timeout. Attestation defaults to ``none``. Requesting direct attestation and
+assigning the ``hardware-backed`` trait requires an application-supplied
+``AttestationTrustMapper``. Its format-specific PEM roots are passed into
+cryptographic attestation verification before its policy can approve the
+verified AAGUID and format. The verified format must select a configured root
+set and the attestation statement must contain a certificate chain; packed
+self-attestation is never promoted to hardware-backed assurance.
+
+Successful passkey assurance is preserved by both transports. Sessions store
+normalized evidence in their versioned payload, while local access tokens carry
+strict ``amr``, ``auth_time``, and security-trait claims that the local bearer
+verifier reconstructs as evidence. Refresh-family state preserves the same
+secret-free evidence so rotation cannot renew its original freshness.
+
+Set ``register_routes=False`` independently on either feature configuration to
+keep its service available for an application-owned controller without
+registering its generated handlers.

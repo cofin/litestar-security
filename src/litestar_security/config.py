@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import timedelta
 from inspect import iscoroutinefunction
 from math import isfinite
 from types import MappingProxyType
@@ -15,15 +16,31 @@ from litestar.middleware.session.base import BaseSessionBackend
 from litestar_security.authentication import AuthenticationMechanism, AuthenticationPolicy, CredentialSlot, required
 
 if TYPE_CHECKING:
+    from litestar_security.accounts import (
+        AttestationTrustMapper,
+        LoginMethodStore,
+        RecoveryCodePepper,
+        SecurityEventSink,
+        TOTPPolicy,
+    )
     from litestar_security.accounts._profiles import LocalAuthConfig
     from litestar_security.providers.jwks import JWKSProvider
     from litestar_security.providers.jwt import LocalJWKSConfig
 
-__all__ = ("ExternalCSRF", "NoOpSecurityMetrics", "SecurityConfig", "SecurityMetrics", "WorkerLimits")
+__all__ = (
+    "ExternalCSRF",
+    "MFAConfig",
+    "NoOpSecurityMetrics",
+    "PasskeyConfig",
+    "SecurityConfig",
+    "SecurityMetrics",
+    "WorkerLimits",
+)
 
 UserT = TypeVar("UserT")
 _EMPTY_METRIC_ATTRIBUTES: Mapping[str, str] = MappingProxyType({})
 _MAXIMUM_WORKER_TOKENS = 1_024
+_ASCII_CONTROL_LIMIT = 32
 
 
 @runtime_checkable
@@ -123,6 +140,138 @@ class ExternalCSRF:
         object.__setattr__(self, "name", name)
 
 
+@dataclass(frozen=True, slots=True)
+class MFAConfig:
+    """Configure MFA capabilities without selecting a persistence technology."""
+
+    store: object
+    secret_protector: object = field(repr=False)
+    policy: "TOTPPolicy | None" = None
+    recovery_peppers: "Sequence[RecoveryCodePepper]" = field(default=(), repr=False)
+    login_methods: "LoginMethodStore | None" = field(default=None, repr=False)
+    events: "SecurityEventSink | None" = field(default=None, repr=False)
+    step_up_store: object | None = field(default=None, repr=False)
+    route_prefix: str = "/auth"
+    issuer: str = "Litestar Security"
+    register_routes: bool = True
+    service: object = field(init=False, repr=False, compare=False)
+    step_up_service: object | None = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Build project-owned services from explicit application ports."""
+        from litestar_security.accounts import (  # noqa: PLC0415 - avoids the accounts profile/config cycle
+            MFAService,
+            StepUpService,
+            StepUpStore,
+        )
+
+        service_kwargs: dict[str, object] = {
+            "store": self.store,
+            "secret_protector": self.secret_protector,
+            "issuer": self.issuer,
+            "recovery_peppers": tuple(self.recovery_peppers),
+            "login_methods": self.login_methods,
+        }
+        if self.policy is not None:
+            service_kwargs["policy"] = self.policy
+        if self.events is not None:
+            service_kwargs["events"] = self.events
+        object.__setattr__(self, "service", MFAService(**cast("Any", service_kwargs)))
+        step_up_store = self.step_up_store if self.step_up_store is not None else self.store
+        object.__setattr__(
+            self,
+            "step_up_service",
+            StepUpService(cast("Any", step_up_store)) if isinstance(step_up_store, StepUpStore) else None,
+        )
+        object.__setattr__(self, "route_prefix", _feature_route_prefix(self.route_prefix))
+        register_routes_value = cast("object", self.register_routes)
+        if register_routes_value.__class__ is not bool:
+            msg = "MFA route registration must be boolean"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.register_routes and (not self.recovery_peppers or self.login_methods is None):
+            msg = "Generated MFA routes require recovery-code peppers and a login-method store"
+            raise ImproperlyConfiguredException(detail=msg)
+
+
+@dataclass(frozen=True, slots=True)
+class PasskeyConfig:
+    """Configure exact WebAuthn relying-party and persistence boundaries."""
+
+    store: object
+    challenge_store: object
+    rp_id: str
+    origins: Sequence[str]
+    rp_name: str = "Litestar Security"
+    algorithms: Sequence[int] = (-8, -7, -257)
+    challenge_ttl: timedelta = timedelta(minutes=5)
+    allow_insecure_localhost: bool = False
+    worker_timeout: float = 10.0
+    attestation_trust: "AttestationTrustMapper | None" = field(default=None, repr=False)
+    login_methods: "LoginMethodStore | None" = field(default=None, repr=False)
+    events: "SecurityEventSink | None" = field(default=None, repr=False)
+    step_up_store: object | None = field(default=None, repr=False)
+    route_prefix: str = "/auth"
+    register_routes: bool = True
+    service: object = field(init=False, repr=False, compare=False)
+    step_up_service: object | None = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Freeze relying-party origins and build the project-owned service."""
+        from litestar_security.accounts import (  # noqa: PLC0415 - avoids the accounts profile/config cycle
+            PasskeyService,
+            StepUpService,
+            StepUpStore,
+        )
+
+        object.__setattr__(self, "origins", tuple(self.origins))
+        object.__setattr__(self, "algorithms", tuple(self.algorithms))
+        service_kwargs = {
+            "store": self.store,
+            "challenge_store": self.challenge_store,
+            "rp_id": self.rp_id,
+            "rp_name": self.rp_name,
+            "origins": self.origins,
+            "algorithms": self.algorithms,
+            "challenge_ttl": self.challenge_ttl,
+            "allow_insecure_localhost": self.allow_insecure_localhost,
+            "worker_timeout": self.worker_timeout,
+            "attestation_trust": self.attestation_trust,
+            "login_methods": self.login_methods,
+        }
+        if self.events is not None:
+            service_kwargs["events"] = self.events
+        object.__setattr__(self, "service", PasskeyService(**cast("Any", service_kwargs)))
+        object.__setattr__(
+            self,
+            "step_up_service",
+            StepUpService(cast("Any", self.step_up_store)) if isinstance(self.step_up_store, StepUpStore) else None,
+        )
+        object.__setattr__(self, "route_prefix", _feature_route_prefix(self.route_prefix))
+        register_routes_value = cast("object", self.register_routes)
+        if register_routes_value.__class__ is not bool:
+            msg = "Passkey route registration must be boolean"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.register_routes and self.login_methods is None:
+            msg = "Generated passkey routes require a login-method store"
+            raise ImproperlyConfiguredException(detail=msg)
+
+
+def _feature_route_prefix(value: object) -> str:
+    if not isinstance(value, str):
+        msg = "MFA and passkey route prefixes must be absolute non-root paths"
+        raise ImproperlyConfiguredException(detail=msg)
+    normalized = value.rstrip("/")
+    if (
+        not normalized.startswith("/")
+        or normalized == ""
+        or "//" in normalized
+        or any(character.isspace() or ord(character) < _ASCII_CONTROL_LIMIT for character in normalized)
+    ):
+        msg = "MFA and passkey route prefixes must be absolute non-root paths"
+        raise ImproperlyConfiguredException(detail=msg)
+    return normalized
+
+
 @dataclass(slots=True)
 class SecurityConfig(Generic[UserT]):
     """Configure the per-application security runtime."""
@@ -138,6 +287,8 @@ class SecurityConfig(Generic[UserT]):
     session_backend: BaseSessionBackend[Any] | None = None
     local_auth: "LocalAuthConfig[UserT] | None" = None
     local_jwks: "LocalJWKSConfig | None" = None
+    mfa: MFAConfig | None = None
+    passkeys: PasskeyConfig | None = None
     jwks_providers: Sequence["JWKSProvider"] = ()
     jwks_warmup_failure: Literal["fail_startup", "lazy"] = "fail_startup"
 

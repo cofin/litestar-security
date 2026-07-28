@@ -71,6 +71,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     __slots__ = (
         "_jwks_lifespan",
         "_local_auth_route_handlers",
+        "_mfa_route_handlers",
         "_middleware",
         "_providers",
         "_rate_limit_lifespan",
@@ -92,6 +93,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._middleware: DefineMiddleware | None = None
         self._jwks_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
         self._local_auth_route_handlers: tuple[Router, ...] | None = None
+        self._mfa_route_handlers: tuple[Router, ...] | None = None
         self._rate_limit_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
 
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
@@ -112,6 +114,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._configure_local_auth()
         self._configure_local_auth_rate_limits(app_config)
         self._configure_local_auth_routes(app_config)
+        self._configure_mfa_routes(app_config)
         self._configure_local_jwks(app_config)
         self._configure_jwks_lifespan(app_config)
         self._validate_dependency_map(app_config.dependencies, "application")
@@ -391,6 +394,69 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if route_handlers is None:
             route_handlers = local_auth.build_route_handlers()
             self._local_auth_route_handlers = route_handlers
+        for route_handler in route_handlers:
+            if not any(existing is route_handler for existing in app_config.route_handlers):
+                app_config.route_handlers.append(route_handler)
+
+    def _configure_mfa_routes(self, app_config: AppConfig) -> None:
+        mfa_config = self.config.mfa
+        passkey_config = self.config.passkeys
+        enabled_mfa = mfa_config if mfa_config is not None and mfa_config.register_routes else None
+        enabled_passkeys = passkey_config if passkey_config is not None and passkey_config.register_routes else None
+        if enabled_mfa is None and enabled_passkeys is None:
+            return
+        local_auth = self.config.local_auth
+        if local_auth is None:
+            message = "Generated MFA and passkey routes require local authentication for epoch validation"
+            raise ImproperlyConfiguredException(detail=message)
+        prefixes = {config.route_prefix for config in (enabled_mfa, enabled_passkeys) if config is not None}
+        if len(prefixes) != 1:
+            message = "Generated MFA and passkey routes must share one route prefix"
+            raise ImproperlyConfiguredException(detail=message)
+        step_up = (
+            enabled_mfa.step_up_service
+            if enabled_mfa is not None and enabled_mfa.step_up_service is not None
+            else enabled_passkeys.step_up_service
+            if enabled_passkeys is not None
+            else None
+        )
+        if step_up is None:
+            message = "Generated MFA and passkey routes require an atomic StepUpStore"
+            raise ImproperlyConfiguredException(detail=message)
+        route_handlers = self._mfa_route_handlers
+        if route_handlers is None:
+            from litestar_security.accounts import (  # noqa: PLC0415 - route imports remain feature-local
+                MFAService,
+                PasskeyService,
+                StepUpService,
+                build_mfa_routes,
+            )
+
+            if not isinstance(step_up, StepUpService):
+                message = "Generated MFA and passkey routes require a StepUpService"
+                raise ImproperlyConfiguredException(detail=message)
+            router = build_mfa_routes(
+                step_up=step_up,
+                epochs=local_auth.accounts,
+                mfa=(
+                    enabled_mfa.service
+                    if enabled_mfa is not None and isinstance(enabled_mfa.service, MFAService)
+                    else None
+                ),
+                passkeys=(
+                    enabled_passkeys.service
+                    if enabled_passkeys is not None and isinstance(enabled_passkeys.service, PasskeyService)
+                    else None
+                ),
+                rate_limits=local_auth.rate_limits,
+                client_key=local_auth.services.client_key_for,
+                local_auth=local_auth.services,
+                session_capable=local_auth.session_auth is not None,
+                token_capable=local_auth.services.refresh_tokens is not None,
+                route_prefix=prefixes.pop(),
+            )
+            route_handlers = (router,)
+            self._mfa_route_handlers = route_handlers
         for route_handler in route_handlers:
             if not any(existing is route_handler for existing in app_config.route_handlers):
                 app_config.route_handlers.append(route_handler)

@@ -39,7 +39,15 @@ from litestar_security.accounts._internal import (
 )
 from litestar_security.accounts._operations import (
     LOGIN,
+    MFA_RECOVERY_CONSUME,
+    MFA_RECOVERY_REPLACE,
+    MFA_TOTP_ENROLL,
+    MFA_TOTP_VERIFY,
     OUTCOME_RATE_LIMITED,
+    PASSKEY_ASSERT,
+    PASSKEY_AUTH_OPTIONS,
+    PASSKEY_REGISTER_OPTIONS,
+    PASSKEY_REGISTER_VERIFY,
     PASSWORD_RESET,
     RECOVERY,
     REFRESH_ROTATE,
@@ -114,6 +122,14 @@ class RateLimitPolicy:
 
 DEFAULT_RATE_LIMIT_POLICIES: "Mapping[str, RateLimitPolicy]" = MappingProxyType({
     LOGIN: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
+    MFA_RECOVERY_CONSUME: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
+    MFA_RECOVERY_REPLACE: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
+    MFA_TOTP_ENROLL: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
+    MFA_TOTP_VERIFY: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
+    PASSKEY_ASSERT: RateLimitPolicy(limit=20, window=timedelta(minutes=5)),
+    PASSKEY_AUTH_OPTIONS: RateLimitPolicy(limit=20, window=timedelta(minutes=5)),
+    PASSKEY_REGISTER_OPTIONS: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
+    PASSKEY_REGISTER_VERIFY: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     REGISTRATION: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     RECOVERY: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     PASSWORD_RESET: RateLimitPolicy(limit=10, window=timedelta(hours=1)),

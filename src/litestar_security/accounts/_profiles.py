@@ -60,6 +60,7 @@ from litestar_security.accounts._stores import (
 )
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.config import ExternalCSRF
+from litestar_security.context import AuthenticationEvidence
 from litestar_security.providers.jwt import BearerSlotSelector, BearerTokenSlot, JWTValidationConfig, LocalKeyRing
 
 if TYPE_CHECKING:
@@ -258,6 +259,51 @@ class LocalAuthServices(Generic[UserT]):
         if refresh_tokens is None:
             return VerificationUnavailable()
         return await refresh_tokens.issue(account)
+
+    async def passkey_login(  # noqa: PLR0911 - transport selection preserves distinct safe failures
+        self,
+        request: Request[Any, Any, Any],
+        account_id: str,
+        *,
+        transport: str | None,
+        evidence: AuthenticationEvidence,
+    ) -> LocalAccountResponse | RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+        """Establish a configured local transport after verified passkey evidence.
+
+        Args:
+            request: Request whose native session may be established.
+            account_id: Account proven by the WebAuthn service.
+            transport: ``session`` or ``tokens`` when both are configured.
+            evidence: Fully verified passkey evidence to preserve in session state.
+
+        Returns:
+            The established session projection, issued token pair, or a
+            sanitized rejection.
+        """
+        try:
+            account = await self.accounts.get_by_id(account_id)
+        except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
+            return VerificationUnavailable()
+        if account is None or not account.active:
+            return InvalidCredentials()
+        if transport == "session" or (
+            transport is None and self.session_auth is not None and self.refresh_tokens is None
+        ):
+            session_auth = self.session_auth
+            if session_auth is None:
+                return InvalidCredentials()
+            established = await session_auth.establish(request, account, evidence=evidence)
+            if not isinstance(established, SessionAuthentication):
+                return established
+            return LocalAccountResponse(account_id=account.account_id, display_name=account.display_name)
+        if transport == "tokens" or (
+            transport is None and self.refresh_tokens is not None and self.session_auth is None
+        ):
+            refresh_tokens = self.refresh_tokens
+            if refresh_tokens is None:
+                return InvalidCredentials()
+            return await refresh_tokens.issue(account, evidence=evidence)
+        return InvalidCredentials()
 
     async def change_session_password(  # noqa: PLR0911 - preserve explicit sanitized outcomes
         self, request: Request[Any, Any, Any], account_id: str, data: LocalPasswordChangeRequest

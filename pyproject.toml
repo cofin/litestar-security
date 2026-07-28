@@ -30,7 +30,9 @@ classifiers = [
 dependencies = [
   "argon2-cffi>=25.1,<26",
   "litestar>=2.24.0",
+  "PyOTP>=2.10,<3",
   "PyJWT[crypto]>=2.13",
+  "webauthn>=3,<4",
 ]
 
 [project.urls]

@@ -43,6 +43,12 @@ Local accounts
 .. automodule:: litestar_security.accounts
    :members:
 
+Testing helpers
+---------------
+
+.. automodule:: litestar_security.testing
+   :members:
+
 Providers
 ---------
 
