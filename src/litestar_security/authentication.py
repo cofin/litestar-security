@@ -1,8 +1,9 @@
 """Typed authentication contracts and deterministic mechanism registration."""
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
+from secrets import token_urlsafe
 from types import MappingProxyType
 from typing import Any, Generic, Literal, Protocol, TypeAlias, TypeVar, cast
 
@@ -34,6 +35,7 @@ from litestar_security.context import (
     intersect_authorization,
 )
 from litestar_security.websocket import (
+    WebSocketBinding,
     WebSocketCloseCoordinator,
     WebSocketHandshake,
     WebSocketSecurityConfig,
@@ -686,7 +688,7 @@ class SecurityMiddleware(Generic[UserT]):
             scope["auth"] = context
         await self.app(scope, receive, send)
 
-    async def _handle_websocket(
+    async def _handle_websocket(  # noqa: C901, PLR0915 - handshake, hook, and close phases remain explicit
         self, scope: Scope, receive: Receive, send: Send, *, session: SessionHandle, plan: SecurityRuntimePlan
     ) -> None:
         connection = ASGIConnection[Any, Principal[UserT], SecurityContext, Any](
@@ -737,6 +739,44 @@ class SecurityMiddleware(Generic[UserT]):
             )
             return
         coordinator = WebSocketCloseCoordinator(send)
+        current_context = cast("SecurityContext", scope["auth"])
+        route_name = _websocket_route_name(scope)
+        revocation_hook: Callable[[], Awaitable[None]] | None = None
+        refresh_hook: Callable[[], Awaitable[None]] | None = None
+        if (
+            self.config.websocket.revocation_source is not None
+            and cast("Principal[Any]", scope["user"]).is_authenticated
+        ):
+            source = self.config.websocket.revocation_source
+            binding = _websocket_binding(
+                principal=cast("Principal[Any]", scope["user"]), context=current_context, route_name=route_name
+            )
+
+            async def wait_for_revocation() -> None:
+                await source.wait(binding)
+
+            revocation_hook = wait_for_revocation
+
+        if self.config.websocket.snapshot_refresher is not None:
+            refresher = self.config.websocket.snapshot_refresher
+
+            async def refresh_authorization() -> None:
+                nonlocal current_context
+                principal = cast("Principal[UserT]", scope["user"])
+                snapshot = await refresher.refresh(
+                    principal=principal, previous=current_context.authorization, route_name=route_name
+                )
+                if snapshot.__class__ is not AuthorizationSnapshot:
+                    raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
+                current_context = replace(
+                    current_context, authorization=intersect_authorization(snapshot, current_context.restrictions)
+                )
+                scope["auth"] = current_context
+                route_handler = cast("Any", cast("Mapping[str, object]", scope).get("route_handler"))
+                if route_handler.resolve_guards():
+                    await route_handler.authorize_connection(connection=connection)
+
+            refresh_hook = refresh_authorization
 
         async def send_with_guard_mapping(message: Message) -> None:
             if (
@@ -753,16 +793,20 @@ class SecurityMiddleware(Generic[UserT]):
             await coordinator.send(message)
 
         try:
-            context = cast("SecurityContext", scope["auth"])
 
             async def handle() -> None:
                 await self.app(scope, receive, send_with_guard_mapping)
 
             await supervise_websocket_lifetime(
                 handle,
-                expires_at=context.expires_at,
+                expires_at=current_context.expires_at,
                 coordinator=coordinator,
                 unauthenticated_close_code=self.config.websocket.close_codes.unauthenticated,
+                unauthorized_close_code=self.config.websocket.close_codes.unauthorized,
+                unavailable_close_code=self.config.websocket.close_codes.verification_unavailable,
+                revocation_wait=revocation_hook,
+                refresh=refresh_hook,
+                refresh_interval=self.config.websocket.refresh_interval,
                 clock=self.config.websocket.clock,
                 sleeper=self.config.websocket.sleeper,
             )
@@ -835,7 +879,10 @@ class SecurityMiddleware(Generic[UserT]):
             methods=frozenset({"websocket-ticket"}),
         )
         return principal, SecurityContext(
-            session=session, evidence=(*context.evidence, evidence), authorization=authorization
+            session=session,
+            evidence=(*context.evidence, evidence),
+            authorization=authorization,
+            restrictions=(*context.restrictions, ticket.restrictions),
         )
 
 
@@ -966,7 +1013,10 @@ class _AuthenticationEvaluator(Generic[UserT]):
         authenticated = tuple(result.outcome for result in resolved)
         authorization = await self._resolve_authorization(principal, authenticated)
         return principal, SecurityContext(
-            session=session, evidence=tuple(outcome.evidence for outcome in authenticated), authorization=authorization
+            session=session,
+            evidence=tuple(outcome.evidence for outcome in authenticated),
+            authorization=authorization,
+            restrictions=tuple(outcome.restrictions for outcome in authenticated),
         )
 
     async def _resolve_authorization(
@@ -1090,4 +1140,24 @@ def _is_generated_options(scope: Scope) -> bool:
     return (
         getattr(handler, "__module__", None) == "litestar.routes.http"
         and getattr(handler, "__name__", None) == "options_handler"
+    )
+
+
+def _websocket_route_name(scope: Scope) -> str:
+    route_handler = cast("Mapping[str, object]", scope).get("route_handler")
+    return cast("str | None", getattr(route_handler, "name", None)) or cast(
+        "str", getattr(route_handler, "handler_name", "")
+    )
+
+
+def _websocket_binding(*, principal: Principal[Any], context: SecurityContext, route_name: str) -> WebSocketBinding:
+    session_value = context.session.get("_litestar_security")
+    session_mapping = cast("Mapping[str, object]", session_value) if isinstance(session_value, Mapping) else None
+    session_id = cast("str | None", session_mapping.get("session_id")) if session_mapping is not None else None
+    return WebSocketBinding(
+        connection_id=token_urlsafe(16),
+        subject_id=cast("str", principal.id),
+        credential_ids=frozenset(f"{evidence.mechanism}:{evidence.slot}" for evidence in context.evidence),
+        session_id=session_id,
+        route_name=route_name,
     )

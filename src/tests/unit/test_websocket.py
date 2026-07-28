@@ -7,7 +7,12 @@ from types import SimpleNamespace
 
 import anyio
 import pytest
-from litestar.exceptions import ImproperlyConfiguredException, WebSocketException
+from litestar.exceptions import (
+    ImproperlyConfiguredException,
+    PermissionDeniedException,
+    ServiceUnavailableException,
+    WebSocketException,
+)
 
 from litestar_security.context import CredentialRestrictions, NullSessionHandle, Principal, SecurityContext
 from litestar_security.websocket import (
@@ -128,7 +133,11 @@ def test_websocket_config_rejects_wrong_close_code_object() -> None:
 
 
 def test_websocket_refresh_interval_accepts_an_explicit_refresher() -> None:
-    refresher = object()
+    class Refresher:
+        async def refresh(self, **_kwargs: object) -> object:
+            return object()
+
+    refresher = Refresher()
 
     config = WebSocketSecurityConfig(refresh_interval=timedelta(seconds=1), snapshot_refresher=refresher)
 
@@ -518,3 +527,113 @@ async def test_websocket_simultaneous_terminal_causes_emit_one_close() -> None:
 
     assert len(messages) == 1
     assert messages[0]["reason"] in {"credential_expired", "credential_revoked"}
+
+
+@pytest.mark.anyio
+async def test_websocket_revocation_event_closes_and_cancels_handler() -> None:
+    messages: list[dict[str, object]] = []
+    cleaned = anyio.Event()
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    async def handler() -> None:
+        try:
+            await anyio.sleep_forever()
+        finally:
+            cleaned.set()
+
+    async def revoked() -> None:
+        return None
+
+    await supervise_websocket_lifetime(
+        handler,
+        expires_at=None,
+        coordinator=WebSocketCloseCoordinator(send),  # type: ignore[arg-type]
+        unauthenticated_close_code=4401,
+        revocation_wait=revoked,
+    )
+
+    assert messages == [{"type": "websocket.close", "code": 4401, "reason": "credential_revoked"}]
+    assert cleaned.is_set()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("error", "code", "reason"),
+    [
+        (PermissionDeniedException(), 4403, "authorization_denied"),
+        (ServiceUnavailableException(), 1013, "verification_unavailable"),
+        (RuntimeError(), 1013, "verification_unavailable"),
+    ],
+)
+async def test_websocket_refresh_failure_has_stable_close(error: Exception, code: int, reason: str) -> None:
+    messages: list[dict[str, object]] = []
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    async def handler() -> None:
+        await anyio.sleep_forever()
+
+    async def refresh() -> None:
+        raise error
+
+    async def refresh_now(_delay: float) -> None:
+        return None
+
+    await supervise_websocket_lifetime(
+        handler,
+        expires_at=None,
+        coordinator=WebSocketCloseCoordinator(send),  # type: ignore[arg-type]
+        unauthenticated_close_code=4401,
+        revocation_wait=None,
+        refresh=refresh,
+        refresh_interval=timedelta(seconds=1),
+        sleeper=refresh_now,
+    )
+
+    assert messages == [{"type": "websocket.close", "code": code, "reason": reason}]
+
+
+@pytest.mark.anyio
+async def test_websocket_refresh_completes_short_resource_scope_and_preserves_access() -> None:
+    messages: list[dict[str, object]] = []
+    refreshed = anyio.Event()
+    resource_open = False
+    sleep_calls = 0
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    async def handler() -> None:
+        await refreshed.wait()
+
+    async def refresh() -> None:
+        nonlocal resource_open
+        resource_open = True
+        try:
+            await anyio.lowlevel.checkpoint()
+        finally:
+            resource_open = False
+        refreshed.set()
+
+    async def interval(_delay: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            await anyio.sleep_forever()
+
+    await supervise_websocket_lifetime(
+        handler,
+        expires_at=None,
+        coordinator=WebSocketCloseCoordinator(send),  # type: ignore[arg-type]
+        unauthenticated_close_code=4401,
+        refresh=refresh,
+        refresh_interval=timedelta(seconds=1),
+        sleeper=interval,
+    )
+
+    assert messages == []
+    assert refreshed.is_set()
+    assert resource_open is False

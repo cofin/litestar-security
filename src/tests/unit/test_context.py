@@ -2691,6 +2691,7 @@ def test_security_config_is_typed_and_slotted() -> None:
         "api_key",
         "iap",
         "service_token",
+        "websocket",
         "authorization_resolver",
         "jwks_providers",
         "jwks_warmup_failure",

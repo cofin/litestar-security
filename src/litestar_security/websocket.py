@@ -14,13 +14,19 @@ from hmac import compare_digest
 from ipaddress import AddressValueError, IPv4Address, IPv6Address
 from secrets import token_bytes
 from string import hexdigits
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cast, runtime_checkable
 from urllib.parse import parse_qsl, urlsplit
 
 from anyio import Lock, create_task_group, sleep
-from litestar.exceptions import ImproperlyConfiguredException, WebSocketException
+from litestar.exceptions import (
+    ImproperlyConfiguredException,
+    NotAuthorizedException,
+    PermissionDeniedException,
+    ServiceUnavailableException,
+    WebSocketException,
+)
 
-from litestar_security.context import CredentialRestrictions, Principal, SecurityContext
+from litestar_security.context import AuthorizationSnapshot, CredentialRestrictions, Principal, SecurityContext
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -62,6 +68,7 @@ _TICKET_COMPONENTS = 3
 _BASE64URL_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 _DIGEST_BYTES = sha256().digest_size
 _ASCII_CONTROL_LIMIT = 32
+UserT = TypeVar("UserT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,8 +90,8 @@ class WebSocketSecurityConfig:
     maximum_ticket_ttl: timedelta = _MAXIMUM_TICKET_TTL
     ticket_query_parameter: str = "ticket"
     refresh_interval: timedelta | None = None
-    snapshot_refresher: object | None = field(default=None, repr=False)
-    revocation_source: object | None = field(default=None, repr=False)
+    snapshot_refresher: "AuthorizationSnapshotRefresher[Any] | None" = field(default=None, repr=False)
+    revocation_source: "WebSocketRevocationSource | None" = field(default=None, repr=False)
     close_codes: WebSocketCloseCodes = WebSocketCloseCodes()
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc), repr=False, compare=False)
     sleeper: Callable[[float], Awaitable[None]] = field(default=sleep, repr=False, compare=False)
@@ -107,6 +114,50 @@ class WebSocketHandshake:
     uses_cookie_credentials: bool
     uses_authorization_header: bool
     ticket: str | None = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class WebSocketBinding:
+    """Secret-free identity and route binding supplied to revocation hooks."""
+
+    connection_id: str
+    subject_id: str
+    credential_ids: frozenset[str]
+    session_id: str | None
+    route_name: str
+
+    def __post_init__(self) -> None:
+        """Normalize stable binding identifiers."""
+        if (
+            not _strict_text(self.connection_id)
+            or not _strict_text(self.subject_id)
+            or not _strict_text(self.route_name)
+            or any(not _strict_text(value) for value in self.credential_ids)
+            or (self.session_id is not None and not _strict_text(self.session_id))
+        ):
+            message = "WebSocket revocation binding is invalid"
+            raise ValueError(message)
+        object.__setattr__(self, "credential_ids", frozenset(self.credential_ids))
+
+
+@runtime_checkable
+class WebSocketRevocationSource(Protocol):
+    """Event-driven application hook that returns when a binding is revoked."""
+
+    async def wait(self, binding: WebSocketBinding) -> None:
+        """Wait without polling until the supplied connection binding is revoked."""
+        ...  # pragma: no cover
+
+
+@runtime_checkable
+class AuthorizationSnapshotRefresher(Protocol[UserT]):
+    """Application hook returning one detached immutable authorization snapshot."""
+
+    async def refresh(
+        self, *, principal: Principal[UserT], previous: AuthorizationSnapshot, route_name: str
+    ) -> AuthorizationSnapshot:
+        """Resolve and return the next detached snapshot."""
+        ...  # pragma: no cover
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,31 +459,70 @@ class WebSocketCloseCoordinator:
             return True
 
 
-async def supervise_websocket_lifetime(  # noqa: PLR0913 - all scheduler and close inputs are independently injectable
+async def supervise_websocket_lifetime(  # noqa: C901, PLR0913 - explicit race branches and injectable scheduler inputs
     handler: Callable[[], Awaitable[None]],
     *,
     expires_at: datetime | None,
     coordinator: WebSocketCloseCoordinator,
     unauthenticated_close_code: int,
+    unauthorized_close_code: int = _DEFAULT_UNAUTHORIZED_CLOSE,
+    unavailable_close_code: int = _DEFAULT_UNAVAILABLE_CLOSE,
+    revocation_wait: Callable[[], Awaitable[None]] | None = None,
+    refresh: Callable[[], Awaitable[None]] | None = None,
+    refresh_interval: timedelta | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     sleeper: Callable[[float], Awaitable[None]] = sleep,
 ) -> None:
     """Run a handler with at most one non-polling credential-expiry task."""
-    if expires_at is None:
+    if expires_at is None and revocation_wait is None and refresh is None:
         await handler()
         return
-    delay = (_utc(expires_at) - _utc(clock())).total_seconds()
-    if delay <= 0:
+    delay = (_utc(expires_at) - _utc(clock())).total_seconds() if expires_at is not None else None
+    if delay is not None and delay <= 0:
         await coordinator.close(code=unauthenticated_close_code, reason="credential_expired")
         return
 
     async def expire() -> None:
-        await sleeper(delay)
+        await sleeper(cast("float", delay))
         await coordinator.close(code=unauthenticated_close_code, reason="credential_expired")
         task_group.cancel_scope.cancel()
 
+    async def revoke() -> None:
+        try:
+            await cast("Callable[[], Awaitable[None]]", revocation_wait)()
+        except Exception:  # noqa: BLE001 - application revocation failures are one sanitized transient outage
+            await coordinator.close(code=unavailable_close_code, reason="verification_unavailable")
+            task_group.cancel_scope.cancel()
+            return
+        await coordinator.close(code=unauthenticated_close_code, reason="credential_revoked")
+        task_group.cancel_scope.cancel()
+
+    async def refresh_snapshots() -> None:
+        interval = cast("timedelta", refresh_interval).total_seconds()
+        while True:
+            await sleeper(interval)
+            try:
+                await cast("Callable[[], Awaitable[None]]", refresh)()
+            except (NotAuthorizedException, PermissionDeniedException):
+                await coordinator.close(code=unauthorized_close_code, reason="authorization_denied")
+                task_group.cancel_scope.cancel()
+                return
+            except ServiceUnavailableException:
+                await coordinator.close(code=unavailable_close_code, reason="verification_unavailable")
+                task_group.cancel_scope.cancel()
+                return
+            except Exception:  # noqa: BLE001 - application refresh failures are one sanitized transient outage
+                await coordinator.close(code=unavailable_close_code, reason="verification_unavailable")
+                task_group.cancel_scope.cancel()
+                return
+
     async with create_task_group() as task_group:
-        task_group.start_soon(expire)
+        if delay is not None:
+            task_group.start_soon(expire)
+        if revocation_wait is not None:
+            task_group.start_soon(revoke)
+        if refresh is not None:
+            task_group.start_soon(refresh_snapshots)
         try:
             await handler()
         finally:
@@ -701,9 +791,15 @@ def _validate_ticket_settings(config: WebSocketSecurityConfig) -> None:
 
 
 def _validate_refresh_settings(config: WebSocketSecurityConfig) -> None:
+    refresher = cast("object | None", config.snapshot_refresher)
+    revocation_source = cast("object | None", config.revocation_source)
+    if refresher is not None and not isinstance(refresher, AuthorizationSnapshotRefresher):
+        _configuration_error("WebSocket snapshot refresher must define refresh")
+    if revocation_source is not None and not isinstance(revocation_source, WebSocketRevocationSource):
+        _configuration_error("WebSocket revocation source must define wait")
     if config.refresh_interval is not None:
         _duration(config.refresh_interval, "refresh interval")
-        if config.snapshot_refresher is None:
+        if refresher is None:
             _configuration_error("WebSocket refresh interval requires a snapshot refresher")
 
 
