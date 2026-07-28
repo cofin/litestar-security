@@ -859,7 +859,7 @@ class SecurityMiddleware(Generic[UserT]):
                 raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
             authorization = intersect_authorization(context.authorization, (ticket.restrictions,))
         else:
-            principal = Principal[UserT](id=ticket.subject_id)
+            principal = Principal(id=ticket.subject_id)
             resolver = self.config.registry.authorization_resolver
             if resolver is None:
                 authorization = AuthorizationSnapshot()
