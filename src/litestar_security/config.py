@@ -13,7 +13,13 @@ from litestar.config.csrf import CSRFConfig
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.middleware.session.base import BaseSessionBackend
 
-from litestar_security.authentication import AuthenticationMechanism, AuthenticationPolicy, CredentialSlot, required
+from litestar_security.authentication import (
+    AuthenticationMechanism,
+    AuthenticationPolicy,
+    AuthorizationResolver,
+    CredentialSlot,
+    required,
+)
 
 if TYPE_CHECKING:
     from litestar_security.accounts import (
@@ -24,9 +30,12 @@ if TYPE_CHECKING:
         TOTPPolicy,
     )
     from litestar_security.accounts._profiles import LocalAuthConfig
+    from litestar_security.providers.api_key import APIKeyConfig
+    from litestar_security.providers.iap import GoogleIAPConfig
     from litestar_security.providers.jwks import JWKSProvider
     from litestar_security.providers.jwt import LocalJWKSConfig
     from litestar_security.providers.oauth import OAuthConfig
+    from litestar_security.providers.oidc import ServiceTokenConfig
 
 __all__ = (
     "ExternalCSRF",
@@ -291,6 +300,10 @@ class SecurityConfig(Generic[UserT]):
     oauth: "OAuthConfig | None" = None
     mfa: MFAConfig | None = None
     passkeys: PasskeyConfig | None = None
+    api_key: "APIKeyConfig | None" = None
+    iap: "GoogleIAPConfig[UserT] | None" = None
+    service_token: "ServiceTokenConfig | None" = None
+    authorization_resolver: AuthorizationResolver[UserT] | None = field(default=None, repr=False)
     jwks_providers: Sequence["JWKSProvider"] = ()
     jwks_warmup_failure: Literal["fail_startup", "lazy"] = "fail_startup"
 
@@ -312,7 +325,14 @@ class SecurityConfig(Generic[UserT]):
             raise ImproperlyConfiguredException(detail=msg)
         self.slots = tuple(self.slots)
         self.mechanisms = tuple(self.mechanisms)
-        self.jwks_providers = tuple(self.jwks_providers)
+        jwks_providers = list(self.jwks_providers)
+        for provider in (
+            None if self.iap is None else self.iap.jwks,
+            None if self.service_token is None else self.service_token.jwks,
+        ):
+            if provider is not None and all(existing is not provider for existing in jwks_providers):
+                jwks_providers.append(provider)
+        self.jwks_providers = tuple(jwks_providers)
         if self.jwks_warmup_failure not in {"fail_startup", "lazy"}:
             msg = "JWKS warmup failure mode must be 'fail_startup' or 'lazy'"
             raise ImproperlyConfiguredException(detail=msg)

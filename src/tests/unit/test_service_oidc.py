@@ -104,6 +104,9 @@ async def test_service_jwt_builds_userless_principal_and_scope_restrictions(
     assert principal == Principal(id="service-1", display_name="report-worker", user=None)
     assert principal.user is None
     assert slot.name == "authorization.bearer"
+    assert mechanism.scheme_name == "service-jwt"
+    assert mechanism.security_scheme is not None
+    assert mechanism.security_scheme.bearer_format == "JWT"
     assert jwks.calls == 1
 
 

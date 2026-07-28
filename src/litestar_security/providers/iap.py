@@ -7,6 +7,7 @@ from typing import Any, Generic, TypeVar, cast
 
 from litestar.connection import ASGIConnection
 from litestar.exceptions import ImproperlyConfiguredException
+from litestar.openapi.spec import SecurityScheme
 
 from litestar_security.authentication import (
     Authenticated,
@@ -106,7 +107,19 @@ class GoogleIAPConfig(Generic[UserT]):
             raise ImproperlyConfiguredException(detail="Google IAP clock must be callable")
         slot = _GoogleIAPSlot(header_name=self.header_name)
         authenticator = _GoogleIAPAuthenticator(config=self, validation=self._validation, clock=clock)
-        return slot, AuthenticationMechanism(authenticator=authenticator, resolver=self.identity_resolver)
+        return slot, AuthenticationMechanism(
+            authenticator=authenticator,
+            resolver=self.identity_resolver,
+            scheme_name="GoogleIAP",
+            security_scheme=SecurityScheme(
+                type="apiKey",
+                name=self.header_name,
+                security_scheme_in="header",
+                description=(
+                    "Assertion header injected by Google IAP; normal API clients must not supply this value manually."
+                ),
+            ),
+        )
 
 
 @dataclass(slots=True)

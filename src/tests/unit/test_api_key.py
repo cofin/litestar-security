@@ -320,6 +320,7 @@ def test_record_rejects_invalid_storage_state(overrides: dict[str, object]) -> N
     "arguments",
     [
         {"pepper": b"short"},
+        {"identity_resolver": object()},
         {"prefix": ""},
         {"prefix": "bad_prefix"},
         {"header_name": "bad header"},
@@ -504,6 +505,9 @@ async def test_api_key_authentication_is_one_lookup_and_defers_usage_persistence
     assert outcome.evidence.slot == "api-key"
     assert outcome.evidence.expires_at == record.expires_at
     assert outcome.evidence.methods == frozenset({"api-key"})
+    assert mechanism.scheme_name == "APIKey"
+    assert mechanism.security_scheme is not None
+    assert mechanism.security_scheme.name == "X-API-Key"
     assert store.get_calls == [record.key_id]
     assert sink.calls == []
     assert await mechanism.resolver.resolve(outcome.claims) == Principal(id="subject-1", user="subject-1")
@@ -556,6 +560,11 @@ async def test_api_key_runtime_defaults_and_absent_usage_are_safe() -> None:
     await service.flush_usage()
     await service.close()
     await service.revoke(issued.key_id)
+
+
+def test_api_key_build_requires_configured_or_explicit_identity_resolver() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="identity resolver"):
+        APIKeyConfig(store=_MemoryAPIKeyStore(), pepper=_PEPPER).build()
 
 
 @pytest.mark.anyio

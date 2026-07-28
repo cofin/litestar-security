@@ -27,6 +27,7 @@ from litestar_security._openapi import OpenAPISchemeSet, RouteCompiler, merge_op
 from litestar_security.authentication import (
     AuthenticationMechanism,
     AuthenticationRegistry,
+    CredentialSlot,
     OwnedSessionBackend,
     SecurityMiddlewareWrapper,
     SecurityRuntimeConfig,
@@ -69,6 +70,8 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     """Expose the Litestar Security configuration and CLI integration points."""
 
     __slots__ = (
+        "_api_key_lifespan",
+        "_api_key_service",
         "_jwks_lifespan",
         "_local_auth_route_handlers",
         "_mfa_route_handlers",
@@ -94,6 +97,8 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._runtime_config: SecurityRuntimeConfig[UserT] | None = None
         self._middleware: DefineMiddleware | None = None
         self._jwks_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
+        self._api_key_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
+        self._api_key_service: object | None = None
         self._local_auth_route_handlers: tuple[Router, ...] | None = None
         self._mfa_route_handlers: tuple[Router, ...] | None = None
         self._oauth_route_handlers: tuple[Router, ...] | None = None
@@ -146,6 +151,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._validate_local_session_backend(app_config, native_sessions)
 
         runtime, middleware = self._get_runtime(existing_session=bool(native_sessions))
+        self._configure_api_key_lifespan(app_config)
         openapi_config = app_config.openapi_config
         if openapi_config is not None:
             schemes = OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", runtime.registry))
@@ -213,6 +219,9 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if self._runtime_config is None:
             slots = list(self.config.slots)
             mechanisms = list(self.config.mechanisms)
+            provider_slots, provider_mechanisms = self._build_configured_providers()
+            slots.extend(provider_slots)
+            mechanisms.extend(provider_mechanisms)
             local_auth = self.config.local_auth
             if local_auth is not None and local_auth.bearer_slot is not None:
                 from litestar_security.providers.jwt import (  # noqa: PLC0415 - deferred to break an import cycle
@@ -268,7 +277,10 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                     )
                 )
             registry = AuthenticationRegistry(
-                slots=slots, mechanisms=mechanisms, require_default=self.config.require_default
+                slots=slots,
+                mechanisms=mechanisms,
+                authorization_resolver=self.config.authorization_resolver,
+                require_default=self.config.require_default,
             )
             owned_session = None
             if self.config.session_backend is not None and not existing_session:
@@ -279,6 +291,50 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             self._runtime_config = SecurityRuntimeConfig(registry=registry, owned_session_backend=owned_session)
             self._middleware = DefineMiddleware(SecurityMiddlewareWrapper, config=self._runtime_config)
         return self._runtime_config, cast("DefineMiddleware", self._middleware)
+
+    def _build_configured_providers(
+        self,
+    ) -> tuple[list[CredentialSlot[Any]], list[AuthenticationMechanism[Any, Any, UserT]]]:
+        slots: list[CredentialSlot[Any]] = []
+        mechanisms: list[AuthenticationMechanism[Any, Any, UserT]] = []
+        if self.config.api_key is not None:
+            api_key_slot, api_key_mechanism, api_key_service = cast(
+                "tuple[CredentialSlot[Any], AuthenticationMechanism[Any, Any, UserT], object]",
+                self.config.api_key.build(),
+            )
+            slots.append(api_key_slot)
+            mechanisms.append(api_key_mechanism)
+            self._api_key_service = api_key_service
+        if self.config.iap is not None:
+            iap_slot, iap_mechanism = self.config.iap.build()
+            slots.append(iap_slot)
+            mechanisms.append(iap_mechanism)
+        if self.config.service_token is not None:
+            service_slot, service_mechanism = self.config.service_token.build()
+            slots.append(service_slot)
+            mechanisms.append(cast("AuthenticationMechanism[Any, Any, UserT]", service_mechanism))
+        return slots, mechanisms
+
+    def _configure_api_key_lifespan(self, app_config: AppConfig) -> None:
+        service = self._api_key_service
+        if service is None:
+            return
+        if self._api_key_lifespan is None:
+
+            @asynccontextmanager
+            async def api_key_lifespan(_app: Litestar) -> AsyncGenerator[None, None]:
+                try:
+                    yield
+                finally:
+                    await cast("Any", service).close()
+
+            self._api_key_lifespan = api_key_lifespan
+        lifespan_handlers = cast(
+            "list[Callable[[Litestar], AbstractAsyncContextManager[None]]]",
+            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType] - third-party callable is untyped
+        )
+        if self._api_key_lifespan not in lifespan_handlers:
+            lifespan_handlers.append(self._api_key_lifespan)
 
     def _validate_dependency_map(self, dependencies: Mapping[str, object] | None, owner: str) -> None:
         for name in _RESERVED_DEPENDENCIES:

@@ -84,6 +84,8 @@ from litestar_security.authentication import (
 from litestar_security.config import ExternalCSRF
 from litestar_security.context import AuthenticationEvidence, Principal, SecurityContext
 from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency
+from litestar_security.providers.api_key import APIKeyConfig
+from litestar_security.providers.iap import GoogleIAPConfig
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
     BearerTokenSlot,
@@ -95,6 +97,7 @@ from litestar_security.providers.jwt import (
     SigningKey,
     VerificationKey,
 )
+from litestar_security.providers.oidc import ServiceTokenConfig
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -135,6 +138,88 @@ class _CompilerAuthenticator:
 class _CompilerResolver:
     async def resolve(self, claims: str) -> Principal[object]:
         return Principal(id=claims)
+
+
+class _ProviderStore:
+    async def get(self, _key_id: str) -> None:
+        return None
+
+    async def create(self, _record: object) -> None:
+        return None
+
+    async def rotate(self, **_kwargs: object) -> None:
+        return None
+
+    async def revoke(self, **_kwargs: object) -> None:
+        return None
+
+
+class _ProviderJWKS:
+    async def select_key(self, *_args: object, **_kwargs: object) -> InvalidCredentials:
+        return InvalidCredentials()
+
+    async def warmup(self, *, now: datetime) -> None:
+        del now
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_chapter_seven_provider_configs_register_native_openapi_schemes() -> None:
+    resolver = _CompilerResolver()
+    jwks = _ProviderJWKS()
+    config = SecurityConfig(
+        api_key=APIKeyConfig(store=_ProviderStore(), pepper=b"p" * 32, identity_resolver=resolver),
+        iap=GoogleIAPConfig(
+            audience="/projects/123/global/backendServices/456",
+            identity_resolver=resolver,  # type: ignore[arg-type]
+            jwks=jwks,
+        ),
+        service_token=ServiceTokenConfig(
+            issuer="https://id.example.com",
+            audiences=frozenset({"service-api"}),
+            allowed_algorithms=frozenset({"ES256"}),
+            jwks=jwks,
+            jwks_uri="https://id.example.com/jwks",
+        ),
+        default_policy=any_of("api-key", "google-iap", "service-jwt"),
+    )
+
+    @get("/protected")
+    async def protected() -> None:
+        return None
+
+    plugin = SecurityPlugin(config)
+    app = Litestar(
+        route_handlers=[protected], openapi_config=OpenAPIConfig(title="Test", version="1.0"), plugins=[plugin]
+    )
+    with TestClient(app) as client:
+        response = client.get("/protected")
+
+    assert response.status_code == 401
+    assert app.openapi_schema.components is not None
+    assert app.openapi_schema.components.security_schemes == {
+        "APIKey": SecurityScheme(type="apiKey", name="X-API-Key", security_scheme_in="header"),
+        "GoogleIAP": SecurityScheme(
+            type="apiKey",
+            name="X-Goog-IAP-JWT-Assertion",
+            security_scheme_in="header",
+            description=(
+                "Assertion header injected by Google IAP; normal API clients must not supply this value manually."
+            ),
+        ),
+        "service-jwt": SecurityScheme(type="http", scheme="bearer", bearer_format="JWT"),
+    }
+    assert app.openapi_schema.paths["/protected"].get.security == [
+        {"APIKey": []},
+        {"GoogleIAP": []},
+        {"service-jwt": []},
+    ]
+    assert config.jwks_providers == (jwks,)
+    reused = AppConfig(openapi_config=None)
+    assert plugin.on_app_init(reused) is reused
+    assert plugin.on_app_init(reused) is reused
+    assert len(reused.lifespan) == 2
 
 
 def _compiler_config(  # noqa: PLR0913

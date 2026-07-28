@@ -198,6 +198,9 @@ async def test_iap_valid_assertion_uses_pinned_jwks_and_preserves_identity_evide
     )
     assert outcome.evidence.mechanism == "google-iap"
     assert outcome.evidence.methods == frozenset({"iap"})
+    assert mechanism.scheme_name == "GoogleIAP"
+    assert mechanism.security_scheme is not None
+    assert mechanism.security_scheme.name == "X-Goog-IAP-JWT-Assertion"
     assert jwks.calls == [(_ISSUER, _JWKS_URI, "iap-key", "ES256", _NOW)]
     assert await mechanism.resolver.resolve(outcome.claims) == Principal(
         id=outcome.claims.subject, display_name=outcome.claims.email, user=outcome.claims.subject

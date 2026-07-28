@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, TypeVar, cast
 
 from litestar.connection import ASGIConnection
+from litestar.openapi.spec import SecurityScheme
 
 from litestar_security.authentication import (
     Authenticated,
@@ -293,7 +294,12 @@ def build_api_key_runtime(  # noqa: PLR0913 - explicit runtime dependencies are 
     authenticator = _APIKeyAuthenticator(
         config=config, codec=codec, clock=clock, usage=usage, participates_by_default=participates_by_default
     )
-    mechanism = AuthenticationMechanism(authenticator=authenticator, resolver=resolver)
+    mechanism = AuthenticationMechanism(
+        authenticator=authenticator,
+        resolver=resolver,
+        scheme_name="APIKey",
+        security_scheme=SecurityScheme(type="apiKey", name=config.header_name, security_scheme_in="header"),
+    )
     service = APIKeyService(config=config, codec=codec, clock=clock, usage=usage)
     return slot, mechanism, service
 

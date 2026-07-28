@@ -274,6 +274,7 @@ class APIKeyConfig:
 
     store: APIKeyStore
     pepper: bytes = field(repr=False, metadata={"sensitive": True})
+    identity_resolver: object | None = field(default=None, repr=False, compare=False)
     usage_sink: APIKeyUsageSink | None = None
     usage_write_interval: timedelta = timedelta(minutes=5)
     usage_buffer_capacity: int = 1024
@@ -288,6 +289,7 @@ class APIKeyConfig:
             not isinstance(store, APIKeyStore)
             or self.pepper.__class__ is not bytes
             or len(self.pepper) < _MINIMUM_PEPPER_BYTES
+            or (self.identity_resolver is not None and not callable(getattr(self.identity_resolver, "resolve", None)))
             or (usage_sink is not None and not isinstance(usage_sink, APIKeyUsageSink))
             or self.usage_write_interval.__class__ is not timedelta
             or self.usage_write_interval <= timedelta(0)
@@ -314,7 +316,7 @@ class APIKeyConfig:
 
     def build(
         self,
-        resolver: "IdentityResolver[APIKeyClaims, UserT]",
+        resolver: "IdentityResolver[APIKeyClaims, UserT] | None" = None,
         *,
         clock: "Callable[[], datetime]" = _utc_now,
         entropy: "Callable[[int], bytes]" = token_bytes,
@@ -339,9 +341,12 @@ class APIKeyConfig:
 
         if not callable(clock) or not callable(entropy) or participates_by_default.__class__ is not bool:
             raise ImproperlyConfiguredException(detail="API-key runtime configuration is invalid")
+        selected_resolver = self.identity_resolver if resolver is None else resolver
+        if not callable(getattr(selected_resolver, "resolve", None)):
+            raise ImproperlyConfiguredException(detail="API-key identity resolver is required")
         return build_api_key_runtime(
             self,
-            resolver,
+            cast("IdentityResolver[APIKeyClaims, UserT]", selected_resolver),
             clock=clock,
             entropy=entropy,
             metrics=NoOpSecurityMetrics() if metrics is None else metrics,
