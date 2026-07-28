@@ -23,7 +23,7 @@ from litestar_security.authentication import (
 from litestar_security.config import NoOpSecurityMetrics, SecurityMetrics
 from litestar_security.context import AuthenticationEvidence, CredentialRestrictions
 from litestar_security.providers._internal import safe_increment
-from litestar_security.providers.api_key._api_key import APIKeyCodec, APIKeyConfig, IssuedAPIKey
+from litestar_security.providers.api_key._api_key import APIKeyCodec, APIKeyConfig, APIKeyStore, IssuedAPIKey
 
 __all__ = ("APIKeyClaims", "APIKeyService", "BufferedAPIKeyUsage")
 
@@ -139,7 +139,7 @@ class APIKeyService:
             The reveal-once key.
         """
         issued, record = self.codec.issue(subject_id=subject_id, restrictions=restrictions, expires_at=expires_at)
-        await self.config.store.create(record)
+        await _runtime_store(self.config).create(record)
         return issued
 
     async def rotate(
@@ -171,7 +171,7 @@ class APIKeyService:
             raise ValueError(message)
         now = _utc(self.clock())
         issued, replacement = self.codec.issue(subject_id=subject_id, restrictions=restrictions, expires_at=expires_at)
-        await self.config.store.rotate(
+        await _runtime_store(self.config).rotate(
             current_key_id=current_key_id,
             replacement=replacement,
             overlap_until=now + overlap if overlap else None,
@@ -185,7 +185,7 @@ class APIKeyService:
         Args:
             key_id: The public lookup to revoke.
         """
-        await self.config.store.revoke(key_id=key_id, now=_utc(self.clock()))
+        await _runtime_store(self.config).revoke(key_id=key_id, now=_utc(self.clock()))
 
     async def flush_usage(self) -> None:
         """Flush eligible buffered usage observations."""
@@ -244,7 +244,7 @@ class _APIKeyAuthenticator:
         if proof is None:
             return InvalidCredentials()
         try:
-            record = await self.config.store.get(proof.key_id)
+            record = await _runtime_store(self.config).get(proof.key_id)
         except Exception:  # noqa: BLE001 - application stores may raise anything; fail closed
             return VerificationUnavailable()
         if record is None or not self.codec.matches(proof, record):
@@ -302,6 +302,10 @@ def build_api_key_runtime(  # noqa: PLR0913 - explicit runtime dependencies are 
     )
     service = APIKeyService(config=config, codec=codec, clock=clock, usage=usage)
     return slot, mechanism, service
+
+
+def _runtime_store(config: APIKeyConfig) -> APIKeyStore:
+    return cast("APIKeyStore", config.store)
 
 
 def _utc(value: datetime) -> datetime:

@@ -4,8 +4,15 @@ import ast
 import inspect
 from importlib.metadata import metadata
 from pathlib import Path
+from threading import Event as ThreadEvent
+from threading import Lock
 from typing import Protocol
 
+import pytest
+from anyio import CancelScope, CapacityLimiter, Event, create_task_group, from_thread
+from anyio.lowlevel import checkpoint
+
+import litestar_security.config as config_module
 from litestar_security.accounts import (
     LoginMethodStore,
     MFAStore,
@@ -97,3 +104,87 @@ def test_atomic_protocols_are_feature_owned_and_async() -> None:
 def test_capability_protocols_do_not_expose_generic_persistence_methods() -> None:
     for protocol in _ATOMIC_METHODS:
         assert not {"add", "update", "delete", "query", "transaction", "connection"}.intersection(protocol.__dict__)
+
+
+def test_blocking_integration_marker_is_public_configuration() -> None:
+    assert hasattr(config_module, "BlockingIntegration")
+
+
+def test_normalized_runtime_has_no_per_call_awaitability_branch() -> None:
+    violations = [
+        str(source_path.relative_to(_PACKAGE_ROOT))
+        for source_path in sorted(_PACKAGE_ROOT.rglob("*.py"))
+        if "inspect.isawaitable" in source_path.read_text()
+    ]
+
+    assert violations == []
+
+
+@pytest.mark.anyio
+async def test_blocking_call_runner_enforces_its_capacity_limit() -> None:
+    runner = config_module.BlockingCallRunner(limiter=CapacityLimiter(1))
+    first_started = Event()
+    release = ThreadEvent()
+    state_lock = Lock()
+    active = 0
+    maximum_active = 0
+    completed: list[int] = []
+
+    def operation(value: int) -> int:
+        nonlocal active, maximum_active
+        with state_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        if value == 1:
+            from_thread.run_sync(first_started.set)
+        release.wait()
+        with state_lock:
+            active -= 1
+        return value
+
+    async def run(value: int) -> None:
+        completed.append(await runner.run(operation, value))
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(run, 1)
+        await first_started.wait()
+        task_group.start_soon(run, 2)
+        await checkpoint()
+        release.set()
+
+    assert maximum_active == 1
+    assert sorted(completed) == [1, 2]
+
+
+@pytest.mark.anyio
+async def test_blocking_call_runner_finishes_in_flight_mutation_before_cancellation() -> None:
+    runner = config_module.BlockingCallRunner(limiter=CapacityLimiter(1))
+    started = Event()
+    caller_finished = Event()
+    release = ThreadEvent()
+    scopes: list[CancelScope] = []
+    mutations: list[str] = []
+
+    def mutation() -> None:
+        from_thread.run_sync(started.set)
+        release.wait()
+        mutations.append("committed")
+
+    async def call() -> None:
+        try:
+            with CancelScope() as scope:
+                scopes.append(scope)
+                await runner.run(mutation)
+        finally:
+            caller_finished.set()
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(call)
+        await started.wait()
+        scopes[0].cancel()
+        await checkpoint()
+        assert not caller_finished.is_set()
+        release.set()
+
+    assert mutations == ["committed"]
+    assert caller_finished.is_set()

@@ -6,11 +6,13 @@ import hmac
 import re
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
+from threading import get_ident
 from typing import TYPE_CHECKING
 
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException
 
+import litestar_security.config as config_module
 from litestar_security.authentication import (
     Authenticated,
     InvalidCredentials,
@@ -18,6 +20,7 @@ from litestar_security.authentication import (
     PresentedCredential,
     VerificationUnavailable,
 )
+from litestar_security.config import BlockingIntegration
 from litestar_security.context import CredentialRestrictions, Principal
 from litestar_security.providers.api_key import (
     APIKeyClaims,
@@ -85,6 +88,32 @@ class _MemoryAPIKeyStore:
     async def revoke(self, *, key_id: str, now: datetime) -> None:
         async with self._lock:
             self.records[key_id] = replace(self.records[key_id], revoked_at=now, overlap_until=None)
+
+
+class _SyncMemoryAPIKeyStore:
+    def __init__(self) -> None:
+        self.records: dict[str, APIKeyRecord] = {}
+        self.thread_ids: list[int] = []
+
+    def get(self, key_id: str) -> APIKeyRecord | None:
+        self.thread_ids.append(get_ident())
+        return self.records.get(key_id)
+
+    def create(self, record: APIKeyRecord) -> None:
+        self.thread_ids.append(get_ident())
+        self.records[record.key_id] = record
+
+    def rotate(
+        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+    ) -> None:
+        self.thread_ids.append(get_ident())
+        current = self.records[current_key_id]
+        self.records[current_key_id] = replace(current, revoked_at=now, overlap_until=overlap_until)
+        self.records[replacement.key_id] = replacement
+
+    def revoke(self, *, key_id: str, now: datetime) -> None:
+        self.thread_ids.append(get_ident())
+        self.records[key_id] = replace(self.records[key_id], revoked_at=now, overlap_until=None)
 
 
 class _Resolver:
@@ -586,6 +615,14 @@ def test_api_key_build_requires_configured_or_explicit_identity_resolver() -> No
         APIKeyConfig(store=_MemoryAPIKeyStore(), pepper=_PEPPER).build()
 
 
+def test_api_key_round_trip_allows_base64url_underscore_components() -> None:
+    codec = _codec(entropy=lambda length: b"\xff" * length)
+
+    issued, _ = codec.issue(subject_id="subject-1")
+
+    assert codec.proof(issued.value) is not None
+
+
 def test_api_key_config_names_missing_store_capabilities() -> None:
     class CRUDOnlyStore:
         async def add(self, _value: object) -> None:
@@ -602,6 +639,68 @@ def test_api_key_config_names_missing_store_capabilities() -> None:
         match=r"API-key store CRUDOnlyStore is missing capabilities: get, create, rotate, revoke",
     ):
         APIKeyConfig(store=CRUDOnlyStore(), pepper=_PEPPER)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_blocking_api_key_store_is_normalized_once_per_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _SyncMemoryAPIKeyStore()
+    config = APIKeyConfig(store=BlockingIntegration(store), pepper=_PEPPER)
+    resolver = _Resolver()
+    current_thread = get_ident()
+    submissions: list[object] = []
+    run_sync = config_module.to_thread.run_sync
+
+    async def count_submission(function: object, **kwargs: object) -> object:
+        submissions.append(function)
+        return await run_sync(function, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(config_module.to_thread, "run_sync", count_submission)
+
+    first_service = config.build(resolver, clock=lambda: _NOW)[2]
+    second_service = config.build(resolver, clock=lambda: _NOW)[2]
+    first = await first_service.issue(subject_id="subject-1")
+    await first_service.revoke(first.key_id)
+
+    assert store.thread_ids
+    assert all(thread_id != current_thread for thread_id in store.thread_ids)
+    assert len(submissions) == len(store.thread_ids) == 2
+    assert first_service.config.store is not second_service.config.store
+    assert config.store == BlockingIntegration(store)
+
+
+@pytest.mark.anyio
+async def test_direct_async_api_key_store_never_submits_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MemoryAPIKeyStore()
+    config = APIKeyConfig(store=store, pepper=_PEPPER)
+    service = config.build(_Resolver(), clock=lambda: _NOW)[2]
+    submissions: list[object] = []
+    run_sync = config_module.to_thread.run_sync
+
+    async def count_submission(function: object, **kwargs: object) -> object:
+        submissions.append(function)
+        return await run_sync(function, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(config_module.to_thread, "run_sync", count_submission)
+
+    issued = await service.issue(subject_id="subject-1")
+    await service.revoke(issued.key_id)
+
+    assert submissions == []
+
+
+def test_blocking_api_key_store_rejects_partial_or_async_implementation() -> None:
+    class PartialStore:
+        def get(self, _key_id: str) -> None:
+            return None
+
+    with pytest.raises(
+        ImproperlyConfiguredException,
+        match=r"API-key store PartialStore is missing capabilities: create, rotate, revoke",
+    ):
+        APIKeyConfig(store=BlockingIntegration(PartialStore()), pepper=_PEPPER)
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"wrapped by BlockingIntegration must be synchronous"):
+        APIKeyConfig(store=BlockingIntegration(_MemoryAPIKeyStore()), pepper=_PEPPER)
 
 
 @pytest.mark.anyio

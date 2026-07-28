@@ -3,12 +3,13 @@
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
+from functools import partial
 from inspect import iscoroutinefunction
 from math import isfinite
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 
-from anyio import CapacityLimiter
+from anyio import CapacityLimiter, to_thread
 from litestar.config.csrf import CSRFConfig
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.middleware.session.base import BaseSessionBackend
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     from litestar_security.providers.oidc import ServiceTokenConfig
 
 __all__ = (
+    "BlockingIntegration",
     "ExternalCSRF",
     "MFAConfig",
     "NoOpSecurityMetrics",
@@ -49,9 +51,43 @@ __all__ = (
 )
 
 UserT = TypeVar("UserT")
+SyncT = TypeVar("SyncT")
+ResultT = TypeVar("ResultT")
 _EMPTY_METRIC_ATTRIBUTES: Mapping[str, str] = MappingProxyType({})
 _MAXIMUM_WORKER_TOKENS = 1_024
 _ASCII_CONTROL_LIMIT = 32
+
+
+@dataclass(frozen=True, slots=True)
+class BlockingIntegration(Generic[SyncT]):
+    """Mark one explicitly synchronous application integration for startup normalization.
+
+    Args:
+        implementation: The complete synchronous feature protocol.
+    """
+
+    implementation: SyncT = field(repr=False)
+
+
+@dataclass(slots=True)
+class BlockingCallRunner:
+    """Submit explicit blocking feature operations through one finite worker budget."""
+
+    limiter: CapacityLimiter = field(default_factory=lambda: CapacityLimiter(8), repr=False)
+
+    async def run(self, function: Callable[..., ResultT], /, *args: object, **kwargs: object) -> ResultT:
+        """Run one complete blocking operation without abandoning an in-flight mutation.
+
+        Args:
+            function: The synchronous atomic operation.
+            *args: Positional arguments forwarded to the operation.
+            **kwargs: Keyword arguments forwarded to the operation.
+
+        Returns:
+            The operation result after its worker job completes.
+        """
+        call = partial(function, *args, **kwargs)
+        return await to_thread.run_sync(call, abandon_on_cancel=False, limiter=self.limiter)
 
 
 @runtime_checkable

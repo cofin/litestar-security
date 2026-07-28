@@ -29,7 +29,7 @@ from litestar_security.authentication import (
     required,
     security,
 )
-from litestar_security.config import ExternalCSRF, MFAConfig, PasskeyConfig, SecurityConfig
+from litestar_security.config import BlockingIntegration, ExternalCSRF, MFAConfig, PasskeyConfig, SecurityConfig
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -102,6 +102,7 @@ __all__ = (
     "AuthorizationResolver",
     "AuthorizationSnapshot",
     "AuthorizationSnapshotRefresher",
+    "BlockingIntegration",
     "CredentialExtraction",
     "CredentialRestrictions",
     "CredentialSlot",

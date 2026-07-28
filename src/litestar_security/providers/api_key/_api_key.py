@@ -3,11 +3,12 @@
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from binascii import Error as BinasciiError
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import compare_digest
 from hmac import new as hmac_new
+from inspect import iscoroutinefunction
 from secrets import token_bytes
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast, runtime_checkable
 
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
     from litestar_security.config import SecurityMetrics
     from litestar_security.providers.api_key._runtime import APIKeyClaims, APIKeyService
 
-from litestar_security.config import NoOpSecurityMetrics
+from litestar_security.config import BlockingCallRunner, BlockingIntegration, NoOpSecurityMetrics
 
 UserT = TypeVar("UserT")
 
@@ -45,7 +46,6 @@ _MINIMUM_PEPPER_BYTES = 32
 _MAXIMUM_PREFIX_CHARACTERS = 32
 _MAXIMUM_USAGE_BUFFER_CAPACITY = 1_000_000
 _API_KEY_STORE_METHODS = ("get", "create", "rotate", "revoke")
-_KEY_COMPONENTS = 3
 _ASCII_CONTROL_LIMIT = 32
 _DOMAIN = b"litestar-security:api-key:v1\x00"
 _BASE64URL_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
@@ -146,9 +146,9 @@ class IssuedAPIKey:
 
     def __post_init__(self) -> None:
         """Require the public lookup to match one canonical encoded key."""
-        parts = self.value.split("_") if self.value.__class__ is str else []
+        parts = _parse_key_value(self.value)
         if (
-            len(parts) != _KEY_COMPONENTS
+            parts is None
             or not _valid_prefix(parts[0])
             or parts[1] != self.key_id
             or _decode_segment(parts[1], expected_bytes=_KEY_ID_BYTES, expected_characters=_KEY_ID_CHARACTERS) is None
@@ -271,11 +271,49 @@ class APIKeyUsageSink(Protocol):
         ...  # pragma: no cover
 
 
+class _SyncAPIKeyStore(Protocol):
+    def get(self, key_id: str) -> APIKeyRecord | None: ...
+
+    def create(self, record: APIKeyRecord) -> None: ...
+
+    def rotate(
+        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+    ) -> None: ...
+
+    def revoke(self, *, key_id: str, now: datetime) -> None: ...
+
+
+@dataclass(slots=True)
+class _BlockingAPIKeyStore:
+    implementation: "_SyncAPIKeyStore" = field(repr=False)
+    runner: BlockingCallRunner = field(default_factory=BlockingCallRunner, repr=False)
+
+    async def get(self, key_id: str) -> APIKeyRecord | None:
+        method = cast("Callable[[str], APIKeyRecord | None]", self.implementation.get)
+        return await self.runner.run(method, key_id)
+
+    async def create(self, record: APIKeyRecord) -> None:
+        method = cast("Callable[[APIKeyRecord], None]", self.implementation.create)
+        await self.runner.run(method, record)
+
+    async def rotate(
+        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+    ) -> None:
+        method = cast("Callable[..., None]", self.implementation.rotate)
+        await self.runner.run(
+            method, current_key_id=current_key_id, replacement=replacement, overlap_until=overlap_until, now=now
+        )
+
+    async def revoke(self, *, key_id: str, now: datetime) -> None:
+        method = cast("Callable[..., None]", self.implementation.revoke)
+        await self.runner.run(method, key_id=key_id, now=now)
+
+
 @dataclass(frozen=True, slots=True)
 class APIKeyConfig:
     """API-key persistence, digest, usage, and namespace configuration."""
 
-    store: APIKeyStore
+    store: APIKeyStore | BlockingIntegration[_SyncAPIKeyStore]
     pepper: bytes = field(repr=False, metadata={"sensitive": True})
     identity_resolver: object | None = field(default=None, repr=False, compare=False)
     usage_sink: APIKeyUsageSink | None = None
@@ -287,17 +325,31 @@ class APIKeyConfig:
     def __post_init__(self) -> None:
         """Reject weak peppers, malformed namespaces, and invalid ports."""
         store = cast("object", self.store)
+        implementation = (
+            cast("BlockingIntegration[object]", store).implementation
+            if isinstance(store, BlockingIntegration)
+            else store
+        )
         usage_sink = cast("object", self.usage_sink)
         missing_store_methods = tuple(
-            method for method in _API_KEY_STORE_METHODS if not callable(getattr(store, method, None))
+            method for method in _API_KEY_STORE_METHODS if not callable(getattr(implementation, method, None))
         )
         if missing_store_methods:
             missing = ", ".join(missing_store_methods)
             raise ImproperlyConfiguredException(
-                detail=f"API-key store {type(store).__name__} is missing capabilities: {missing}"
+                detail=f"API-key store {type(implementation).__name__} is missing capabilities: {missing}"
+            )
+        if isinstance(store, BlockingIntegration) and any(
+            iscoroutinefunction(getattr(implementation, method)) for method in _API_KEY_STORE_METHODS
+        ):
+            raise ImproperlyConfiguredException(
+                detail=(
+                    f"API-key store {type(implementation).__name__} wrapped by BlockingIntegration must be synchronous"
+                )
             )
         if (
-            self.pepper.__class__ is not bytes
+            (not isinstance(store, BlockingIntegration) and not isinstance(store, APIKeyStore))
+            or self.pepper.__class__ is not bytes
             or len(self.pepper) < _MINIMUM_PEPPER_BYTES
             or (self.identity_resolver is not None and not callable(getattr(self.identity_resolver, "resolve", None)))
             or (usage_sink is not None and not isinstance(usage_sink, APIKeyUsageSink))
@@ -354,8 +406,13 @@ class APIKeyConfig:
         selected_resolver = self.identity_resolver if resolver is None else resolver
         if not callable(getattr(selected_resolver, "resolve", None)):
             raise ImproperlyConfiguredException(detail="API-key identity resolver is required")
+        normalized = (
+            replace(self, store=_BlockingAPIKeyStore(self.store.implementation))
+            if isinstance(self.store, BlockingIntegration)
+            else self
+        )
         return build_api_key_runtime(
-            self,
+            normalized,
             cast("IdentityResolver[APIKeyClaims, UserT]", selected_resolver),
             clock=clock,
             entropy=entropy,
@@ -434,8 +491,8 @@ class APIKeyCodec:
         """
         if not isinstance(value, str) or value.__class__ is not str:
             return None
-        parts = value.split("_")
-        if len(parts) != _KEY_COMPONENTS:
+        parts = _parse_key_value(value)
+        if parts is None:
             return None
         prefix, key_id, secret = parts
         if (
@@ -466,6 +523,19 @@ class APIKeyCodec:
         if value.__class__ is not bytes or len(value) != length:
             raise APIKeyGenerationError
         return value
+
+
+def _parse_key_value(value: object) -> tuple[str, str, str] | None:
+    if not isinstance(value, str) or value.__class__ is not str:
+        return None
+    prefix, separator, encoded = value.partition("_")
+    if (
+        not separator
+        or len(encoded) != _KEY_ID_CHARACTERS + 1 + _SECRET_CHARACTERS
+        or encoded[_KEY_ID_CHARACTERS] != "_"
+    ):
+        return None
+    return prefix, encoded[:_KEY_ID_CHARACTERS], encoded[_KEY_ID_CHARACTERS + 1 :]
 
 
 def _strict_text(value: object) -> bool:
