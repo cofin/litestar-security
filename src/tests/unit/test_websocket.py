@@ -14,10 +14,12 @@ from litestar_security.websocket import (
     InMemoryWebSocketTicketStore,
     IssuedWebSocketTicket,
     WebSocketCloseCodes,
+    WebSocketCloseCoordinator,
     WebSocketHandshake,
     WebSocketSecurityConfig,
     WebSocketTicketService,
     extract_websocket_handshake,
+    supervise_websocket_lifetime,
 )
 
 _NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
@@ -434,3 +436,85 @@ async def test_websocket_ticket_expiry_boundary_is_exclusive_and_deletes_record(
 
     assert consumed is None
     assert store.records == ()
+
+
+@pytest.mark.anyio
+async def test_websocket_expiry_closes_once_and_cancels_idle_handler() -> None:
+    messages: list[dict[str, object]] = []
+    handler_cleaned = anyio.Event()
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    async def handler() -> None:
+        try:
+            await anyio.sleep_forever()
+        finally:
+            handler_cleaned.set()
+
+    async def expire_immediately(_delay: float) -> None:
+        return None
+
+    coordinator = WebSocketCloseCoordinator(send)  # type: ignore[arg-type]
+    await supervise_websocket_lifetime(
+        handler,
+        expires_at=_NOW + timedelta(minutes=1),
+        coordinator=coordinator,
+        unauthenticated_close_code=4401,
+        clock=lambda: _NOW,
+        sleeper=expire_immediately,
+    )
+
+    assert messages == [{"type": "websocket.close", "code": 4401, "reason": "credential_expired"}]
+    assert handler_cleaned.is_set()
+    assert coordinator.state == "closed"
+
+
+@pytest.mark.anyio
+async def test_websocket_handler_return_cancels_expiry_task_without_close() -> None:
+    messages: list[dict[str, object]] = []
+    sleeper_cleaned = anyio.Event()
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    async def handler() -> None:
+        return None
+
+    async def wait_forever(_delay: float) -> None:
+        try:
+            await anyio.sleep_forever()
+        finally:
+            sleeper_cleaned.set()
+
+    await supervise_websocket_lifetime(
+        handler,
+        expires_at=_NOW + timedelta(minutes=1),
+        coordinator=WebSocketCloseCoordinator(send),  # type: ignore[arg-type]
+        unauthenticated_close_code=4401,
+        clock=lambda: _NOW,
+        sleeper=wait_forever,
+    )
+
+    assert messages == []
+    assert sleeper_cleaned.is_set()
+
+
+@pytest.mark.anyio
+async def test_websocket_simultaneous_terminal_causes_emit_one_close() -> None:
+    messages: list[dict[str, object]] = []
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    coordinator = WebSocketCloseCoordinator(send)  # type: ignore[arg-type]
+
+    async def close(reason: str) -> None:
+        await coordinator.close(code=4401, reason=reason)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(close, "credential_expired")
+        task_group.start_soon(close, "credential_revoked")
+
+    assert len(messages) == 1
+    assert messages[0]["reason"] in {"credential_expired", "credential_revoked"}

@@ -1146,7 +1146,9 @@ def test_real_native_session_backends_preserve_anonymous_state_and_resist_fixati
                 SecurityConfig(
                     local_auth=local_auth,
                     session_backend=backend,
-                    websocket=WebSocketSecurityConfig(allowed_origins=frozenset({"http://testserver.local"})),
+                    websocket=WebSocketSecurityConfig(
+                        allowed_origins=frozenset({"http://testserver.local"}), clock=lambda: current_time[0]
+                    ),
                 )
             )
         ],

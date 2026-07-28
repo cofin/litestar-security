@@ -34,6 +34,7 @@ from litestar_security.context import (
     intersect_authorization,
 )
 from litestar_security.websocket import (
+    WebSocketCloseCoordinator,
     WebSocketHandshake,
     WebSocketSecurityConfig,
     WebSocketTicketRecord,
@@ -41,6 +42,7 @@ from litestar_security.websocket import (
     WebSocketTicketUnavailableError,
     close_websocket,
     extract_websocket_handshake,
+    supervise_websocket_lifetime,
     websocket_policy_fingerprint,
 )
 
@@ -734,15 +736,12 @@ class SecurityMiddleware(Generic[UserT]):
                 send, code=self.config.websocket.close_codes.verification_unavailable, reason="verification_unavailable"
             )
             return
-        accepted = False
+        coordinator = WebSocketCloseCoordinator(send)
 
         async def send_with_guard_mapping(message: Message) -> None:
-            nonlocal accepted
-            if message["type"] == "websocket.accept":
-                accepted = True
-            elif (
+            if (
                 message["type"] == "websocket.close"
-                and not accepted
+                and coordinator.state == "pending"
                 and message.get("code") == _LITESTAR_INTERNAL_ERROR_CLOSE
                 and message.get("reason") in {"Authentication required", "Permission denied"}
             ):
@@ -751,14 +750,24 @@ class SecurityMiddleware(Generic[UserT]):
                     "code": self.config.websocket.close_codes.unauthorized,
                     "reason": "authorization_denied",
                 }
-            await send(message)
+            await coordinator.send(message)
 
         try:
-            await self.app(scope, receive, send_with_guard_mapping)
-        except (NotAuthorizedException, PermissionDeniedException):
-            await close_websocket(
-                send, code=self.config.websocket.close_codes.unauthorized, reason="authorization_denied"
+            context = cast("SecurityContext", scope["auth"])
+
+            async def handle() -> None:
+                await self.app(scope, receive, send_with_guard_mapping)
+
+            await supervise_websocket_lifetime(
+                handle,
+                expires_at=context.expires_at,
+                coordinator=coordinator,
+                unauthenticated_close_code=self.config.websocket.close_codes.unauthenticated,
+                clock=self.config.websocket.clock,
+                sleeper=self.config.websocket.sleeper,
             )
+        except (NotAuthorizedException, PermissionDeniedException):
+            await coordinator.close(code=self.config.websocket.close_codes.unauthorized, reason="authorization_denied")
 
     async def _authenticate_ticket(  # noqa: PLR0913 - explicit routed inputs prevent reparsing and hidden state
         self,
@@ -777,7 +786,9 @@ class SecurityMiddleware(Generic[UserT]):
         )
         if ticket_store is None or handshake.origin is None or not route_name or handshake.ticket is None:
             raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-        ticket = await WebSocketTicketService(store=ticket_store, ttl=self.config.websocket.ticket_ttl).consume(
+        ticket = await WebSocketTicketService(
+            store=ticket_store, ttl=self.config.websocket.ticket_ttl, clock=self.config.websocket.clock
+        ).consume(
             handshake.ticket,
             route_name=route_name,
             origin=handshake.origin,

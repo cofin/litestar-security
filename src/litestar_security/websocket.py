@@ -6,7 +6,7 @@ does not replace exact server-side Origin validation or credential policy.
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from binascii import Error as BinasciiError
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -14,10 +14,10 @@ from hmac import compare_digest
 from ipaddress import AddressValueError, IPv4Address, IPv6Address
 from secrets import token_bytes
 from string import hexdigits
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, cast, runtime_checkable
 from urllib.parse import parse_qsl, urlsplit
 
-from anyio import Lock
+from anyio import Lock, create_task_group, sleep
 from litestar.exceptions import ImproperlyConfiguredException, WebSocketException
 
 from litestar_security.context import CredentialRestrictions, Principal, SecurityContext
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from litestar.connection import ASGIConnection
-    from litestar.types import Send
+    from litestar.types import Message, Send
 
 __all__ = (
     "InMemoryWebSocketTicketStore",
@@ -86,6 +86,8 @@ class WebSocketSecurityConfig:
     snapshot_refresher: object | None = field(default=None, repr=False)
     revocation_source: object | None = field(default=None, repr=False)
     close_codes: WebSocketCloseCodes = WebSocketCloseCodes()
+    clock: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc), repr=False, compare=False)
+    sleeper: Callable[[float], Awaitable[None]] = field(default=sleep, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate and freeze security-sensitive transport settings."""
@@ -93,6 +95,8 @@ class WebSocketSecurityConfig:
         _validate_ticket_settings(self)
         _validate_refresh_settings(self)
         _validate_close_codes(self.close_codes)
+        if not callable(self.clock) or not callable(self.sleeper):
+            _configuration_error("WebSocket clock and sleeper must be callable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,6 +371,72 @@ async def close_websocket(send: "Send", *, code: int, reason: str) -> None:
         None.
     """
     await send({"type": "websocket.close", "code": code, "reason": reason})
+
+
+@dataclass(slots=True)
+class WebSocketCloseCoordinator:
+    """Serialize accepted and terminal ASGI events for one WebSocket."""
+
+    send_callable: "Send" = field(repr=False)
+    state: Literal["pending", "accepted", "closing", "closed"] = field(default="pending", init=False)
+    _lock: Lock = field(default_factory=Lock, init=False, repr=False)
+
+    async def send(self, message: "Message") -> None:
+        """Forward one event unless a terminal close already won."""
+        async with self._lock:
+            if self.state == "closed":
+                return
+            if message["type"] == "websocket.accept":
+                if self.state != "pending":
+                    return
+                self.state = "accepted"
+            elif message["type"] == "websocket.close":
+                self.state = "closing"
+                await self.send_callable(message)
+                self.state = "closed"
+                return
+            await self.send_callable(message)
+
+    async def close(self, *, code: int, reason: str) -> bool:
+        """Send the sole close event and report whether this call won."""
+        async with self._lock:
+            if self.state in {"closing", "closed"}:
+                return False
+            self.state = "closing"
+            await self.send_callable({"type": "websocket.close", "code": code, "reason": reason})
+            self.state = "closed"
+            return True
+
+
+async def supervise_websocket_lifetime(  # noqa: PLR0913 - all scheduler and close inputs are independently injectable
+    handler: Callable[[], Awaitable[None]],
+    *,
+    expires_at: datetime | None,
+    coordinator: WebSocketCloseCoordinator,
+    unauthenticated_close_code: int,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    sleeper: Callable[[float], Awaitable[None]] = sleep,
+) -> None:
+    """Run a handler with at most one non-polling credential-expiry task."""
+    if expires_at is None:
+        await handler()
+        return
+    delay = (_utc(expires_at) - _utc(clock())).total_seconds()
+    if delay <= 0:
+        await coordinator.close(code=unauthenticated_close_code, reason="credential_expired")
+        return
+
+    async def expire() -> None:
+        await sleeper(delay)
+        await coordinator.close(code=unauthenticated_close_code, reason="credential_expired")
+        task_group.cancel_scope.cancel()
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(expire)
+        try:
+            await handler()
+        finally:
+            task_group.cancel_scope.cancel()
 
 
 def extract_websocket_handshake(
