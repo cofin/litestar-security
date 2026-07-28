@@ -745,12 +745,20 @@ def _feature_test_ports() -> tuple[object, object, object, object]:
         advance_totp_counter=false,
         replace_recovery_codes=none,
         consume_recovery_code=false,
+        register_login_method=none,
+        revoke_login_method=none,
         put=none,
         consume=none,
     )
     protector = SimpleNamespace(active_key_version="v1", protect=none, unprotect=none)
     passkey_store = SimpleNamespace(
-        add_credential=false, get_credential=none, record_assertion=none, list_credentials=none, rename_credential=none
+        add_credential=false,
+        get_credential=none,
+        record_assertion=none,
+        list_credentials=none,
+        rename_credential=none,
+        register_login_method=none,
+        revoke_login_method=none,
     )
     challenge_store = SimpleNamespace(put=none, consume=none)
     return mfa_store, protector, passkey_store, challenge_store
@@ -764,7 +772,12 @@ def test_plugin_mfa_route_registration_validates_ownership_and_is_idempotent() -
     assert app_config.route_handlers == []
 
     recovery_peppers = (accounts_module.RecoveryCodePepper("v1", b"p" * 32),)
-    enabled = MFAConfig(store=mfa_store, secret_protector=protector, recovery_peppers=recovery_peppers)
+    enabled = MFAConfig(
+        store=mfa_store,
+        secret_protector=protector,
+        recovery_peppers=recovery_peppers,
+        login_methods=cast("Any", mfa_store),
+    )
     with pytest.raises(ImproperlyConfiguredException, match="local authentication"):
         SecurityPlugin(SecurityConfig(mfa=enabled))._configure_mfa_routes(AppConfig())  # noqa: SLF001
 
@@ -784,7 +797,12 @@ def test_plugin_mfa_route_registration_validates_ownership_and_is_idempotent() -
             "consume_recovery_code",
         )
     })
-    without_step = MFAConfig(store=no_step_store, secret_protector=protector, recovery_peppers=recovery_peppers)
+    without_step = MFAConfig(
+        store=no_step_store,
+        secret_protector=protector,
+        recovery_peppers=recovery_peppers,
+        login_methods=cast("Any", mfa_store),
+    )
     with pytest.raises(ImproperlyConfiguredException, match="StepUpStore"):
         SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=without_step))._configure_mfa_routes(  # noqa: SLF001
             AppConfig()
@@ -795,6 +813,7 @@ def test_plugin_mfa_route_registration_validates_ownership_and_is_idempotent() -
         challenge_store=challenge_store,
         rp_id="example.com",
         origins=("https://example.com",),
+        login_methods=cast("Any", passkey_store),
         step_up_store=mfa_store,
         route_prefix="/other",
     )
@@ -814,6 +833,7 @@ def test_plugin_mfa_route_registration_validates_ownership_and_is_idempotent() -
         challenge_store=challenge_store,
         rp_id="example.com",
         origins=("https://example.com",),
+        login_methods=cast("Any", passkey_store),
         step_up_store=mfa_store,
     )
     plugin = SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=enabled, passkeys=passkeys))

@@ -188,8 +188,8 @@ class MFAConfig:
         if register_routes_value.__class__ is not bool:
             msg = "MFA route registration must be boolean"
             raise ImproperlyConfiguredException(detail=msg)
-        if self.register_routes and not self.recovery_peppers:
-            msg = "Generated MFA routes require at least one recovery-code pepper"
+        if self.register_routes and (not self.recovery_peppers or self.login_methods is None):
+            msg = "Generated MFA routes require recovery-code peppers and a login-method store"
             raise ImproperlyConfiguredException(detail=msg)
 
 
@@ -250,6 +250,9 @@ class PasskeyConfig:
         register_routes_value = cast("object", self.register_routes)
         if register_routes_value.__class__ is not bool:
             msg = "Passkey route registration must be boolean"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.register_routes and self.login_methods is None:
+            msg = "Generated passkey routes require a login-method store"
             raise ImproperlyConfiguredException(detail=msg)
 
 

@@ -32,6 +32,7 @@ from litestar_security.accounts._operations import (
     OUTCOME_VERIFIED,
 )
 from litestar_security.accounts._records import (
+    LoginMethod,
     NoOpSecurityEventSink,
     RevokeLoginMethodResult,
     SecurityEvent,
@@ -385,15 +386,24 @@ class MFAStore(Protocol):
         """
         ...  # pragma: no cover
 
-    async def activate_totp(
-        self, account_id: str, enrollment_id: str, *, accepted_counter: int, now: datetime
+    async def activate_totp(  # noqa: PLR0913 - one atomic port carries every committed factor record
+        self,
+        account_id: str,
+        enrollment_id: str,
+        *,
+        accepted_counter: int,
+        login_method: LoginMethod,
+        event: SecurityEvent,
+        now: datetime,
     ) -> TOTPMethod | None:
-        """Atomically consume an enrollment and create its active method.
+        """Atomically consume an enrollment and register its active login method.
 
         Args:
             account_id: The owning account.
             enrollment_id: The pending enrollment to consume.
             accepted_counter: The counter verified during activation.
+            login_method: The viable method to register in the shared account inventory.
+            event: The durable creation event to commit with both records.
             now: The commit timestamp.
 
         Returns:
@@ -401,25 +411,30 @@ class MFAStore(Protocol):
         """
         ...  # pragma: no cover
 
-    async def activate_totp_with_recovery_codes(
+    async def activate_totp_with_recovery_codes(  # noqa: PLR0913 - one atomic port carries every committed factor record
         self,
         account_id: str,
         enrollment_id: str,
         *,
         accepted_counter: int,
         codes: tuple[RecoveryCodeDigest, ...],
+        login_method: LoginMethod,
+        event: SecurityEvent,
         now: datetime,
     ) -> TOTPMethod | None:
         """Atomically activate TOTP and replace the complete recovery-code set.
 
         Implementations must consume the enrollment, create the active method,
-        and replace recovery codes in one commit or perform none of them.
+        replace recovery codes, register the viable login method, and commit
+        the event in one transaction or perform none of them.
 
         Args:
             account_id: The owning account.
             enrollment_id: The pending enrollment to consume.
             accepted_counter: The counter verified during activation.
             codes: The complete recovery-code replacement set.
+            login_method: The viable method to register in the shared account inventory.
+            event: The durable creation event to commit with every record.
             now: The commit timestamp.
 
         Returns:
@@ -584,10 +599,26 @@ class MFAService:
             counter = _accepted_counter(secret, code, now, enrollment.policy)
             if counter is None:
                 return InvalidCredentials()
-            method = await self.store.activate_totp(account_id, enrollment_id, accepted_counter=counter, now=now)
+            login_method = LoginMethod(method_id=enrollment.method_id, kind="totp", created_at=now)
+            method = await self.store.activate_totp(
+                account_id,
+                enrollment_id,
+                accepted_counter=counter,
+                login_method=login_method,
+                event=SecurityEvent(
+                    event_id=self.event_ids(),
+                    occurred_at=now,
+                    operation=MFA_TOTP_VERIFY,
+                    outcome=OUTCOME_VERIFIED,
+                    account_id=account_id,
+                ),
+                now=now,
+            )
         except Exception:  # noqa: BLE001 - sanitize application protector/store failures
             return VerificationUnavailable()
-        return method if method is not None else InvalidCredentials()
+        if method is None:
+            return InvalidCredentials()
+        return method
 
     async def activate_totp_with_recovery_codes(
         self, account_id: str, enrollment_id: str, code: str
@@ -624,7 +655,19 @@ class MFAService:
                 for recovery_code in codes
             )
             method = await self.store.activate_totp_with_recovery_codes(
-                account_id, enrollment_id, accepted_counter=counter, codes=digests, now=now
+                account_id,
+                enrollment_id,
+                accepted_counter=counter,
+                codes=digests,
+                login_method=LoginMethod(method_id=enrollment.method_id, kind="totp", created_at=now),
+                event=SecurityEvent(
+                    event_id=self.event_ids(),
+                    occurred_at=now,
+                    operation=MFA_TOTP_VERIFY,
+                    outcome=OUTCOME_VERIFIED,
+                    account_id=account_id,
+                ),
+                now=now,
             )
         except Exception:  # noqa: BLE001 - sanitize application protector, entropy, and store failures
             return VerificationUnavailable()
@@ -664,6 +707,9 @@ class MFAService:
                 return InvalidCredentials()
         except Exception:  # noqa: BLE001 - sanitize application protector/store failures
             return VerificationUnavailable()
+        await self._emit_event(
+            operation=MFA_TOTP_VERIFY, outcome=OUTCOME_VERIFIED, account_id=account_id, occurred_at=now
+        )
         return AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=now, methods=frozenset({"totp"}))
 
     async def generate_recovery_codes(self, account_id: str) -> RecoveryCodes | VerificationUnavailable:

@@ -126,8 +126,11 @@ MFA, passkeys, and step-up
 ``/auth`` prefix. It contains TOTP enrollment and activation, recovery-code
 replacement, passkey registration and authentication, safe credential
 inventory and removal, and ``POST /auth/step-up/{purpose}``. Generated MFA
-routes require an explicit recovery-code pepper ring; startup rejects a route
-configuration that could activate TOTP without producing a recovery path.
+routes require an explicit recovery-code pepper ring and login-method store;
+passkey routes require the same shared viability boundary. Startup rejects a
+route configuration that could activate a factor without recording it for
+final-method-safe removal. Factor creation, login-method registration, and the
+durable event are one application-store atomic operation.
 
 Step-up grants are short-lived, single-use values returned in JSON. The stored
 record contains only a digest and is bound to the authenticated principal,
@@ -155,7 +158,14 @@ route rather than selected by an untrusted request field.
 The synchronous WebAuthn adapter runs through a bounded worker limiter and
 timeout. Attestation defaults to ``none``. Requesting direct attestation and
 assigning the ``hardware-backed`` trait requires an application-supplied
-``AttestationTrustMapper`` that approves the fully verified result.
+``AttestationTrustMapper``. Its format-specific PEM roots are passed into
+cryptographic attestation verification before its policy can approve the
+verified AAGUID and format.
+
+Successful passkey assurance is preserved by both transports. Sessions store
+normalized evidence in their versioned payload, while local access tokens carry
+strict ``amr`` and security-trait claims that the local bearer verifier
+reconstructs as evidence.
 
 Set ``register_routes=False`` independently on either feature configuration to
 keep its service available for an application-owned controller without

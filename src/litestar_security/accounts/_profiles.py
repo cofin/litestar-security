@@ -302,7 +302,7 @@ class LocalAuthServices(Generic[UserT]):
             refresh_tokens = self.refresh_tokens
             if refresh_tokens is None:
                 return InvalidCredentials()
-            return await refresh_tokens.issue(account)
+            return await refresh_tokens.issue(account, evidence=evidence)
         return InvalidCredentials()
 
     async def change_session_password(  # noqa: PLR0911 - preserve explicit sanitized outcomes

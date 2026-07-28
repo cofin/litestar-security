@@ -24,7 +24,7 @@ from litestar_security.authentication import (
     InvalidCredentials,
     VerificationUnavailable,
 )
-from litestar_security.context import AuthorizationSnapshot, Principal
+from litestar_security.context import AuthenticationEvidence, AuthorizationSnapshot, Principal
 from litestar_security.providers.jwt import (
     JWTClaims,
     JWTValidationConfig,
@@ -106,7 +106,12 @@ class LocalAccessTokenIssuer(Generic[UserT]):
             raise ImproperlyConfiguredException(detail=msg)
 
     async def issue(
-        self, account: LocalAccount[UserT], *, scopes: "AbstractSet[str]" = frozenset(), now: datetime | None = None
+        self,
+        account: LocalAccount[UserT],
+        *,
+        scopes: "AbstractSet[str]" = frozenset(),
+        evidence: AuthenticationEvidence | None = None,
+        now: datetime | None = None,
     ) -> LocalAccessToken | InvalidCredentials | VerificationUnavailable:
         """Issue one short-lived epoch-bound token without serializing application data.
 
@@ -116,6 +121,7 @@ class LocalAccessTokenIssuer(Generic[UserT]):
         Args:
             account: The authenticated account to issue for.
             scopes: The scopes to record on the token.
+            evidence: Verified authentication assurance to preserve in the access token.
             now: Override the clock, for tests and replayable issuance.
 
         Returns:
@@ -145,6 +151,9 @@ class LocalAccessTokenIssuer(Generic[UserT]):
                 now=issued_at,
                 lifetime=self.lifetime,
                 scopes=scopes,
+                methods=evidence.methods if evidence is not None else frozenset(),
+                traits=evidence.traits if evidence is not None else frozenset(),
+                amr=evidence.amr if evidence is not None else (),
                 jti=token_id,
             )
         except (TypeError, ValueError):
@@ -167,7 +176,15 @@ class LocalAccessVerifier:
         outcome = await self.verifier.verify(token, now=now)
         if not isinstance(outcome, Authenticated):
             return outcome
-        return replace(outcome, grants=AuthorizationSnapshot(scopes=outcome.claims.scopes))
+        methods = _claim_set(outcome.claims.raw.get("amr"))
+        traits = _claim_set(outcome.claims.raw.get("security_traits"))
+        if methods is None or traits is None:
+            return InvalidCredentials()
+        return replace(
+            outcome,
+            evidence=replace(outcome.evidence, methods=methods, traits=traits, amr=tuple(sorted(methods))),
+            grants=AuthorizationSnapshot(scopes=outcome.claims.scopes),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,3 +280,15 @@ def _valid_compact_access_token(value: object) -> bool:
         )
     except (BinasciiError, UnicodeEncodeError, ValueError):
         return False
+
+
+def _claim_set(value: object) -> frozenset[str] | None:
+    if value is None:
+        return frozenset()
+    if not isinstance(value, (list, tuple)):
+        return None
+    values = cast("list[object] | tuple[object, ...]", value)
+    if any(not _strict_claim_text(item) for item in values):
+        return None
+    normalized = frozenset(cast("list[str] | tuple[str, ...]", values))
+    return normalized if len(normalized) == len(values) else None

@@ -8,9 +8,11 @@ from anyio import Lock
 
 from litestar_security.accounts import (
     AssertionRecordResult,
+    LoginMethod,
     PasskeyCredential,
     PendingTOTPEnrollment,
     RecoveryCodeDigest,
+    SecurityEvent,
     StepUpRecord,
     TOTPMethod,
     WebAuthnChallenge,
@@ -74,12 +76,14 @@ class FakeClock:
 class InMemoryMFAStore:
     """Atomic in-memory implementation of the MFA store contract."""
 
-    __slots__ = ("_lock", "enrollments", "methods", "recovery_codes")
+    __slots__ = ("_lock", "enrollments", "events", "login_methods", "methods", "recovery_codes")
 
     def __init__(self) -> None:
         """Initialize isolated mutable state."""
         self._lock = Lock()
         self.enrollments: dict[str, PendingTOTPEnrollment] = {}
+        self.events: list[SecurityEvent] = []
+        self.login_methods: dict[str, LoginMethod] = {}
         self.methods: dict[str, TOTPMethod] = {}
         self.recovery_codes: dict[str, tuple[RecoveryCodeDigest, ...]] = {}
 
@@ -103,8 +107,15 @@ class InMemoryMFAStore:
         """
         return self.enrollments.get(enrollment_id)
 
-    async def activate_totp(
-        self, account_id: str, enrollment_id: str, *, accepted_counter: int, now: datetime
+    async def activate_totp(  # noqa: PLR0913 - mirrors the atomic public protocol
+        self,
+        account_id: str,
+        enrollment_id: str,
+        *,
+        accepted_counter: int,
+        login_method: LoginMethod,
+        event: SecurityEvent,
+        now: datetime,
     ) -> TOTPMethod | None:
         """Atomically consume and activate one enrollment.
 
@@ -112,6 +123,8 @@ class InMemoryMFAStore:
             account_id: Expected owner.
             enrollment_id: Enrollment to consume.
             accepted_counter: Verified initial counter.
+            login_method: Viable method committed with activation.
+            event: Durable creation event.
             now: Commit timestamp.
 
         Returns:
@@ -130,15 +143,19 @@ class InMemoryMFAStore:
                 created_at=now,
             )
             self.methods[method.method_id] = method
+            self.login_methods[login_method.method_id] = login_method
+            self.events.append(event)
             return method
 
-    async def activate_totp_with_recovery_codes(
+    async def activate_totp_with_recovery_codes(  # noqa: PLR0913 - mirrors the atomic public protocol
         self,
         account_id: str,
         enrollment_id: str,
         *,
         accepted_counter: int,
         codes: tuple[RecoveryCodeDigest, ...],
+        login_method: LoginMethod,
+        event: SecurityEvent,
         now: datetime,
     ) -> TOTPMethod | None:
         """Atomically activate one enrollment and replace recovery codes."""
@@ -157,6 +174,8 @@ class InMemoryMFAStore:
             del self.enrollments[enrollment_id]
             self.methods[method.method_id] = method
             self.recovery_codes[account_id] = tuple(codes)
+            self.login_methods[login_method.method_id] = login_method
+            self.events.append(event)
             return method
 
     async def get_totp_method(self, account_id: str, method_id: str) -> TOTPMethod | None:
@@ -273,18 +292,24 @@ class InMemoryWebAuthnChallengeStore:
 class InMemoryPasskeyStore:
     """Atomic in-memory passkey credential store."""
 
-    __slots__ = ("_lock", "credentials")
+    __slots__ = ("_lock", "credentials", "events", "login_methods")
 
     def __init__(self) -> None:
         """Initialize isolated mutable state."""
         self._lock = Lock()
         self.credentials: dict[bytes, PasskeyCredential] = {}
+        self.events: list[SecurityEvent] = []
+        self.login_methods: dict[str, LoginMethod] = {}
 
-    async def add_credential(self, credential: PasskeyCredential) -> bool:
-        """Atomically register a globally unique credential.
+    async def add_credential(
+        self, credential: PasskeyCredential, *, login_method: LoginMethod, event: SecurityEvent
+    ) -> bool:
+        """Atomically register a credential, login method, and event.
 
         Args:
             credential: Verified credential.
+            login_method: Viable method committed with the credential.
+            event: Durable creation event.
 
         Returns:
             Whether it was absent and added.
@@ -293,6 +318,8 @@ class InMemoryPasskeyStore:
             if credential.credential_id in self.credentials:
                 return False
             self.credentials[credential.credential_id] = credential
+            self.login_methods[login_method.method_id] = login_method
+            self.events.append(event)
             return True
 
     async def get_credential(self, credential_id: bytes) -> PasskeyCredential | None:

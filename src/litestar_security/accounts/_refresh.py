@@ -47,6 +47,7 @@ from litestar_security.accounts._refresh_tokens import (
     valid_refresh_scope,
 )
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
+from litestar_security.context import AuthenticationEvidence
 
 if TYPE_CHECKING:
     from litestar_security.accounts._access_tokens import LocalAccessTokenIssuer
@@ -414,13 +415,19 @@ class RefreshTokenService(Generic[UserT]):
             raise ImproperlyConfiguredException(detail=msg)
 
     async def issue(  # noqa: PLR0911 - preserve explicit sanitized outcomes
-        self, account: "LocalAccount[UserT]", *, scopes: AbstractSet[str] = frozenset(), now: datetime | None = None
+        self,
+        account: "LocalAccount[UserT]",
+        *,
+        scopes: AbstractSet[str] = frozenset(),
+        evidence: AuthenticationEvidence | None = None,
+        now: datetime | None = None,
     ) -> RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
         """Create the initial family before revealing either credential.
 
         Args:
             account: The authenticated account to issue for. It must be active and verified.
             scopes: The scopes to bind into the access token.
+            evidence: Verified authentication assurance to preserve in the initial access token.
             now: Override the clock, for tests and replayable issuance.
 
         Returns:
@@ -448,7 +455,9 @@ class RefreshTokenService(Generic[UserT]):
         if normalized_scopes is None:
             return InvalidCredentials()
         try:
-            access: object = await self.access_tokens.issue(account_value, scopes=normalized_scopes, now=issued_at)
+            access: object = await self.access_tokens.issue(
+                account_value, scopes=normalized_scopes, evidence=evidence, now=issued_at
+            )
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
         if not isinstance(access, LocalAccessToken):

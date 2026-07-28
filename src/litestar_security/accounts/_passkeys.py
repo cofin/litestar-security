@@ -1,7 +1,7 @@
 """Project-owned WebAuthn challenge, credential, and service boundary."""
 
 from base64 import urlsafe_b64encode
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -29,6 +29,7 @@ from webauthn.helpers import (
 from webauthn.helpers.cose import COSEAlgorithmIdentifier
 from webauthn.helpers.structs import (
     AttestationConveyancePreference,
+    AttestationFormat,
     AuthenticatorSelectionCriteria,
     CredentialDeviceType,
     UserVerificationRequirement,
@@ -39,11 +40,13 @@ from litestar_security.accounts._operations import (
     OUTCOME_CLONE_RISK,
     OUTCOME_CREATED,
     OUTCOME_REVOKED,
+    OUTCOME_VERIFIED,
     PASSKEY_ASSERT,
     PASSKEY_REGISTER_VERIFY,
     PASSKEY_REMOVE,
 )
 from litestar_security.accounts._records import (
+    LoginMethod,
     NoOpSecurityEventSink,
     RevokeLoginMethodResult,
     SecurityEvent,
@@ -110,6 +113,17 @@ class InvalidWebAuthnResponseError(ValueError):
 @runtime_checkable
 class AttestationTrustMapper(Protocol):
     """Explicit application policy for assigning hardware-backed trust."""
+
+    def root_certificates(self) -> Mapping[str, Sequence[bytes]]:
+        """Return format-specific PEM roots used during attestation verification.
+
+        Implementations must return only application-trusted root certificates;
+        an empty mapping cannot establish hardware-backed assurance.
+
+        Returns:
+            Attestation-format names mapped to trusted PEM root certificates.
+        """
+        ...  # pragma: no cover
 
     def trusted(self, verification: "RegistrationVerification") -> bool:
         """Return whether a fully verified attestation is hardware-backed.
@@ -292,11 +306,15 @@ class WebAuthnChallengeStore(Protocol):
 class PasskeyStore(Protocol):
     """Persist credentials and assertion state through atomic operations."""
 
-    async def add_credential(self, credential: PasskeyCredential) -> bool:
-        """Atomically add a globally unique credential for its owner.
+    async def add_credential(
+        self, credential: PasskeyCredential, *, login_method: LoginMethod, event: SecurityEvent
+    ) -> bool:
+        """Atomically add a credential, viable login method, and durable event.
 
         Args:
             credential: The fully verified credential.
+            login_method: The matching method for the shared viability inventory.
+            event: The durable creation event to commit with both records.
 
         Returns:
             ``True`` when inserted, ``False`` on any ownership conflict.
@@ -551,6 +569,12 @@ class PyWebAuthnVerifier:
                 supported_pub_key_algs=[
                     COSEAlgorithmIdentifier(value) for value in cast("Sequence[int]", kwargs["algorithms"])
                 ],
+                pem_root_certs_bytes_by_fmt={
+                    AttestationFormat(format_name): list(certificates)
+                    for format_name, certificates in cast(
+                        "Mapping[str, Sequence[bytes]]", kwargs.get("root_certificates", {})
+                    ).items()
+                },
             )
         except Exception as exc:
             raise InvalidWebAuthnResponseError from exc
@@ -707,6 +731,12 @@ class PasskeyService:
             )
             if record is None or record.account_id != account_id:
                 return InvalidCredentials()
+            mapper = self.attestation_trust
+            root_certificates: Mapping[str, Sequence[bytes]] = {}
+            if mapper is not None:
+                root_certificates = await self._run_worker(mapper.root_certificates)
+                if not _valid_attestation_roots(root_certificates):
+                    return InvalidCredentials()
             verified = await self._run_worker(
                 partial(
                     self.verifier.verify_registration,
@@ -716,13 +746,13 @@ class PasskeyService:
                     origins=record.origins,
                     require_user_verification=record.user_verification is UserVerification.REQUIRED,
                     algorithms=record.algorithms,
+                    root_certificates=root_certificates,
                 )
             )
             if not verified.backup_eligible and verified.backup_state:
                 return InvalidCredentials()
             hardware_backed = False
             if verified.attestation_format != "none":
-                mapper = self.attestation_trust
                 if mapper is None or await self._run_worker(mapper.trusted, verified) is not True:
                     return InvalidCredentials()
                 hardware_backed = True
@@ -739,7 +769,18 @@ class PasskeyService:
                 created_at=now,
                 hardware_backed=hardware_backed,
             )
-            if not await self.store.add_credential(credential):
+            method_id = _passkey_method_id(credential.credential_id)
+            if not await self.store.add_credential(
+                credential,
+                login_method=LoginMethod(method_id=method_id, kind="passkey", created_at=now),
+                event=SecurityEvent(
+                    event_id=self.event_ids(),
+                    occurred_at=now,
+                    operation=PASSKEY_REGISTER_VERIFY,
+                    outcome=OUTCOME_CREATED,
+                    account_id=account_id,
+                ),
+            ):
                 return InvalidCredentials()
         except InvalidWebAuthnResponseError:
             return InvalidCredentials()
@@ -810,6 +851,10 @@ class PasskeyService:
             )
             if self.clone_risk_policy is CloneRiskPolicy.REJECT:
                 return InvalidCredentials()
+        else:
+            await self._emit_event(
+                operation=PASSKEY_ASSERT, outcome=OUTCOME_VERIFIED, account_id=account_id, occurred_at=now
+            )
         traits = {"phishing-resistant"}
         if verified.user_verified and record.user_verification is UserVerification.REQUIRED:
             traits.add("user-verified")
@@ -821,6 +866,7 @@ class PasskeyService:
             authenticated_at=now,
             methods=frozenset({"passkey"}),
             traits=frozenset(traits),
+            amr=("passkey",),
         )
 
     async def list_credentials(self, account_id: str) -> tuple[PasskeySummary, ...] | VerificationUnavailable:
@@ -854,7 +900,7 @@ class PasskeyService:
             return VerificationUnavailable()
         try:
             now = aware_utc_time(self.clock())
-            method_id = f"pk_{urlsafe_b64encode(credential_id).rstrip(b'=').decode('ascii')}"
+            method_id = _passkey_method_id(credential_id)
             event = SecurityEvent(
                 event_id=self.event_ids(),
                 occurred_at=now,
@@ -930,6 +976,31 @@ def _credential_summary(credential: PasskeyCredential) -> PasskeySummary:
         suspect=credential.suspect,
         created_at=credential.created_at,
         last_used_at=credential.last_used_at,
+    )
+
+
+def _passkey_method_id(credential_id: bytes) -> str:
+    return f"pk_{urlsafe_b64encode(credential_id).rstrip(b'=').decode('ascii')}"
+
+
+def _valid_attestation_roots(value: object) -> bool:
+    if not isinstance(value, Mapping) or not value:
+        return False
+    roots = cast("Mapping[object, object]", value)
+    return all(_valid_attestation_root_entry(format_name, certificates) for format_name, certificates in roots.items())
+
+
+def _valid_attestation_root_entry(format_name: object, certificates: object) -> bool:
+    if (
+        not isinstance(format_name, str)
+        or format_name == "none"
+        or not isinstance(certificates, Sequence)
+        or isinstance(certificates, (str, bytes))
+    ):
+        return False
+    certificate_values = cast("Sequence[object]", certificates)
+    return bool(certificate_values) and all(
+        isinstance(certificate, bytes) and bool(certificate) for certificate in certificate_values
     )
 
 
