@@ -2613,6 +2613,7 @@ def test_security_config_is_typed_and_slotted() -> None:
         "session_backend",
         "local_auth",
         "local_jwks",
+        "oauth",
         "mfa",
         "passkeys",
         "jwks_providers",

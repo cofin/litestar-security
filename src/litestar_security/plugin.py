@@ -73,6 +73,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         "_local_auth_route_handlers",
         "_mfa_route_handlers",
         "_middleware",
+        "_oauth_route_handlers",
         "_providers",
         "_rate_limit_lifespan",
         "_route_compiler",
@@ -94,6 +95,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._jwks_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
         self._local_auth_route_handlers: tuple[Router, ...] | None = None
         self._mfa_route_handlers: tuple[Router, ...] | None = None
+        self._oauth_route_handlers: tuple[Router, ...] | None = None
         self._rate_limit_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
 
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
@@ -115,6 +117,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._configure_local_auth_rate_limits(app_config)
         self._configure_local_auth_routes(app_config)
         self._configure_mfa_routes(app_config)
+        self._configure_oauth_routes(app_config)
         self._configure_local_jwks(app_config)
         self._configure_jwks_lifespan(app_config)
         self._validate_dependency_map(app_config.dependencies, "application")
@@ -457,6 +460,18 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             )
             route_handlers = (router,)
             self._mfa_route_handlers = route_handlers
+        for route_handler in route_handlers:
+            if not any(existing is route_handler for existing in app_config.route_handlers):
+                app_config.route_handlers.append(route_handler)
+
+    def _configure_oauth_routes(self, app_config: AppConfig) -> None:
+        oauth = self.config.oauth
+        if oauth is None or not oauth.register_routes:
+            return
+        route_handlers = self._oauth_route_handlers
+        if route_handlers is None:
+            route_handlers = oauth.build_route_handlers()
+            self._oauth_route_handlers = route_handlers
         for route_handler in route_handlers:
             if not any(existing is route_handler for existing in app_config.route_handlers):
                 app_config.route_handlers.append(route_handler)

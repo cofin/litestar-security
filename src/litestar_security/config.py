@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from litestar_security.accounts._profiles import LocalAuthConfig
     from litestar_security.providers.jwks import JWKSProvider
     from litestar_security.providers.jwt import LocalJWKSConfig
+    from litestar_security.providers.oauth import OAuthConfig
 
 __all__ = (
     "ExternalCSRF",
@@ -287,6 +288,7 @@ class SecurityConfig(Generic[UserT]):
     session_backend: BaseSessionBackend[Any] | None = None
     local_auth: "LocalAuthConfig[UserT] | None" = None
     local_jwks: "LocalJWKSConfig | None" = None
+    oauth: "OAuthConfig | None" = None
     mfa: MFAConfig | None = None
     passkeys: PasskeyConfig | None = None
     jwks_providers: Sequence["JWKSProvider"] = ()
