@@ -160,12 +160,15 @@ timeout. Attestation defaults to ``none``. Requesting direct attestation and
 assigning the ``hardware-backed`` trait requires an application-supplied
 ``AttestationTrustMapper``. Its format-specific PEM roots are passed into
 cryptographic attestation verification before its policy can approve the
-verified AAGUID and format.
+verified AAGUID and format. The verified format must select a configured root
+set and the attestation statement must contain a certificate chain; packed
+self-attestation is never promoted to hardware-backed assurance.
 
 Successful passkey assurance is preserved by both transports. Sessions store
 normalized evidence in their versioned payload, while local access tokens carry
-strict ``amr`` and security-trait claims that the local bearer verifier
-reconstructs as evidence.
+strict ``amr``, ``auth_time``, and security-trait claims that the local bearer
+verifier reconstructs as evidence. Refresh-family state preserves the same
+secret-free evidence so rotation cannot renew its original freshness.
 
 Set ``register_routes=False`` independently on either feature configuration to
 keep its service available for an application-owned controller without

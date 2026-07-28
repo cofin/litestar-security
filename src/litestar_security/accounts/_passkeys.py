@@ -22,6 +22,7 @@ from webauthn import (
     verify_registration_response,
 )
 from webauthn.helpers import (
+    parse_attestation_object,
     parse_authentication_credential_json,
     parse_client_data_json,
     parse_registration_credential_json,
@@ -198,6 +199,7 @@ class RegistrationVerification:
     user_verified: bool
     aaguid: str
     attestation_format: str
+    attestation_chain_verified: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,8 +561,16 @@ class PyWebAuthnVerifier:
     def verify_registration(self, **kwargs: object) -> RegistrationVerification:
         """Verify registration and project the dependency result."""
         try:
+            credential = parse_registration_credential_json(cast("str", kwargs["response"]))
+            attestation = parse_attestation_object(bytes(credential.response.attestation_object))
+            root_certificates = {
+                AttestationFormat(format_name): list(certificates)
+                for format_name, certificates in cast(
+                    "Mapping[str, Sequence[bytes]]", kwargs.get("root_certificates", {})
+                ).items()
+            }
             verified = verify_registration_response(
-                credential=cast("str", kwargs["response"]),
+                credential=credential,
                 expected_challenge=cast("bytes", kwargs["challenge"]),
                 expected_rp_id=cast("str", kwargs["rp_id"]),
                 expected_origin=list(cast("Sequence[str]", kwargs["origins"])),
@@ -569,12 +579,7 @@ class PyWebAuthnVerifier:
                 supported_pub_key_algs=[
                     COSEAlgorithmIdentifier(value) for value in cast("Sequence[int]", kwargs["algorithms"])
                 ],
-                pem_root_certs_bytes_by_fmt={
-                    AttestationFormat(format_name): list(certificates)
-                    for format_name, certificates in cast(
-                        "Mapping[str, Sequence[bytes]]", kwargs.get("root_certificates", {})
-                    ).items()
-                },
+                pem_root_certs_bytes_by_fmt=root_certificates,
             )
         except Exception as exc:
             raise InvalidWebAuthnResponseError from exc
@@ -587,6 +592,7 @@ class PyWebAuthnVerifier:
             user_verified=verified.user_verified,
             aaguid=verified.aaguid,
             attestation_format=verified.fmt.value,
+            attestation_chain_verified=bool(attestation.att_stmt.x5c) and bool(root_certificates.get(verified.fmt)),
         )
 
     def verify_authentication(self, **kwargs: object) -> AuthenticationVerification:
@@ -643,6 +649,7 @@ class PasskeyService:
         verifier = cast("object", self.verifier)
         worker_limiter = cast("object", self.worker_limiter)
         attestation_trust = cast("object", self.attestation_trust)
+        login_methods = cast("object", self.login_methods)
         self.origins = tuple(self.origins)
         self.algorithms = tuple(self.algorithms)
         if not isinstance(store, PasskeyStore) or not isinstance(challenge_store, WebAuthnChallengeStore):
@@ -656,6 +663,9 @@ class PasskeyService:
             raise ImproperlyConfiguredException(detail=message)
         if attestation_trust is not None and not isinstance(attestation_trust, AttestationTrustMapper):
             message = "Passkey attestation trust must implement AttestationTrustMapper"
+            raise ImproperlyConfiguredException(detail=message)
+        if login_methods is not None and not isinstance(login_methods, LoginMethodStore):
+            message = "Passkey login methods must implement LoginMethodStore"
             raise ImproperlyConfiguredException(detail=message)
         if (
             not strict_context_text(self.rp_id)
@@ -753,7 +763,13 @@ class PasskeyService:
                 return InvalidCredentials()
             hardware_backed = False
             if verified.attestation_format != "none":
-                if mapper is None or await self._run_worker(mapper.trusted, verified) is not True:
+                trusted_roots = root_certificates.get(verified.attestation_format)
+                if (
+                    mapper is None
+                    or not trusted_roots
+                    or not verified.attestation_chain_verified
+                    or await self._run_worker(mapper.trusted, verified) is not True
+                ):
                     return InvalidCredentials()
                 hardware_backed = True
             credential = PasskeyCredential(

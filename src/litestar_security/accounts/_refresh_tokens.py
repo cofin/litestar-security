@@ -32,6 +32,7 @@ from litestar_security.accounts._internal import (
     valid_security_epoch,
 )
 from litestar_security.authentication import InvalidCredentials
+from litestar_security.context import AuthenticationEvidence
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -267,6 +268,7 @@ class RefreshFamilyContext:
     token_expires_at: "datetime"
     family_expires_at: "datetime"
     scopes: frozenset[str] = frozenset()
+    evidence: AuthenticationEvidence | None = None
 
     def __post_init__(self) -> None:
         """Validate proof-checked preflight metadata and preserved scopes."""
@@ -282,6 +284,12 @@ class RefreshFamilyContext:
             or not valid_security_epoch(self.security_epoch)
             or token_expires_at > family_expires_at
             or any(not valid_refresh_scope(scope) for scope in self.scopes)
+            or (
+                self.evidence is not None
+                and not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime store boundary
+                    self.evidence, AuthenticationEvidence
+                )
+            )
         ):
             msg = "Refresh family context is invalid"
             raise ValueError(msg)

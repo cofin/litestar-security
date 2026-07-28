@@ -154,6 +154,7 @@ class LocalAccessTokenIssuer(Generic[UserT]):
                 methods=evidence.methods if evidence is not None else frozenset(),
                 traits=evidence.traits if evidence is not None else frozenset(),
                 amr=evidence.amr if evidence is not None else (),
+                authenticated_at=evidence.authenticated_at if evidence is not None else None,
                 jti=token_id,
             )
         except (TypeError, ValueError):
@@ -178,11 +179,20 @@ class LocalAccessVerifier:
             return outcome
         methods = _claim_set(outcome.claims.raw.get("amr"))
         traits = _claim_set(outcome.claims.raw.get("security_traits"))
-        if methods is None or traits is None:
+        authenticated_at = _claim_authentication_time(
+            outcome.claims.raw.get("auth_time"), fallback=outcome.evidence.authenticated_at
+        )
+        if methods is None or traits is None or authenticated_at is None:
             return InvalidCredentials()
         return replace(
             outcome,
-            evidence=replace(outcome.evidence, methods=methods, traits=traits, amr=tuple(sorted(methods))),
+            evidence=replace(
+                outcome.evidence,
+                authenticated_at=authenticated_at,
+                methods=methods,
+                traits=traits,
+                amr=tuple(sorted(methods)),
+            ),
             grants=AuthorizationSnapshot(scopes=outcome.claims.scopes),
         )
 
@@ -292,3 +302,14 @@ def _claim_set(value: object) -> frozenset[str] | None:
         return None
     normalized = frozenset(cast("list[str] | tuple[str, ...]", values))
     return normalized if len(normalized) == len(values) else None
+
+
+def _claim_authentication_time(value: object, *, fallback: datetime) -> datetime | None:
+    if value is None:
+        return fallback
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=fallback.tzinfo)
+    except (OverflowError, OSError, ValueError):
+        return None

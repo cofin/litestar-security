@@ -520,11 +520,15 @@ class MFAService:
         """Validate structural capabilities and stable issuer configuration."""
         store = cast("object", self.store)
         secret_protector = cast("object", self.secret_protector)
+        login_methods = cast("object", self.login_methods)
         if not isinstance(store, MFAStore):
             message = "MFA service store must implement MFAStore"
             raise ImproperlyConfiguredException(detail=message)
         if not isinstance(secret_protector, SecretProtector):
             message = "MFA secret protector must implement SecretProtector"
+            raise ImproperlyConfiguredException(detail=message)
+        if login_methods is not None and not isinstance(login_methods, LoginMethodStore):
+            message = "MFA login methods must implement LoginMethodStore"
             raise ImproperlyConfiguredException(detail=message)
         if not strict_context_text(self.issuer):
             message = "MFA issuer must be non-blank text"

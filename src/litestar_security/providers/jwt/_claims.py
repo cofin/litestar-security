@@ -50,7 +50,13 @@ _FORBIDDEN_JOSE_HEADERS = frozenset({"b64", "crit", "jku", "jwk", "x5c", "x5t", 
 _LOCAL_ACCESS_REQUIRED_CLAIMS = frozenset({"iss", "sub", "aud", "exp", "iat", "client_id", "jti", "se"})
 
 
-_LOCAL_ACCESS_ALLOWED_CLAIMS = _LOCAL_ACCESS_REQUIRED_CLAIMS.union({"amr", "nbf", "scope", "security_traits"})
+_LOCAL_ACCESS_ALLOWED_CLAIMS = _LOCAL_ACCESS_REQUIRED_CLAIMS.union({
+    "amr",
+    "auth_time",
+    "nbf",
+    "scope",
+    "security_traits",
+})
 
 
 _INVALID = InvalidCredentials()
@@ -211,7 +217,7 @@ def normalize_audiences(value: JSONValue | None) -> frozenset[str] | None:
     return audiences if len(audiences) == len(audience_values) else None
 
 
-def build_access_token_claims(  # noqa: PLR0913 - explicit configuration surface; every input is named
+def build_access_token_claims(  # noqa: C901, PLR0913 - explicit validated claim construction remains cohesive
     *,
     issuer: str,
     audience: str,
@@ -224,6 +230,7 @@ def build_access_token_claims(  # noqa: PLR0913 - explicit configuration surface
     methods: AbstractSet[str] = frozenset(),
     traits: AbstractSet[str] = frozenset(),
     amr: Sequence[str] = (),
+    authenticated_at: datetime | None = None,
     jti: str | None = None,
     not_before: datetime | None = None,
 ) -> Mapping[str, JSONValue]:
@@ -244,6 +251,7 @@ def build_access_token_claims(  # noqa: PLR0913 - explicit configuration surface
         methods: Normalized authentication methods to preserve.
         traits: Normalized assurance traits to preserve.
         amr: Ordered authentication-method references to preserve.
+        authenticated_at: Original authentication time for freshness checks.
         jti: The token identifier, or ``None`` to omit it.
         not_before: When the token becomes valid, or ``None`` to omit it.
 
@@ -278,6 +286,10 @@ def build_access_token_claims(  # noqa: PLR0913 - explicit configuration surface
     normalized_methods = frozenset(strict_identifier_value(method) for method in methods)
     normalized_traits = frozenset(strict_identifier_value(trait) for trait in traits)
     normalized_amr = tuple(strict_identifier_value(method) for method in amr)
+    if authenticated_at is not None:
+        authenticated_at = aware_utc(authenticated_at)
+        if authenticated_at > now:
+            raise_value("Access-token authentication time cannot be in the future")
     claims: dict[str, JSONValue] = {
         "iss": issuer,
         "sub": subject,
@@ -294,6 +306,8 @@ def build_access_token_claims(  # noqa: PLR0913 - explicit configuration surface
         claims["amr"] = cast("JSONValue", list(normalized_amr or sorted(normalized_methods)))
     if normalized_traits:
         claims["security_traits"] = cast("JSONValue", sorted(normalized_traits))
+    if authenticated_at is not None:
+        claims["auth_time"] = int(authenticated_at.timestamp())
     if not_before is not None:
         claims["nbf"] = int(not_before.timestamp())
     return cast("Mapping[str, JSONValue]", MappingProxyType(claims))
@@ -337,6 +351,13 @@ def validate_local_access_claims(
     not_before = payload.get("nbf")
     if not_before is not None and (
         isinstance(not_before, bool) or not isinstance(not_before, int) or not_before >= expires_at
+    ):
+        raise_value("Invalid local access-token claims")
+    authentication_time = payload.get("auth_time")
+    if authentication_time is not None and (
+        isinstance(authentication_time, bool)
+        or not isinstance(authentication_time, int)
+        or authentication_time > issued_at
     ):
         raise_value("Invalid local access-token claims")
     scope = payload.get("scope")

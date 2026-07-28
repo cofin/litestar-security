@@ -87,6 +87,7 @@ class CreateRefreshFamilyCommand:
     token_expires_at: "datetime"
     family_expires_at: "datetime"
     scopes: frozenset[str] = frozenset()
+    evidence: AuthenticationEvidence | None = None
 
     def __post_init__(self) -> None:
         """Validate one complete atomic family creation candidate."""
@@ -106,6 +107,12 @@ class CreateRefreshFamilyCommand:
             or not valid_security_epoch(self.security_epoch)
             or not created_at < token_expires_at <= family_expires_at
             or any(not valid_refresh_scope(scope) for scope in self.scopes)
+            or (
+                self.evidence is not None
+                and not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime store boundary
+                    self.evidence, AuthenticationEvidence
+                )
+            )
         ):
             msg = "Refresh family creation command is invalid"
             raise ValueError(msg)
@@ -132,6 +139,7 @@ class RotateRefreshCommand:
     receipt_expires_at: "datetime"
     idempotency_digest: bytes | None = field(default=None, repr=False)
     scopes: frozenset[str] = frozenset()
+    evidence: AuthenticationEvidence | None = None
 
     def __post_init__(self) -> None:
         """Reject malformed storage material and contradictory deadlines."""
@@ -163,6 +171,12 @@ class RotateRefreshCommand:
                 and (self.idempotency_digest.__class__ is not bytes or len(self.idempotency_digest) != DIGEST_BYTES)
             )
             or any(not valid_refresh_scope(scope) for scope in self.scopes)
+            or (
+                self.evidence is not None
+                and not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime store boundary
+                    self.evidence, AuthenticationEvidence
+                )
+            )
         ):
             msg = "Refresh rotation command or security epoch is invalid"
             raise ValueError(msg)
@@ -485,6 +499,7 @@ class RefreshTokenService(Generic[UserT]):
                 token_expires_at=token_expires_at,
                 family_expires_at=family_expires_at,
                 scopes=normalized_scopes,
+                evidence=evidence,
             )
             created = await self.store.create_family(
                 command,
@@ -588,7 +603,9 @@ class RefreshTokenService(Generic[UserT]):
         account = account_result
         try:
             successor = self.codec.issue()
-            access: object = await self.access_tokens.issue(account, scopes=prepared.scopes, now=rotated_at)
+            access: object = await self.access_tokens.issue(
+                account, scopes=prepared.scopes, evidence=prepared.evidence, now=rotated_at
+            )
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
         if not isinstance(access, LocalAccessToken):
@@ -627,6 +644,7 @@ class RefreshTokenService(Generic[UserT]):
                 receipt_expires_at=receipt_expires_at,
                 idempotency_digest=idempotency_digest,
                 scopes=prepared.scopes,
+                evidence=prepared.evidence,
             )
             result_value: object = await self.store.rotate(
                 command,

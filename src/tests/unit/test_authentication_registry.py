@@ -7101,6 +7101,27 @@ async def test_local_access_token_preserves_passkey_assurance(local_key_ring: Lo
     malformed["amr"] = []
     with pytest.raises(ValueError, match="Invalid local access-token claims"):
         jwt_claims.validate_local_access_claims(malformed, issuer=local_key_ring.issuer, now=_JWT_NOW)
+    malformed = dict(outcome.claims.raw)
+    malformed["auth_time"] = int(_JWT_NOW.timestamp()) + 1
+    with pytest.raises(ValueError, match="Invalid local access-token claims"):
+        jwt_claims.validate_local_access_claims(malformed, issuer=local_key_ring.issuer, now=_JWT_NOW)
+    with pytest.raises(ValueError, match="authentication time"):
+        build_access_token_claims(
+            issuer=local_key_ring.issuer,
+            audience=_JWT_AUDIENCE,
+            subject="account-1",
+            client_id="local",
+            security_epoch=1,
+            now=_JWT_NOW,
+            lifetime=timedelta(minutes=10),
+            authenticated_at=_JWT_NOW + timedelta(seconds=1),
+        )
+    invalid_time: object = True
+    assert access_tokens_module._claim_authentication_time(invalid_time, fallback=_JWT_NOW) is None  # noqa: SLF001
+    assert (
+        access_tokens_module._claim_authentication_time(10**30, fallback=_JWT_NOW)  # noqa: SLF001
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -7206,11 +7227,13 @@ class _AccessSigner:
     def __init__(self, token: str = "e30.e30.YQ", *, fail: bool = False) -> None:  # noqa: S107
         self.token = token
         self.fail = fail
+        self.claims: list[Mapping[str, object]] = []
 
-    async def sign(self, _claims: Mapping[str, object], *, now: datetime) -> str:
+    async def sign(self, claims: Mapping[str, object], *, now: datetime) -> str:
         del now
         if self.fail:
             raise OSError
+        self.claims.append(claims)
         return self.token
 
 
@@ -7853,6 +7876,7 @@ class _WebAuthnVerifier:
             user_verified=self.user_verified,
             aaguid="00000000-0000-0000-0000-000000000000",
             attestation_format="none",
+            attestation_chain_verified=False,
         )
 
     def verify_authentication(self, **kwargs: object) -> accounts_module.AuthenticationVerification:
@@ -7875,6 +7899,7 @@ def _passkey_service(  # noqa: PLR0913 - explicit service seam builder for cerem
     verifier: _WebAuthnVerifier | None = None,
     now: datetime = _JWT_NOW,
     attestation_trust: object | None = None,
+    login_methods: object | None = None,
     worker_timeout: float = 10.0,
 ) -> accounts_module.PasskeyService:
     return accounts_module.PasskeyService(
@@ -7888,6 +7913,7 @@ def _passkey_service(  # noqa: PLR0913 - explicit service seam builder for cerem
         clock=lambda: now,
         challenge_entropy=lambda length: b"c" * length,
         attestation_trust=cast("Any", attestation_trust),
+        login_methods=cast("Any", login_methods),
         worker_timeout=worker_timeout,
     )
 
@@ -8439,6 +8465,8 @@ def test_mfa_value_and_service_configuration_rejects_invalid_contracts() -> None
         accounts_module.MFAService(_MFAStore(), cast("Any", object()))
     with pytest.raises(ImproperlyConfiguredException, match="issuer"):
         accounts_module.MFAService(_MFAStore(), _MFAProtector(), issuer=" ")
+    with pytest.raises(ImproperlyConfiguredException, match="LoginMethodStore"):
+        accounts_module.MFAService(_MFAStore(), _MFAProtector(), login_methods=cast("Any", object()))
     with pytest.raises(ImproperlyConfiguredException, match="store"):
         accounts_module.StepUpService(cast("Any", object()))
     with pytest.raises(ImproperlyConfiguredException, match="lifetime"):
@@ -8447,7 +8475,9 @@ def test_mfa_value_and_service_configuration_rejects_invalid_contracts() -> None
 
 def test_pywebauthn_adapter_projects_pinned_dependency_results(monkeypatch: pytest.MonkeyPatch) -> None:
     client_data = b'{"type":"webauthn.get"}'
-    credential = SimpleNamespace(raw_id=b"credential", response=SimpleNamespace(client_data_json=client_data))
+    credential = SimpleNamespace(
+        raw_id=b"credential", response=SimpleNamespace(client_data_json=client_data, attestation_object=b"attestation")
+    )
     verified = SimpleNamespace(
         credential_id=b"credential",
         credential_public_key=b"public-key",
@@ -8457,12 +8487,17 @@ def test_pywebauthn_adapter_projects_pinned_dependency_results(monkeypatch: pyte
         credential_backed_up=False,
         user_verified=True,
         aaguid="00000000-0000-0000-0000-000000000000",
-        fmt=SimpleNamespace(value="none"),
+        fmt=passkeys_module.AttestationFormat.PACKED,
     )
     monkeypatch.setattr(passkeys_module, "generate_registration_options", lambda **_kwargs: object())
     monkeypatch.setattr(passkeys_module, "generate_authentication_options", lambda **_kwargs: object())
     monkeypatch.setattr(passkeys_module, "options_to_json", lambda _options: "{}")
     monkeypatch.setattr(passkeys_module, "parse_registration_credential_json", lambda _response: credential)
+    monkeypatch.setattr(
+        passkeys_module,
+        "parse_attestation_object",
+        lambda _value: SimpleNamespace(att_stmt=SimpleNamespace(x5c=[b"leaf-certificate"])),
+    )
     monkeypatch.setattr(passkeys_module, "parse_authentication_credential_json", lambda _response: credential)
     monkeypatch.setattr(
         passkeys_module, "parse_client_data_json", lambda _value: SimpleNamespace(challenge=b"challenge")
@@ -8510,6 +8545,7 @@ def test_pywebauthn_adapter_projects_pinned_dependency_results(monkeypatch: pyte
         require_user_verification=True,
     )
     assert registration.credential_id == b"credential"
+    assert registration.attestation_chain_verified
     assert registration_kwargs["pem_root_certs_bytes_by_fmt"] == {
         passkeys_module.AttestationFormat.PACKED: [b"trusted-root"]
     }
@@ -8544,6 +8580,8 @@ def test_pywebauthn_adapter_projects_pinned_dependency_results(monkeypatch: pyte
 
 def test_passkey_values_and_dependency_configuration_reject_invalid_shapes() -> None:
     now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    with pytest.raises(ImproperlyConfiguredException, match="LoginMethodStore"):
+        _passkey_service(login_methods=cast("Any", object()))
     with pytest.raises(ValueError, match="challenge"):
         accounts_module.WebAuthnChallenge(
             challenge_digest=b"short",
@@ -9233,6 +9271,7 @@ class _AtomicRefreshStore:
                 family_expires_at=command.family_expires_at,
                 family_id=command.family_id,
                 idempotency_digest=None,
+                evidence=command.evidence,
                 receipt_expires_at=None,
                 scopes=command.scopes,
                 sealed_receipt=None,
@@ -9286,6 +9325,7 @@ class _AtomicRefreshStore:
                             token_expires_at=record.token_expires_at,
                             family_expires_at=record.family_expires_at,
                             scopes=record.scopes,
+                            evidence=record.evidence,
                         ),
                         sealed_receipt=record.sealed_receipt,
                     )
@@ -9302,6 +9342,7 @@ class _AtomicRefreshStore:
                     token_expires_at=record.token_expires_at,
                     family_expires_at=record.family_expires_at,
                     scopes=record.scopes,
+                    evidence=record.evidence,
                 )
             self.preparations.append(result)
             if self._expected_preparations:
@@ -9336,6 +9377,7 @@ class _AtomicRefreshStore:
                 or command.security_epoch != record.security_epoch
                 or command.family_expires_at != record.family_expires_at
                 or command.scopes != record.scopes
+                or command.evidence != record.evidence
             ):
                 return self._result(accounts_module.RefreshRotationStatus.INVALID)
             if command.security_epoch != self.accounts.security_epoch:
@@ -9364,6 +9406,7 @@ class _AtomicRefreshStore:
                 family_expires_at=record.family_expires_at,
                 family_id=record.family_id,
                 idempotency_digest=None,
+                evidence=record.evidence,
                 receipt_expires_at=None,
                 scopes=record.scopes,
                 sealed_receipt=None,
@@ -9657,6 +9700,10 @@ async def test_passkey_defensive_registration_authentication_and_audit_outcomes(
         def verify_registration(self, **kwargs: object) -> accounts_module.RegistrationVerification:
             return replace(super().verify_registration(**kwargs), attestation_format="packed")
 
+    class ChainAttestationVerifier(InvalidAttestationVerifier):
+        def verify_registration(self, **kwargs: object) -> accounts_module.RegistrationVerification:
+            return replace(super().verify_registration(**kwargs), attestation_chain_verified=True)
+
     class TrustedAttestation:
         def root_certificates(self) -> Mapping[str, tuple[bytes, ...]]:
             return {"packed": (b"trusted-root",)}
@@ -9667,6 +9714,10 @@ async def test_passkey_defensive_registration_authentication_and_audit_outcomes(
     class UnanchoredAttestation(TrustedAttestation):
         def root_certificates(self) -> Mapping[str, tuple[bytes, ...]]:
             return {}
+
+    class MismatchedAttestation(TrustedAttestation):
+        def root_certificates(self) -> Mapping[str, tuple[bytes, ...]]:
+            return {"tpm": (b"trusted-root",)}
 
     binding = b"session-binding"
     assert not passkeys_module._valid_attestation_roots({"none": (b"root",)})  # noqa: SLF001
@@ -9685,11 +9736,21 @@ async def test_passkey_defensive_registration_authentication_and_audit_outcomes(
     assert isinstance(
         await service.verify_registration("account-1", binding=binding, response="{}"), InvalidCredentials
     )
+    service = _passkey_service(verifier=InvalidAttestationVerifier(), attestation_trust=TrustedAttestation())
+    await service.begin_registration("account-1", user_name="person@example.com", binding=binding)
+    assert isinstance(
+        await service.verify_registration("account-1", binding=binding, response="{}"), InvalidCredentials
+    )
+    service = _passkey_service(verifier=ChainAttestationVerifier(), attestation_trust=MismatchedAttestation())
+    await service.begin_registration("account-1", user_name="person@example.com", binding=binding)
+    assert isinstance(
+        await service.verify_registration("account-1", binding=binding, response="{}"), InvalidCredentials
+    )
 
     trusted_store = _PasskeyStore()
     trusted_events = _SecurityEvents()
     service = _passkey_service(
-        store=trusted_store, verifier=InvalidAttestationVerifier(sign_count=1), attestation_trust=TrustedAttestation()
+        store=trusted_store, verifier=ChainAttestationVerifier(sign_count=1), attestation_trust=TrustedAttestation()
     )
     service.events = trusted_events
     await service.begin_registration("account-1", user_name="person@example.com", binding=binding)
@@ -9697,7 +9758,7 @@ async def test_passkey_defensive_registration_authentication_and_audit_outcomes(
     assert isinstance(trusted, accounts_module.PasskeyCredential)
     assert trusted.hardware_backed
     assert trusted_store.login_methods["pk_Y3JlZGVudGlhbC0x"].kind == "passkey"
-    cast("InvalidAttestationVerifier", service.verifier).sign_count = 2
+    cast("ChainAttestationVerifier", service.verifier).sign_count = 2
     await service.begin_authentication("account-1", binding=binding)
     trusted_evidence = await service.verify_authentication("account-1", binding=binding, response="{}")
     assert isinstance(trusted_evidence, AuthenticationEvidence)
@@ -9876,6 +9937,36 @@ async def test_refresh_first_rotation_and_same_key_duplicate_return_exact_sealed
     stored = repr(store.tokens)
     for plaintext in (initial.refresh_token, first.access_token, first.refresh_token):
         assert plaintext not in stored
+
+
+@pytest.mark.anyio
+async def test_refresh_rotation_preserves_original_passkey_assurance_and_time() -> None:
+    service, store, _accounts, account = _refresh_service()
+    authenticated_at = _JWT_NOW - timedelta(minutes=2)
+    evidence = AuthenticationEvidence(
+        mechanism="passkey",
+        slot="mfa",
+        authenticated_at=authenticated_at,
+        methods=frozenset({"passkey"}),
+        traits=frozenset({"phishing-resistant"}),
+        amr=("passkey",),
+    )
+    initial = await service.issue(account, evidence=evidence, now=_JWT_NOW)
+    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+
+    rotated = await service.rotate(
+        initial.refresh_token, idempotency_key=_refresh_idempotency_key(), now=_JWT_NOW + timedelta(minutes=1)
+    )
+
+    assert isinstance(rotated, accounts_module.RefreshTokenResponse)
+    records = tuple(store.tokens.values())
+    assert all(record.evidence == evidence for record in records)
+    signer = cast("_AccessSigner", service.access_tokens.signer)
+    assert [claims["auth_time"] for claims in signer.claims] == [
+        int(authenticated_at.timestamp()),
+        int(authenticated_at.timestamp()),
+    ]
+    assert all(claims["amr"] == ["passkey"] for claims in signer.claims)
 
 
 @pytest.mark.parametrize("outage", ["signer", "token_entropy", "receipt_entropy"])
