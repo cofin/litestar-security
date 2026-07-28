@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from litestar.connection import ASGIConnection
+    from litestar.types import Send
 
 __all__ = ("WebSocketCloseCodes", "WebSocketHandshake", "WebSocketSecurityConfig", "extract_websocket_handshake")
 
@@ -71,6 +72,20 @@ class WebSocketHandshake:
     uses_cookie_credentials: bool
     uses_authorization_header: bool
     ticket: str | None = field(repr=False)
+
+
+async def close_websocket(send: "Send", *, code: int, reason: str) -> None:
+    """Send one sanitized WebSocket close event.
+
+    Args:
+        send: The routed WebSocket send callable.
+        code: A validated WebSocket close code.
+        reason: A stable machine-readable reason.
+
+    Returns:
+        None.
+    """
+    await send({"type": "websocket.close", "code": code, "reason": reason})
 
 
 def extract_websocket_handshake(

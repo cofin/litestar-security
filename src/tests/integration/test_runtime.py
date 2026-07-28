@@ -12,8 +12,9 @@ import pytest
 from litestar import Controller, Litestar, Request, Response, Router, WebSocket, get, post, websocket
 from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
+from litestar.di import NamedDependency, Provide
 from litestar.enums import ScopeType
-from litestar.exceptions import NotAuthorizedException, ServiceUnavailableException
+from litestar.exceptions import NotAuthorizedException, ServiceUnavailableException, WebSocketDisconnect
 from litestar.middleware import DefineMiddleware
 from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
 from litestar.middleware.session.base import BaseSessionBackend, SessionMiddleware
@@ -63,6 +64,7 @@ from litestar_security.authentication import (
     AuthenticationMechanism,
     AuthenticationRegistry,
     InvalidCredentials,
+    NoCredentials,
     OwnedSessionBackend,
     PresentedCredential,
     SecurityMiddleware,
@@ -94,6 +96,7 @@ from litestar_security.providers.jwt import (
     PyJWTVerifier,
     SigningKey,
 )
+from litestar_security.websocket import WebSocketSecurityConfig
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -1133,7 +1136,15 @@ def test_real_native_session_backends_preserve_anonymous_state_and_resist_fixati
         ],
         openapi_config=None,
         stores={"sessions": MemoryStore()},
-        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, session_backend=backend))],
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(
+                    local_auth=local_auth,
+                    session_backend=backend,
+                    websocket=WebSocketSecurityConfig(allowed_origins=frozenset({"http://testserver.local"})),
+                )
+            )
+        ],
     )
 
     with TestClient(app) as client:
@@ -1154,7 +1165,7 @@ def test_real_native_session_backends_preserve_anonymous_state_and_resist_fixati
         assert any(header.startswith("binding=") for header in cookie_headers)
         assert sum(header.count(first_binding) for header in cookie_headers) == 1
         assert client.get("/me").json() == {"id": "account-1"}
-        with client.websocket_connect("/ws") as socket:
+        with client.websocket_connect("/ws", headers={"Origin": "http://testserver.local"}) as socket:
             assert socket.receive_json() == {"id": "account-1"}
         assert accounts.state.touches == 0
         current_time[0] += timedelta(minutes=5)
@@ -1398,6 +1409,130 @@ def test_authorization_guard_has_identical_http_and_websocket_decisions(connecti
     connection = connection_type(scope=scope, receive=receive, send=send)  # type: ignore[operator]
 
     requires_scope("reports:read")(connection, _RouteHandler())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("extraction", "outcome", "expected_code", "expected_reason"),
+    [
+        (NoCredentials(), NoCredentials(), 4401, "authentication_required"),
+        (InvalidCredentials(), NoCredentials(), 4401, "authentication_required"),
+        (PresentedCredential("credential"), VerificationUnavailable(), 1013, "verification_unavailable"),
+    ],
+)
+def test_websocket_authentication_denial_closes_before_accept_handler_and_di(
+    extraction: object, outcome: object, expected_code: int, expected_reason: str
+) -> None:
+    events: list[str] = []
+    slot = _Slot(extraction)
+    authenticator = _Authenticator(outcome)
+
+    async def provide_resource() -> str:
+        events.append("dependency")
+        return "resource"
+
+    @websocket("/ws")
+    async def handler(socket: WebSocket, resource: NamedDependency[str]) -> None:
+        events.append(resource)
+        await socket.accept()
+
+    app = Litestar(
+        route_handlers=[handler],
+        dependencies={"resource": Provide(provide_resource)},
+        openapi_config=None,
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(
+                    slots=(slot,),  # type: ignore[arg-type]
+                    mechanisms=(
+                        AuthenticationMechanism(
+                            authenticator=authenticator,  # type: ignore[arg-type]
+                            resolver=_Resolver(),
+                        ),
+                    ),
+                    websocket=WebSocketSecurityConfig(),
+                )
+            )
+        ],
+    )
+
+    with TestClient(app) as client, pytest.raises(WebSocketDisconnect) as captured, client.websocket_connect("/ws"):
+        pass
+
+    assert captured.value.code == expected_code
+    assert captured.value.detail == expected_reason
+    assert events == []
+
+
+def test_websocket_native_guard_denial_closes_before_handler_and_di() -> None:
+    events: list[str] = []
+
+    async def provide_resource() -> str:
+        events.append("dependency")
+        return "resource"
+
+    @websocket("/ws", guards=[requires_scope("reports:write")])
+    async def handler(socket: WebSocket, resource: NamedDependency[str]) -> None:
+        events.append(resource)
+        await socket.accept()
+
+    app = Litestar(
+        route_handlers=[handler],
+        dependencies={"resource": Provide(provide_resource)},
+        openapi_config=None,
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(
+                    slots=(_DependencySlot(),),
+                    mechanisms=(
+                        AuthenticationMechanism(
+                            authenticator=_DependencyAuthenticator(),
+                            resolver=_DependencyResolver(Principal(id="subject")),
+                        ),
+                    ),
+                    websocket=WebSocketSecurityConfig(),
+                )
+            )
+        ],
+    )
+
+    with TestClient(app) as client, pytest.raises(WebSocketDisconnect) as captured, client.websocket_connect("/ws"):
+        pass
+
+    assert captured.value.code == 4403
+    assert captured.value.detail == "authorization_denied"
+    assert events == []
+
+
+@pytest.mark.anyio
+async def test_public_websocket_and_http_install_the_same_anonymous_context_with_async_client() -> None:
+    observed: list[tuple[Principal[object], SecurityContext]] = []
+
+    @get("/http", opt=security(public()))
+    async def http_handler(request: Request) -> dict[str, bool]:
+        observed.append((request.user, request.auth))
+        return {"anonymous": not request.user.is_authenticated}
+
+    @websocket("/ws", opt=security(public()))
+    async def websocket_handler(socket: WebSocket) -> None:
+        observed.append((socket.user, socket.auth))
+        await socket.accept()
+        await socket.send_json({"anonymous": not socket.user.is_authenticated})
+        await socket.close()
+
+    app = Litestar(
+        route_handlers=[http_handler, websocket_handler],
+        plugins=[SecurityPlugin(SecurityConfig(websocket=WebSocketSecurityConfig()))],
+    )
+    async with AsyncTestClient(app=app) as client:
+        assert (await client.get("/http")).json() == {"anonymous": True}
+        session = await client.websocket_connect("/ws")
+        with session as socket:
+            assert socket.receive_json() == {"anonymous": True}
+
+    assert len(observed) == 2
+    assert all(
+        isinstance(principal, Principal) and isinstance(context, SecurityContext) for principal, context in observed
+    )
 
 
 @pytest.mark.parametrize(

@@ -288,7 +288,9 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 owned_session = OwnedSessionBackend(
                     middleware=DefineMiddleware(SessionMiddleware, backend=backend), backend=backend
                 )
-            self._runtime_config = SecurityRuntimeConfig(registry=registry, owned_session_backend=owned_session)
+            self._runtime_config = SecurityRuntimeConfig(
+                registry=registry, owned_session_backend=owned_session, websocket=self.config.websocket
+            )
             self._middleware = DefineMiddleware(SecurityMiddlewareWrapper, config=self._runtime_config)
         return self._runtime_config, cast("DefineMiddleware", self._middleware)
 

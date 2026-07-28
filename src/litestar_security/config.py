@@ -20,6 +20,7 @@ from litestar_security.authentication import (
     CredentialSlot,
     required,
 )
+from litestar_security.websocket import WebSocketSecurityConfig
 
 if TYPE_CHECKING:
     from litestar_security.accounts import (
@@ -303,6 +304,7 @@ class SecurityConfig(Generic[UserT]):
     api_key: "APIKeyConfig | None" = None
     iap: "GoogleIAPConfig[UserT] | None" = None
     service_token: "ServiceTokenConfig | None" = None
+    websocket: WebSocketSecurityConfig = field(default_factory=WebSocketSecurityConfig)
     authorization_resolver: AuthorizationResolver[UserT] | None = field(default=None, repr=False)
     jwks_providers: Sequence["JWKSProvider"] = ()
     jwks_warmup_failure: Literal["fail_startup", "lazy"] = "fail_startup"
