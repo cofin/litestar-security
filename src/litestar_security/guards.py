@@ -396,11 +396,20 @@ class _AssurancePredicate(AuthorizationPredicate):
             )
             if not relevant:
                 relevant = evidence
-            if any(
-                item.authenticated_at > now
-                or now - item.authenticated_at > self.requirement.max_age
-                or (item.expires_at is not None and item.expires_at <= now)
+            current = tuple(
+                item
                 for item in relevant
+                if item.authenticated_at <= now
+                and now - item.authenticated_at <= self.requirement.max_age
+                and (item.expires_at is None or item.expires_at > now)
+            )
+            current_methods = frozenset(method for item in current for method in item.methods)
+            current_traits = frozenset(trait for item in current for trait in item.traits)
+            if (
+                not current
+                or not self.requirement.methods.issubset(current_methods)
+                or not required_traits.issubset(current_traits)
+                or (purpose_trait is not None and purpose_trait not in current_traits)
             ):
                 return AuthorizationDecision(granted=False, code="assurance_too_old", path=("assurance",))
         return _ALLOWED

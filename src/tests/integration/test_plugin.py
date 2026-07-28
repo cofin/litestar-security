@@ -43,6 +43,7 @@ from litestar_security.accounts import (
     LocalAuth,
     LocalAuthSecrets,
     PasskeySummary,
+    PasswordReauthenticationProof,
     ProtectedSecret,
     PurposeTokenCodec,
     RecoveryCodes,
@@ -275,6 +276,14 @@ class _RouteMFAService:
             created_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
         )
 
+    async def activate_totp_with_recovery_codes(self, account_id: str, enrollment_id: str, code: str) -> object:
+        del account_id, enrollment_id, code
+        if self.failure == "activate":
+            return InvalidCredentials()
+        if self.failure == "recovery":
+            return VerificationUnavailable()
+        return RecoveryCodes(codes=("rc_v1_00000000000000000000000000000000",))
+
     async def generate_recovery_codes(self, account_id: str) -> object:
         del account_id
         if self.failure == "recovery":
@@ -371,8 +380,26 @@ class _RouteEpochs:
 class _RouteLocalAuth:
     failure = False
 
-    async def passkey_login(self, request: object, account_id: str, *, transport: str | None) -> object:
-        del request, transport
+    class PasswordReauthentication:
+        failure = False
+
+        async def verify(self, account_id: str, password: str) -> object:
+            del password
+            if self.failure:
+                return InvalidCredentials()
+            return PasswordReauthenticationProof(
+                account_id=account_id,
+                security_epoch=1,
+                authenticated_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
+                expires_at=datetime(2026, 7, 27, 0, 5, tzinfo=timezone.utc),
+            )
+
+    password_reauthentication = PasswordReauthentication()
+
+    async def passkey_login(
+        self, request: object, account_id: str, *, transport: str | None, evidence: object
+    ) -> object:
+        del request, transport, evidence
         if self.failure:
             return InvalidCredentials()
         return LocalAccountResponse(account_id=account_id)
@@ -396,12 +423,13 @@ def _route_options() -> WebAuthnOptions:
 
 
 def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_responses() -> None:
+    local_auth = _RouteLocalAuth()
     router = build_mfa_routes(
         step_up=cast("Any", _RouteStepUpService()),
         epochs=cast("Any", _RouteEpochs()),
         mfa=cast("Any", _RouteMFAService()),
         passkeys=cast("Any", _RoutePasskeyService()),
-        local_auth=cast("Any", _RouteLocalAuth()),
+        local_auth=cast("Any", local_auth),
     )
     app = Litestar(
         route_handlers=[router], openapi_config=None, plugins=[SecurityPlugin(_compiler_config(names=("a",)))]
@@ -409,6 +437,14 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
     authenticated = {"x-auth-a": "valid", "authorization": "Bearer transport"}
 
     with TestClient(app) as client:
+        local_auth.password_reauthentication.failure = True
+        assert (
+            client.post(
+                "/auth/step-up/settings", headers=authenticated, json={"method": "password", "credential": "bad"}
+            ).status_code
+            == 401
+        )
+        local_auth.password_reauthentication.failure = False
         assert (
             client.post(
                 "/auth/step-up/settings",
@@ -416,6 +452,20 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
                 json={"method": "totp", "credential": "123456", "methodId": "method-1"},
             ).status_code
             == HTTP_200_OK
+        )
+        assert (
+            client.post(
+                "/auth/step-up/totp-enroll", headers=authenticated, json={"method": "password", "credential": "secret"}
+            ).status_code
+            == HTTP_200_OK
+        )
+        assert (
+            client.post(
+                "/auth/step-up/totp-enroll",
+                headers=authenticated,
+                json={"method": "totp", "credential": "123456", "methodId": "method-1"},
+            ).status_code
+            == 401
         )
         assert (
             client.post(
@@ -457,13 +507,24 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
             ).status_code
             == HTTP_201_CREATED
         )
-        assert (
-            client.post("/auth/passkeys/authentication/options", json={"accountId": "user"}).status_code == HTTP_200_OK
-        )
+        authentication_options = client.post("/auth/passkeys/authentication/options", json={"accountId": "user"})
+        assert authentication_options.status_code == HTTP_200_OK
         assert (
             client.post(
                 "/auth/passkeys/authentication/verify",
                 json={"accountId": "user", "response": "{}", "transport": "tokens"},
+            ).status_code
+            == 401
+        )
+        assert (
+            client.post(
+                "/auth/passkeys/authentication/verify",
+                json={
+                    "accountId": "user",
+                    "response": "{}",
+                    "binding": authentication_options.json()["binding"],
+                    "transport": "tokens",
+                },
             ).status_code
             == HTTP_200_OK
         )
@@ -594,7 +655,8 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         passkeys.failure = "authentication"
         assert (
             client.post(
-                "/auth/passkeys/authentication/verify", json={"accountId": "user", "response": "{}"}
+                "/auth/passkeys/authentication/verify",
+                json={"accountId": "user", "response": "{}", "binding": "binding"},
             ).status_code
             == 401
         )
@@ -602,7 +664,8 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         local_auth.failure = True
         assert (
             client.post(
-                "/auth/passkeys/authentication/verify", json={"accountId": "user", "response": "{}"}
+                "/auth/passkeys/authentication/verify",
+                json={"accountId": "user", "response": "{}", "binding": "binding"},
             ).status_code
             == 401
         )
@@ -677,6 +740,7 @@ def _feature_test_ports() -> tuple[object, object, object, object]:
         create_totp_enrollment=none,
         get_totp_enrollment=none,
         activate_totp=none,
+        activate_totp_with_recovery_codes=none,
         get_totp_method=none,
         advance_totp_counter=false,
         replace_recovery_codes=none,
@@ -699,7 +763,8 @@ def test_plugin_mfa_route_registration_validates_ownership_and_is_idempotent() -
     SecurityPlugin(SecurityConfig(mfa=disabled))._configure_mfa_routes(app_config)  # noqa: SLF001
     assert app_config.route_handlers == []
 
-    enabled = MFAConfig(store=mfa_store, secret_protector=protector)
+    recovery_peppers = (accounts_module.RecoveryCodePepper("v1", b"p" * 32),)
+    enabled = MFAConfig(store=mfa_store, secret_protector=protector, recovery_peppers=recovery_peppers)
     with pytest.raises(ImproperlyConfiguredException, match="local authentication"):
         SecurityPlugin(SecurityConfig(mfa=enabled))._configure_mfa_routes(AppConfig())  # noqa: SLF001
 
@@ -712,13 +777,14 @@ def test_plugin_mfa_route_registration_validates_ownership_and_is_idempotent() -
             "create_totp_enrollment",
             "get_totp_enrollment",
             "activate_totp",
+            "activate_totp_with_recovery_codes",
             "get_totp_method",
             "advance_totp_counter",
             "replace_recovery_codes",
             "consume_recovery_code",
         )
     })
-    without_step = MFAConfig(store=no_step_store, secret_protector=protector)
+    without_step = MFAConfig(store=no_step_store, secret_protector=protector, recovery_peppers=recovery_peppers)
     with pytest.raises(ImproperlyConfiguredException, match="StepUpStore"):
         SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=without_step))._configure_mfa_routes(  # noqa: SLF001
             AppConfig()

@@ -125,7 +125,9 @@ MFA, passkeys, and step-up
 ``MFAConfig`` and ``PasskeyConfig`` add a second route bundle under the same
 ``/auth`` prefix. It contains TOTP enrollment and activation, recovery-code
 replacement, passkey registration and authentication, safe credential
-inventory and removal, and ``POST /auth/step-up/{purpose}``.
+inventory and removal, and ``POST /auth/step-up/{purpose}``. Generated MFA
+routes require an explicit recovery-code pepper ring; startup rejects a route
+configuration that could activate TOTP without producing a recovery path.
 
 Step-up grants are short-lived, single-use values returned in JSON. The stored
 record contains only a digest and is bound to the authenticated principal,
@@ -137,11 +139,23 @@ All secret- and challenge-bearing responses set ``Cache-Control: no-store`` and
 models without embedding sample TOTP secrets, recovery codes, browser
 credential responses, or public verification keys.
 
+Passkey authentication options include a reveal-once ``binding`` alongside the
+browser options. Return that value unchanged in the verification request; it is
+redacted from representations and binds the public ceremony without relying on
+an existing cookie or token.
+
 Passkey authentication establishes the local transport selected by the
 application profile. Session-capable profiles compile the unsafe verification
 route with CSRF enforcement; token-only profiles do not require a browser CSRF
-cookie. In a hybrid profile, clients select ``session`` or ``tokens`` in the
-verification body.
+cookie. A hybrid profile exposes distinct
+``/passkeys/authentication/session/verify`` and
+``/passkeys/authentication/tokens/verify`` routes so CSRF policy is fixed by the
+route rather than selected by an untrusted request field.
+
+The synchronous WebAuthn adapter runs through a bounded worker limiter and
+timeout. Attestation defaults to ``none``. Requesting direct attestation and
+assigning the ``hardware-backed`` trait requires an application-supplied
+``AttestationTrustMapper`` that approves the fully verified result.
 
 Set ``register_routes=False`` independently on either feature configuration to
 keep its service available for an application-owned controller without

@@ -7,11 +7,12 @@ from datetime import datetime, timedelta
 from enum import Enum
 from functools import partial
 from hashlib import sha256
+from math import isfinite
 from secrets import token_bytes
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol, TypeVar, cast, runtime_checkable
 from urllib.parse import urlsplit
 
-from anyio import CapacityLimiter, to_thread
+from anyio import CapacityLimiter, fail_after, to_thread
 from litestar.exceptions import ImproperlyConfiguredException
 from webauthn import (
     generate_authentication_options,
@@ -34,7 +35,14 @@ from webauthn.helpers.structs import (
 )
 
 from litestar_security.accounts._internal import aware_utc_time, new_event_id, strict_context_text, utc_now
-from litestar_security.accounts._operations import OUTCOME_CLONE_RISK, OUTCOME_REVOKED, PASSKEY_ASSERT, PASSKEY_REMOVE
+from litestar_security.accounts._operations import (
+    OUTCOME_CLONE_RISK,
+    OUTCOME_CREATED,
+    OUTCOME_REVOKED,
+    PASSKEY_ASSERT,
+    PASSKEY_REGISTER_VERIFY,
+    PASSKEY_REMOVE,
+)
 from litestar_security.accounts._records import (
     NoOpSecurityEventSink,
     RevokeLoginMethodResult,
@@ -47,6 +55,7 @@ from litestar_security.context import AuthenticationEvidence
 
 __all__ = (
     "AssertionRecordResult",
+    "AttestationTrustMapper",
     "AuthenticationVerification",
     "CloneRiskPolicy",
     "InvalidWebAuthnResponseError",
@@ -68,6 +77,7 @@ _MAXIMUM_CHALLENGE_TTL = timedelta(minutes=10)
 _DEFAULT_CHALLENGE_TTL = timedelta(minutes=5)
 _DEFAULT_ALGORITHMS = (-8, -7, -257)
 _SUPPORTED_ALGORITHMS = frozenset(_DEFAULT_ALGORITHMS)
+WorkerT = TypeVar("WorkerT")
 
 
 class UserVerification(str, Enum):
@@ -95,6 +105,25 @@ class CloneRiskPolicy(str, Enum):
 
 class InvalidWebAuthnResponseError(ValueError):
     """Sanitized dependency-boundary rejection."""
+
+
+@runtime_checkable
+class AttestationTrustMapper(Protocol):
+    """Explicit application policy for assigning hardware-backed trust."""
+
+    def trusted(self, verification: "RegistrationVerification") -> bool:
+        """Return whether a fully verified attestation is hardware-backed.
+
+        Implementations must derive trust only from verified attestation
+        metadata and their own explicit trust policy.
+
+        Args:
+            verification: The dependency-neutral verified registration result.
+
+        Returns:
+            Whether the credential may receive the ``hardware-backed`` trait.
+        """
+        ...  # pragma: no cover
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +215,7 @@ class PasskeyCredential:
     display_name: str | None = None
     suspect: bool = False
     last_used_at: datetime | None = None
+    hardware_backed: bool = False
 
     def __post_init__(self) -> None:
         """Validate strict ownership, flags, counters, and metadata."""
@@ -207,6 +237,7 @@ class PasskeyCredential:
             or self.backup_state.__class__ is not bool
             or self.user_verified.__class__ is not bool
             or self.suspect.__class__ is not bool
+            or self.hardware_backed.__class__ is not bool
             or (not self.backup_eligible and self.backup_state)
         ):
             message = "Passkey credential requires valid ownership, key, counter, and backup flags"
@@ -342,31 +373,102 @@ class WebAuthnVerifier(Protocol):
     """Synchronous cryptographic adapter used outside guards and request policy."""
 
     def registration_options(self, **kwargs: object) -> str:
-        """Build browser registration JSON."""
+        """Build browser registration JSON from project-validated arguments.
+
+        Args:
+            **kwargs: Exact relying-party, user, challenge, timeout, attestation,
+                verification, and algorithm values.
+
+        Returns:
+            Browser-compatible registration-options JSON.
+
+        Raises:
+            InvalidWebAuthnResponseError: If the adapter cannot build valid options.
+        """
         ...  # pragma: no cover
 
     def authentication_options(self, **kwargs: object) -> str:
-        """Build browser authentication JSON."""
+        """Build browser authentication JSON from validated arguments.
+
+        Args:
+            **kwargs: Exact relying-party, challenge, timeout, and verification values.
+
+        Returns:
+            Browser-compatible authentication-options JSON.
+
+        Raises:
+            InvalidWebAuthnResponseError: If the adapter cannot build valid options.
+        """
         ...  # pragma: no cover
 
     def registration_challenge(self, response: str) -> bytes:
-        """Extract the client challenge before one-time consumption."""
+        """Extract the client challenge before one-time consumption.
+
+        Args:
+            response: The browser credential response JSON.
+
+        Returns:
+            The decoded client challenge.
+
+        Raises:
+            InvalidWebAuthnResponseError: If the response cannot be parsed safely.
+        """
         ...  # pragma: no cover
 
     def authentication_challenge(self, response: str) -> bytes:
-        """Extract the assertion challenge before one-time consumption."""
+        """Extract the assertion challenge before one-time consumption.
+
+        Args:
+            response: The browser assertion response JSON.
+
+        Returns:
+            The decoded assertion challenge.
+
+        Raises:
+            InvalidWebAuthnResponseError: If the response cannot be parsed safely.
+        """
         ...  # pragma: no cover
 
     def credential_id(self, response: str) -> bytes:
-        """Extract an assertion credential identifier."""
+        """Extract an assertion credential identifier.
+
+        Args:
+            response: The browser assertion response JSON.
+
+        Returns:
+            The decoded opaque credential identifier.
+
+        Raises:
+            InvalidWebAuthnResponseError: If the response cannot be parsed safely.
+        """
         ...  # pragma: no cover
 
     def verify_registration(self, **kwargs: object) -> RegistrationVerification:
-        """Perform exact registration verification."""
+        """Perform exact registration verification.
+
+        Args:
+            **kwargs: The response and exact stored ceremony bindings.
+
+        Returns:
+            A dependency-neutral verified registration result.
+
+        Raises:
+            InvalidWebAuthnResponseError: If any cryptographic or binding check fails.
+        """
         ...  # pragma: no cover
 
     def verify_authentication(self, **kwargs: object) -> AuthenticationVerification:
-        """Perform exact assertion verification."""
+        """Perform exact assertion verification.
+
+        Args:
+            **kwargs: The response, credential, and exact stored ceremony bindings.
+
+        Returns:
+            A dependency-neutral verified assertion result.
+
+        Raises:
+            InvalidWebAuthnResponseError: If any cryptographic or binding check fails.
+        """
         ...  # pragma: no cover
 
 
@@ -384,7 +486,11 @@ class PyWebAuthnVerifier:
                 user_id=cast("str", kwargs["account_id"]).encode(),
                 challenge=cast("bytes", kwargs["challenge"]),
                 timeout=cast("int", kwargs["timeout_ms"]),
-                attestation=AttestationConveyancePreference.NONE,
+                attestation=(
+                    AttestationConveyancePreference.DIRECT
+                    if kwargs.get("attestation") is True
+                    else AttestationConveyancePreference.NONE
+                ),
                 authenticator_selection=AuthenticatorSelectionCriteria(
                     user_verification=UserVerificationRequirement(cast("str", kwargs["user_verification"]))
                 ),
@@ -500,6 +606,8 @@ class PasskeyService:
     clone_risk_policy: CloneRiskPolicy = CloneRiskPolicy.REJECT
     allow_insecure_localhost: bool = False
     worker_limiter: CapacityLimiter = field(default_factory=lambda: CapacityLimiter(32), repr=False, compare=False)
+    worker_timeout: float = 10.0
+    attestation_trust: AttestationTrustMapper | None = field(default=None, repr=False, compare=False)
     login_methods: LoginMethodStore | None = field(default=None, repr=False, compare=False)
     events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
     event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
@@ -510,6 +618,7 @@ class PasskeyService:
         challenge_store = cast("object", self.challenge_store)
         verifier = cast("object", self.verifier)
         worker_limiter = cast("object", self.worker_limiter)
+        attestation_trust = cast("object", self.attestation_trust)
         self.origins = tuple(self.origins)
         self.algorithms = tuple(self.algorithms)
         if not isinstance(store, PasskeyStore) or not isinstance(challenge_store, WebAuthnChallengeStore):
@@ -521,6 +630,9 @@ class PasskeyService:
         if not isinstance(worker_limiter, CapacityLimiter):
             message = "Passkey service worker limiter must be an AnyIO CapacityLimiter"
             raise ImproperlyConfiguredException(detail=message)
+        if attestation_trust is not None and not isinstance(attestation_trust, AttestationTrustMapper):
+            message = "Passkey attestation trust must implement AttestationTrustMapper"
+            raise ImproperlyConfiguredException(detail=message)
         if (
             not strict_context_text(self.rp_id)
             or not strict_context_text(self.rp_name)
@@ -531,6 +643,9 @@ class PasskeyService:
             or len(frozenset(self.algorithms)) != len(self.algorithms)
             or not all(algorithm in _SUPPORTED_ALGORITHMS for algorithm in self.algorithms)
             or self.allow_insecure_localhost.__class__ is not bool
+            or self.worker_timeout.__class__ not in {int, float}
+            or not isfinite(self.worker_timeout)
+            or self.worker_timeout <= 0
         ):
             message = "Passkey service requires exact relying-party, origin, algorithm, and expiry configuration"
             raise ImproperlyConfiguredException(detail=message)
@@ -560,6 +675,7 @@ class PasskeyService:
                 timeout_ms=int(self.challenge_ttl.total_seconds() * 1000),
                 user_verification=self.user_verification.value,
                 algorithms=self.algorithms,
+                attestation=self.attestation_trust is not None,
             ),
         )
 
@@ -579,21 +695,19 @@ class PasskeyService:
             ),
         )
 
-    async def verify_registration(
+    async def verify_registration(  # noqa: PLR0911 - each ceremony rejection has one explicit safe outcome
         self, account_id: str, *, binding: bytes, response: str
     ) -> PasskeyCredential | InvalidCredentials | VerificationUnavailable:
         """Consume, verify, and atomically register one credential."""
         try:
-            challenge = await to_thread.run_sync(
-                self.verifier.registration_challenge, response, limiter=self.worker_limiter
-            )
+            challenge = await self._run_worker(self.verifier.registration_challenge, response)
             now = aware_utc_time(self.clock())
             record = await self.challenge_store.consume(
                 sha256(challenge).digest(), binding_digest=_binding_digest(binding), purpose="registration", now=now
             )
             if record is None or record.account_id != account_id:
                 return InvalidCredentials()
-            verified = await to_thread.run_sync(
+            verified = await self._run_worker(
                 partial(
                     self.verifier.verify_registration,
                     response=response,
@@ -602,11 +716,16 @@ class PasskeyService:
                     origins=record.origins,
                     require_user_verification=record.user_verification is UserVerification.REQUIRED,
                     algorithms=record.algorithms,
-                ),
-                limiter=self.worker_limiter,
+                )
             )
-            if verified.attestation_format != "none" or (not verified.backup_eligible and verified.backup_state):
+            if not verified.backup_eligible and verified.backup_state:
                 return InvalidCredentials()
+            hardware_backed = False
+            if verified.attestation_format != "none":
+                mapper = self.attestation_trust
+                if mapper is None or await self._run_worker(mapper.trusted, verified) is not True:
+                    return InvalidCredentials()
+                hardware_backed = True
             credential = PasskeyCredential(
                 credential_id=verified.credential_id,
                 account_id=account_id,
@@ -618,6 +737,7 @@ class PasskeyService:
                 aaguid=verified.aaguid,
                 attestation_format=verified.attestation_format,
                 created_at=now,
+                hardware_backed=hardware_backed,
             )
             if not await self.store.add_credential(credential):
                 return InvalidCredentials()
@@ -625,6 +745,9 @@ class PasskeyService:
             return InvalidCredentials()
         except Exception:  # noqa: BLE001 - sanitize application stores and dependency failures
             return VerificationUnavailable()
+        await self._emit_event(
+            operation=PASSKEY_REGISTER_VERIFY, outcome=OUTCOME_CREATED, account_id=account_id, occurred_at=now
+        )
         return credential
 
     async def verify_authentication(  # noqa: PLR0911 - each protocol or persistence rejection has a distinct safe outcome
@@ -632,10 +755,8 @@ class PasskeyService:
     ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
         """Consume, verify, and atomically record one assertion."""
         try:
-            challenge = await to_thread.run_sync(
-                self.verifier.authentication_challenge, response, limiter=self.worker_limiter
-            )
-            credential_id = await to_thread.run_sync(self.verifier.credential_id, response, limiter=self.worker_limiter)
+            challenge = await self._run_worker(self.verifier.authentication_challenge, response)
+            credential_id = await self._run_worker(self.verifier.credential_id, response)
             now = aware_utc_time(self.clock())
             record = await self.challenge_store.consume(
                 sha256(challenge).digest(), binding_digest=_binding_digest(binding), purpose="authentication", now=now
@@ -648,7 +769,7 @@ class PasskeyService:
                 or credential.account_id != account_id
             ):
                 return InvalidCredentials()
-            verified = await to_thread.run_sync(
+            verified = await self._run_worker(
                 partial(
                     self.verifier.verify_authentication,
                     response=response,
@@ -657,8 +778,7 @@ class PasskeyService:
                     origins=record.origins,
                     public_key=credential.public_key,
                     require_user_verification=record.user_verification is UserVerification.REQUIRED,
-                ),
-                limiter=self.worker_limiter,
+                )
             )
             if (
                 verified.credential_id != credential.credential_id
@@ -693,6 +813,8 @@ class PasskeyService:
         traits = {"phishing-resistant"}
         if verified.user_verified and record.user_verification is UserVerification.REQUIRED:
             traits.add("user-verified")
+        if credential.hardware_backed:
+            traits.add("hardware-backed")
         return AuthenticationEvidence(
             mechanism="passkey",
             slot="mfa",
@@ -758,6 +880,10 @@ class PasskeyService:
         except Exception:  # noqa: BLE001 - observational audit failure cannot change a settled decision
             return
 
+    async def _run_worker(self, function: Callable[..., WorkerT], *args: object) -> WorkerT:
+        with fail_after(self.worker_timeout):
+            return await to_thread.run_sync(function, *args, abandon_on_cancel=True, limiter=self.worker_limiter)
+
     async def _begin(
         self, *, account_id: str, binding: bytes, purpose: str, options: Callable[[bytes], str]
     ) -> WebAuthnOptions | VerificationUnavailable:
@@ -768,7 +894,7 @@ class PasskeyService:
             if not isinstance(challenge_value, bytes) or len(challenge_value) < _CHALLENGE_BYTES:
                 return VerificationUnavailable()
             expires_at = now + self.challenge_ttl
-            json_options = await to_thread.run_sync(options, challenge, limiter=self.worker_limiter)
+            json_options = await self._run_worker(options, challenge)
             record = WebAuthnChallenge(
                 challenge_digest=sha256(challenge).digest(),
                 binding_digest=_binding_digest(binding),

@@ -926,6 +926,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "AssertionRecordResult",
         "AssuranceRequirement",
         "AssuranceTrait",
+        "AttestationTrustMapper",
         "AuthenticationVerification",
         "CloneRiskPolicy",
         "ConsumeResult",

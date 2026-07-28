@@ -449,9 +449,10 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                     else None
                 ),
                 rate_limits=local_auth.rate_limits,
-                client_key=local_auth.client_key,
+                client_key=local_auth.services.client_key_for,
                 local_auth=local_auth.services,
                 session_capable=local_auth.session_auth is not None,
+                token_capable=local_auth.services.refresh_tokens is not None,
                 route_prefix=prefixes.pop(),
             )
             route_handlers = (router,)

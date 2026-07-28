@@ -42,6 +42,7 @@ from litestar_security.accounts._mfa_schemas import (
 )
 from litestar_security.accounts._passkeys import (
     AssertionRecordResult,
+    AttestationTrustMapper,
     AuthenticationVerification,
     CloneRiskPolicy,
     InvalidWebAuthnResponseError,
@@ -196,6 +197,7 @@ __all__ = (
     "AssertionRecordResult",
     "AssuranceRequirement",
     "AssuranceTrait",
+    "AttestationTrustMapper",
     "AuthenticationVerification",
     "CloneRiskPolicy",
     "ConsumeResult",

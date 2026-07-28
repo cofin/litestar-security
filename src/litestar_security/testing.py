@@ -132,6 +132,33 @@ class InMemoryMFAStore:
             self.methods[method.method_id] = method
             return method
 
+    async def activate_totp_with_recovery_codes(
+        self,
+        account_id: str,
+        enrollment_id: str,
+        *,
+        accepted_counter: int,
+        codes: tuple[RecoveryCodeDigest, ...],
+        now: datetime,
+    ) -> TOTPMethod | None:
+        """Atomically activate one enrollment and replace recovery codes."""
+        async with self._lock:
+            enrollment = self.enrollments.get(enrollment_id)
+            if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
+                return None
+            method = TOTPMethod(
+                method_id=enrollment.method_id,
+                account_id=account_id,
+                protected_secret=enrollment.protected_secret,
+                policy=enrollment.policy,
+                last_accepted_counter=accepted_counter,
+                created_at=now,
+            )
+            del self.enrollments[enrollment_id]
+            self.methods[method.method_id] = method
+            self.recovery_codes[account_id] = tuple(codes)
+            return method
+
     async def get_totp_method(self, account_id: str, method_id: str) -> TOTPMethod | None:
         """Load an owner-checked active method.
 

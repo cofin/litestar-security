@@ -6321,15 +6321,21 @@ async def test_native_session_establish_authenticate_touch_and_rebind_are_fixati
     assert session == {
         "cart": "anonymous",
         "_litestar_security": {
-            "version": 1,
+            "version": 2,
             "session_id": authentication.session_id,
             "binding_id": authentication.binding_id,
             "account_id": "account-1",
             "security_epoch": 1,
             "authenticated_at": _JWT_NOW.isoformat(),
             "expires_at": (_JWT_NOW + timedelta(days=14)).isoformat(),
+            "methods": ["password"],
+            "traits": ["session"],
+            "amr": ["pwd"],
         },
     }
+
+    with pytest.raises(ValueError, match="assurance"):
+        replace(authentication, methods=cast("Any", {1}))
     token = _queued_binding_token(connection)
     assert token.startswith(f"{authentication.binding_id}.")
     assert token not in repr(store.commands)
@@ -6805,7 +6811,7 @@ async def test_native_session_rejects_canonical_length_malformed_binding_and_pay
     else:
         payload = cast("dict[str, object]", session["_litestar_security"])
         if mutation in {"version", "boolean_version"}:
-            payload["version"] = True if mutation == "boolean_version" else 2
+            payload["version"] = True if mutation == "boolean_version" else 3
         else:
             payload["authenticated_at"] = "not-a-timestamp"
     connection = _native_session_connection(session, binding_token=token)
@@ -7210,6 +7216,34 @@ class _MFAStore:
                 created_at=now,
             )
             self.methods[method.method_id] = method
+            return method
+
+    async def activate_totp_with_recovery_codes(
+        self,
+        account_id: str,
+        enrollment_id: str,
+        *,
+        accepted_counter: int,
+        codes: tuple[accounts_module.RecoveryCodeDigest, ...],
+        now: datetime,
+    ) -> accounts_module.TOTPMethod | None:
+        async with self.lock:
+            enrollment = self.enrollments.get(enrollment_id)
+            if self.fail:
+                raise OSError
+            if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
+                return None
+            method = accounts_module.TOTPMethod(
+                method_id=enrollment.method_id,
+                account_id=account_id,
+                protected_secret=enrollment.protected_secret,
+                policy=enrollment.policy,
+                last_accepted_counter=accepted_counter,
+                created_at=now,
+            )
+            del self.enrollments[enrollment_id]
+            self.methods[method.method_id] = method
+            self.recovery_codes = {code.digest: code for code in codes}
             return method
 
     async def get_totp_method(self, account_id: str, method_id: str) -> accounts_module.TOTPMethod | None:
@@ -7746,12 +7780,14 @@ class _WebAuthnVerifier:
         )
 
 
-def _passkey_service(
+def _passkey_service(  # noqa: PLR0913 - explicit service seam builder for ceremony matrices
     *,
     challenge_store: _ChallengeStore | None = None,
     store: _PasskeyStore | None = None,
     verifier: _WebAuthnVerifier | None = None,
     now: datetime = _JWT_NOW,
+    attestation_trust: object | None = None,
+    worker_timeout: float = 10.0,
 ) -> accounts_module.PasskeyService:
     return accounts_module.PasskeyService(
         store=store or _PasskeyStore(),
@@ -7763,6 +7799,8 @@ def _passkey_service(
         user_verification=accounts_module.UserVerification.REQUIRED,
         clock=lambda: now,
         challenge_entropy=lambda length: b"c" * length,
+        attestation_trust=cast("Any", attestation_trust),
+        worker_timeout=worker_timeout,
     )
 
 
@@ -8425,6 +8463,8 @@ def test_passkey_values_and_dependency_configuration_reject_invalid_shapes() -> 
         ({"challenge_store": object()}, "Store"),
         ({"verifier": object()}, "verifier"),
         ({"worker_limiter": object()}, "limiter"),
+        ({"worker_timeout": 0}, "configuration"),
+        ({"attestation_trust": object()}, "attestation"),
         ({"origins": ("https://user@example.com",)}, "HTTPS"),
         ({"origins": ("https://example.com/path",)}, "HTTPS"),
         ({"origins": ("https://example.com:bad",)}, "HTTPS"),
@@ -8440,6 +8480,17 @@ def test_passkey_values_and_dependency_configuration_reject_invalid_shapes() -> 
     }
     localhost = accounts_module.PasskeyService(**localhost_config)  # type: ignore[arg-type]
     assert localhost.allow_insecure_localhost is True
+
+
+@pytest.mark.anyio
+async def test_passkey_worker_timeout_cancels_the_request_boundary() -> None:
+    class SlowVerifier(_WebAuthnVerifier):
+        def authentication_options(self, **kwargs: object) -> str:
+            sleep(0.05)
+            return super().authentication_options(**kwargs)
+
+    service = _passkey_service(verifier=SlowVerifier(), worker_timeout=0.001)
+    assert isinstance(await service.begin_authentication("account-1", binding=b"binding"), VerificationUnavailable)
 
 
 @pytest.mark.anyio
@@ -8502,8 +8553,8 @@ async def test_local_auth_passkey_login_selects_only_configured_transport() -> N
             expires_at=_JWT_NOW + timedelta(hours=1),
         )
 
-        async def establish(self, request: object, projected: object) -> object:
-            del request, projected
+        async def establish(self, request: object, projected: object, *, evidence: object) -> object:
+            del request, projected, evidence
             return self.result
 
     class Tokens:
@@ -8516,6 +8567,13 @@ async def test_local_auth_passkey_login_selects_only_configured_transport() -> N
     accounts = Accounts()
     session = Session()
     tokens = Tokens()
+    evidence = AuthenticationEvidence(
+        mechanism="passkey",
+        slot="mfa",
+        authenticated_at=_JWT_NOW,
+        methods=frozenset({"passkey"}),
+        traits=frozenset({"phishing-resistant"}),
+    )
 
     def services(
         *, session_auth: object | None, refresh_tokens: object | None
@@ -8532,30 +8590,30 @@ async def test_local_auth_passkey_login_selects_only_configured_transport() -> N
         )
 
     result = await services(session_auth=session, refresh_tokens=None).passkey_login(
-        cast("Any", object()), "account-1", transport=None
+        cast("Any", object()), "account-1", transport=None, evidence=evidence
     )
     assert isinstance(result, accounts_module.LocalAccountResponse)
     assert (
         await services(session_auth=None, refresh_tokens=tokens).passkey_login(
-            cast("Any", object()), "account-1", transport=None
+            cast("Any", object()), "account-1", transport=None, evidence=evidence
         )
         is tokens.result
     )
     assert isinstance(
         await services(session_auth=session, refresh_tokens=tokens).passkey_login(
-            cast("Any", object()), "account-1", transport=None
+            cast("Any", object()), "account-1", transport=None, evidence=evidence
         ),
         InvalidCredentials,
     )
     assert isinstance(
         await services(session_auth=None, refresh_tokens=None).passkey_login(
-            cast("Any", object()), "account-1", transport="session"
+            cast("Any", object()), "account-1", transport="session", evidence=evidence
         ),
         InvalidCredentials,
     )
     assert isinstance(
         await services(session_auth=None, refresh_tokens=None).passkey_login(
-            cast("Any", object()), "account-1", transport="tokens"
+            cast("Any", object()), "account-1", transport="tokens", evidence=evidence
         ),
         InvalidCredentials,
     )
@@ -8563,7 +8621,7 @@ async def test_local_auth_passkey_login_selects_only_configured_transport() -> N
     session.result = VerificationUnavailable()
     assert isinstance(
         await services(session_auth=session, refresh_tokens=None).passkey_login(
-            cast("Any", object()), "account-1", transport="session"
+            cast("Any", object()), "account-1", transport="session", evidence=evidence
         ),
         VerificationUnavailable,
     )
@@ -8571,14 +8629,14 @@ async def test_local_auth_passkey_login_selects_only_configured_transport() -> N
     accounts.value = None
     assert isinstance(
         await services(session_auth=session, refresh_tokens=None).passkey_login(
-            cast("Any", object()), "account-1", transport="session"
+            cast("Any", object()), "account-1", transport="session", evidence=evidence
         ),
         InvalidCredentials,
     )
     accounts.value = OSError()
     assert isinstance(
         await services(session_auth=session, refresh_tokens=None).passkey_login(
-            cast("Any", object()), "account-1", transport="session"
+            cast("Any", object()), "account-1", transport="session", evidence=evidence
         ),
         VerificationUnavailable,
     )
@@ -8594,6 +8652,13 @@ async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
     )
     mfa_controllers_module.build_mfa_routes(
         step_up=cast("Any", object()), epochs=cast("Any", object()), passkeys=cast("Any", object())
+    )
+    mfa_controllers_module.build_mfa_routes(
+        step_up=cast("Any", object()),
+        epochs=cast("Any", object()),
+        passkeys=cast("Any", object()),
+        session_capable=True,
+        token_capable=True,
     )
     assert mfa_controllers_module._error(accounts_module.RateLimited(retry_after=3)).status_code == 429  # noqa: SLF001
     assert mfa_controllers_module._error(accounts_module.RateLimited()).status_code == 429  # noqa: SLF001
@@ -8652,6 +8717,13 @@ async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
             return accounts_module.RateLimited()
 
     services = replace(services, rate_limits=cast("Any", Guard()), client_key=cast("Any", lambda _request: "client"))
+    assert isinstance(
+        await mfa_controllers_module._check_rate_limit(  # noqa: SLF001
+            services, request, "operation", "account-1"
+        ),
+        accounts_module.RateLimited,
+    )
+    services = replace(services, client_key=cast("Any", lambda _request: 1 / 0))
     assert isinstance(
         await mfa_controllers_module._check_rate_limit(  # noqa: SLF001
             services, request, "operation", "account-1"
@@ -8751,10 +8823,13 @@ async def test_testing_stores_cover_expiry_update_and_clone_risk_outcomes() -> N
     await store.create_totp_enrollment(pending)
     assert await store.get_totp_enrollment("e1") is pending
     assert await store.activate_totp("a1", "e1", accepted_counter=1, now=now) is None
+    assert await store.activate_totp_with_recovery_codes("a1", "e1", accepted_counter=1, codes=(), now=now) is None
     active = replace(pending, enrollment_id="e2", expires_at=now + timedelta(minutes=1))
     await store.create_totp_enrollment(active)
-    activated = await store.activate_totp("a1", "e2", accepted_counter=1, now=now)
+    digest = accounts_module.RecoveryCodeDigest("a1", "v1", b"d" * 32)
+    activated = await store.activate_totp_with_recovery_codes("a1", "e2", accepted_counter=1, codes=(digest,), now=now)
     assert activated is not None
+    assert store.recovery_codes["a1"] == (digest,)
     assert await store.advance_totp_counter("m1", accepted_counter=2, now=now)
 
     credential = _stored_passkey()
@@ -8817,6 +8892,9 @@ def test_mfa_and_passkey_feature_configs_build_services_and_validate_route_contr
     assert isinstance(passkeys.step_up_service, accounts_module.StepUpService)
     assert passkeys.service.login_methods is login_methods
     assert passkeys.service.events is events
+
+    with pytest.raises(ImproperlyConfiguredException, match="recovery-code pepper"):
+        MFAConfig(store=combined, secret_protector=_MFAProtector())
 
     for config in (
         lambda: MFAConfig(_MFAStore(), _MFAProtector(), route_prefix="relative"),
@@ -9371,6 +9449,56 @@ async def test_mfa_atomic_rejection_and_step_up_storage_failure_are_sanitized() 
         VerificationUnavailable,
     )
 
+    atomic_store = _MFAStore()
+    atomic = _mfa_service(atomic_store, _MFAProtector(), now=now)
+    atomic.recovery_peppers = (accounts_module.RecoveryCodePepper("v1", b"p" * 32),)
+    atomic.recovery_code_count = 1
+    atomic.recovery_entropy = lambda length: b"r" * length
+    pending = await atomic.begin_totp_enrollment("account-1", label="person@example.com")
+    assert isinstance(pending, accounts_module.TOTPEnrollment)
+    assert isinstance(
+        await atomic.activate_totp_with_recovery_codes("account-1", pending.enrollment_id, "000000"), InvalidCredentials
+    )
+    atomic_store.fail = True
+    assert isinstance(
+        await atomic.activate_totp_with_recovery_codes(
+            "account-1", pending.enrollment_id, pyotp.TOTP(_MFA_ENCODED_SEED).at(now)
+        ),
+        VerificationUnavailable,
+    )
+    atomic_store.fail = False
+    activated = await atomic.activate_totp_with_recovery_codes(
+        "account-1", pending.enrollment_id, pyotp.TOTP(_MFA_ENCODED_SEED).at(now)
+    )
+    assert isinstance(activated, accounts_module.RecoveryCodes)
+    assert atomic_store.methods
+    assert atomic_store.recovery_codes
+    assert isinstance(
+        await atomic.activate_totp_with_recovery_codes(
+            "account-1", pending.enrollment_id, pyotp.TOTP(_MFA_ENCODED_SEED).at(now)
+        ),
+        InvalidCredentials,
+    )
+
+    class RejectActivationStore(_MFAStore):
+        async def activate_totp_with_recovery_codes(
+            self, *args: object, **kwargs: object
+        ) -> accounts_module.TOTPMethod | None:
+            del args, kwargs
+            return None
+
+    rejecting = _mfa_service(RejectActivationStore(), _MFAProtector(), now=now)
+    rejecting.recovery_peppers = atomic.recovery_peppers
+    rejecting.recovery_code_count = 1
+    rejected_pending = await rejecting.begin_totp_enrollment("account-1", label="person@example.com")
+    assert isinstance(rejected_pending, accounts_module.TOTPEnrollment)
+    assert isinstance(
+        await rejecting.activate_totp_with_recovery_codes(
+            "account-1", rejected_pending.enrollment_id, pyotp.TOTP(_MFA_ENCODED_SEED).at(now)
+        ),
+        InvalidCredentials,
+    )
+
 
 @pytest.mark.anyio
 async def test_passkey_defensive_registration_authentication_and_audit_outcomes() -> None:
@@ -9378,12 +9506,35 @@ async def test_passkey_defensive_registration_authentication_and_audit_outcomes(
         def verify_registration(self, **kwargs: object) -> accounts_module.RegistrationVerification:
             return replace(super().verify_registration(**kwargs), attestation_format="packed")
 
+    class TrustedAttestation:
+        def trusted(self, verification: accounts_module.RegistrationVerification) -> bool:
+            return verification.attestation_format == "packed"
+
     binding = b"session-binding"
     service = _passkey_service(verifier=InvalidAttestationVerifier())
     await service.begin_registration("account-1", user_name="person@example.com", binding=binding)
     assert isinstance(
         await service.verify_registration("account-1", binding=binding, response="{}"), InvalidCredentials
     )
+    service = _passkey_service(verifier=_WebAuthnVerifier(backup_state=True))
+    await service.begin_registration("account-1", user_name="person@example.com", binding=binding)
+    assert isinstance(
+        await service.verify_registration("account-1", binding=binding, response="{}"), InvalidCredentials
+    )
+
+    trusted_store = _PasskeyStore()
+    service = _passkey_service(
+        store=trusted_store, verifier=InvalidAttestationVerifier(sign_count=1), attestation_trust=TrustedAttestation()
+    )
+    await service.begin_registration("account-1", user_name="person@example.com", binding=binding)
+    trusted = await service.verify_registration("account-1", binding=binding, response="{}")
+    assert isinstance(trusted, accounts_module.PasskeyCredential)
+    assert trusted.hardware_backed
+    cast("InvalidAttestationVerifier", service.verifier).sign_count = 2
+    await service.begin_authentication("account-1", binding=binding)
+    trusted_evidence = await service.verify_authentication("account-1", binding=binding, response="{}")
+    assert isinstance(trusted_evidence, AuthenticationEvidence)
+    assert "hardware-backed" in trusted_evidence.traits
 
     store = _PasskeyStore()
     store.credentials[b"credential-1"] = _stored_passkey()

@@ -23,7 +23,10 @@ from litestar_security.accounts._internal import (
 from litestar_security.accounts._operations import (
     MFA_RECOVERY_CONSUME,
     MFA_RECOVERY_REPLACE,
+    MFA_TOTP_ENROLL,
     MFA_TOTP_REMOVE,
+    MFA_TOTP_VERIFY,
+    OUTCOME_CREATED,
     OUTCOME_REVOKED,
     OUTCOME_UPDATED,
     OUTCOME_VERIFIED,
@@ -398,6 +401,32 @@ class MFAStore(Protocol):
         """
         ...  # pragma: no cover
 
+    async def activate_totp_with_recovery_codes(
+        self,
+        account_id: str,
+        enrollment_id: str,
+        *,
+        accepted_counter: int,
+        codes: tuple[RecoveryCodeDigest, ...],
+        now: datetime,
+    ) -> TOTPMethod | None:
+        """Atomically activate TOTP and replace the complete recovery-code set.
+
+        Implementations must consume the enrollment, create the active method,
+        and replace recovery codes in one commit or perform none of them.
+
+        Args:
+            account_id: The owning account.
+            enrollment_id: The pending enrollment to consume.
+            accepted_counter: The counter verified during activation.
+            codes: The complete recovery-code replacement set.
+            now: The commit timestamp.
+
+        Returns:
+            The active method only for the single winning atomic commit.
+        """
+        ...  # pragma: no cover
+
     async def get_totp_method(self, account_id: str, method_id: str) -> TOTPMethod | None:
         """Load an active method only for its owner.
 
@@ -526,6 +555,9 @@ class MFAService:
             await self.store.create_totp_enrollment(pending)
         except Exception:  # noqa: BLE001 - sanitize application protector/store and entropy failures
             return VerificationUnavailable()
+        await self._emit_event(
+            operation=MFA_TOTP_ENROLL, outcome=OUTCOME_CREATED, account_id=account_id, occurred_at=now
+        )
         return TOTPEnrollment(
             enrollment_id=enrollment_id, method_id=method_id, provisioning_uri=uri, expires_at=pending.expires_at
         )
@@ -556,6 +588,55 @@ class MFAService:
         except Exception:  # noqa: BLE001 - sanitize application protector/store failures
             return VerificationUnavailable()
         return method if method is not None else InvalidCredentials()
+
+    async def activate_totp_with_recovery_codes(
+        self, account_id: str, enrollment_id: str, code: str
+    ) -> RecoveryCodes | InvalidCredentials | VerificationUnavailable:
+        """Activate one enrollment and replace recovery codes in one atomic commit.
+
+        Args:
+            account_id: The expected enrollment owner.
+            enrollment_id: The pending enrollment.
+            code: The presented TOTP value.
+
+        Returns:
+            Reveal-once recovery codes, generic invalid credentials, or an
+            operational failure.
+        """
+        try:
+            now = aware_utc_time(self.clock())
+            enrollment = await self.store.get_totp_enrollment(enrollment_id)
+            if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
+                return InvalidCredentials()
+            secret = await self._recover_secret(account_id, enrollment.method_id, enrollment.protected_secret)
+            counter = _accepted_counter(secret, code, now, enrollment.policy)
+            if counter is None:
+                return InvalidCredentials()
+            peppers = _validate_recovery_configuration(self.recovery_peppers, self.recovery_code_count)
+            active = peppers[0]
+            codes = _generate_recovery_codes(active.key_version, self.recovery_code_count, self.recovery_entropy)
+            digests = tuple(
+                RecoveryCodeDigest(
+                    account_id=account_id,
+                    pepper_version=active.key_version,
+                    digest=_recovery_digest(active, recovery_code),
+                )
+                for recovery_code in codes
+            )
+            method = await self.store.activate_totp_with_recovery_codes(
+                account_id, enrollment_id, accepted_counter=counter, codes=digests, now=now
+            )
+        except Exception:  # noqa: BLE001 - sanitize application protector, entropy, and store failures
+            return VerificationUnavailable()
+        if method is None:
+            return InvalidCredentials()
+        await self._emit_event(
+            operation=MFA_TOTP_VERIFY, outcome=OUTCOME_VERIFIED, account_id=account_id, occurred_at=now
+        )
+        await self._emit_event(
+            operation=MFA_RECOVERY_REPLACE, outcome=OUTCOME_CREATED, account_id=account_id, occurred_at=now
+        )
+        return RecoveryCodes(codes=codes)
 
     async def verify_totp(
         self, account_id: str, method_id: str, code: str

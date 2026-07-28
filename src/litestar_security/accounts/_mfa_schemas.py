@@ -131,12 +131,14 @@ class PasskeyVerifyRequest(msgspec.Struct, frozen=True, rename="camel", forbid_u
 
     account_id: str
     response: str
+    binding: str | None = None
     transport: str | None = None
 
     def __repr__(self) -> str:
         """Redact the browser credential response."""
         return (
-            f"{type(self).__name__}(account_id={self.account_id!r}, response=<redacted>, transport={self.transport!r})"
+            f"{type(self).__name__}(account_id={self.account_id!r}, response=<redacted>, "
+            f"binding=<redacted>, transport={self.transport!r})"
         )
 
 
@@ -145,10 +147,11 @@ class PasskeyOptionsResponse(msgspec.Struct, frozen=True, rename="camel", forbid
 
     options: str
     expires_at: datetime
+    binding: str | None = None
 
     def __repr__(self) -> str:
         """Redact challenge-bearing WebAuthn options."""
-        return f"{type(self).__name__}(options=<redacted>, expires_at={self.expires_at!r})"
+        return f"{type(self).__name__}(options=<redacted>, expires_at={self.expires_at!r}, binding=<redacted>)"
 
 
 class PasskeySummaryResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):

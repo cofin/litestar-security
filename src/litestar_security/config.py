@@ -16,7 +16,13 @@ from litestar.middleware.session.base import BaseSessionBackend
 from litestar_security.authentication import AuthenticationMechanism, AuthenticationPolicy, CredentialSlot, required
 
 if TYPE_CHECKING:
-    from litestar_security.accounts import LoginMethodStore, RecoveryCodePepper, SecurityEventSink, TOTPPolicy
+    from litestar_security.accounts import (
+        AttestationTrustMapper,
+        LoginMethodStore,
+        RecoveryCodePepper,
+        SecurityEventSink,
+        TOTPPolicy,
+    )
     from litestar_security.accounts._profiles import LocalAuthConfig
     from litestar_security.providers.jwks import JWKSProvider
     from litestar_security.providers.jwt import LocalJWKSConfig
@@ -182,6 +188,9 @@ class MFAConfig:
         if register_routes_value.__class__ is not bool:
             msg = "MFA route registration must be boolean"
             raise ImproperlyConfiguredException(detail=msg)
+        if self.register_routes and not self.recovery_peppers:
+            msg = "Generated MFA routes require at least one recovery-code pepper"
+            raise ImproperlyConfiguredException(detail=msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +205,8 @@ class PasskeyConfig:
     algorithms: Sequence[int] = (-8, -7, -257)
     challenge_ttl: timedelta = timedelta(minutes=5)
     allow_insecure_localhost: bool = False
+    worker_timeout: float = 10.0
+    attestation_trust: "AttestationTrustMapper | None" = field(default=None, repr=False)
     login_methods: "LoginMethodStore | None" = field(default=None, repr=False)
     events: "SecurityEventSink | None" = field(default=None, repr=False)
     step_up_store: object | None = field(default=None, repr=False)
@@ -223,6 +234,8 @@ class PasskeyConfig:
             "algorithms": self.algorithms,
             "challenge_ttl": self.challenge_ttl,
             "allow_insecure_localhost": self.allow_insecure_localhost,
+            "worker_timeout": self.worker_timeout,
+            "attestation_trust": self.attestation_trust,
             "login_methods": self.login_methods,
         }
         if self.events is not None:
