@@ -31,6 +31,7 @@ from litestar_security.context import (
     LitestarSessionHandle,
     NullSessionHandle,
     Principal,
+    ResourcePermission,
     SecurityContext,
     SessionHandle,
     SessionPersistenceUnavailableError,
@@ -117,6 +118,7 @@ _PUBLIC_API = (
     "AuthenticationRegistry",
     "AuthorizationDecision",
     "AuthorizationPredicate",
+    "AuthorizationResolver",
     "AuthorizationSnapshot",
     "CredentialExtraction",
     "CredentialRestrictions",
@@ -142,6 +144,7 @@ _PUBLIC_API = (
     "Principal",
     "PrincipalDependency",
     "RequestAuthenticator",
+    "ResourcePermission",
     "SecurityConfig",
     "SecurityContext",
     "SecurityContextDependency",
@@ -160,6 +163,7 @@ _PUBLIC_API = (
     "guard_any_of",
     "guard_at_least",
     "guard_one_of",
+    "intersect_authorization",
     "mechanism",
     "optional",
     "public",
@@ -708,6 +712,16 @@ def test_credential_restrictions_normalize_sets_and_preserve_empty() -> None:
     assert restrictions.tenant_ids == frozenset({"tenant-1"})
 
 
+def test_resource_permission_is_immutable_and_normalized() -> None:
+    permission = ResourcePermission(resource=" report-1 ", scopes={" read "})
+
+    assert permission == ResourcePermission(resource="report-1", scopes=frozenset({"read"}))
+    with pytest.raises(ValueError, match="must not be blank"):
+        ResourcePermission(resource="", scopes=frozenset())
+    with pytest.raises(ValueError, match="must not be blank"):
+        ResourcePermission(resource="report-1", scopes={""})
+
+
 @pytest.mark.parametrize(
     "kwargs", [{"scopes": {" "}}, {"roles": {""}}, {"capabilities": {" "}}, {"team_ids": {""}}, {"tenant_ids": {" "}}]
 )
@@ -853,20 +867,25 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
 
     providers = import_module("litestar_security.providers")
     assert providers.__all__ == (
+        "APIKeyClaims",
         "APIKeyCodec",
         "APIKeyConfig",
         "APIKeyGenerationError",
         "APIKeyProof",
         "APIKeyRecord",
+        "APIKeyService",
         "APIKeyStore",
         "APIKeyUsageSink",
         "AsyncJWKSFetcher",
         "BearerSlotSelector",
         "BearerTokenSlot",
+        "BufferedAPIKeyUsage",
         "CachedJWKSProvider",
         "CompositeBearerConfig",
         "DiscoveryPolicy",
         "GitHubOAuthProvider",
+        "GoogleIAPClaims",
+        "GoogleIAPConfig",
         "IssuedAPIKey",
         "JSONValue",
         "JWKSCacheEntry",
@@ -877,6 +896,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "JWTClaims",
         "JWTValidationConfig",
         "JWTVerifier",
+        "KeycloakClaims",
         "LocalJWKSConfig",
         "LocalKeyRing",
         "NoOpSecurityMetrics",
@@ -891,6 +911,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "OIDCMetadata",
         "OIDCProvider",
         "SecurityMetrics",
+        "ServiceTokenConfig",
         "SigningKey",
         "SyncJWKSFetcher",
         "SyncJWTVerifier",
@@ -905,12 +926,14 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "extend_composite_bearer",
         "google_oidc_provider",
         "keycloak_oidc_provider",
+        "map_keycloak_claims",
         "normalize_fetcher",
         "normalize_signer",
         "normalize_verifier",
         "oidc_provider",
     )
     api_key_module = import_module("litestar_security.providers.api_key")
+    iap_module = import_module("litestar_security.providers.iap")
     jwks_module = import_module("litestar_security.providers.jwks")
     jwt_module = import_module("litestar_security.providers.jwt")
     oidc_module = import_module("litestar_security.providers.oidc")
@@ -924,18 +947,22 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "TokenVault",
     }
     assert set(api_key_module.__all__).union(
-        jwks_module.__all__, jwt_module.__all__, oidc_module.__all__, oauth_exports
+        iap_module.__all__, jwks_module.__all__, jwt_module.__all__, oidc_module.__all__, oauth_exports
     ) == set(providers.__all__)
     assert api_key_module.__all__ == (
+        "APIKeyClaims",
         "APIKeyCodec",
         "APIKeyConfig",
         "APIKeyGenerationError",
         "APIKeyProof",
         "APIKeyRecord",
+        "APIKeyService",
         "APIKeyStore",
         "APIKeyUsageSink",
+        "BufferedAPIKeyUsage",
         "IssuedAPIKey",
     )
+    assert iap_module.__all__ == ("GoogleIAPClaims", "GoogleIAPConfig")
     assert jwks_module.__all__ == (
         "AsyncJWKSFetcher",
         "CachedJWKSProvider",
@@ -2661,6 +2688,10 @@ def test_security_config_is_typed_and_slotted() -> None:
         "oauth",
         "mfa",
         "passkeys",
+        "api_key",
+        "iap",
+        "service_token",
+        "authorization_resolver",
         "jwks_providers",
         "jwks_warmup_failure",
     )

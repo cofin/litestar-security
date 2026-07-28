@@ -1,15 +1,19 @@
 """Curated authentication provider contracts."""
 
 from litestar_security.providers.api_key import (
+    APIKeyClaims,
     APIKeyCodec,
     APIKeyConfig,
     APIKeyGenerationError,
     APIKeyProof,
     APIKeyRecord,
+    APIKeyService,
     APIKeyStore,
     APIKeyUsageSink,
+    BufferedAPIKeyUsage,
     IssuedAPIKey,
 )
+from litestar_security.providers.iap import GoogleIAPClaims, GoogleIAPConfig
 from litestar_security.providers.jwks import (
     AsyncJWKSFetcher,
     CachedJWKSProvider,
@@ -57,31 +61,39 @@ from litestar_security.providers.oauth import (
 )
 from litestar_security.providers.oidc import (
     DiscoveryPolicy,
+    KeycloakClaims,
     OIDCDiscoveryClient,
     OIDCDiscoveryError,
     OIDCJWTLogoutTokenConsumer,
     OIDCMetadata,
     OIDCProvider,
+    ServiceTokenConfig,
     google_oidc_provider,
     keycloak_oidc_provider,
+    map_keycloak_claims,
     oidc_provider,
 )
 
 __all__ = (
+    "APIKeyClaims",
     "APIKeyCodec",
     "APIKeyConfig",
     "APIKeyGenerationError",
     "APIKeyProof",
     "APIKeyRecord",
+    "APIKeyService",
     "APIKeyStore",
     "APIKeyUsageSink",
     "AsyncJWKSFetcher",
     "BearerSlotSelector",
     "BearerTokenSlot",
+    "BufferedAPIKeyUsage",
     "CachedJWKSProvider",
     "CompositeBearerConfig",
     "DiscoveryPolicy",
     "GitHubOAuthProvider",
+    "GoogleIAPClaims",
+    "GoogleIAPConfig",
     "IssuedAPIKey",
     "JSONValue",
     "JWKSCacheEntry",
@@ -92,6 +104,7 @@ __all__ = (
     "JWTClaims",
     "JWTValidationConfig",
     "JWTVerifier",
+    "KeycloakClaims",
     "LocalJWKSConfig",
     "LocalKeyRing",
     "NoOpSecurityMetrics",
@@ -106,6 +119,7 @@ __all__ = (
     "OIDCMetadata",
     "OIDCProvider",
     "SecurityMetrics",
+    "ServiceTokenConfig",
     "SigningKey",
     "SyncJWKSFetcher",
     "SyncJWTVerifier",
@@ -120,6 +134,7 @@ __all__ = (
     "extend_composite_bearer",
     "google_oidc_provider",
     "keycloak_oidc_provider",
+    "map_keycloak_claims",
     "normalize_fetcher",
     "normalize_signer",
     "normalize_verifier",

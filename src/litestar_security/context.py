@@ -1,6 +1,6 @@
 """Immutable request security context contracts."""
 
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Mapping, MutableMapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,10 +18,12 @@ __all__ = (
     "LitestarSessionHandle",
     "NullSessionHandle",
     "Principal",
+    "ResourcePermission",
     "SecurityContext",
     "SessionHandle",
     "SessionPersistenceUnavailableError",
     "SessionUnavailableError",
+    "intersect_authorization",
 )
 
 UserT = TypeVar("UserT")
@@ -275,6 +277,19 @@ class Principal(Generic[UserT]):
 
 
 @dataclass(frozen=True, slots=True)
+class ResourcePermission:
+    """Credential or application permission scoped to one resource."""
+
+    resource: str
+    scopes: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        """Normalize the resource identifier and immutable scope set."""
+        object.__setattr__(self, "resource", _normalize_text(self.resource, "Resource"))
+        object.__setattr__(self, "scopes", _normalize_values(self.scopes, "Resource scope"))
+
+
+@dataclass(frozen=True, slots=True)
 class AuthenticationEvidence:
     """Normalized evidence emitted by one successful authenticator."""
 
@@ -314,6 +329,7 @@ class AuthorizationSnapshot:
         default_factory=lambda: cast("Mapping[str, frozenset[str]]", MappingProxyType({}))
     )
     tenant_ids: frozenset[str] = frozenset()
+    resources: frozenset[ResourcePermission] = frozenset()
     attributes: Mapping[str, object] = field(default_factory=lambda: cast("Mapping[str, object]", MappingProxyType({})))
 
     def __post_init__(self) -> None:
@@ -330,6 +346,7 @@ class AuthorizationSnapshot:
             }),
         )
         object.__setattr__(self, "tenant_ids", _normalize_values(self.tenant_ids, "Tenant id"))
+        object.__setattr__(self, "resources", frozenset(self.resources))
         object.__setattr__(self, "attributes", MappingProxyType(dict(self.attributes)))
 
 
@@ -342,6 +359,7 @@ class CredentialRestrictions:
     capabilities: frozenset[str] | None = None
     team_ids: frozenset[str] | None = None
     tenant_ids: frozenset[str] | None = None
+    resources: frozenset[ResourcePermission] | None = None
 
     def __post_init__(self) -> None:
         """Normalize bounds while preserving unbounded versus empty."""
@@ -350,6 +368,51 @@ class CredentialRestrictions:
         object.__setattr__(self, "capabilities", _normalize_optional_values(self.capabilities, "Capability"))
         object.__setattr__(self, "team_ids", _normalize_optional_values(self.team_ids, "Team id"))
         object.__setattr__(self, "tenant_ids", _normalize_optional_values(self.tenant_ids, "Tenant id"))
+        object.__setattr__(self, "resources", None if self.resources is None else frozenset(self.resources))
+
+
+def intersect_authorization(
+    snapshot: AuthorizationSnapshot, restrictions: Sequence[CredentialRestrictions]
+) -> AuthorizationSnapshot:
+    """Narrow application authorization by every credential-carried bound.
+
+    Args:
+        snapshot: The application-resolved authorization source of truth.
+        restrictions: Bounds from successful same-subject credentials.
+
+    Returns:
+        One immutable effective snapshot that never expands ``snapshot``.
+    """
+    scopes = snapshot.scopes
+    roles = snapshot.roles
+    capabilities = snapshot.capabilities
+    team_roles = snapshot.team_roles
+    tenant_ids = snapshot.tenant_ids
+    resources = snapshot.resources
+    for restriction in restrictions:
+        if restriction.scopes is not None:
+            scopes = scopes & restriction.scopes
+        if restriction.roles is not None:
+            roles = roles & restriction.roles
+        if restriction.capabilities is not None:
+            capabilities = capabilities & restriction.capabilities
+        if restriction.team_ids is not None:
+            team_roles = {
+                team_id: team_roles[team_id] for team_id in sorted(team_roles) if team_id in restriction.team_ids
+            }
+        if restriction.tenant_ids is not None:
+            tenant_ids = tenant_ids & restriction.tenant_ids
+        if restriction.resources is not None:
+            resources = _intersect_resources(resources, restriction.resources)
+    return AuthorizationSnapshot(
+        scopes=scopes,
+        roles=roles,
+        capabilities=capabilities,
+        team_roles=team_roles,
+        tenant_ids=tenant_ids,
+        resources=resources,
+        attributes=snapshot.attributes,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,6 +448,19 @@ def _normalize_values(values: AbstractSet[str], label: str) -> frozenset[str]:
 
 def _normalize_optional_values(values: AbstractSet[str] | None, label: str) -> frozenset[str] | None:
     return None if values is None else _normalize_values(values, label)
+
+
+def _intersect_resources(
+    current: frozenset[ResourcePermission], bounds: frozenset[ResourcePermission]
+) -> frozenset[ResourcePermission]:
+    bound_by_resource = {permission.resource: permission.scopes for permission in bounds}
+    return frozenset(
+        ResourcePermission(
+            resource=permission.resource, scopes=permission.scopes & bound_by_resource[permission.resource]
+        )
+        for permission in current
+        if permission.resource in bound_by_resource
+    )
 
 
 def _normalize_datetime(value: datetime, label: str) -> datetime:
