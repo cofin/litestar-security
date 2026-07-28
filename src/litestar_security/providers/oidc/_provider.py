@@ -1,12 +1,11 @@
 """OIDC provider lifecycle layered over OAuth and a distinct JWT verifier."""
 
-from __future__ import annotations
-
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from hmac import compare_digest
-from typing import TYPE_CHECKING, NoReturn, cast
+from typing import NoReturn, cast
 
 from litestar.exceptions import ImproperlyConfiguredException
 
@@ -25,9 +24,6 @@ from litestar_security.providers.oauth import (
     SecretStr,
 )
 from litestar_security.providers.oidc._discovery import OIDCMetadata
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 __all__ = ("OIDCProvider", "google_oidc_provider", "keycloak_oidc_provider", "oidc_provider")
 
@@ -138,7 +134,11 @@ class OIDCProvider:
             _raise_provider()
         claims = outcome.claims
         raw = cast("Mapping[str, object]", claims.raw)
-        if claims.issuer != self.issuer or self.oauth.config.client_id not in claims.audiences:
+        if (
+            claims.issuer != self.issuer
+            or claims.subject is None
+            or self.oauth.config.client_id not in claims.audiences
+        ):
             _raise_provider()
         _validate_authorized_party(raw.get("azp"), audiences=claims.audiences, client_id=self.oauth.config.client_id)
         _validate_nonce(raw.get("nonce"), transaction.nonce)
@@ -163,17 +163,20 @@ class OIDCProvider:
             amr=amr,
         )
 
-    async def refresh(self, refresh_token: SecretStr, *, now: datetime | None = None) -> ProviderTokenSet:
+    async def refresh(
+        self, refresh_token: SecretStr, *, current_scopes: frozenset[str] | None = None, now: datetime | None = None
+    ) -> ProviderTokenSet:
         """Refresh provider credentials.
 
         Args:
             refresh_token: The protected refresh credential.
+            current_scopes: Existing granted scopes when the provider omits them.
             now: The authoritative response time.
 
         Returns:
             The rotated token set.
         """
-        return await self.oauth.refresh(refresh_token, now=now)
+        return await self.oauth.refresh(refresh_token, current_scopes=current_scopes, now=now)
 
     async def revoke(self, token: SecretStr, *, token_type_hint: str | None) -> None:
         """Revoke a provider credential.

@@ -73,6 +73,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         "_local_auth_route_handlers",
         "_mfa_route_handlers",
         "_middleware",
+        "_oauth_lifespan",
         "_oauth_route_handlers",
         "_providers",
         "_rate_limit_lifespan",
@@ -96,6 +97,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._local_auth_route_handlers: tuple[Router, ...] | None = None
         self._mfa_route_handlers: tuple[Router, ...] | None = None
         self._oauth_route_handlers: tuple[Router, ...] | None = None
+        self._oauth_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
         self._rate_limit_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
 
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
@@ -118,6 +120,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._configure_local_auth_routes(app_config)
         self._configure_mfa_routes(app_config)
         self._configure_oauth_routes(app_config)
+        self._configure_oauth_lifespan(app_config)
         self._configure_local_jwks(app_config)
         self._configure_jwks_lifespan(app_config)
         self._validate_dependency_map(app_config.dependencies, "application")
@@ -475,6 +478,36 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         for route_handler in route_handlers:
             if not any(existing is route_handler for existing in app_config.route_handlers):
                 app_config.route_handlers.append(route_handler)
+
+    def _configure_oauth_lifespan(self, app_config: AppConfig) -> None:
+        oauth = self.config.oauth
+        if oauth is None:
+            return
+        closable = tuple(provider for provider in oauth.providers if callable(getattr(provider, "aclose", None)))
+        if not closable:
+            return
+        if self._oauth_lifespan is None:
+
+            @asynccontextmanager
+            async def oauth_lifespan(_app: Litestar) -> AsyncGenerator[None, None]:
+                try:
+                    yield
+                finally:
+                    primary_error = sys.exc_info()[1]
+                    results = await asyncio.gather(
+                        *(cast("Any", provider).aclose() for provider in closable), return_exceptions=True
+                    )
+                    if primary_error is None and any(isinstance(result, BaseException) for result in results):
+                        message = "OAuth provider shutdown failed"
+                        raise ImproperlyConfiguredException(detail=message)
+
+            self._oauth_lifespan = oauth_lifespan
+        lifespan_handlers = cast(
+            "list[object]",
+            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType] - third-party callable is untyped
+        )
+        if self._oauth_lifespan not in lifespan_handlers:
+            lifespan_handlers.append(self._oauth_lifespan)
 
     def _validate_local_session_backend(
         self, app_config: AppConfig, native_sessions: Sequence[tuple[int, DefineMiddleware]]

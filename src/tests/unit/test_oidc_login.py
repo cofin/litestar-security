@@ -1,10 +1,10 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import httpx
 import pytest
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
 
 from litestar_security.authentication import Authenticated, InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
@@ -21,6 +21,7 @@ from litestar_security.providers.oauth import (
     SecretStr,
 )
 from litestar_security.providers.oidc import (
+    OIDCJWTLogoutTokenConsumer,
     OIDCMetadata,
     OIDCProvider,
     google_oidc_provider,
@@ -97,6 +98,144 @@ def transaction(**overrides: object) -> OAuthTransaction:
     }
     values.update(overrides)
     return OAuthTransaction(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_oidc_logout_token_consumer_verifies_events_and_rejects_replay() -> None:
+    base_claims = claims(events={"http://schemas.openid.net/event/backchannel-logout": {}}, sid="sid-1")
+    raw = dict(base_claims.raw)
+    raw.pop("nonce")
+    logout_claims = replace(base_claims, raw=raw, token_id="jti-1")  # noqa: S106 - public JWT identifier
+    verifier = StubVerifier(
+        config=JWTValidationConfig(
+            issuer=ISSUER,
+            audiences=frozenset({CLIENT_ID}),
+            algorithms=frozenset({"RS256"}),
+            access_token_profile=False,
+            subject_required=False,
+        ),
+        outcome=Authenticated(
+            claims=logout_claims,
+            evidence=AuthenticationEvidence(mechanism="oidc-logout", slot="logout", authenticated_at=NOW),
+        ),
+    )
+    consumer = OIDCJWTLogoutTokenConsumer(verifiers={"oidc": cast("Any", verifier)})
+
+    identity = await consumer.consume("oidc", "signed-token", now=NOW)
+
+    assert identity.session_id == "sid-1"
+    assert identity.expires_at == logout_claims.expires_at
+    sid_only_raw = dict(logout_claims.raw)
+    sid_only_raw.pop("sub")
+    verifier.outcome = Authenticated(
+        claims=replace(
+            logout_claims,
+            subject=None,
+            raw=sid_only_raw,
+            token_id="jti-2",  # noqa: S106 - public JWT identifier
+        ),
+        evidence=AuthenticationEvidence(mechanism="oidc-logout", slot="logout", authenticated_at=NOW),
+    )
+    assert (await consumer.consume("oidc", "sid-only-token", now=NOW)).subject is None
+
+
+@pytest.mark.anyio
+async def test_oidc_logout_token_consumer_rejects_invalid_event() -> None:
+    base_invalid = claims(events={})
+    invalid_raw = dict(base_invalid.raw)
+    invalid_raw.pop("nonce")
+    invalid = replace(base_invalid, raw=invalid_raw, token_id="jti")  # noqa: S106 - public JWT identifier
+    verifier = StubVerifier(
+        config=JWTValidationConfig(
+            issuer=ISSUER,
+            audiences=frozenset({CLIENT_ID}),
+            algorithms=frozenset({"RS256"}),
+            access_token_profile=False,
+            subject_required=False,
+        ),
+        outcome=Authenticated(
+            claims=invalid,
+            evidence=AuthenticationEvidence(mechanism="oidc-logout", slot="logout", authenticated_at=NOW),
+        ),
+    )
+    consumer = OIDCJWTLogoutTokenConsumer(verifiers={"oidc": cast("Any", verifier)})
+    with pytest.raises(NotAuthorizedException, match="logout token is invalid"):
+        await consumer.consume("oidc", "signed-token", now=NOW)
+
+
+def test_oidc_logout_consumer_rejects_invalid_configuration() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="consumer configuration"):
+        OIDCJWTLogoutTokenConsumer(verifiers={})
+    with pytest.raises(ImproperlyConfiguredException, match="consumer configuration"):
+        OIDCJWTLogoutTokenConsumer(verifiers={"oidc": cast("Any", object())})
+    verifier = StubVerifier(
+        config=JWTValidationConfig(
+            issuer=ISSUER, audiences=frozenset({CLIENT_ID}), algorithms=frozenset({"RS256"}), access_token_profile=False
+        ),
+        outcome=InvalidCredentials(),
+    )
+    with pytest.raises(ImproperlyConfiguredException, match="consumer configuration"):
+        OIDCJWTLogoutTokenConsumer(verifiers={"oidc": cast("Any", verifier)})
+
+
+@pytest.mark.anyio
+async def test_oidc_logout_consumer_rejects_missing_provider_and_failed_verification() -> None:
+    verifier = StubVerifier(
+        config=JWTValidationConfig(
+            issuer=ISSUER,
+            audiences=frozenset({CLIENT_ID}),
+            algorithms=frozenset({"RS256"}),
+            access_token_profile=False,
+            subject_required=False,
+        ),
+        outcome=InvalidCredentials(),
+    )
+    consumer = OIDCJWTLogoutTokenConsumer(verifiers={"oidc": cast("Any", verifier)})
+
+    with pytest.raises(NotAuthorizedException, match="logout token is invalid"):
+        await consumer.consume("missing", "signed-token", now=NOW)
+    with pytest.raises(NotAuthorizedException, match="logout token is invalid"):
+        await consumer.consume("oidc", "signed-token", now=NOW)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("raw_overrides", "token_id"),
+    [
+        ({"events": {"http://schemas.openid.net/event/backchannel-logout": {}}}, None),
+        ({"events": "invalid", "nonce": None}, "jti"),
+        ({"events": {"extra": {}}, "nonce": None}, "jti"),
+        ({"events": {"http://schemas.openid.net/event/backchannel-logout": "invalid"}, "nonce": None}, "jti"),
+        ({"events": {"http://schemas.openid.net/event/backchannel-logout": {"value": True}}, "nonce": None}, "jti"),
+        ({"events": {"http://schemas.openid.net/event/backchannel-logout": {}}, "nonce": None, "sid": ""}, "jti"),
+        ({"events": {"http://schemas.openid.net/event/backchannel-logout": {}}, "nonce": None, "sub": None}, "jti"),
+    ],
+)
+async def test_oidc_logout_consumer_rejects_invalid_claim_matrix(
+    raw_overrides: dict[str, JSONValue], token_id: str | None
+) -> None:
+    value = claims(**raw_overrides)
+    raw = dict(value.raw)
+    if raw.get("nonce") is None:
+        raw.pop("nonce", None)
+    invalid = replace(value, raw=raw, token_id=token_id)
+    verifier = StubVerifier(
+        config=JWTValidationConfig(
+            issuer=ISSUER,
+            audiences=frozenset({CLIENT_ID}),
+            algorithms=frozenset({"RS256"}),
+            access_token_profile=False,
+            subject_required=False,
+        ),
+        outcome=Authenticated(
+            claims=invalid,
+            evidence=AuthenticationEvidence(mechanism="oidc-logout", slot="logout", authenticated_at=NOW),
+        ),
+    )
+    consumer = OIDCJWTLogoutTokenConsumer(verifiers={"oidc": cast("Any", verifier)})
+
+    with pytest.raises(NotAuthorizedException, match="logout token is invalid"):
+        await consumer.consume("oidc", "signed-token", now=NOW)
 
 
 def tokens(*, id_token: SecretStr | None = ID_TOKEN) -> ProviderTokenSet:

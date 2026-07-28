@@ -1,34 +1,29 @@
 """Atomic provider-account lifecycle and encrypted token-vault contracts."""
 
-from __future__ import annotations
-
 import json
-from collections.abc import Mapping  # noqa: TC003 - runtime protocol and JSON shape checks require Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from hashlib import sha256
-from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 from anyio import Lock
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.providers._internal import reject_non_finite, unique_object, validate_depth
 from litestar_security.providers.oauth._provider import (
+    InvalidProviderGrantError,
     OAuthProvider,
-    OAuthProviderError,
     ProviderGrant,
     ProviderIdentity,
     ProviderTokenSet,
 )
 from litestar_security.providers.oauth._transactions import OAuthTransactionProtector, ProtectedOAuthSecret, SecretStr
 
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
 __all__ = (
     "AccountLinkError",
-    "InvalidProviderGrant",
+    "InvalidProviderGrantError",
     "LinkedProviderAccount",
     "MemoryOAuthAccountStore",
     "MemoryTokenVault",
@@ -37,6 +32,8 @@ __all__ = (
     "OAuthAccountStore",
     "OAuthLinkProof",
     "OAuthLoginResolution",
+    "OAuthRevocationFailure",
+    "OAuthRevocationRetryStore",
     "ProviderTokenReference",
     "StoredProviderTokens",
     "TokenVault",
@@ -141,6 +138,24 @@ class StoredProviderTokens:
 
 
 @dataclass(frozen=True, slots=True)
+class OAuthRevocationFailure:
+    """Secret-free upstream revocation retry classification."""
+
+    provider_account_id: str
+    failed_token_types: frozenset[str]
+    occurred_at: datetime
+
+
+@runtime_checkable
+class OAuthRevocationRetryStore(Protocol):
+    """Application-owned encrypted persistence for failed upstream revocation."""
+
+    async def schedule(self, failure: OAuthRevocationFailure, tokens: ProviderTokenSet) -> None:
+        """Persist encrypted retry material before the active vault is deleted."""
+        ...  # pragma: no cover
+
+
+@dataclass(frozen=True, slots=True)
 class OAuthLinkProof:
     """Consumed purpose-bound proof tied to account and security epoch."""
 
@@ -179,6 +194,10 @@ class OAuthAccountStore(Protocol):
         """Resolve only the exact provider, issuer, and subject identity."""
         ...  # pragma: no cover
 
+    async def resolve_provider_account(self, account_id: str, provider: str) -> LinkedProviderAccount | None:
+        """Resolve one account-owned provider link without crossing ownership."""
+        ...  # pragma: no cover
+
     async def link_identity(
         self, account_id: str, identity: ProviderIdentity, grant: ProviderGrant, *, now: datetime
     ) -> LinkedProviderAccount:
@@ -192,9 +211,9 @@ class OAuthAccountStore(Protocol):
         ...  # pragma: no cover
 
     async def apply_grant(
-        self, provider_account_id: str, grant: ProviderGrant, *, now: datetime
+        self, account_id: str, provider_account_id: str, grant: ProviderGrant, *, now: datetime
     ) -> LinkedProviderAccount:
-        """Atomically replace the actually granted provider scopes."""
+        """Atomically replace scopes only for an account-owned provider link."""
         ...  # pragma: no cover
 
 
@@ -234,10 +253,6 @@ class AccountLinkError(OAuthAccountError):
     """Reject a duplicate cross-account provider identity."""
 
 
-class InvalidProviderGrant(OAuthProviderError):  # noqa: N818 - domain outcome matches OAuth invalid_grant
-    """Indicate that refresh requires provider reauthorization."""
-
-
 class MemoryOAuthAccountStore:
     """Atomic in-memory reference store for provider account behavior."""
 
@@ -263,6 +278,20 @@ class MemoryOAuthAccountStore:
         async with self._lock:
             provider_account_id = self._identity_index.get(key)
             return OAuthLoginResolution(None if provider_account_id is None else self._links[provider_account_id])
+
+    async def resolve_provider_account(self, account_id: str, provider: str) -> LinkedProviderAccount | None:
+        """Resolve one exact account-owned provider link."""
+        if not _strict_text(account_id) or not _strict_text(provider):
+            raise OAuthAccountError
+        async with self._lock:
+            matches = [
+                linked
+                for linked in self._links.values()
+                if linked.account_id == account_id and linked.provider == provider
+            ]
+        if len(matches) > 1:
+            raise OAuthAccountError
+        return matches[0] if matches else None
 
     async def link_identity(
         self, account_id: str, identity: ProviderIdentity, grant: ProviderGrant, *, now: datetime
@@ -314,14 +343,14 @@ class MemoryOAuthAccountStore:
             return UnlinkResult(UnlinkStatus.UNLINKED, provider_account_id)
 
     async def apply_grant(
-        self, provider_account_id: str, grant: ProviderGrant, *, now: datetime
+        self, account_id: str, provider_account_id: str, grant: ProviderGrant, *, now: datetime
     ) -> LinkedProviderAccount:
         """Atomically replace a provider grant."""
-        if not _aware(now):
+        if not _strict_text(account_id) or not _aware(now):
             raise OAuthAccountError
         async with self._lock:
             linked = self._links.get(provider_account_id)
-            if linked is None:
+            if linked is None or linked.account_id != account_id:
                 raise OAuthAccountError
             updated = replace(linked, grant=grant)
             self._links[provider_account_id] = updated
@@ -427,10 +456,16 @@ class MemoryTokenVault:
         return f"oauth-vault-v1\0{self.provider}\0{self.client_id}\0{provider_account_id}\0{key_version}".encode()
 
 
+@dataclass(slots=True)
+class _RefreshLock:
+    lock: Lock = field(default_factory=Lock)
+    references: int = 0
+
+
 class OAuthAccountService:
     """Coordinate exact login/link/scope/vault behavior over atomic ports."""
 
-    __slots__ = ("_refresh_locks", "provision", "store", "vault")
+    __slots__ = ("_refresh_locks", "_refresh_locks_guard", "provision", "revocation_retries", "store", "vault")
 
     def __init__(
         self,
@@ -438,6 +473,7 @@ class OAuthAccountService:
         store: OAuthAccountStore,
         vault: TokenVault | None = None,
         provision: Callable[[ProviderIdentity], Awaitable[str]] | None = None,
+        revocation_retries: OAuthRevocationRetryStore | None = None,
     ) -> None:
         """Create the account lifecycle service.
 
@@ -445,17 +481,23 @@ class OAuthAccountService:
             store: Atomic provider-account store.
             vault: Optional encrypted token retention.
             provision: Explicit unknown-identity account callback.
+            revocation_retries: Optional encrypted upstream-retry persistence.
         """
         store_value = cast("object", store)
         vault_value = cast("object", vault)
-        if not isinstance(store_value, OAuthAccountStore) or (
-            vault_value is not None and not isinstance(vault_value, TokenVault)
+        retries_value = cast("object", revocation_retries)
+        if (
+            not isinstance(store_value, OAuthAccountStore)
+            or (vault_value is not None and not isinstance(vault_value, TokenVault))
+            or (retries_value is not None and not isinstance(retries_value, OAuthRevocationRetryStore))
         ):
             raise ImproperlyConfiguredException(detail="OAuth account service configuration is invalid")
         self.store = store
         self.vault = vault
         self.provision = provision
-        self._refresh_locks: dict[str, Lock] = {}
+        self.revocation_retries = revocation_retries
+        self._refresh_locks: dict[str, _RefreshLock] = {}
+        self._refresh_locks_guard = Lock()
 
     async def login(
         self, identity: ProviderIdentity, grant: ProviderGrant, tokens: ProviderTokenSet, *, now: datetime
@@ -468,7 +510,9 @@ class OAuthAccountService:
             account_id = await self.provision(identity)
             linked = await self.store.link_identity(account_id, identity, grant, now=now)
         else:
-            linked = await self.store.apply_grant(resolution.linked.provider_account_id, grant, now=now)
+            linked = await self.store.apply_grant(
+                resolution.linked.account_id, resolution.linked.provider_account_id, grant, now=now
+            )
         if self.vault is not None:
             await self.vault.put(linked.provider_account_id, tokens, now=now)
         return linked
@@ -522,7 +566,7 @@ class OAuthAccountService:
         """Record only the provider's actual grant after step-up."""
         if not proof.valid_for("oauth-scope-upgrade") or not required_scopes.issubset(grant.scopes):
             raise OAuthAccountError
-        return await self.store.apply_grant(provider_account_id, grant, now=now)
+        return await self.store.apply_grant(proof.account_id, provider_account_id, grant, now=now)
 
     async def refresh(self, provider_account_id: str, provider: OAuthProvider, *, now: datetime) -> ProviderTokenSet:
         """Single-flight refresh and optimistic rotation for one provider account."""
@@ -531,42 +575,85 @@ class OAuthAccountService:
         observed = await self.vault.get_for_refresh(provider_account_id, now=now)
         if observed is None or observed.tokens.refresh_token is None:
             raise OAuthAccountError(_REAUTHORIZATION_REQUIRED)
-        lock = self._refresh_locks.setdefault(provider_account_id, Lock())
-        async with lock:
-            stored = await self.vault.get_for_refresh(provider_account_id, now=now)
-            if stored is None or stored.tokens.refresh_token is None:
-                raise OAuthAccountError(_REAUTHORIZATION_REQUIRED)
-            if stored.reference.version != observed.reference.version:
-                return stored.tokens
-            try:
-                refreshed = await provider.refresh(stored.tokens.refresh_token, now=now)
-            except InvalidProviderGrant:
-                await self.vault.delete(provider_account_id)
-                raise OAuthAccountError(_REAUTHORIZATION_REQUIRED) from None
-            if not await self.vault.replace(
-                provider_account_id, expected_version=stored.reference.version, tokens=refreshed, now=now
-            ):
-                raise OAuthAccountError(_REFRESH_RACED)
-            return refreshed
+        entry = await self._acquire_refresh_lock(provider_account_id)
+        try:
+            async with entry.lock:
+                stored = await self.vault.get_for_refresh(provider_account_id, now=now)
+                if stored is None or stored.tokens.refresh_token is None:
+                    raise OAuthAccountError(_REAUTHORIZATION_REQUIRED)
+                if stored.reference.version != observed.reference.version:
+                    return stored.tokens
+                try:
+                    refreshed = await provider.refresh(
+                        stored.tokens.refresh_token, current_scopes=stored.tokens.scopes, now=now
+                    )
+                except InvalidProviderGrantError:
+                    await self.vault.delete(provider_account_id)
+                    raise OAuthAccountError(_REAUTHORIZATION_REQUIRED) from None
+                if not await self.vault.replace(
+                    provider_account_id, expected_version=stored.reference.version, tokens=refreshed, now=now
+                ):
+                    raise OAuthAccountError(_REFRESH_RACED)
+                return refreshed
+        finally:
+            await self._release_refresh_lock(provider_account_id, entry)
+
+    async def _acquire_refresh_lock(self, provider_account_id: str) -> "_RefreshLock":
+        async with self._refresh_locks_guard:
+            entry = self._refresh_locks.get(provider_account_id)
+            if entry is None:
+                entry = _RefreshLock()
+                self._refresh_locks[provider_account_id] = entry
+            entry.references += 1
+            return entry
+
+    async def _release_refresh_lock(self, provider_account_id: str, entry: "_RefreshLock") -> None:
+        async with self._refresh_locks_guard:
+            entry.references -= 1
+            if entry.references == 0 and self._refresh_locks.get(provider_account_id) is entry:
+                del self._refresh_locks[provider_account_id]
 
     async def revoke(self, provider_account_id: str, provider: OAuthProvider, *, now: datetime) -> None:
-        """Revoke retained credentials and always delete the local vault record."""
+        """Revoke retained credentials without losing material needed for retry."""
         if self.vault is None:
             return
         stored = await self.vault.get_for_refresh(provider_account_id, now=now)
-        try:
-            if stored is not None:
-                if stored.tokens.refresh_token is not None:
+        failed: set[str] = set()
+        if stored is not None:
+            if stored.tokens.refresh_token is not None:
+                try:
                     await provider.revoke(
                         stored.tokens.refresh_token,
                         token_type_hint="refresh_token",  # noqa: S106 - standardized OAuth token kind
                     )
+                except Exception:  # noqa: BLE001 - attempt every credential and sanitize provider failure
+                    failed.add("refresh_token")
+            try:
                 await provider.revoke(
                     stored.tokens.access_token,
                     token_type_hint="access_token",  # noqa: S106 - standardized OAuth token kind
                 )
-        finally:
+            except Exception:  # noqa: BLE001 - attempt every credential and sanitize provider failure
+                failed.add("access_token")
+            if failed:
+                if await self._persist_revocation_retry(provider_account_id, failed, stored.tokens, now):
+                    await self.vault.delete(provider_account_id)
+                msg = "oauth_revocation_pending"
+                raise OAuthAccountError(msg)
             await self.vault.delete(provider_account_id)
+
+    async def _persist_revocation_retry(
+        self, provider_account_id: str, failed: set[str], tokens: ProviderTokenSet, now: datetime
+    ) -> bool:
+        if self.revocation_retries is None:
+            return False
+        try:
+            await self.revocation_retries.schedule(
+                OAuthRevocationFailure(provider_account_id, frozenset(failed), now), tokens
+            )
+        except Exception:  # noqa: BLE001 - retain active vault material when retry persistence is unavailable
+            return False
+        return True
 
 
 def _identity_key(identity: ProviderIdentity) -> tuple[str, str, str]:

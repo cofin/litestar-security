@@ -127,6 +127,30 @@ async def test_start_generates_independent_256_bit_material_and_s256_pkce() -> N
     assert "AwMDAw" not in repr(start.transaction)
 
 
+@pytest.mark.anyio
+async def test_start_reuses_valid_browser_binding_for_concurrent_tabs() -> None:
+    service = _service()
+    binding = SecretStr("b" * 43)
+    arguments = {
+        "operation": OAuthOperation.LOGIN,
+        "provider": "google",
+        "redirect_uri": _CALLBACK,
+        "return_to": "/",
+        "requested_scopes": frozenset({"openid"}),
+        "expected_issuer": "https://accounts.google.com",
+        "now": _NOW,
+        "include_nonce": True,
+        "browser_binding": binding,
+    }
+
+    first = await service.start(**arguments)  # type: ignore[arg-type]
+    second = await service.start(**arguments)  # type: ignore[arg-type]
+
+    assert first.browser_binding is binding
+    assert second.browser_binding is binding
+    assert first.state != second.state
+
+
 def test_pkce_s256_matches_rfc_7636_vector() -> None:
     verifier = SecretStr("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
 
@@ -681,3 +705,18 @@ async def test_protector_failure_is_secret_free_unavailable_error() -> None:
         )
 
     assert "protect detail" not in repr(exc_info.value)
+
+
+@pytest.mark.anyio
+async def test_start_rejects_invalid_reused_browser_binding() -> None:
+    with pytest.raises(OAuthTransactionUnavailable, match="unavailable"):
+        await _service().start(
+            operation=OAuthOperation.LOGIN,
+            provider="google",
+            redirect_uri=_CALLBACK,
+            return_to="/",
+            requested_scopes=frozenset(),
+            browser_binding=SecretStr("invalid"),
+            now=_NOW,
+            include_nonce=False,
+        )

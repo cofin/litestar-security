@@ -14,6 +14,7 @@ import pytest
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.providers.oauth import (
+    InvalidProviderGrantError,
     OAuthClientAuth,
     OAuthEndpointConfig,
     OAuthHTTPPolicy,
@@ -119,8 +120,10 @@ def test_provider_protocol_uses_redacted_typed_contracts() -> None:
             del tokens
             return _identity()
 
-        async def refresh(self, refresh_token: SecretStr) -> ProviderTokenSet:
-            del refresh_token
+        async def refresh(
+            self, refresh_token: SecretStr, *, current_scopes: frozenset[str] | None = None
+        ) -> ProviderTokenSet:
+            del refresh_token, current_scopes
             return _tokens()
 
         async def revoke(self, token: SecretStr, *, token_type_hint: str | None) -> None:
@@ -264,6 +267,33 @@ async def test_post_client_auth_and_refresh_rotation() -> None:
     assert tokens.access_token.get_secret_value() == "new-access"
     assert tokens.refresh_token is not None
     assert tokens.refresh_token.get_secret_value() == "new-refresh"
+
+
+@pytest.mark.anyio
+async def test_refresh_preserves_omitted_scope_and_refresh_token() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(request, {"access_token": "new-access", "token_type": "Bearer", "expires_in": 120})
+
+    async with _client(handler) as client:
+        refreshed = await client.refresh(
+            SecretStr("old-refresh"), current_scopes=frozenset({"openid", "profile"}), now=_NOW
+        )
+
+    assert refreshed.scopes == frozenset({"openid", "profile"})
+    assert refreshed.refresh_token is not None
+    assert refreshed.refresh_token.get_secret_value() == "old-refresh"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("content_type", ["application/json", "application/x-www-form-urlencoded"])
+async def test_refresh_classifies_invalid_grant(content_type: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = b'{"error":"invalid_grant"}' if content_type == "application/json" else b"error=invalid_grant"
+        return httpx.Response(400, headers={"content-type": content_type}, content=body, request=request)
+
+    async with _client(handler) as client:
+        with pytest.raises(InvalidProviderGrantError):
+            await client.refresh(SecretStr("refresh"), current_scopes=frozenset({"openid"}), now=_NOW)
 
 
 @pytest.mark.anyio

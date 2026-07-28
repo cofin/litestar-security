@@ -1,8 +1,9 @@
 """OAuth authorization transaction and provider lifecycle contracts."""
 
+from typing import TYPE_CHECKING, Any
+
 from litestar_security.providers.oauth._accounts import (
     AccountLinkError,
-    InvalidProviderGrant,
     LinkedProviderAccount,
     MemoryOAuthAccountStore,
     MemoryTokenVault,
@@ -11,6 +12,8 @@ from litestar_security.providers.oauth._accounts import (
     OAuthAccountStore,
     OAuthLinkProof,
     OAuthLoginResolution,
+    OAuthRevocationFailure,
+    OAuthRevocationRetryStore,
     ProviderTokenReference,
     StoredProviderTokens,
     TokenVault,
@@ -19,6 +22,7 @@ from litestar_security.providers.oauth._accounts import (
 )
 from litestar_security.providers.oauth._provider import (
     GitHubOAuthProvider,
+    InvalidProviderGrantError,
     OAuthClientAuth,
     OAuthEndpointConfig,
     OAuthHTTPPolicy,
@@ -32,15 +36,26 @@ from litestar_security.providers.oauth._provider import (
 from litestar_security.providers.oauth._routes import (
     OAuthAuthorization,
     OAuthConfig,
+    OAuthLifecycleService,
     OAuthLinkRequest,
+    OAuthLocalTransport,
     OAuthLogoutResult,
+    OAuthProviderRegistration,
     OAuthRouteResponse,
     OAuthRouteService,
     OAuthScopeRequest,
+    OAuthStepUpAuthorization,
+    OAuthStepUpAuthorizer,
     OAuthStepUpRequest,
+    OIDCBackchannelLogoutRequest,
+    OIDCLogoutIdentity,
+    OIDCLogoutLifecycleService,
+    OIDCLogoutTokenConsumer,
+    OIDCSessionLogoutStore,
     build_oauth_routes,
 )
 from litestar_security.providers.oauth._transactions import (
+    OAUTH_BINDING_COOKIE_NAME,
     InvalidOAuthCallback,
     MemoryOAuthTransactionStore,
     OAuthOperation,
@@ -57,11 +72,15 @@ from litestar_security.providers.oauth._transactions import (
     pkce_s256,
 )
 
+if TYPE_CHECKING:
+    from litestar_security.providers.oauth._local import OAuthLocalAuthTransport
+
 __all__ = (
+    "OAUTH_BINDING_COOKIE_NAME",
     "AccountLinkError",
     "GitHubOAuthProvider",
     "InvalidOAuthCallback",
-    "InvalidProviderGrant",
+    "InvalidProviderGrantError",
     "LinkedProviderAccount",
     "MemoryOAuthAccountStore",
     "MemoryOAuthTransactionStore",
@@ -74,18 +93,26 @@ __all__ = (
     "OAuthConfig",
     "OAuthEndpointConfig",
     "OAuthHTTPPolicy",
+    "OAuthLifecycleService",
     "OAuthLinkProof",
     "OAuthLinkRequest",
+    "OAuthLocalAuthTransport",
+    "OAuthLocalTransport",
     "OAuthLoginResolution",
     "OAuthLogoutResult",
     "OAuthOperation",
     "OAuthProvider",
     "OAuthProviderClient",
     "OAuthProviderError",
+    "OAuthProviderRegistration",
     "OAuthRedirectPolicy",
+    "OAuthRevocationFailure",
+    "OAuthRevocationRetryStore",
     "OAuthRouteResponse",
     "OAuthRouteService",
     "OAuthScopeRequest",
+    "OAuthStepUpAuthorization",
+    "OAuthStepUpAuthorizer",
     "OAuthStepUpRequest",
     "OAuthTransaction",
     "OAuthTransactionProtector",
@@ -93,6 +120,11 @@ __all__ = (
     "OAuthTransactionStart",
     "OAuthTransactionStore",
     "OAuthTransactionUnavailable",
+    "OIDCBackchannelLogoutRequest",
+    "OIDCLogoutIdentity",
+    "OIDCLogoutLifecycleService",
+    "OIDCLogoutTokenConsumer",
+    "OIDCSessionLogoutStore",
     "ProtectedOAuthSecret",
     "ProviderGrant",
     "ProviderIdentity",
@@ -107,3 +139,13 @@ __all__ = (
     "oauth_binding_cookie",
     "pkce_s256",
 )
+
+
+def __getattr__(name: str) -> Any:  # noqa: ANN401 - module lazy-export hooks are dynamically typed
+    """Resolve the local-auth bridge without introducing provider cycles."""
+    if name == "OAuthLocalAuthTransport":
+        from litestar_security.providers.oauth._local import OAuthLocalAuthTransport  # noqa: PLC0415
+
+        return OAuthLocalAuthTransport
+    message = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(message)

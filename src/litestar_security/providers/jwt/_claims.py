@@ -38,7 +38,7 @@ _SUPPORTED_ALGORITHMS = frozenset({"EdDSA", "ES256", "RS256", "HS256"})
 _ACCESS_TOKEN_TYPES = frozenset({"at+jwt", "application/at+jwt"})
 
 
-_BASE_REQUIRED_CLAIMS = frozenset({"iss", "sub", "aud", "exp", "iat"})
+_BASE_REQUIRED_CLAIMS = frozenset({"iss", "aud", "exp", "iat"})
 
 
 _ACCESS_REQUIRED_CLAIMS = frozenset({"client_id", "jti"})
@@ -67,7 +67,7 @@ class JWTClaims:
     """Verified, normalized JWT claims without the compact credential."""
 
     issuer: str
-    subject: str
+    subject: str | None
     audiences: frozenset[str]
     expires_at: datetime
     issued_at: datetime
@@ -94,6 +94,7 @@ class JWTValidationConfig:
     algorithms: frozenset[str]
     required_claims: frozenset[str] = frozenset({"iss", "sub", "aud", "exp", "iat"})
     access_token_profile: bool = True
+    subject_required: bool = True
     clock_skew: timedelta = timedelta(seconds=30)
     maximum_lifetime: timedelta | None = timedelta(hours=1)
     token_types: frozenset[str] = _ACCESS_TOKEN_TYPES
@@ -114,7 +115,10 @@ class JWTValidationConfig:
             raise_config("JWT clock skew must not be negative")
         if self.maximum_lifetime is not None and self.maximum_lifetime <= timedelta(0):
             raise_config("JWT maximum lifetime must be positive")
+        if self.subject_required.__class__ is not bool or (self.access_token_profile and not self.subject_required):
+            raise_config("JWT subject requirement is invalid")
         required = frozenset(strict_identifier(name) for name in self.required_claims).union(_BASE_REQUIRED_CLAIMS)
+        required = required.union({"sub"}) if self.subject_required else required.difference({"sub"})
         if self.access_token_profile:
             required = required.union(_ACCESS_REQUIRED_CLAIMS)
         token_types = frozenset(strict_identifier(value).lower() for value in self.token_types)
@@ -157,8 +161,8 @@ def normalize_claims(  # noqa: PLR0911 - preserve explicit sanitized outcomes at
         not isinstance(issuer, str)
         or issuer != config.issuer
         or not is_strict_identifier(issuer)
-        or not isinstance(subject, str)
-        or not is_strict_identifier(subject)
+        or (subject is not None and (not isinstance(subject, str) or not is_strict_identifier(subject)))
+        or (config.subject_required and subject is None)
     ):
         return _INVALID
     audiences = normalize_audiences(payload.get("aud"))

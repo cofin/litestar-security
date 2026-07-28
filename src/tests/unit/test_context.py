@@ -123,6 +123,7 @@ _PUBLIC_API = (
     "CredentialSlot",
     "CurrentUser",
     "ExternalCSRF",
+    "GitHubOAuthProvider",
     "IdentityResolution",
     "IdentityResolver",
     "InvalidCredentials",
@@ -131,6 +132,11 @@ _PUBLIC_API = (
     "MechanismRequirement",
     "NoCredentials",
     "NullSessionHandle",
+    "OAuthAccountService",
+    "OAuthAccountStore",
+    "OAuthConfig",
+    "OAuthProvider",
+    "OAuthRouteService",
     "PasskeyConfig",
     "PresentedCredential",
     "Principal",
@@ -143,6 +149,7 @@ _PUBLIC_API = (
     "SessionHandle",
     "SessionPersistenceUnavailableError",
     "SessionUnavailableError",
+    "TokenVault",
     "VerificationUnavailable",
     "__project__",
     "__version__",
@@ -852,6 +859,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "CachedJWKSProvider",
         "CompositeBearerConfig",
         "DiscoveryPolicy",
+        "GitHubOAuthProvider",
         "JSONValue",
         "JWKSCacheEntry",
         "JWKSCachePolicy",
@@ -864,8 +872,14 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "LocalJWKSConfig",
         "LocalKeyRing",
         "NoOpSecurityMetrics",
+        "OAuthAccountService",
+        "OAuthAccountStore",
+        "OAuthConfig",
+        "OAuthProvider",
+        "OAuthRouteService",
         "OIDCDiscoveryClient",
         "OIDCDiscoveryError",
+        "OIDCJWTLogoutTokenConsumer",
         "OIDCMetadata",
         "OIDCProvider",
         "SecurityMetrics",
@@ -874,6 +888,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "SyncJWTVerifier",
         "SyncTokenSigner",
         "TokenSigner",
+        "TokenVault",
         "VerificationKey",
         "VerificationKeySet",
         "WorkerLimits",
@@ -890,7 +905,18 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     jwks_module = import_module("litestar_security.providers.jwks")
     jwt_module = import_module("litestar_security.providers.jwt")
     oidc_module = import_module("litestar_security.providers.oidc")
-    assert set(jwks_module.__all__).union(jwt_module.__all__, oidc_module.__all__) == set(providers.__all__)
+    oauth_exports = {
+        "GitHubOAuthProvider",
+        "OAuthAccountService",
+        "OAuthAccountStore",
+        "OAuthConfig",
+        "OAuthProvider",
+        "OAuthRouteService",
+        "TokenVault",
+    }
+    assert set(jwks_module.__all__).union(jwt_module.__all__, oidc_module.__all__, oauth_exports) == set(
+        providers.__all__
+    )
     assert jwks_module.__all__ == (
         "AsyncJWKSFetcher",
         "CachedJWKSProvider",

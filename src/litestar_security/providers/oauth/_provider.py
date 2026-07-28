@@ -1,7 +1,5 @@
 """Generic OAuth provider contracts and hardened async HTTP boundary."""
 
-from __future__ import annotations
-
 import json
 import math
 from collections.abc import Mapping
@@ -21,6 +19,7 @@ from litestar_security.providers.oauth._transactions import OAuthTransaction, OA
 
 __all__ = (
     "GitHubOAuthProvider",
+    "InvalidProviderGrantError",
     "OAuthClientAuth",
     "OAuthEndpointConfig",
     "OAuthHTTPPolicy",
@@ -288,11 +287,14 @@ class OAuthProvider(Protocol):
         """
         ...  # pragma: no cover
 
-    async def refresh(self, refresh_token: SecretStr, *, now: datetime | None = None) -> ProviderTokenSet:
+    async def refresh(
+        self, refresh_token: SecretStr, *, current_scopes: frozenset[str] | None = None, now: datetime | None = None
+    ) -> ProviderTokenSet:
         """Refresh provider credentials.
 
         Args:
             refresh_token: The protected stored refresh credential.
+            current_scopes: Current grant used when the response omits scope.
             now: The authoritative response time.
 
         Returns:
@@ -317,6 +319,10 @@ class OAuthProviderError(RuntimeError):
         """Initialize a closed-client or generic request failure."""
         self.retry_after = retry_after
         super().__init__("OAuth provider client is closed" if closed else "OAuth provider request failed")
+
+
+class InvalidProviderGrantError(OAuthProviderError):
+    """Indicate that refresh requires provider reauthorization."""
 
 
 class OAuthProviderClient:
@@ -434,11 +440,14 @@ class OAuthProviderClient:
         }
         return await self._token_request(data, fallback_scopes=transaction.requested_scopes, now=_response_time(now))
 
-    async def refresh(self, refresh_token: SecretStr, *, now: datetime | None = None) -> ProviderTokenSet:
+    async def refresh(
+        self, refresh_token: SecretStr, *, current_scopes: frozenset[str] | None = None, now: datetime | None = None
+    ) -> ProviderTokenSet:
         """Refresh provider credentials through the fixed token endpoint.
 
         Args:
             refresh_token: The protected stored refresh credential.
+            current_scopes: Current grant used when the response omits scope.
             now: The authoritative response time.
 
         Returns:
@@ -452,7 +461,8 @@ class OAuthProviderClient:
             _raise_provider()
         return await self._token_request(
             {"grant_type": "refresh_token", "refresh_token": refresh_token.get_secret_value()},
-            fallback_scopes=frozenset(),
+            fallback_scopes=current_scopes if current_scopes is not None else self.config.required_scopes,
+            fallback_refresh_token=refresh_token,
             now=_response_time(now),
         )
 
@@ -509,7 +519,12 @@ class OAuthProviderClient:
         await self.aclose()
 
     async def _token_request(
-        self, data: dict[str, str], *, fallback_scopes: frozenset[str], now: datetime
+        self,
+        data: dict[str, str],
+        *,
+        fallback_scopes: frozenset[str],
+        fallback_refresh_token: SecretStr | None = None,
+        now: datetime,
     ) -> ProviderTokenSet:
         auth, request_data = self._client_auth(data)
         try:
@@ -523,15 +538,17 @@ class OAuthProviderClient:
                     "Accept-Encoding": "identity",
                 },
             ) as response:
-                if response.status_code != _HTTP_OK:
-                    _raise_provider()
                 body = await _read_bounded(response, self.policy.maximum_response_bytes)
+                if response.status_code != _HTTP_OK:
+                    if _is_invalid_grant_response(response.headers.get("content-type", ""), body):
+                        raise InvalidProviderGrantError  # noqa: TRY301 - preserve provider reauthorization classification
+                    _raise_provider()
                 document = _parse_token_document(response.headers.get("content-type", ""), body)
             return _token_set(
                 document,
                 fallback_scopes=fallback_scopes,
-                required_scopes=self.config.required_scopes,
-                allowed_scopes=self.config.allowed_scopes,
+                config=self.config,
+                fallback_refresh_token=fallback_refresh_token,
                 now=now,
             )
         except OAuthProviderError:
@@ -679,17 +696,20 @@ class GitHubOAuthProvider:
             raw_claims=raw_claims,
         )
 
-    async def refresh(self, refresh_token: SecretStr, *, now: datetime | None = None) -> ProviderTokenSet:
+    async def refresh(
+        self, refresh_token: SecretStr, *, current_scopes: frozenset[str] | None = None, now: datetime | None = None
+    ) -> ProviderTokenSet:
         """Refresh an expiring GitHub user token.
 
         Args:
             refresh_token: The protected GitHub refresh credential.
+            current_scopes: Current grant used when the response omits scope.
             now: The authoritative response time.
 
         Returns:
             The rotated GitHub token set.
         """
-        return await self.oauth.refresh(refresh_token, now=now)
+        return await self.oauth.refresh(refresh_token, current_scopes=current_scopes, now=now)
 
     async def revoke(self, token: SecretStr, *, token_type_hint: str | None) -> None:
         """Delete one GitHub OAuth application token grant.
@@ -819,12 +839,20 @@ def _parse_token_document(content_type: str, body: bytes) -> dict[str, object]:
     return _raise_provider()
 
 
+def _is_invalid_grant_response(content_type: str, body: bytes) -> bool:
+    try:
+        document = _parse_token_document(content_type, body)
+    except Exception:  # noqa: BLE001 - malformed provider errors remain one sanitized failure
+        return False
+    return document.get("error") == "invalid_grant"
+
+
 def _token_set(
     document: Mapping[str, object],
     *,
     fallback_scopes: frozenset[str],
-    required_scopes: frozenset[str],
-    allowed_scopes: frozenset[str],
+    config: OAuthEndpointConfig,
+    fallback_refresh_token: SecretStr | None = None,
     now: datetime,
 ) -> ProviderTokenSet:
     access_token = _required_text(document, "access_token")
@@ -833,9 +861,9 @@ def _token_set(
         _raise_provider()
     expires_seconds = _expires_seconds(document.get("expires_in"))
     scopes = _response_scopes(document.get("scope"), fallback=fallback_scopes)
-    if not required_scopes.issubset(scopes) or not scopes.issubset(allowed_scopes):
+    if not config.required_scopes.issubset(scopes) or not scopes.issubset(config.allowed_scopes):
         _raise_provider()
-    refresh_token = _optional_secret(document, "refresh_token")
+    refresh_token = _optional_secret(document, "refresh_token") or fallback_refresh_token
     id_token = _optional_secret(document, "id_token")
     return ProviderTokenSet(
         access_token=SecretStr(access_token),

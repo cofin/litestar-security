@@ -1,7 +1,5 @@
 """Atomic OAuth transaction and dedicated browser-binding contracts."""
 
-from __future__ import annotations
-
 from base64 import urlsafe_b64encode
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -20,6 +18,7 @@ from litestar.datastructures import Cookie
 from litestar.exceptions import ImproperlyConfiguredException
 
 __all__ = (
+    "OAUTH_BINDING_COOKIE_NAME",
     "InvalidOAuthCallback",
     "MemoryOAuthTransactionStore",
     "OAuthOperation",
@@ -37,7 +36,7 @@ __all__ = (
 )
 
 
-_OAUTH_COOKIE_NAME = "__Host-litestar-security-oauth"
+OAUTH_BINDING_COOKIE_NAME = "__Host-litestar-security-oauth"
 _DEFAULT_TRANSACTION_LIFETIME = timedelta(minutes=10)
 _STATE_BYTES = 32
 _BINDING_BYTES = 32
@@ -159,6 +158,8 @@ class OAuthTransaction:
     nonce: SecretStr | None = field(default=None, repr=False)
     account_id: str | None = None
     session_binding: str | None = field(default=None, repr=False)
+    security_epoch: int | None = None
+    provider_account_id: str | None = None
     expires_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:
@@ -177,6 +178,11 @@ class OAuthTransaction:
             or (self.expected_issuer is not None and not _strict_text(self.expected_issuer))
             or (self.account_id is not None and not _strict_text(self.account_id))
             or (self.session_binding is not None and not _strict_text(self.session_binding))
+            or (
+                self.security_epoch is not None
+                and (self.security_epoch.__class__ is not int or self.security_epoch < 0)
+            )
+            or (self.provider_account_id is not None and not _strict_text(self.provider_account_id))
             or not _aware_time(self.expires_at)
         ):
             message = "OAuth transaction is invalid"
@@ -430,6 +436,9 @@ class OAuthTransactionService:
         expected_issuer: str | None = None,
         account_id: str | None = None,
         session_binding: str | None = None,
+        browser_binding: SecretStr | None = None,
+        security_epoch: int | None = None,
+        provider_account_id: str | None = None,
     ) -> OAuthTransactionStart:
         """Create and persist one independent browser transaction.
 
@@ -444,6 +453,10 @@ class OAuthTransactionService:
             expected_issuer: The fixed issuer expected on callback.
             account_id: The account bound to a link or scope upgrade.
             session_binding: The optional Litestar session binding.
+            browser_binding: An existing dedicated browser binding to reuse
+                across concurrent transactions.
+            security_epoch: Authoritative epoch bound by consumed step-up.
+            provider_account_id: Provider link targeted by scope upgrade.
 
         Returns:
             Browser-facing state, binding, challenge, nonce, and stored transaction.
@@ -463,7 +476,10 @@ class OAuthTransactionService:
         try:
             entropy = cast("Callable[[int], bytes]", self.entropy)
             state = SecretStr(_encode_random(_entropy(entropy, _STATE_BYTES)))
-            browser_binding = SecretStr(_encode_random(_entropy(entropy, _BINDING_BYTES)))
+            if browser_binding is None:
+                browser_binding = SecretStr(_encode_random(_entropy(entropy, _BINDING_BYTES)))
+            elif _callback_secret(browser_binding) is None:
+                raise ValueError  # noqa: TRY301 - normalize invalid caller-supplied binding through one failure path
             verifier = SecretStr(_encode_random(_entropy(entropy, _PKCE_BYTES)))
             nonce = SecretStr(_encode_random(_entropy(entropy, _NONCE_BYTES))) if include_nonce else None
             transaction = OAuthTransaction(
@@ -479,6 +495,8 @@ class OAuthTransactionService:
                 nonce=nonce,
                 account_id=account_id,
                 session_binding=session_binding,
+                security_epoch=security_epoch,
+                provider_account_id=provider_account_id,
                 expires_at=now + self.lifetime,
             )
             await self.store.create(transaction)
@@ -498,7 +516,7 @@ class OAuthTransactionService:
         state: SecretStr | str,
         browser_binding: SecretStr | str,
         provider: str,
-        operation: OAuthOperation,
+        operation: OAuthOperation | None,
         session_binding: str | None,
         now: datetime,
     ) -> OAuthTransaction:
@@ -508,7 +526,8 @@ class OAuthTransactionService:
             state: The provider-returned opaque state.
             browser_binding: The dedicated cookie value.
             provider: The provider route receiving the callback.
-            operation: The operation expected by that route.
+            operation: The operation expected by that route, or ``None`` when a
+                shared callback dispatches from the consumed transaction.
             session_binding: The optional current Litestar session binding.
             now: The authoritative callback time.
 
@@ -525,7 +544,7 @@ class OAuthTransactionService:
             state_value is None
             or binding_value is None
             or not _strict_text(provider)
-            or operation.__class__ is not OAuthOperation
+            or (operation is not None and operation.__class__ is not OAuthOperation)
             or not _aware_time(now)
         ):
             raise InvalidOAuthCallback
@@ -540,7 +559,7 @@ class OAuthTransactionService:
             raise OAuthTransactionUnavailable from None
         if (
             transaction is None
-            or transaction.operation is not operation
+            or (operation is not None and transaction.operation is not operation)
             or not _session_matches(transaction.session_binding, session_binding)
         ):
             raise InvalidOAuthCallback
@@ -596,7 +615,7 @@ def oauth_binding_cookie(binding: SecretStr | str, *, max_age: int = 600) -> Coo
         message = "OAuth binding cookie value or lifetime is invalid"
         raise ValueError(message)
     return Cookie(
-        key=_OAUTH_COOKIE_NAME,
+        key=OAUTH_BINDING_COOKIE_NAME,
         value=value,
         max_age=max_age,
         secure=True,
@@ -669,6 +688,8 @@ def _replace_secrets(
         nonce=nonce,
         account_id=transaction.account_id,
         session_binding=transaction.session_binding,
+        security_epoch=transaction.security_epoch,
+        provider_account_id=transaction.provider_account_id,
         expires_at=transaction.expires_at,
     )
 
