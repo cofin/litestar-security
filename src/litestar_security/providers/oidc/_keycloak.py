@@ -113,7 +113,7 @@ def _permissions(value: JSONValue | None) -> frozenset[ResourcePermission] | Non
         normalized_scopes = _string_set(scopes)
         if not isinstance(resource, str) or not resource or normalized_scopes is None:
             return None
-        result.add(ResourcePermission(resource_id=resource, scopes=normalized_scopes))
+        result.add(ResourcePermission(resource=resource, scopes=normalized_scopes))
     return frozenset(result)
 
 

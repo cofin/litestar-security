@@ -118,6 +118,7 @@ _PUBLIC_API = (
     "AuthenticationRegistry",
     "AuthorizationDecision",
     "AuthorizationPredicate",
+    "AuthorizationResolver",
     "AuthorizationSnapshot",
     "CredentialExtraction",
     "CredentialRestrictions",
@@ -162,6 +163,7 @@ _PUBLIC_API = (
     "guard_any_of",
     "guard_at_least",
     "guard_one_of",
+    "intersect_authorization",
     "mechanism",
     "optional",
     "public",
@@ -711,13 +713,13 @@ def test_credential_restrictions_normalize_sets_and_preserve_empty() -> None:
 
 
 def test_resource_permission_is_immutable_and_normalized() -> None:
-    permission = ResourcePermission(resource_id=" report-1 ", scopes={" read "})
+    permission = ResourcePermission(resource=" report-1 ", scopes={" read "})
 
-    assert permission == ResourcePermission(resource_id="report-1", scopes=frozenset({"read"}))
+    assert permission == ResourcePermission(resource="report-1", scopes=frozenset({"read"}))
     with pytest.raises(ValueError, match="must not be blank"):
-        ResourcePermission(resource_id="", scopes=frozenset())
+        ResourcePermission(resource="", scopes=frozenset())
     with pytest.raises(ValueError, match="must not be blank"):
-        ResourcePermission(resource_id="report-1", scopes={""})
+        ResourcePermission(resource="report-1", scopes={""})
 
 
 @pytest.mark.parametrize(

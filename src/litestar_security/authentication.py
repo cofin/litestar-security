@@ -22,8 +22,10 @@ from litestar_security.context import (
     LitestarSessionHandle,
     NullSessionHandle,
     Principal,
+    ResourcePermission,
     SecurityContext,
     SessionHandle,
+    intersect_authorization,
 )
 
 __all__ = (
@@ -32,6 +34,7 @@ __all__ = (
     "AuthenticationOutcome",
     "AuthenticationPolicy",
     "AuthenticationRegistry",
+    "AuthorizationResolver",
     "CredentialExtraction",
     "CredentialSlot",
     "IdentityResolution",
@@ -336,6 +339,9 @@ AuthenticationOutcome: TypeAlias = NoCredentials | Authenticated[ClaimsT] | Inva
 IdentityResolution: TypeAlias = Principal[UserT] | InvalidCredentials | VerificationUnavailable
 
 
+AuthorizationResolution: TypeAlias = AuthorizationSnapshot | InvalidCredentials | VerificationUnavailable
+
+
 class CredentialSlot(Protocol[_CredentialT]):
     """Synchronous, non-blocking credential extraction boundary."""
 
@@ -395,6 +401,21 @@ class IdentityResolver(Protocol[_ResolverClaimsT_contra, _UserT]):
         ...  # pragma: no cover
 
 
+class AuthorizationResolver(Protocol[_UserT]):
+    """Application-owned resolution of authorization for one verified principal."""
+
+    async def resolve(self, principal: Principal[_UserT]) -> AuthorizationResolution:
+        """Load one immutable application authorization snapshot.
+
+        Args:
+            principal: The same-subject principal established by authentication.
+
+        Returns:
+            Application authorization or a sanitized rejection/outage outcome.
+        """
+        ...  # pragma: no cover
+
+
 @dataclass(frozen=True, slots=True)
 class AuthenticationMechanism(Generic[CredentialT, ClaimsT, UserT]):
     """Pair one slot authenticator with its identity resolver."""
@@ -420,6 +441,7 @@ class AuthenticationRegistry(Generic[UserT]):
 
     slots: Sequence[CredentialSlot[Any]] = ()
     mechanisms: Sequence[AuthenticationMechanism[Any, Any, UserT]] = ()
+    authorization_resolver: AuthorizationResolver[UserT] | None = field(default=None, repr=False, compare=False)
     require_default: bool = False
     _slots_by_name: Mapping[str, CredentialSlot[Any]] = field(init=False, repr=False, compare=False)
     _mechanisms_by_name: Mapping[str, AuthenticationMechanism[Any, Any, UserT]] = field(
@@ -436,6 +458,7 @@ class AuthenticationRegistry(Generic[UserT]):
         """Normalize names and reject ambiguous ownership before startup."""
         slots = tuple(self.slots)
         mechanisms = tuple(self.mechanisms)
+        _validate_authorization_resolver(self.authorization_resolver)
         slots_by_name: dict[str, CredentialSlot[Any]] = {}
         slot_names: list[str] = []
         for slot in slots:
@@ -763,10 +786,25 @@ class _AuthenticationEvaluator(Generic[UserT]):
             return principal, SecurityContext(session=session)
 
         authenticated = tuple(result.outcome for result in resolved)
-        authorization = _apply_restrictions(_merge_authorization(authenticated), _intersect_restrictions(authenticated))
+        authorization = await self._resolve_authorization(principal, authenticated)
         return principal, SecurityContext(
             session=session, evidence=tuple(outcome.evidence for outcome in authenticated), authorization=authorization
         )
+
+    async def _resolve_authorization(
+        self, principal: Principal[UserT], outcomes: Sequence[Authenticated[Any]]
+    ) -> AuthorizationSnapshot:
+        resolver = self.registry.authorization_resolver
+        if resolver is None:
+            snapshot = _merge_authorization(outcomes)
+        else:
+            resolution = await resolver.resolve(principal)
+            if isinstance(resolution, VerificationUnavailable):
+                raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
+            if isinstance(resolution, InvalidCredentials):
+                raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+            snapshot = resolution
+        return intersect_authorization(snapshot, tuple(outcome.restrictions for outcome in outcomes))
 
     def _participant_names(self, participant_names: AbstractSet[str] | None) -> frozenset[str]:
         if participant_names is None:
@@ -828,12 +866,19 @@ class _AuthenticationEvaluator(Generic[UserT]):
         return resolved
 
 
+def _validate_authorization_resolver(resolver: object | None) -> None:
+    if resolver is not None and not callable(getattr(resolver, "resolve", None)):
+        message = "Authorization resolver must define resolve"
+        raise ImproperlyConfiguredException(detail=message)
+
+
 def _merge_authorization(outcomes: Sequence[Authenticated[Any]]) -> AuthorizationSnapshot:
     scopes: set[str] = set()
     roles: set[str] = set()
     capabilities: set[str] = set()
     team_roles: dict[str, set[str]] = {}
     tenant_ids: set[str] = set()
+    resources: set[ResourcePermission] = set()
     attributes: dict[str, object] = {}
     for outcome in outcomes:
         scopes.update(outcome.grants.scopes)
@@ -842,6 +887,7 @@ def _merge_authorization(outcomes: Sequence[Authenticated[Any]]) -> Authorizatio
         for team_id, grants in outcome.grants.team_roles.items():
             team_roles.setdefault(team_id, set()).update(grants)
         tenant_ids.update(outcome.grants.tenant_ids)
+        resources.update(outcome.grants.resources)
         attributes.update(outcome.grants.attributes)
     return AuthorizationSnapshot(
         scopes=frozenset(scopes),
@@ -849,48 +895,8 @@ def _merge_authorization(outcomes: Sequence[Authenticated[Any]]) -> Authorizatio
         capabilities=frozenset(capabilities),
         team_roles={team_id: frozenset(grants) for team_id, grants in team_roles.items()},
         tenant_ids=frozenset(tenant_ids),
+        resources=frozenset(resources),
         attributes=attributes,
-    )
-
-
-def _intersect_restrictions(outcomes: Sequence[Authenticated[Any]]) -> CredentialRestrictions:
-    return CredentialRestrictions(
-        scopes=_intersect_dimension(outcomes, "scopes"),
-        roles=_intersect_dimension(outcomes, "roles"),
-        capabilities=_intersect_dimension(outcomes, "capabilities"),
-        team_ids=_intersect_dimension(outcomes, "team_ids"),
-        tenant_ids=_intersect_dimension(outcomes, "tenant_ids"),
-    )
-
-
-def _intersect_dimension(outcomes: Sequence[Authenticated[Any]], name: str) -> frozenset[str] | None:
-    bounds = tuple(value for outcome in outcomes if (value := getattr(outcome.restrictions, name)) is not None)
-    if not bounds:
-        return None
-    intersection = set(bounds[0])
-    for bound in bounds[1:]:
-        intersection.intersection_update(bound)
-    return frozenset(intersection)
-
-
-def _apply_restrictions(grants: AuthorizationSnapshot, restrictions: CredentialRestrictions) -> AuthorizationSnapshot:
-    return AuthorizationSnapshot(
-        scopes=grants.scopes if restrictions.scopes is None else grants.scopes & restrictions.scopes,
-        roles=grants.roles if restrictions.roles is None else grants.roles & restrictions.roles,
-        capabilities=(
-            grants.capabilities
-            if restrictions.capabilities is None
-            else grants.capabilities & restrictions.capabilities
-        ),
-        team_roles=(
-            grants.team_roles
-            if restrictions.team_ids is None
-            else {team_id: roles for team_id, roles in grants.team_roles.items() if team_id in restrictions.team_ids}
-        ),
-        tenant_ids=(
-            grants.tenant_ids if restrictions.tenant_ids is None else grants.tenant_ids & restrictions.tenant_ids
-        ),
-        attributes=grants.attributes,
     )
 
 

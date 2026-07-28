@@ -9,6 +9,7 @@ from litestar_security.authentication import (
     AuthenticationOutcome,
     AuthenticationPolicy,
     AuthenticationRegistry,
+    AuthorizationResolver,
     CredentialExtraction,
     CredentialSlot,
     IdentityResolution,
@@ -41,6 +42,7 @@ from litestar_security.context import (
     SessionHandle,
     SessionPersistenceUnavailableError,
     SessionUnavailableError,
+    intersect_authorization,
 )
 from litestar_security.guards import (
     AssuranceRequirement,
@@ -83,6 +85,7 @@ __all__ = (
     "AuthenticationRegistry",
     "AuthorizationDecision",
     "AuthorizationPredicate",
+    "AuthorizationResolver",
     "AuthorizationSnapshot",
     "CredentialExtraction",
     "CredentialRestrictions",
@@ -127,6 +130,7 @@ __all__ = (
     "guard_any_of",
     "guard_at_least",
     "guard_one_of",
+    "intersect_authorization",
     "mechanism",
     "optional",
     "public",

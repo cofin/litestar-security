@@ -35,6 +35,8 @@ from litestar_security.context import (
     CredentialRestrictions,
     NullSessionHandle,
     Principal,
+    ResourcePermission,
+    intersect_authorization,
 )
 
 if TYPE_CHECKING:
@@ -114,6 +116,18 @@ class _Resolver:
         return self.principal
 
 
+class _AuthorizationResolver:
+    def __init__(self, outcome: object, events: list[str]) -> None:
+        self.outcome = outcome
+        self.events = events
+        self.calls = 0
+
+    async def resolve(self, principal: Principal[object]) -> object:
+        self.calls += 1
+        self.events.append(f"authorize:{principal.id}")
+        return self.outcome
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("status", [200, 401], ids=["normal", "exception"])
 async def test_security_wrapper_appends_queued_headers_to_every_http_response(status: int) -> None:
@@ -173,7 +187,10 @@ def _success(
 
 
 def _evaluator(
-    definitions: list[tuple[str, object, object, Principal[object]]], events: list[str]
+    definitions: list[tuple[str, object, object, Principal[object]]],
+    events: list[str],
+    *,
+    authorization_resolver: object | None = None,
 ) -> tuple[_AuthenticationEvaluator[object], list[_Slot], list[_Authenticator], list[_Resolver]]:
     slots: list[_Slot] = []
     authenticators: list[_Authenticator] = []
@@ -192,7 +209,9 @@ def _evaluator(
                 resolver=resolver,
             )
         )
-    registry = AuthenticationRegistry(slots=slots, mechanisms=mechanisms)  # type: ignore[arg-type]
+    registry = AuthenticationRegistry(  # type: ignore[arg-type]
+        slots=slots, mechanisms=mechanisms, authorization_resolver=authorization_resolver
+    )
     return registry.evaluator(), slots, authenticators, resolvers
 
 
@@ -491,6 +510,7 @@ async def test_same_subject_merges_evidence_and_grants_in_order() -> None:
                         capabilities={"reports.view"},
                         team_roles={"team-1": {"member"}},
                         tenant_ids={"tenant-1"},
+                        resources={ResourcePermission(resource="report-1", scopes={"read"})},
                         attributes={"source-a": True},
                     ),
                 ),
@@ -508,6 +528,7 @@ async def test_same_subject_merges_evidence_and_grants_in_order() -> None:
                         capabilities={"reports.export"},
                         team_roles={"team-1": {"owner"}, "team-2": {"member"}},
                         tenant_ids={"tenant-2"},
+                        resources={ResourcePermission(resource="report-2", scopes={"write"})},
                         attributes={"source-b": True},
                     ),
                 ),
@@ -529,6 +550,10 @@ async def test_same_subject_merges_evidence_and_grants_in_order() -> None:
         "team-2": frozenset({"member"}),
     }
     assert context.authorization.tenant_ids == frozenset({"tenant-1", "tenant-2"})
+    assert context.authorization.resources == frozenset({
+        ResourcePermission(resource="report-1", scopes={"read"}),
+        ResourcePermission(resource="report-2", scopes={"write"}),
+    })
     assert context.authorization.attributes == {"source-a": True, "source-b": True}
 
 
@@ -545,6 +570,9 @@ def _authorization_for_dimension(dimension: str) -> AuthorizationSnapshot:
     [
         ((None, None), {"a", "b", "c"}),
         ((None, frozenset()), set()),
+        ((frozenset({"a", "b", "c"}), frozenset({"a", "b", "c"})), {"a", "b", "c"}),
+        ((frozenset({"a", "b"}), None), {"a", "b"}),
+        ((frozenset({"a", "b", "c", "d"}), None), {"a", "b", "c"}),
         ((frozenset({"a", "b"}), frozenset({"b", "c"})), {"b"}),
         ((frozenset({"a"}), frozenset({"c"})), set()),
     ],
@@ -580,6 +608,119 @@ async def test_restriction_intersection_truth_table(
     else:
         actual = set(getattr(context.authorization, dimension))
     assert actual == expected
+
+
+@pytest.mark.parametrize(
+    ("bounds", "expected"),
+    [
+        (None, {"report-1": {"read", "write"}, "report-2": {"view"}}),
+        (frozenset(), {}),
+        (
+            frozenset({
+                ResourcePermission(resource="report-1", scopes={"read"}),
+                ResourcePermission(resource="report-3", scopes={"admin"}),
+            }),
+            {"report-1": {"read"}},
+        ),
+        (frozenset({ResourcePermission(resource="missing", scopes={"read"})}), {}),
+    ],
+)
+def test_resource_restriction_truth_table(
+    bounds: frozenset[ResourcePermission] | None, expected: dict[str, set[str]]
+) -> None:
+    snapshot = AuthorizationSnapshot(
+        resources={
+            ResourcePermission(resource="report-1", scopes={"read", "write"}),
+            ResourcePermission(resource="report-2", scopes={"view"}),
+        }
+    )
+
+    effective = intersect_authorization(snapshot, (CredentialRestrictions(resources=bounds),))
+
+    assert {permission.resource: set(permission.scopes) for permission in effective.resources} == expected
+
+
+@pytest.mark.anyio
+async def test_application_authorization_is_resolved_once_then_narrowed_by_all_credentials() -> None:
+    events: list[str] = []
+    application = AuthorizationSnapshot(
+        scopes={"read", "write"},
+        team_roles={"team-1": {"member"}, "team-2": {"owner"}},
+        tenant_ids={"tenant-1"},
+        resources={ResourcePermission(resource="report-1", scopes={"read", "write"})},
+    )
+    authorization_resolver = _AuthorizationResolver(application, events)
+    evaluator, _, _, _ = _evaluator(
+        [
+            (
+                "api-key",
+                PresentedCredential("key"),
+                _success(
+                    "api-key",
+                    "slot-api-key",
+                    grants=AuthorizationSnapshot(scopes={"manufactured"}, team_roles={"missing": {"owner"}}),
+                    restrictions=CredentialRestrictions(
+                        scopes={"read"},
+                        team_ids={"team-1", "missing"},
+                        resources=frozenset({ResourcePermission(resource="report-1", scopes={"read"})}),
+                    ),
+                ),
+                Principal(id="user-1"),
+            ),
+            (
+                "rpt",
+                PresentedCredential("token"),
+                _success(
+                    "rpt",
+                    "slot-rpt",
+                    restrictions=CredentialRestrictions(
+                        tenant_ids={"tenant-1", "missing"},
+                        resources=frozenset({
+                            ResourcePermission(resource="report-1", scopes={"write"}),
+                            ResourcePermission(resource="missing", scopes={"admin"}),
+                        }),
+                    ),
+                ),
+                Principal(id="user-1"),
+            ),
+        ],
+        events,
+        authorization_resolver=authorization_resolver,
+    )
+
+    _, context = await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True)
+
+    assert authorization_resolver.calls == 1
+    assert context.authorization.scopes == frozenset({"read"})
+    assert context.authorization.team_roles == {"team-1": frozenset({"member"})}
+    assert context.authorization.tenant_ids == frozenset({"tenant-1"})
+    assert context.authorization.resources == frozenset({ResourcePermission(resource="report-1", scopes=frozenset())})
+    assert "manufactured" not in context.authorization.scopes
+    assert events[-1] == "authorize:user-1"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("resolution", "error"),
+    [(InvalidCredentials(), NotAuthorizedException), (VerificationUnavailable(), ServiceUnavailableException)],
+)
+async def test_authorization_resolution_preserves_structured_failure(
+    resolution: object, error: type[Exception]
+) -> None:
+    events: list[str] = []
+    evaluator, _, _, _ = _evaluator(
+        [("a", PresentedCredential("a"), _success("a", "slot-a"), Principal(id="user-1"))],
+        events,
+        authorization_resolver=_AuthorizationResolver(resolution, events),
+    )
+
+    with pytest.raises(error):
+        await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True)
+
+
+def test_registry_rejects_malformed_authorization_resolver() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Authorization resolver"):
+        AuthenticationRegistry(authorization_resolver=object())  # type: ignore[arg-type]
 
 
 @pytest.mark.anyio

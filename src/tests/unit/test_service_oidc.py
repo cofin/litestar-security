@@ -161,10 +161,7 @@ async def test_service_jwt_accepts_rotated_jwks_key(service_key_material: tuple[
 
     outcome = await mechanism.authenticator.authenticate(
         jwt.encode(
-            _service_claims(),
-            rotated_private,
-            algorithm="ES256",
-            headers={"kid": "service-key", "typ": "at+jwt"},
+            _service_claims(), rotated_private, algorithm="ES256", headers={"kid": "service-key", "typ": "at+jwt"}
         ),
         type("Connection", (), {"scope": {"headers": []}})(),
     )
@@ -321,8 +318,8 @@ def test_keycloak_maps_roles_scopes_and_issued_rpt_without_io() -> None:
         client_roles=MappingProxyType({"billing": frozenset({"reader"}), "reports": frozenset({"reader", "writer"})}),
         scopes=frozenset({"openid", "reports:read"}),
         permissions=frozenset({
-            ResourcePermission(resource_id="resource-1", scopes=frozenset({"read", "write"})),
-            ResourcePermission(resource_id="named-resource", scopes=frozenset({"view"})),
+            ResourcePermission(resource="resource-1", scopes=frozenset({"read", "write"})),
+            ResourcePermission(resource="named-resource", scopes=frozenset({"view"})),
         }),
     )
 
