@@ -21,6 +21,7 @@ from litestar_security.authentication import (
     CredentialSlot,
     required,
 )
+from litestar_security.headers import SecurityHeadersConfig
 from litestar_security.websocket import WebSocketSecurityConfig
 
 if TYPE_CHECKING:
@@ -340,6 +341,7 @@ class SecurityConfig(Generic[UserT]):
     api_key: "APIKeyConfig | None" = None
     iap: "GoogleIAPConfig[UserT] | None" = None
     service_token: "ServiceTokenConfig | None" = None
+    headers: SecurityHeadersConfig | None = None
     websocket: WebSocketSecurityConfig = field(default_factory=WebSocketSecurityConfig)
     authorization_resolver: AuthorizationResolver[UserT] | None = field(default=None, repr=False)
     jwks_providers: Sequence["JWKSProvider"] = ()
@@ -357,6 +359,10 @@ class SecurityConfig(Generic[UserT]):
             raise ImproperlyConfiguredException(detail=msg)
         if external_csrf is not None and not isinstance(external_csrf, ExternalCSRF):
             msg = "External CSRF configuration must be an ExternalCSRF assertion"
+            raise ImproperlyConfiguredException(detail=msg)
+        headers = cast("object | None", self.headers)
+        if headers is not None and not isinstance(headers, SecurityHeadersConfig):
+            msg = "Browser security headers must be a SecurityHeadersConfig"
             raise ImproperlyConfiguredException(detail=msg)
         if csrf_config is not None and external_csrf is not None:
             msg = "Security configuration cannot combine native and external CSRF enforcement"

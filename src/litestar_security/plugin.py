@@ -35,6 +35,7 @@ from litestar_security.authentication import (
 )
 from litestar_security.config import SecurityConfig
 from litestar_security.context import Principal, SecurityContext
+from litestar_security.headers import CSPHook, configure_security_headers
 
 __all__ = ("CurrentUser", "PrincipalDependency", "SecurityContextDependency", "SecurityPlugin")
 
@@ -72,6 +73,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     __slots__ = (
         "_api_key_lifespan",
         "_api_key_service",
+        "_headers_hook",
         "_jwks_lifespan",
         "_local_auth_route_handlers",
         "_mfa_route_handlers",
@@ -97,6 +99,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._runtime_config: SecurityRuntimeConfig[UserT] | None = None
         self._middleware: DefineMiddleware | None = None
         self._jwks_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
+        self._headers_hook: CSPHook | None = None
         self._api_key_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
         self._api_key_service: object | None = None
         self._local_auth_route_handlers: tuple[Router, ...] | None = None
@@ -120,6 +123,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 something this plugin must own, such as a competing session
                 middleware, CSRF config, or reserved dependency name.
         """
+        self._configure_headers(app_config)
         self._configure_local_auth()
         self._configure_local_auth_rate_limits(app_config)
         self._configure_local_auth_routes(app_config)
@@ -215,6 +219,11 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         from litestar_security._cli import register  # noqa: PLC0415 - the CLI registrar loads only when the CLI runs
 
         register(cli)
+
+    def _configure_headers(self, app_config: AppConfig) -> None:
+        headers = self.config.headers
+        if headers is not None:
+            self._headers_hook = configure_security_headers(app_config, headers, self._headers_hook)
 
     def _get_runtime(self, *, existing_session: bool) -> tuple[SecurityRuntimeConfig[UserT], DefineMiddleware]:
         if self._runtime_config is None:

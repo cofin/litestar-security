@@ -34,7 +34,7 @@ from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
 from litestar.testing import TestClient
 
 import litestar_security.accounts as accounts_module
-from litestar_security import MFAConfig, PasskeyConfig, SecurityConfig, SecurityPlugin
+from litestar_security import MFAConfig, PasskeyConfig, SecurityConfig, SecurityPlugin, csp_nonce
 from litestar_security._cli import register, security_group
 from litestar_security.accounts import (
     LOCAL_AUTH_TAGS,
@@ -83,6 +83,7 @@ from litestar_security.authentication import (
 )
 from litestar_security.config import ExternalCSRF
 from litestar_security.context import AuthenticationEvidence, Principal, SecurityContext
+from litestar_security.headers import ContentSecurityPolicy, SecurityHeadersConfig
 from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency
 from litestar_security.providers.api_key import APIKeyConfig
 from litestar_security.providers.iap import GoogleIAPConfig
@@ -99,6 +100,61 @@ from litestar_security.providers.jwt import (
 )
 from litestar_security.providers.oidc import ServiceTokenConfig
 from litestar_security.websocket import WebSocketSecurityConfig
+
+
+def test_static_security_headers_use_native_response_headers_without_hook() -> None:
+    @get("/", sync_to_thread=False)
+    def handler() -> None:
+        return None
+
+    plugin = SecurityPlugin[object](
+        SecurityConfig[object](
+            default_policy=public(),
+            headers=SecurityHeadersConfig(
+                static={"X-Content-Type-Options": "nosniff"},
+                csp=ContentSecurityPolicy(directives={"default-src": ("'self'",)}),
+            ),
+        )
+    )
+    app = Litestar(route_handlers=[handler], plugins=[plugin])
+
+    with TestClient(app) as client:
+        response = client.get("/")
+
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-security-policy"] == "default-src 'self'"
+    assert app.before_send == []
+
+
+def test_nonce_csp_dependency_matches_fresh_response_header() -> None:
+    @get("/", sync_to_thread=False)
+    def handler(csp_nonce: csp_nonce) -> str:
+        return csp_nonce
+
+    plugin = SecurityPlugin[object](
+        SecurityConfig[object](
+            default_policy=public(),
+            headers=SecurityHeadersConfig(
+                csp=ContentSecurityPolicy(
+                    directives={"default-src": ("'self'",), "script-src": ("'self'",)},
+                    nonce_directives=("script-src",),
+                )
+            ),
+        )
+    )
+    app = Litestar(route_handlers=[handler], plugins=[plugin])
+
+    with TestClient(app) as client:
+        first = client.get("/")
+        second = client.get("/")
+
+    first_nonce = first.text
+    second_nonce = second.text
+    assert first_nonce != second_nonce
+    assert len(first_nonce) >= 22
+    assert f"'nonce-{first_nonce}'" in first.headers["content-security-policy"]
+    assert f"'nonce-{second_nonce}'" in second.headers["content-security-policy"]
+    assert len(app.before_send) == 1
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
