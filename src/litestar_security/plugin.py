@@ -402,20 +402,14 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         mfa_config = self.config.mfa
         passkey_config = self.config.passkeys
         enabled_mfa = mfa_config if mfa_config is not None and mfa_config.register_routes else None
-        enabled_passkeys = (
-            passkey_config if passkey_config is not None and passkey_config.register_routes else None
-        )
+        enabled_passkeys = passkey_config if passkey_config is not None and passkey_config.register_routes else None
         if enabled_mfa is None and enabled_passkeys is None:
             return
         local_auth = self.config.local_auth
         if local_auth is None:
             message = "Generated MFA and passkey routes require local authentication for epoch validation"
             raise ImproperlyConfiguredException(detail=message)
-        prefixes = {
-            config.route_prefix
-            for config in (enabled_mfa, enabled_passkeys)
-            if config is not None
-        }
+        prefixes = {config.route_prefix for config in (enabled_mfa, enabled_passkeys) if config is not None}
         if len(prefixes) != 1:
             message = "Generated MFA and passkey routes must share one route prefix"
             raise ImproperlyConfiguredException(detail=message)
@@ -456,6 +450,8 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 ),
                 rate_limits=local_auth.rate_limits,
                 client_key=local_auth.client_key,
+                local_auth=local_auth.services,
+                session_capable=local_auth.session_auth is not None,
                 route_prefix=prefixes.pop(),
             )
             route_handlers = (router,)

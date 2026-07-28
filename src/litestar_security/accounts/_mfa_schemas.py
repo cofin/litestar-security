@@ -21,12 +21,7 @@ __all__ = (
 )
 
 
-class TOTPEnrollmentRequest(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class TOTPEnrollmentRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Request a protected TOTP enrollment."""
 
     label: str
@@ -37,12 +32,7 @@ class TOTPEnrollmentRequest(
         return f"{type(self).__name__}(label={self.label!r}, step_up_grant=<redacted>)"
 
 
-class TOTPEnrollmentResponse(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class TOTPEnrollmentResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Reveal one TOTP provisioning URI."""
 
     enrollment_id: str
@@ -58,12 +48,7 @@ class TOTPEnrollmentResponse(
         )
 
 
-class TOTPVerificationRequest(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class TOTPVerificationRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Activate one pending TOTP enrollment."""
 
     enrollment_id: str
@@ -74,12 +59,7 @@ class TOTPVerificationRequest(
         return f"{type(self).__name__}(enrollment_id={self.enrollment_id!r}, code=<redacted>)"
 
 
-class RecoveryCodesRequest(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class RecoveryCodesRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Authorize a recovery-code replacement."""
 
     step_up_grant: str
@@ -89,12 +69,7 @@ class RecoveryCodesRequest(
         return f"{type(self).__name__}(step_up_grant=<redacted>)"
 
 
-class RecoveryCodesResponse(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class RecoveryCodesResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Reveal a replacement recovery-code set once."""
 
     codes: tuple[str, ...]
@@ -104,23 +79,13 @@ class RecoveryCodesResponse(
         return f"{type(self).__name__}(codes=<redacted>)"
 
 
-class MFAStatusResponse(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class MFAStatusResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Return one redacted generated-route outcome."""
 
     detail: str
 
 
-class StepUpRequest(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class StepUpRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Present one configured factor for a purpose-bound grant."""
 
     method: str
@@ -129,18 +94,10 @@ class StepUpRequest(
 
     def __repr__(self) -> str:
         """Redact the factor credential."""
-        return (
-            f"{type(self).__name__}(method={self.method!r}, credential=<redacted>, "
-            f"method_id={self.method_id!r})"
-        )
+        return f"{type(self).__name__}(method={self.method!r}, credential=<redacted>, method_id={self.method_id!r})"
 
 
-class StepUpResponse(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class StepUpResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Return one short-lived transport-bound grant."""
 
     grant: str
@@ -149,18 +106,10 @@ class StepUpResponse(
 
     def __repr__(self) -> str:
         """Redact the reveal-once grant."""
-        return (
-            f"{type(self).__name__}(grant=<redacted>, purpose={self.purpose!r}, "
-            f"expires_at={self.expires_at!r})"
-        )
+        return f"{type(self).__name__}(grant=<redacted>, purpose={self.purpose!r}, expires_at={self.expires_at!r})"
 
 
-class PasskeyRegistrationOptionsRequest(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class PasskeyRegistrationOptionsRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Request bound passkey registration options."""
 
     user_name: str
@@ -171,39 +120,27 @@ class PasskeyRegistrationOptionsRequest(
         return f"{type(self).__name__}(user_name={self.user_name!r}, step_up_grant=<redacted>)"
 
 
-class PasskeyAuthenticationOptionsRequest(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class PasskeyAuthenticationOptionsRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Request bound passkey authentication options."""
 
     account_id: str
 
 
-class PasskeyVerifyRequest(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class PasskeyVerifyRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Submit one browser WebAuthn JSON response."""
 
     account_id: str
     response: str
+    transport: str | None = None
 
     def __repr__(self) -> str:
         """Redact the browser credential response."""
-        return f"{type(self).__name__}(account_id={self.account_id!r}, response=<redacted>)"
+        return (
+            f"{type(self).__name__}(account_id={self.account_id!r}, response=<redacted>, transport={self.transport!r})"
+        )
 
 
-class PasskeyOptionsResponse(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class PasskeyOptionsResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Carry dependency-independent WebAuthn JSON options."""
 
     options: str
@@ -214,12 +151,7 @@ class PasskeyOptionsResponse(
         return f"{type(self).__name__}(options=<redacted>, expires_at={self.expires_at!r})"
 
 
-class PasskeySummaryResponse(
-    msgspec.Struct,
-    frozen=True,
-    rename="camel",
-    forbid_unknown_fields=True,
-):
+class PasskeySummaryResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
     """Safe caller-owned credential metadata."""
 
     credential_id: str

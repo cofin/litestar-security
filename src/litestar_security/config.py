@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import timedelta
 from inspect import iscoroutinefunction
 from math import isfinite
 from types import MappingProxyType
@@ -15,6 +16,7 @@ from litestar.middleware.session.base import BaseSessionBackend
 from litestar_security.authentication import AuthenticationMechanism, AuthenticationPolicy, CredentialSlot, required
 
 if TYPE_CHECKING:
+    from litestar_security.accounts import LoginMethodStore, RecoveryCodePepper, SecurityEventSink, TOTPPolicy
     from litestar_security.accounts._profiles import LocalAuthConfig
     from litestar_security.providers.jwks import JWKSProvider
     from litestar_security.providers.jwt import LocalJWKSConfig
@@ -138,6 +140,10 @@ class MFAConfig:
 
     store: object
     secret_protector: object = field(repr=False)
+    policy: "TOTPPolicy | None" = None
+    recovery_peppers: "Sequence[RecoveryCodePepper]" = field(default=(), repr=False)
+    login_methods: "LoginMethodStore | None" = field(default=None, repr=False)
+    events: "SecurityEventSink | None" = field(default=None, repr=False)
     step_up_store: object | None = field(default=None, repr=False)
     route_prefix: str = "/auth"
     issuer: str = "Litestar Security"
@@ -153,15 +159,18 @@ class MFAConfig:
             StepUpStore,
         )
 
-        object.__setattr__(
-            self,
-            "service",
-            MFAService(
-                store=cast("Any", self.store),
-                secret_protector=cast("Any", self.secret_protector),
-                issuer=self.issuer,
-            ),
-        )
+        service_kwargs: dict[str, object] = {
+            "store": self.store,
+            "secret_protector": self.secret_protector,
+            "issuer": self.issuer,
+            "recovery_peppers": tuple(self.recovery_peppers),
+            "login_methods": self.login_methods,
+        }
+        if self.policy is not None:
+            service_kwargs["policy"] = self.policy
+        if self.events is not None:
+            service_kwargs["events"] = self.events
+        object.__setattr__(self, "service", MFAService(**cast("Any", service_kwargs)))
         step_up_store = self.step_up_store if self.step_up_store is not None else self.store
         object.__setattr__(
             self,
@@ -184,6 +193,11 @@ class PasskeyConfig:
     rp_id: str
     origins: Sequence[str]
     rp_name: str = "Litestar Security"
+    algorithms: Sequence[int] = (-8, -7, -257)
+    challenge_ttl: timedelta = timedelta(minutes=5)
+    allow_insecure_localhost: bool = False
+    login_methods: "LoginMethodStore | None" = field(default=None, repr=False)
+    events: "SecurityEventSink | None" = field(default=None, repr=False)
     step_up_store: object | None = field(default=None, repr=False)
     route_prefix: str = "/auth"
     register_routes: bool = True
@@ -199,23 +213,25 @@ class PasskeyConfig:
         )
 
         object.__setattr__(self, "origins", tuple(self.origins))
-        object.__setattr__(
-            self,
-            "service",
-            PasskeyService(
-                store=cast("Any", self.store),
-                challenge_store=cast("Any", self.challenge_store),
-                rp_id=self.rp_id,
-                rp_name=self.rp_name,
-                origins=cast("tuple[str, ...]", self.origins),
-            ),
-        )
+        object.__setattr__(self, "algorithms", tuple(self.algorithms))
+        service_kwargs = {
+            "store": self.store,
+            "challenge_store": self.challenge_store,
+            "rp_id": self.rp_id,
+            "rp_name": self.rp_name,
+            "origins": self.origins,
+            "algorithms": self.algorithms,
+            "challenge_ttl": self.challenge_ttl,
+            "allow_insecure_localhost": self.allow_insecure_localhost,
+            "login_methods": self.login_methods,
+        }
+        if self.events is not None:
+            service_kwargs["events"] = self.events
+        object.__setattr__(self, "service", PasskeyService(**cast("Any", service_kwargs)))
         object.__setattr__(
             self,
             "step_up_service",
-            StepUpService(cast("Any", self.step_up_store))
-            if isinstance(self.step_up_store, StepUpStore)
-            else None,
+            StepUpService(cast("Any", self.step_up_store)) if isinstance(self.step_up_store, StepUpStore) else None,
         )
         object.__setattr__(self, "route_prefix", _feature_route_prefix(self.route_prefix))
         register_routes_value = cast("object", self.register_routes)

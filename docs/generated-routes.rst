@@ -118,3 +118,31 @@ mount your own controllers against ``local_auth.services``:
 
 No tag descriptions are contributed in that case, because no operations are
 generated to file under them.
+
+MFA, passkeys, and step-up
+==========================
+
+``MFAConfig`` and ``PasskeyConfig`` add a second route bundle under the same
+``/auth`` prefix. It contains TOTP enrollment and activation, recovery-code
+replacement, passkey registration and authentication, safe credential
+inventory and removal, and ``POST /auth/step-up/{purpose}``.
+
+Step-up grants are short-lived, single-use values returned in JSON. The stored
+record contains only a digest and is bound to the authenticated principal,
+current security epoch, exact purpose, and current session or token transport.
+A grant for one operation cannot authorize another operation.
+
+All secret- and challenge-bearing responses set ``Cache-Control: no-store`` and
+``Pragma: no-cache``. Generated schemas describe the typed camel-case JSON
+models without embedding sample TOTP secrets, recovery codes, browser
+credential responses, or public verification keys.
+
+Passkey authentication establishes the local transport selected by the
+application profile. Session-capable profiles compile the unsafe verification
+route with CSRF enforcement; token-only profiles do not require a browser CSRF
+cookie. In a hybrid profile, clients select ``session`` or ``tokens`` in the
+verification body.
+
+Set ``register_routes=False`` independently on either feature configuration to
+keep its service available for an application-owned controller without
+registering its generated handlers.

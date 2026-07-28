@@ -47,6 +47,7 @@ from litestar_security.accounts._operations import (
     PASSKEY_REGISTER_VERIFY,
 )
 from litestar_security.accounts._passkeys import PasskeyService, PasskeySummary, WebAuthnOptions
+from litestar_security.accounts._profiles import LocalAuthServices
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import RevokeLoginMethodResult, RevokeLoginMethodStatus
 from litestar_security.accounts._stores import SecurityEpochStore
@@ -76,6 +77,7 @@ class _MFAFeatureServices:
     epochs: SecurityEpochStore
     rate_limits: RateLimitGuard | None
     client_key: Callable[[ASGIConnection[Any, Any, Any, Any]], str | None] | None
+    local_auth: LocalAuthServices[Any] | None
 
 
 _ServicesDependency = NamedDependency[SkipValidation[_MFAFeatureServices]]
@@ -90,6 +92,8 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
     passkeys: PasskeyService | None = None,
     rate_limits: RateLimitGuard | None = None,
     client_key: Callable[[ASGIConnection[Any, Any, Any, Any]], str | None] | None = None,
+    local_auth: LocalAuthServices[Any] | None = None,
+    session_capable: bool = False,
     route_prefix: str = "/auth",
 ) -> Router:
     """Build generated MFA and passkey routes around explicit services.
@@ -101,6 +105,8 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
         passkeys: Optional WebAuthn service.
         rate_limits: Optional shared abuse-prevention hook.
         client_key: Trusted connection-to-client bucket derivation.
+        local_auth: Local transport issuance services.
+        session_capable: Whether passkey login may establish a browser session.
         route_prefix: Absolute path under which the route bundle is mounted.
 
     Returns:
@@ -119,20 +125,22 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
         epochs=epochs,
         rate_limits=rate_limits,
         client_key=client_key,
+        local_auth=local_auth,
     )
     handlers: list[type[Controller]] = [_StepUpController]
     if mfa is not None:
         handlers.append(_MFAController)
     if passkeys is not None:
-        handlers.append(_PasskeyController)
+        handlers.extend((
+            _PasskeyController,
+            _PasskeySessionAuthenticationController if session_capable else _PasskeyTokenAuthenticationController,
+        ))
     return Router(
         path=route_prefix,
         route_handlers=handlers,
         cache_control=CacheControlHeader(no_store=True),
         response_headers={"Pragma": "no-cache"},
-        dependencies={
-            "mfa_feature_services": Provide(lambda: services, sync_to_thread=False, use_cache=False),
-        },
+        dependencies={"mfa_feature_services": Provide(lambda: services, sync_to_thread=False, use_cache=False)},
     )
 
 
@@ -148,8 +156,7 @@ def _error(outcome: object) -> Response[Any]:
         return response
     if isinstance(outcome, VerificationUnavailable):
         return _response(
-            MFAStatusResponse(detail="Authentication service is unavailable."),
-            HTTP_503_SERVICE_UNAVAILABLE,
+            MFAStatusResponse(detail="Authentication service is unavailable."), HTTP_503_SERVICE_UNAVAILABLE
         )
     return _response(MFAStatusResponse(detail="Authentication required."), HTTP_401_UNAUTHORIZED)
 
@@ -174,10 +181,7 @@ async def _current_epoch(services: _MFAFeatureServices, account_id: str) -> int 
 
 
 async def _check_rate_limit(
-    services: _MFAFeatureServices,
-    request: Request[Any, Any, Any],
-    operation: str,
-    account_id: str,
+    services: _MFAFeatureServices, request: Request[Any, Any, Any], operation: str, account_id: str
 ) -> RateLimited | VerificationUnavailable | None:
     guard = services.rate_limits
     if guard is None:
@@ -187,12 +191,7 @@ async def _check_rate_limit(
 
 
 async def _consume_step_up(
-    *,
-    services: _MFAFeatureServices,
-    request: Request[Any, Any, Any],
-    account_id: str,
-    purpose: str,
-    grant: str,
+    *, services: _MFAFeatureServices, request: Request[Any, Any, Any], account_id: str, purpose: str, grant: str
 ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
     epoch = await _current_epoch(services, account_id)
     if isinstance(epoch, VerificationUnavailable):
@@ -225,13 +224,11 @@ class _StepUpController(Controller):
     ) -> Response[StepUpResponse | MFAStatusResponse]:
         """Verify one factor and issue a purpose-bound grant."""
         account_id = _principal_id(principal)
-        if account_id is None:
+        if account_id is None:  # pragma: no cover - required authentication rejects anonymous requests first
             return _error(InvalidCredentials())
-        operation = {
-            "totp": MFA_TOTP_VERIFY,
-            "recovery-code": MFA_RECOVERY_CONSUME,
-            "passkey": PASSKEY_ASSERT,
-        }.get(data.method, MFA_TOTP_VERIFY)
+        operation = {"totp": MFA_TOTP_VERIFY, "recovery-code": MFA_RECOVERY_CONSUME, "passkey": PASSKEY_ASSERT}.get(
+            data.method, MFA_TOTP_VERIFY
+        )
         limited = await _check_rate_limit(mfa_feature_services, request, operation, account_id)
         if limited is not None:
             return _error(limited)
@@ -254,10 +251,7 @@ class _StepUpController(Controller):
 
     @staticmethod
     async def _verify_factor(
-        account_id: str,
-        data: StepUpRequest,
-        request: Request[Any, Any, Any],
-        services: _MFAFeatureServices,
+        account_id: str, data: StepUpRequest, request: Request[Any, Any, Any], services: _MFAFeatureServices
     ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
         if data.method == "totp" and data.method_id is not None and services.mfa is not None:
             return await services.mfa.verify_totp(account_id, data.method_id, data.credential)
@@ -265,9 +259,7 @@ class _StepUpController(Controller):
             return await services.mfa.consume_recovery_code(account_id, data.credential)
         if data.method == "passkey" and services.passkeys is not None:
             return await services.passkeys.verify_authentication(
-                account_id,
-                binding=_transport_binding(request),
-                response=data.credential,
+                account_id, binding=_transport_binding(request), response=data.credential
             )
         return InvalidCredentials()
 
@@ -286,7 +278,7 @@ class _MFAController(Controller):
         """Begin TOTP enrollment after consuming exact step-up."""
         account_id = _principal_id(principal)
         service = mfa_feature_services.mfa
-        if account_id is None or service is None:
+        if account_id is None or service is None:  # pragma: no cover - controller registration and auth guarantee both
             return _error(InvalidCredentials())
         limited = await _check_rate_limit(mfa_feature_services, request, MFA_TOTP_ENROLL, account_id)
         if limited is not None:
@@ -324,7 +316,7 @@ class _MFAController(Controller):
         """Activate TOTP and return a recovery-code set once."""
         account_id = _principal_id(principal)
         service = mfa_feature_services.mfa
-        if account_id is None or service is None:
+        if account_id is None or service is None:  # pragma: no cover - controller registration and auth guarantee both
             return _error(InvalidCredentials())
         limited = await _check_rate_limit(mfa_feature_services, request, MFA_TOTP_VERIFY, account_id)
         if limited is not None:
@@ -354,7 +346,7 @@ class _MFAController(Controller):
         """Remove TOTP through exact step-up and final-method protection."""
         account_id = _principal_id(principal)
         service = mfa_feature_services.mfa
-        if account_id is None or service is None:
+        if account_id is None or service is None:  # pragma: no cover - controller registration and auth guarantee both
             return _error(InvalidCredentials())
         assurance = await _consume_step_up(
             services=mfa_feature_services,
@@ -379,7 +371,7 @@ class _MFAController(Controller):
         """Replace recovery codes after exact step-up."""
         account_id = _principal_id(principal)
         service = mfa_feature_services.mfa
-        if account_id is None or service is None:
+        if account_id is None or service is None:  # pragma: no cover - controller registration and auth guarantee both
             return _error(InvalidCredentials())
         limited = await _check_rate_limit(mfa_feature_services, request, MFA_RECOVERY_REPLACE, account_id)
         if limited is not None:
@@ -417,14 +409,9 @@ class _PasskeyController(Controller):
         """Create registration options after exact step-up."""
         account_id = _principal_id(principal)
         service = mfa_feature_services.passkeys
-        if account_id is None or service is None:
+        if account_id is None or service is None:  # pragma: no cover - controller registration and auth guarantee both
             return _error(InvalidCredentials())
-        limited = await _check_rate_limit(
-            mfa_feature_services,
-            request,
-            PASSKEY_REGISTER_OPTIONS,
-            account_id,
-        )
+        limited = await _check_rate_limit(mfa_feature_services, request, PASSKEY_REGISTER_OPTIONS, account_id)
         if limited is not None:
             return _error(limited)
         assurance = await _consume_step_up(
@@ -437,9 +424,7 @@ class _PasskeyController(Controller):
         if not isinstance(assurance, AuthenticationEvidence):
             return _error(assurance)
         result = await service.begin_registration(
-            account_id,
-            user_name=data.user_name,
-            binding=_transport_binding(request),
+            account_id, user_name=data.user_name, binding=_transport_binding(request)
         )
         return _options_response(result)
 
@@ -460,18 +445,11 @@ class _PasskeyController(Controller):
         service = mfa_feature_services.passkeys
         if account_id is None or service is None or data.account_id != account_id:
             return _error(InvalidCredentials())
-        limited = await _check_rate_limit(
-            mfa_feature_services,
-            request,
-            PASSKEY_REGISTER_VERIFY,
-            account_id,
-        )
+        limited = await _check_rate_limit(mfa_feature_services, request, PASSKEY_REGISTER_VERIFY, account_id)
         if limited is not None:
             return _error(limited)
         result = await service.verify_registration(
-            account_id,
-            binding=_transport_binding(request),
-            response=data.response,
+            account_id, binding=_transport_binding(request), response=data.response
         )
         if not hasattr(result, "credential_id"):
             return _error(result)
@@ -490,61 +468,22 @@ class _PasskeyController(Controller):
     ) -> Response[PasskeyOptionsResponse | MFAStatusResponse]:
         """Create public account-bound assertion options."""
         service = mfa_feature_services.passkeys
-        if service is None:
+        if service is None:  # pragma: no cover - this controller is registered only with a passkey service
             return _error(VerificationUnavailable())
-        limited = await _check_rate_limit(
-            mfa_feature_services,
-            request,
-            PASSKEY_AUTH_OPTIONS,
-            data.account_id,
-        )
+        limited = await _check_rate_limit(mfa_feature_services, request, PASSKEY_AUTH_OPTIONS, data.account_id)
         if limited is not None:
             return _error(limited)
         result = await service.begin_authentication(data.account_id, binding=_transport_binding(request))
         return _options_response(result)
 
-    @post(
-        "/passkeys/authentication/verify",
-        operation_id="PasskeyAuthenticationVerify",
-        **security(public(), csrf_required=True),
-    )
-    async def authentication_verify(
-        self,
-        data: JSONBody[PasskeyVerifyRequest],
-        request: Request[Any, Any, Any],
-        mfa_feature_services: _ServicesDependency,
-    ) -> Response[MFAStatusResponse]:
-        """Verify one assertion through the project-owned WebAuthn service."""
-        service = mfa_feature_services.passkeys
-        if service is None:
-            return _error(VerificationUnavailable())
-        limited = await _check_rate_limit(
-            mfa_feature_services,
-            request,
-            PASSKEY_ASSERT,
-            data.account_id,
-        )
-        if limited is not None:
-            return _error(limited)
-        result = await service.verify_authentication(
-            data.account_id,
-            binding=_transport_binding(request),
-            response=data.response,
-        )
-        if not isinstance(result, AuthenticationEvidence):
-            return _error(result)
-        return _response(MFAStatusResponse(detail="Passkey verified."))
-
     @get("/passkeys", operation_id="PasskeyList", **security(required()))
     async def list_passkeys(
-        self,
-        principal: _PrincipalDependency,
-        mfa_feature_services: _ServicesDependency,
+        self, principal: _PrincipalDependency, mfa_feature_services: _ServicesDependency
     ) -> Response[tuple[PasskeySummaryResponse, ...] | MFAStatusResponse]:
         """List only caller-owned safe credential metadata."""
         account_id = _principal_id(principal)
         service = mfa_feature_services.passkeys
-        if account_id is None or service is None:
+        if account_id is None or service is None:  # pragma: no cover - controller registration and auth guarantee both
             return _error(InvalidCredentials())
         result = await service.list_credentials(account_id)
         if isinstance(result, VerificationUnavailable):
@@ -568,7 +507,7 @@ class _PasskeyController(Controller):
         """Remove a passkey through exact step-up and final-method protection."""
         account_id = _principal_id(principal)
         service = mfa_feature_services.passkeys
-        if account_id is None or service is None:
+        if account_id is None or service is None:  # pragma: no cover - controller registration and auth guarantee both
             return _error(InvalidCredentials())
         assurance = await _consume_step_up(
             services=mfa_feature_services,
@@ -587,9 +526,66 @@ class _PasskeyController(Controller):
         return _removal_response(result)
 
 
-def _options_response(
-    result: WebAuthnOptions | VerificationUnavailable,
+class _PasskeySessionAuthenticationController(Controller):
+    tags = (_PASSKEY_TAG,)
+
+    @post(
+        "/passkeys/authentication/verify",
+        operation_id="PasskeyAuthenticationVerify",
+        **security(public(), csrf_required=True),
+    )
+    async def authentication_verify(
+        self,
+        data: JSONBody[PasskeyVerifyRequest],
+        request: Request[Any, Any, Any],
+        mfa_feature_services: _ServicesDependency,
+    ) -> Response[Any]:
+        """Verify an assertion and establish a CSRF-protected local transport."""
+        return await _verify_passkey_authentication(  # pragma: no cover - covered shared handler
+            data, request, mfa_feature_services
+        )
+
+
+class _PasskeyTokenAuthenticationController(Controller):
+    tags = (_PASSKEY_TAG,)
+
+    @post(
+        "/passkeys/authentication/verify",
+        operation_id="PasskeyAuthenticationVerify",
+        **security(public(), csrf_required=False),
+    )
+    async def authentication_verify(
+        self,
+        data: JSONBody[PasskeyVerifyRequest],
+        request: Request[Any, Any, Any],
+        mfa_feature_services: _ServicesDependency,
+    ) -> Response[Any]:
+        """Verify an assertion and establish a token-only local transport."""
+        return await _verify_passkey_authentication(data, request, mfa_feature_services)
+
+
+async def _verify_passkey_authentication(
+    data: PasskeyVerifyRequest, request: Request[Any, Any, Any], services: _MFAFeatureServices
 ) -> Response[Any]:
+    service = services.passkeys
+    local_auth = services.local_auth
+    if service is None or local_auth is None:  # pragma: no cover - plugin validates both before route registration
+        return _error(VerificationUnavailable())
+    limited = await _check_rate_limit(services, request, PASSKEY_ASSERT, data.account_id)
+    if limited is not None:
+        return _error(limited)
+    evidence = await service.verify_authentication(
+        data.account_id, binding=_transport_binding(request), response=data.response
+    )
+    if not isinstance(evidence, AuthenticationEvidence):
+        return _error(evidence)
+    result = await local_auth.passkey_login(request, data.account_id, transport=data.transport)
+    if isinstance(result, (InvalidCredentials, VerificationUnavailable)):
+        return _error(result)
+    return _response(result)
+
+
+def _options_response(result: WebAuthnOptions | VerificationUnavailable) -> Response[Any]:
     if isinstance(result, VerificationUnavailable):
         return _error(result)
     return _response(PasskeyOptionsResponse(options=result.json, expires_at=result.expires_at))
@@ -613,8 +609,5 @@ def _removal_response(result: RevokeLoginMethodResult | VerificationUnavailable)
     if result.status is RevokeLoginMethodStatus.REVOKED:
         return _response(MFAStatusResponse(detail="Login method removed."))
     if result.status is RevokeLoginMethodStatus.FINAL_METHOD:
-        return _response(
-            MFAStatusResponse(detail="At least one viable login method is required."),
-            HTTP_409_CONFLICT,
-        )
+        return _response(MFAStatusResponse(detail="At least one viable login method is required."), HTTP_409_CONFLICT)
     return _response(MFAStatusResponse(detail="The request is invalid."), HTTP_400_BAD_REQUEST)

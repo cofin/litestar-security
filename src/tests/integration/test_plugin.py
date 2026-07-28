@@ -30,22 +30,35 @@ from litestar.openapi.plugins import JsonRenderPlugin
 from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme, Tag
 from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
+from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
 from litestar.testing import TestClient
 
-from litestar_security import SecurityConfig, SecurityPlugin
+import litestar_security.accounts as accounts_module
+from litestar_security import MFAConfig, PasskeyConfig, SecurityConfig, SecurityPlugin
 from litestar_security._cli import register, security_group
 from litestar_security.accounts import (
     LOCAL_AUTH_TAGS,
     LifecycleAccepted,
+    LocalAccountResponse,
     LocalAuth,
     LocalAuthSecrets,
+    PasskeySummary,
+    ProtectedSecret,
     PurposeTokenCodec,
+    RecoveryCodes,
     RefreshReceiptKey,
     RefreshReceiptSealer,
     RefreshTokenCodec,
     RegistrationPolicy,
+    RevokeLoginMethodResult,
+    RevokeLoginMethodStatus,
     SessionBindingConfig,
     SessionSummary,
+    StepUpGrant,
+    TOTPEnrollment,
+    TOTPMethod,
+    TOTPPolicy,
+    WebAuthnOptions,
     build_mfa_routes,
 )
 from litestar_security.authentication import (
@@ -221,6 +234,527 @@ def test_generated_mfa_route_bundle_has_exact_paths_policies_and_secret_free_ope
     assert "otpauth://" not in schema
     assert "rc_v1_" not in schema
     assert "private credential" not in schema.lower()
+
+
+class _RouteMFAService:
+    failure: str | None = None
+
+    async def verify_totp(self, account_id: str, method_id: str, code: str) -> object:
+        del account_id, method_id, code
+        if self.failure == "factor":
+            return InvalidCredentials()
+        return _route_factor_evidence()
+
+    async def consume_recovery_code(self, account_id: str, code: str) -> object:
+        del account_id, code
+        if self.failure == "factor":
+            return InvalidCredentials()
+        return _route_factor_evidence()
+
+    async def begin_totp_enrollment(self, account_id: str, *, label: str) -> object:
+        del account_id, label
+        if self.failure == "enroll":
+            return VerificationUnavailable()
+        return TOTPEnrollment(
+            enrollment_id="enrollment-1",
+            method_id="method-1",
+            provisioning_uri="otpauth://totp/Example?secret=SECRET",
+            expires_at=datetime(2026, 7, 27, 0, 5, tzinfo=timezone.utc),
+        )
+
+    async def activate_totp(self, account_id: str, enrollment_id: str, code: str) -> object:
+        del enrollment_id, code
+        if self.failure == "activate":
+            return InvalidCredentials()
+        return TOTPMethod(
+            method_id="method-1",
+            account_id=account_id,
+            protected_secret=ProtectedSecret(ciphertext=b"ciphertext", key_version="v1"),
+            policy=TOTPPolicy(),
+            last_accepted_counter=1,
+            created_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
+        )
+
+    async def generate_recovery_codes(self, account_id: str) -> object:
+        del account_id
+        if self.failure == "recovery":
+            return VerificationUnavailable()
+        return RecoveryCodes(codes=("rc_v1_00000000000000000000000000000000",))
+
+    async def remove_totp_method(self, account_id: str, method_id: str) -> object:
+        del account_id, method_id
+        if self.failure == "remove":
+            return VerificationUnavailable()
+        return RevokeLoginMethodResult(RevokeLoginMethodStatus.REVOKED)
+
+
+class _RoutePasskeyService:
+    failure: str | None = None
+
+    async def verify_authentication(self, account_id: str, *, binding: bytes, response: str) -> object:
+        del account_id, binding, response
+        if self.failure == "authentication":
+            return InvalidCredentials()
+        return _route_factor_evidence()
+
+    async def begin_registration(self, account_id: str, *, user_name: str, binding: bytes) -> object:
+        del account_id, user_name, binding
+        if self.failure == "options":
+            return VerificationUnavailable()
+        return _route_options()
+
+    async def verify_registration(self, account_id: str, *, binding: bytes, response: str) -> object:
+        del account_id, binding, response
+        if self.failure == "registration":
+            return InvalidCredentials()
+        return SimpleNamespace(credential_id=b"credential")
+
+    async def begin_authentication(self, account_id: str, *, binding: bytes) -> object:
+        del account_id, binding
+        if self.failure == "options":
+            return VerificationUnavailable()
+        return _route_options()
+
+    async def list_credentials(self, account_id: str) -> object:
+        del account_id
+        if self.failure == "list":
+            return VerificationUnavailable()
+        return (
+            PasskeySummary(
+                credential_id="Y3JlZGVudGlhbA",
+                display_name="Laptop",
+                backup_eligible=True,
+                backup_state=False,
+                suspect=False,
+                created_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
+                last_used_at=None,
+            ),
+        )
+
+    async def remove_credential(self, account_id: str, credential_id: bytes) -> object:
+        del account_id, credential_id
+        if self.failure == "remove":
+            return VerificationUnavailable()
+        return RevokeLoginMethodResult(RevokeLoginMethodStatus.REVOKED)
+
+
+class _RouteStepUpService:
+    failure: str | None = None
+
+    async def issue(self, **kwargs: object) -> object:
+        del kwargs
+        if self.failure == "issue":
+            return InvalidCredentials()
+        return StepUpGrant(
+            token="step-up-grant",  # noqa: S106 - deterministic opaque fixture token
+            purpose="settings",
+            expires_at=datetime(2026, 7, 27, 0, 5, tzinfo=timezone.utc),
+        )
+
+    async def consume(self, *args: object, **kwargs: object) -> object:
+        del args, kwargs
+        if self.failure == "consume":
+            return InvalidCredentials()
+        return _route_factor_evidence()
+
+
+class _RouteEpochs:
+    value: object = 1
+
+    async def current_epoch(self, account_id: str) -> int:
+        del account_id
+        if isinstance(self.value, BaseException):
+            raise self.value
+        return cast("int", self.value)
+
+
+class _RouteLocalAuth:
+    failure = False
+
+    async def passkey_login(self, request: object, account_id: str, *, transport: str | None) -> object:
+        del request, transport
+        if self.failure:
+            return InvalidCredentials()
+        return LocalAccountResponse(account_id=account_id)
+
+
+def _route_factor_evidence() -> AuthenticationEvidence:
+    return AuthenticationEvidence(
+        mechanism="totp",
+        slot="mfa",
+        authenticated_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
+        methods=frozenset({"totp"}),
+    )
+
+
+def _route_options() -> WebAuthnOptions:
+    return WebAuthnOptions(
+        challenge="challenge",
+        json='{"challenge":"challenge"}',
+        expires_at=datetime(2026, 7, 27, 0, 5, tzinfo=timezone.utc),
+    )
+
+
+def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_responses() -> None:
+    router = build_mfa_routes(
+        step_up=cast("Any", _RouteStepUpService()),
+        epochs=cast("Any", _RouteEpochs()),
+        mfa=cast("Any", _RouteMFAService()),
+        passkeys=cast("Any", _RoutePasskeyService()),
+        local_auth=cast("Any", _RouteLocalAuth()),
+    )
+    app = Litestar(
+        route_handlers=[router], openapi_config=None, plugins=[SecurityPlugin(_compiler_config(names=("a",)))]
+    )
+    authenticated = {"x-auth-a": "valid", "authorization": "Bearer transport"}
+
+    with TestClient(app) as client:
+        assert (
+            client.post(
+                "/auth/step-up/settings",
+                headers=authenticated,
+                json={"method": "totp", "credential": "123456", "methodId": "method-1"},
+            ).status_code
+            == HTTP_200_OK
+        )
+        assert (
+            client.post(
+                "/auth/mfa/totp/enroll",
+                headers=authenticated,
+                json={"label": "person@example.com", "stepUpGrant": "grant"},
+            ).status_code
+            == HTTP_201_CREATED
+        )
+        assert (
+            client.post(
+                "/auth/mfa/totp/verify", headers=authenticated, json={"enrollmentId": "enrollment-1", "code": "123456"}
+            ).status_code
+            == HTTP_200_OK
+        )
+        assert (
+            client.request(
+                "DELETE", "/auth/mfa/totp/method-1", headers=authenticated, json={"stepUpGrant": "grant"}
+            ).status_code
+            == HTTP_200_OK
+        )
+        assert (
+            client.post("/auth/mfa/recovery-codes", headers=authenticated, json={"stepUpGrant": "grant"}).status_code
+            == HTTP_200_OK
+        )
+        assert (
+            client.post(
+                "/auth/passkeys/registration/options",
+                headers=authenticated,
+                json={"userName": "person@example.com", "stepUpGrant": "grant"},
+            ).status_code
+            == HTTP_200_OK
+        )
+        assert (
+            client.post(
+                "/auth/passkeys/registration/verify",
+                headers=authenticated,
+                json={"accountId": "user", "response": "{}"},
+            ).status_code
+            == HTTP_201_CREATED
+        )
+        assert (
+            client.post("/auth/passkeys/authentication/options", json={"accountId": "user"}).status_code == HTTP_200_OK
+        )
+        assert (
+            client.post(
+                "/auth/passkeys/authentication/verify",
+                json={"accountId": "user", "response": "{}", "transport": "tokens"},
+            ).status_code
+            == HTTP_200_OK
+        )
+        inventory = client.get("/auth/passkeys", headers=authenticated)
+        assert inventory.status_code == HTTP_200_OK
+        assert "public_key" not in inventory.text
+        assert (
+            client.request(
+                "DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", headers=authenticated, json={"stepUpGrant": "grant"}
+            ).status_code
+            == HTTP_200_OK
+        )
+        assert all(response.headers["cache-control"] == "no-store" for response in (inventory,))
+        assert inventory.headers["pragma"] == "no-cache"
+
+
+def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:  # noqa: PLR0915 - one route-family failure matrix
+    mfa = _RouteMFAService()
+    passkeys = _RoutePasskeyService()
+    step_up = _RouteStepUpService()
+    epochs = _RouteEpochs()
+    local_auth = _RouteLocalAuth()
+    router = build_mfa_routes(
+        step_up=cast("Any", step_up),
+        epochs=cast("Any", epochs),
+        mfa=cast("Any", mfa),
+        passkeys=cast("Any", passkeys),
+        local_auth=cast("Any", local_auth),
+    )
+    app = Litestar(
+        route_handlers=[router], openapi_config=None, plugins=[SecurityPlugin(_compiler_config(names=("a",)))]
+    )
+    headers = {"x-auth-a": "valid", "authorization": "Bearer transport"}
+
+    with TestClient(app) as client:
+        assert (
+            client.post(
+                "/auth/step-up/settings", headers=headers, json={"method": "unknown", "credential": "x"}
+            ).status_code
+            == 401
+        )
+        mfa.failure = "factor"
+        assert (
+            client.post(
+                "/auth/step-up/settings", headers=headers, json={"method": "totp", "methodId": "m1", "credential": "x"}
+            ).status_code
+            == 401
+        )
+        mfa.failure = None
+        step_up.failure = "issue"
+        assert (
+            client.post(
+                "/auth/step-up/settings", headers=headers, json={"method": "recovery-code", "credential": "x"}
+            ).status_code
+            == 401
+        )
+        step_up.failure = None
+        epochs.value = False
+        assert (
+            client.post(
+                "/auth/step-up/settings", headers=headers, json={"method": "passkey", "credential": "{}"}
+            ).status_code
+            == 503
+        )
+        epochs.value = 1
+        step_up.failure = "consume"
+        assert (
+            client.post(
+                "/auth/mfa/totp/enroll", headers=headers, json={"label": "User", "stepUpGrant": "bad"}
+            ).status_code
+            == 401
+        )
+        step_up.failure = None
+        mfa.failure = "enroll"
+        assert (
+            client.post(
+                "/auth/mfa/totp/enroll", headers=headers, json={"label": "User", "stepUpGrant": "grant"}
+            ).status_code
+            == 503
+        )
+        mfa.failure = "activate"
+        assert (
+            client.post(
+                "/auth/mfa/totp/verify", headers=headers, json={"enrollmentId": "e1", "code": "123456"}
+            ).status_code
+            == 401
+        )
+        mfa.failure = "recovery"
+        assert (
+            client.post(
+                "/auth/mfa/totp/verify", headers=headers, json={"enrollmentId": "e1", "code": "123456"}
+            ).status_code
+            == 503
+        )
+        assert (
+            client.post("/auth/mfa/recovery-codes", headers=headers, json={"stepUpGrant": "grant"}).status_code == 503
+        )
+        mfa.failure = "remove"
+        assert (
+            client.request("DELETE", "/auth/mfa/totp/m1", headers=headers, json={"stepUpGrant": "grant"}).status_code
+            == 503
+        )
+        mfa.failure = None
+        passkeys.failure = "options"
+        assert (
+            client.post(
+                "/auth/passkeys/registration/options",
+                headers=headers,
+                json={"userName": "User", "stepUpGrant": "grant"},
+            ).status_code
+            == 503
+        )
+        passkeys.failure = "registration"
+        assert (
+            client.post(
+                "/auth/passkeys/registration/verify", headers=headers, json={"accountId": "user", "response": "{}"}
+            ).status_code
+            == 401
+        )
+        assert (
+            client.post(
+                "/auth/passkeys/registration/verify", headers=headers, json={"accountId": "other", "response": "{}"}
+            ).status_code
+            == 401
+        )
+        passkeys.failure = "options"
+        assert client.post("/auth/passkeys/authentication/options", json={"accountId": "user"}).status_code == 503
+        passkeys.failure = "authentication"
+        assert (
+            client.post(
+                "/auth/passkeys/authentication/verify", json={"accountId": "user", "response": "{}"}
+            ).status_code
+            == 401
+        )
+        passkeys.failure = None
+        local_auth.failure = True
+        assert (
+            client.post(
+                "/auth/passkeys/authentication/verify", json={"accountId": "user", "response": "{}"}
+            ).status_code
+            == 401
+        )
+        local_auth.failure = False
+        passkeys.failure = "list"
+        assert client.get("/auth/passkeys", headers=headers).status_code == 503
+        assert (
+            client.request("DELETE", "/auth/passkeys/a", headers=headers, json={"stepUpGrant": "grant"}).status_code
+            == 400
+        )
+        passkeys.failure = "remove"
+        assert (
+            client.request(
+                "DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", headers=headers, json={"stepUpGrant": "grant"}
+            ).status_code
+            == 503
+        )
+        step_up.failure = "consume"
+        for method, path, payload in (
+            ("DELETE", "/auth/mfa/totp/m1", {"stepUpGrant": "bad"}),
+            ("POST", "/auth/mfa/recovery-codes", {"stepUpGrant": "bad"}),
+            ("POST", "/auth/passkeys/registration/options", {"userName": "User", "stepUpGrant": "bad"}),
+            ("DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", {"stepUpGrant": "bad"}),
+        ):
+            assert client.request(method, path, headers=headers, json=payload).status_code == 401
+
+
+def test_generated_mfa_handlers_apply_shared_rate_limit_before_factor_work() -> None:
+    class Guard:
+        async def check(self, *args: object, **kwargs: object) -> object:
+            del args, kwargs
+            return accounts_module.RateLimited(retry_after=2)
+
+    router = build_mfa_routes(
+        step_up=cast("Any", _RouteStepUpService()),
+        epochs=cast("Any", _RouteEpochs()),
+        mfa=cast("Any", _RouteMFAService()),
+        passkeys=cast("Any", _RoutePasskeyService()),
+        local_auth=cast("Any", _RouteLocalAuth()),
+        rate_limits=cast("Any", Guard()),
+        client_key=lambda _request: "client",
+    )
+    app = Litestar(
+        route_handlers=[router], openapi_config=None, plugins=[SecurityPlugin(_compiler_config(names=("a",)))]
+    )
+    headers = {"x-auth-a": "valid", "authorization": "Bearer transport"}
+    requests = (
+        ("POST", "/auth/step-up/settings", {"method": "totp", "methodId": "m1", "credential": "x"}, headers),
+        ("POST", "/auth/mfa/totp/enroll", {"label": "User", "stepUpGrant": "grant"}, headers),
+        ("POST", "/auth/mfa/totp/verify", {"enrollmentId": "e1", "code": "123456"}, headers),
+        ("POST", "/auth/mfa/recovery-codes", {"stepUpGrant": "grant"}, headers),
+        ("POST", "/auth/passkeys/registration/options", {"userName": "User", "stepUpGrant": "grant"}, headers),
+        ("POST", "/auth/passkeys/registration/verify", {"accountId": "user", "response": "{}"}, headers),
+        ("POST", "/auth/passkeys/authentication/options", {"accountId": "user"}, {}),
+        ("POST", "/auth/passkeys/authentication/verify", {"accountId": "user", "response": "{}"}, {}),
+    )
+    with TestClient(app) as client:
+        for method, path, payload, request_headers in requests:
+            response = client.request(method, path, headers=request_headers, json=payload)
+            assert response.status_code == 429
+            assert response.headers["retry-after"] == "2"
+
+
+def _feature_test_ports() -> tuple[object, object, object, object]:
+    async def none(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def false(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    mfa_store = SimpleNamespace(
+        create_totp_enrollment=none,
+        get_totp_enrollment=none,
+        activate_totp=none,
+        get_totp_method=none,
+        advance_totp_counter=false,
+        replace_recovery_codes=none,
+        consume_recovery_code=false,
+        put=none,
+        consume=none,
+    )
+    protector = SimpleNamespace(active_key_version="v1", protect=none, unprotect=none)
+    passkey_store = SimpleNamespace(
+        add_credential=false, get_credential=none, record_assertion=none, list_credentials=none, rename_credential=none
+    )
+    challenge_store = SimpleNamespace(put=none, consume=none)
+    return mfa_store, protector, passkey_store, challenge_store
+
+
+def test_plugin_mfa_route_registration_validates_ownership_and_is_idempotent() -> None:
+    mfa_store, protector, passkey_store, challenge_store = _feature_test_ports()
+    disabled = MFAConfig(store=mfa_store, secret_protector=protector, register_routes=False)
+    app_config = AppConfig()
+    SecurityPlugin(SecurityConfig(mfa=disabled))._configure_mfa_routes(app_config)  # noqa: SLF001
+    assert app_config.route_handlers == []
+
+    enabled = MFAConfig(store=mfa_store, secret_protector=protector)
+    with pytest.raises(ImproperlyConfiguredException, match="local authentication"):
+        SecurityPlugin(SecurityConfig(mfa=enabled))._configure_mfa_routes(AppConfig())  # noqa: SLF001
+
+    local_auth = _local_session_auth(
+        csrf=CSRFConfig(secret=token_hex()), binding=SessionBindingConfig(pepper=b"b" * 32, max_age=600)
+    )
+    no_step_store = SimpleNamespace(**{
+        name: getattr(mfa_store, name)
+        for name in (
+            "create_totp_enrollment",
+            "get_totp_enrollment",
+            "activate_totp",
+            "get_totp_method",
+            "advance_totp_counter",
+            "replace_recovery_codes",
+            "consume_recovery_code",
+        )
+    })
+    without_step = MFAConfig(store=no_step_store, secret_protector=protector)
+    with pytest.raises(ImproperlyConfiguredException, match="StepUpStore"):
+        SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=without_step))._configure_mfa_routes(  # noqa: SLF001
+            AppConfig()
+        )
+
+    passkeys = PasskeyConfig(
+        store=passkey_store,
+        challenge_store=challenge_store,
+        rp_id="example.com",
+        origins=("https://example.com",),
+        step_up_store=mfa_store,
+        route_prefix="/other",
+    )
+    with pytest.raises(ImproperlyConfiguredException, match="route prefix"):
+        SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=enabled, passkeys=passkeys))._configure_mfa_routes(  # noqa: SLF001 - validates the plugin construction invariant directly
+            AppConfig()
+        )
+    object.__setattr__(enabled, "step_up_service", object())
+    with pytest.raises(ImproperlyConfiguredException, match="StepUpService"):
+        SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=enabled))._configure_mfa_routes(  # noqa: SLF001 - validates the plugin construction invariant directly
+            AppConfig()
+        )
+    object.__setattr__(enabled, "step_up_service", accounts_module.StepUpService(cast("Any", mfa_store)))
+
+    passkeys = PasskeyConfig(
+        store=passkey_store,
+        challenge_store=challenge_store,
+        rp_id="example.com",
+        origins=("https://example.com",),
+        step_up_store=mfa_store,
+    )
+    plugin = SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=enabled, passkeys=passkeys))
+    app_config = AppConfig()
+    plugin._configure_mfa_routes(app_config)  # noqa: SLF001
+    plugin._configure_mfa_routes(app_config)  # noqa: SLF001
+    assert len(app_config.route_handlers) == 1
 
 
 def _local_session_accounts() -> Any:

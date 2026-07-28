@@ -336,7 +336,10 @@ def _grant_decision(
 
 
 def _normalize_name(value: str, label: str) -> str:
-    normalized = value.strip()
+    value_object = cast("object", value)
+    if not isinstance(value_object, str):
+        raise TypeError
+    normalized = value_object.strip()
     if not normalized:
         message = f"{label} must not be blank"
         raise ImproperlyConfiguredException(detail=message)

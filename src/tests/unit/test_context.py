@@ -455,6 +455,7 @@ def test_assurance_rejects_stale_raw_provider_or_wrong_purpose_evidence(
 
 
 def test_assurance_contract_validates_utc_clock_and_requirement_values() -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     with pytest.raises(ImproperlyConfiguredException, match="clock must return a timezone-aware"):
         requires_assurance(clock=lambda: datetime(2026, 7, 27, 12)).decide(  # noqa: DTZ001
             _guard_connection()  # type: ignore[arg-type]
@@ -463,6 +464,27 @@ def test_assurance_contract_validates_utc_clock_and_requirement_values() -> None
         AssuranceRequirement(max_age=timedelta())
     with pytest.raises(ImproperlyConfiguredException, match="purpose must not be blank"):
         AssuranceRequirement(purpose=" ")
+    for kwargs in ({"methods": cast("Any", {1})}, {"traits": cast("Any", {"unsupported"})}):
+        with pytest.raises(ImproperlyConfiguredException, match="methods and traits"):
+            AssuranceRequirement(**kwargs)
+
+    predicate = requires_assurance(max_age=timedelta(minutes=5), clock=lambda: now)
+    assert requires_assurance(clock=lambda: now).decide(_guard_connection()).granted  # type: ignore[arg-type]
+    assert predicate.decide(_guard_connection(authenticated=False)).code == "authentication_required"  # type: ignore[arg-type]
+    assert predicate.decide(  # type: ignore[arg-type]
+        _guard_connection(
+            evidence=(
+                AuthenticationEvidence(
+                    mechanism="local", slot="session", authenticated_at=now, expires_at=now + timedelta(minutes=1)
+                ),
+            )
+        )
+    ).granted
+    for evidence in (
+        AuthenticationEvidence(mechanism="local", slot="session", authenticated_at=now + timedelta(seconds=1)),
+        AuthenticationEvidence(mechanism="local", slot="session", authenticated_at=now, expires_at=now),
+    ):
+        assert predicate.decide(_guard_connection(evidence=(evidence,))).code == "assurance_too_old"  # type: ignore[arg-type]
 
 
 def test_authorization_snapshot_defensively_freezes_input() -> None:

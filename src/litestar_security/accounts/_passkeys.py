@@ -5,10 +5,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+from functools import partial
 from hashlib import sha256
 from secrets import token_bytes
 from typing import Protocol, cast, runtime_checkable
+from urllib.parse import urlsplit
 
+from anyio import CapacityLimiter, to_thread
 from litestar.exceptions import ImproperlyConfiguredException
 from webauthn import (
     generate_authentication_options,
@@ -64,6 +67,7 @@ _CHALLENGE_BYTES = 32
 _MAXIMUM_CHALLENGE_TTL = timedelta(minutes=10)
 _DEFAULT_CHALLENGE_TTL = timedelta(minutes=5)
 _DEFAULT_ALGORITHMS = (-8, -7, -257)
+_SUPPORTED_ALGORITHMS = frozenset(_DEFAULT_ALGORITHMS)
 
 
 class UserVerification(str, Enum):
@@ -494,6 +498,8 @@ class PasskeyService:
     clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
     challenge_entropy: Callable[[int], bytes] = field(default=token_bytes, repr=False, compare=False)
     clone_risk_policy: CloneRiskPolicy = CloneRiskPolicy.REJECT
+    allow_insecure_localhost: bool = False
+    worker_limiter: CapacityLimiter = field(default_factory=lambda: CapacityLimiter(32), repr=False, compare=False)
     login_methods: LoginMethodStore | None = field(default=None, repr=False, compare=False)
     events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
     event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
@@ -503,6 +509,7 @@ class PasskeyService:
         store = cast("object", self.store)
         challenge_store = cast("object", self.challenge_store)
         verifier = cast("object", self.verifier)
+        worker_limiter = cast("object", self.worker_limiter)
         self.origins = tuple(self.origins)
         self.algorithms = tuple(self.algorithms)
         if not isinstance(store, PasskeyStore) or not isinstance(challenge_store, WebAuthnChallengeStore):
@@ -511,6 +518,9 @@ class PasskeyService:
         if not isinstance(verifier, WebAuthnVerifier):
             message = "Passkey service verifier must implement WebAuthnVerifier"
             raise ImproperlyConfiguredException(detail=message)
+        if not isinstance(worker_limiter, CapacityLimiter):
+            message = "Passkey service worker limiter must be an AnyIO CapacityLimiter"
+            raise ImproperlyConfiguredException(detail=message)
         if (
             not strict_context_text(self.rp_id)
             or not strict_context_text(self.rp_name)
@@ -518,8 +528,19 @@ class PasskeyService:
             or not all(strict_context_text(origin) for origin in self.origins)
             or not timedelta() < self.challenge_ttl <= _MAXIMUM_CHALLENGE_TTL
             or not self.algorithms
+            or len(frozenset(self.algorithms)) != len(self.algorithms)
+            or not all(algorithm in _SUPPORTED_ALGORITHMS for algorithm in self.algorithms)
+            or self.allow_insecure_localhost.__class__ is not bool
         ):
             message = "Passkey service requires exact relying-party, origin, algorithm, and expiry configuration"
+            raise ImproperlyConfiguredException(detail=message)
+        if not all(
+            _valid_origin(origin, self.rp_id, allow_insecure_localhost=self.allow_insecure_localhost)
+            for origin in self.origins
+        ):
+            message = (
+                "Passkey origins must be exact HTTPS RP origins or explicitly enabled localhost development origins"
+            )
             raise ImproperlyConfiguredException(detail=message)
 
     async def begin_registration(
@@ -563,20 +584,26 @@ class PasskeyService:
     ) -> PasskeyCredential | InvalidCredentials | VerificationUnavailable:
         """Consume, verify, and atomically register one credential."""
         try:
-            challenge = self.verifier.registration_challenge(response)
+            challenge = await to_thread.run_sync(
+                self.verifier.registration_challenge, response, limiter=self.worker_limiter
+            )
             now = aware_utc_time(self.clock())
             record = await self.challenge_store.consume(
                 sha256(challenge).digest(), binding_digest=_binding_digest(binding), purpose="registration", now=now
             )
             if record is None or record.account_id != account_id:
                 return InvalidCredentials()
-            verified = self.verifier.verify_registration(
-                response=response,
-                challenge=challenge,
-                rp_id=record.rp_id,
-                origins=record.origins,
-                require_user_verification=record.user_verification is UserVerification.REQUIRED,
-                algorithms=record.algorithms,
+            verified = await to_thread.run_sync(
+                partial(
+                    self.verifier.verify_registration,
+                    response=response,
+                    challenge=challenge,
+                    rp_id=record.rp_id,
+                    origins=record.origins,
+                    require_user_verification=record.user_verification is UserVerification.REQUIRED,
+                    algorithms=record.algorithms,
+                ),
+                limiter=self.worker_limiter,
             )
             if verified.attestation_format != "none" or (not verified.backup_eligible and verified.backup_state):
                 return InvalidCredentials()
@@ -605,8 +632,10 @@ class PasskeyService:
     ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
         """Consume, verify, and atomically record one assertion."""
         try:
-            challenge = self.verifier.authentication_challenge(response)
-            credential_id = self.verifier.credential_id(response)
+            challenge = await to_thread.run_sync(
+                self.verifier.authentication_challenge, response, limiter=self.worker_limiter
+            )
+            credential_id = await to_thread.run_sync(self.verifier.credential_id, response, limiter=self.worker_limiter)
             now = aware_utc_time(self.clock())
             record = await self.challenge_store.consume(
                 sha256(challenge).digest(), binding_digest=_binding_digest(binding), purpose="authentication", now=now
@@ -619,13 +648,17 @@ class PasskeyService:
                 or credential.account_id != account_id
             ):
                 return InvalidCredentials()
-            verified = self.verifier.verify_authentication(
-                response=response,
-                challenge=challenge,
-                rp_id=record.rp_id,
-                origins=record.origins,
-                public_key=credential.public_key,
-                require_user_verification=record.user_verification is UserVerification.REQUIRED,
+            verified = await to_thread.run_sync(
+                partial(
+                    self.verifier.verify_authentication,
+                    response=response,
+                    challenge=challenge,
+                    rp_id=record.rp_id,
+                    origins=record.origins,
+                    public_key=credential.public_key,
+                    require_user_verification=record.user_verification is UserVerification.REQUIRED,
+                ),
+                limiter=self.worker_limiter,
             )
             if (
                 verified.credential_id != credential.credential_id
@@ -634,9 +667,7 @@ class PasskeyService:
             ):
                 return InvalidCredentials()
             clone_risk = (
-                credential.sign_count > 0
-                and verified.sign_count > 0
-                and verified.sign_count <= credential.sign_count
+                credential.sign_count > 0 and verified.sign_count > 0 and verified.sign_count <= credential.sign_count
             )
             result = await self.store.record_assertion(
                 credential.credential_id,
@@ -655,10 +686,7 @@ class PasskeyService:
             return VerificationUnavailable()
         if result is AssertionRecordResult.CLONE_RISK:
             await self._emit_event(
-                operation=PASSKEY_ASSERT,
-                outcome=OUTCOME_CLONE_RISK,
-                account_id=account_id,
-                occurred_at=now,
+                operation=PASSKEY_ASSERT, outcome=OUTCOME_CLONE_RISK, account_id=account_id, occurred_at=now
             )
             if self.clone_risk_policy is CloneRiskPolicy.REJECT:
                 return InvalidCredentials()
@@ -673,16 +701,12 @@ class PasskeyService:
             traits=frozenset(traits),
         )
 
-    async def list_credentials(
-        self, account_id: str
-    ) -> tuple[PasskeySummary, ...] | VerificationUnavailable:
+    async def list_credentials(self, account_id: str) -> tuple[PasskeySummary, ...] | VerificationUnavailable:
         """List safe credential metadata for one owner."""
         try:
             credentials = await self.store.list_credentials(account_id)
             return tuple(
-                _credential_summary(credential)
-                for credential in credentials
-                if credential.account_id == account_id
+                _credential_summary(credential) for credential in credentials if credential.account_id == account_id
             )
         except Exception:  # noqa: BLE001 - sanitize application store failures
             return VerificationUnavailable()
@@ -716,15 +740,11 @@ class PasskeyService:
                 outcome=OUTCOME_REVOKED,
                 account_id=account_id,
             )
-            return await login_methods.revoke_login_method(
-                account_id, method_id, require_remaining=True, event=event
-            )
+            return await login_methods.revoke_login_method(account_id, method_id, require_remaining=True, event=event)
         except Exception:  # noqa: BLE001 - sanitize application login-method store failures
             return VerificationUnavailable()
 
-    async def _emit_event(
-        self, *, operation: str, outcome: str, account_id: str, occurred_at: datetime
-    ) -> None:
+    async def _emit_event(self, *, operation: str, outcome: str, account_id: str, occurred_at: datetime) -> None:
         try:
             await self.events.emit(
                 SecurityEvent(
@@ -748,7 +768,7 @@ class PasskeyService:
             if not isinstance(challenge_value, bytes) or len(challenge_value) < _CHALLENGE_BYTES:
                 return VerificationUnavailable()
             expires_at = now + self.challenge_ttl
-            json_options = options(challenge)
+            json_options = await to_thread.run_sync(options, challenge, limiter=self.worker_limiter)
             record = WebAuthnChallenge(
                 challenge_digest=sha256(challenge).digest(),
                 binding_digest=_binding_digest(binding),
@@ -784,4 +804,31 @@ def _credential_summary(credential: PasskeyCredential) -> PasskeySummary:
         suspect=credential.suspect,
         created_at=credential.created_at,
         last_used_at=credential.last_used_at,
+    )
+
+
+def _valid_origin(origin: str, rp_id: str, *, allow_insecure_localhost: bool) -> bool:
+    try:
+        parsed = urlsplit(origin)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        host is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+        or (host != rp_id and not host.endswith(f".{rp_id}"))
+    ):
+        return False
+    if parsed.scheme == "https":
+        return True
+    return (
+        allow_insecure_localhost
+        and parsed.scheme == "http"
+        and host in {"localhost", "127.0.0.1", "::1"}
+        and port is not None
     )

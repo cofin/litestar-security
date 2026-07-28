@@ -35,8 +35,11 @@ from litestar.stores.memory import MemoryStore
 
 import litestar_security.accounts as accounts_module
 import litestar_security.accounts._controllers as controllers_module
+import litestar_security.accounts._mfa_controllers as mfa_controllers_module
+import litestar_security.accounts._passkeys as passkeys_module
 import litestar_security.accounts._rate_limits as rate_limits_module
 import litestar_security.accounts._sessions as sessions_module
+import litestar_security.testing as testing_module
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -56,7 +59,7 @@ from litestar_security.authentication import (
     required,
     security,
 )
-from litestar_security.config import ExternalCSRF, SecurityConfig
+from litestar_security.config import ExternalCSRF, MFAConfig, PasskeyConfig, SecurityConfig
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -7661,9 +7664,7 @@ class _PasskeyStore:
     async def list_credentials(self, account_id: str) -> tuple[accounts_module.PasskeyCredential, ...]:
         if self.fail:
             raise OSError
-        return tuple(
-            credential for credential in self.credentials.values() if credential.account_id == account_id
-        )
+        return tuple(credential for credential in self.credentials.values() if credential.account_id == account_id)
 
     async def rename_credential(
         self, account_id: str, credential_id: bytes, display_name: str
@@ -7880,10 +7881,7 @@ async def test_passkey_authentication_verifies_owner_and_emits_normalized_assura
 
 
 def _stored_passkey(
-    *,
-    sign_count: int = 0,
-    backup_eligible: bool = False,
-    backup_state: bool = False,
+    *, sign_count: int = 0, backup_eligible: bool = False, backup_state: bool = False
 ) -> accounts_module.PasskeyCredential:
     return accounts_module.PasskeyCredential(
         credential_id=b"credential-1",
@@ -7923,14 +7921,9 @@ async def test_passkey_counter_policy_persists_clone_risk_before_assurance(
     service = _passkey_service(store=store, verifier=_WebAuthnVerifier(sign_count=new_count))
     service.clone_risk_policy = policy
     binding = b"session-binding"
-    assert isinstance(
-        await service.begin_authentication("account-1", binding=binding),
-        accounts_module.WebAuthnOptions,
-    )
+    assert isinstance(await service.begin_authentication("account-1", binding=binding), accounts_module.WebAuthnOptions)
 
-    outcome = await service.verify_authentication(
-        "account-1", binding=binding, response='{"id":"credential"}'
-    )
+    outcome = await service.verify_authentication("account-1", binding=binding, response='{"id":"credential"}')
 
     assert isinstance(outcome, expected_type)
     assert store.credentials[b"credential-1"].suspect is suspect
@@ -7955,22 +7948,13 @@ async def test_passkey_backup_eligibility_is_immutable_and_state_may_transition(
     expected_type: type[object],
 ) -> None:
     store = _PasskeyStore()
-    store.credentials[b"credential-1"] = _stored_passkey(
-        backup_eligible=stored_be, backup_state=stored_bs
-    )
-    verifier = _WebAuthnVerifier(
-        backup_eligible=new_be, backup_state=new_bs
-    )
+    store.credentials[b"credential-1"] = _stored_passkey(backup_eligible=stored_be, backup_state=stored_bs)
+    verifier = _WebAuthnVerifier(backup_eligible=new_be, backup_state=new_bs)
     service = _passkey_service(store=store, verifier=verifier)
     binding = b"session-binding"
-    assert isinstance(
-        await service.begin_authentication("account-1", binding=binding),
-        accounts_module.WebAuthnOptions,
-    )
+    assert isinstance(await service.begin_authentication("account-1", binding=binding), accounts_module.WebAuthnOptions)
 
-    outcome = await service.verify_authentication(
-        "account-1", binding=binding, response='{"id":"credential"}'
-    )
+    outcome = await service.verify_authentication("account-1", binding=binding, response='{"id":"credential"}')
 
     assert isinstance(outcome, expected_type)
 
@@ -8029,17 +8013,8 @@ class _StepUpStore:
 async def test_step_up_grant_is_exactly_bound_expiring_and_single_use() -> None:
     store = _StepUpStore()
     now = datetime(2026, 7, 27, tzinfo=timezone.utc)
-    service = accounts_module.StepUpService(
-        store=store,
-        clock=lambda: now,
-        entropy=lambda _size: b"g" * 32,
-    )
-    source = AuthenticationEvidence(
-        mechanism="totp",
-        slot="mfa",
-        authenticated_at=now,
-        methods=frozenset({"totp"}),
-    )
+    service = accounts_module.StepUpService(store=store, clock=lambda: now, entropy=lambda _size: b"g" * 32)
+    source = AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=now, methods=frozenset({"totp"}))
 
     grant = await service.issue(
         principal_id="account-1",
@@ -8072,10 +8047,7 @@ async def test_step_up_grant_is_exactly_bound_expiring_and_single_use() -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("changed"),
-    ["principal", "epoch", "transport", "expiry"],
-)
+@pytest.mark.parametrize(("changed"), ["principal", "epoch", "transport", "expiry"])
 async def test_step_up_grant_rejects_changed_binding(changed: str) -> None:
     store = _StepUpStore()
     now = datetime(2026, 7, 27, tzinfo=timezone.utc)
@@ -8105,6 +8077,757 @@ async def test_step_up_grant_rejects_changed_binding(changed: str) -> None:
         transport_binding=b"token-2" if changed == "transport" else b"token-1",
     )
     assert isinstance(result, InvalidCredentials)
+
+
+def test_public_testing_helpers_are_isolated_structural_conformance_ports() -> None:
+    now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    clock = testing_module.FakeClock(now)
+
+    assert isinstance(testing_module.InMemoryMFAStore(), accounts_module.MFAStore)
+    assert isinstance(testing_module.InMemoryWebAuthnChallengeStore(), accounts_module.WebAuthnChallengeStore)
+    assert isinstance(testing_module.InMemoryPasskeyStore(), accounts_module.PasskeyStore)
+    assert isinstance(testing_module.InMemoryStepUpStore(), accounts_module.StepUpStore)
+    assert clock() == now
+    assert clock.advance(timedelta(seconds=1)) == now + timedelta(seconds=1)
+    with pytest.raises(ValueError, match="positive"):
+        clock.advance(timedelta())
+
+
+@pytest.mark.anyio
+async def test_public_step_up_conformance_store_has_one_atomic_winner() -> None:
+    now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    store = testing_module.InMemoryStepUpStore()
+    service = accounts_module.StepUpService(store=store, clock=lambda: now, entropy=lambda _size: b"s" * 32)
+    grant = await service.issue(
+        principal_id="account-1",
+        security_epoch=1,
+        purpose="settings",
+        transport_binding=b"session",
+        evidence=AuthenticationEvidence(
+            mechanism="totp", slot="mfa", authenticated_at=now, methods=frozenset({"totp"})
+        ),
+    )
+    assert isinstance(grant, accounts_module.StepUpGrant)
+    outcomes: list[object] = []
+
+    async def consume() -> None:
+        outcomes.append(
+            await service.consume(
+                grant.token,
+                principal_id="account-1",
+                security_epoch=1,
+                purpose="settings",
+                transport_binding=b"session",
+            )
+        )
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(consume)
+        task_group.start_soon(consume)
+
+    assert sum(isinstance(outcome, AuthenticationEvidence) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, InvalidCredentials) for outcome in outcomes) == 1
+
+
+@pytest.mark.anyio
+async def test_public_conformance_helpers_execute_factor_atomicity_matrix() -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    clock = testing_module.FakeClock(now)
+    mfa_store = testing_module.InMemoryMFAStore()
+    protector = _MFAProtector()
+    recovery_values = iter(range(10))
+    mfa = accounts_module.MFAService(
+        store=mfa_store,
+        secret_protector=protector,
+        clock=clock,
+        secret_generator=lambda: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+        identifiers=iter(("enrollment-1", "method-1")).__next__,
+        recovery_peppers=(accounts_module.RecoveryCodePepper("v1", b"p" * 32),),
+        recovery_entropy=lambda _size: next(recovery_values).to_bytes(16, "big"),
+    )
+    enrollment = await mfa.begin_totp_enrollment("account-1", label="person@example.com")
+    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").at(now)
+    method = await mfa.activate_totp("account-1", enrollment.enrollment_id, code)
+    assert isinstance(method, accounts_module.TOTPMethod)
+    assert await mfa_store.get_totp_method("other", method.method_id) is None
+    assert not await mfa_store.advance_totp_counter(method.method_id, accepted_counter=1, now=now)
+    recovery = await mfa.generate_recovery_codes("account-1")
+    assert isinstance(recovery, accounts_module.RecoveryCodes)
+    assert isinstance(await mfa.consume_recovery_code("account-1", recovery.codes[0]), AuthenticationEvidence)
+    assert isinstance(await mfa.consume_recovery_code("account-1", recovery.codes[0]), InvalidCredentials)
+
+    challenge_store = testing_module.InMemoryWebAuthnChallengeStore()
+    passkey_store = testing_module.InMemoryPasskeyStore()
+    verifier = _WebAuthnVerifier()
+    passkeys = accounts_module.PasskeyService(
+        store=passkey_store,
+        challenge_store=challenge_store,
+        verifier=verifier,
+        rp_id="example.com",
+        rp_name="Example",
+        origins=("https://example.com",),
+        clock=clock,
+        challenge_entropy=lambda size: b"c" * size,
+    )
+    options = await passkeys.begin_registration("account-1", user_name="person@example.com", binding=b"session")
+    assert isinstance(options, accounts_module.WebAuthnOptions)
+    credential = await passkeys.verify_registration("account-1", binding=b"session", response="{}")
+    assert isinstance(credential, accounts_module.PasskeyCredential)
+    assert not await passkey_store.add_credential(credential)
+    assert await passkey_store.get_credential(b"absent") is None
+    assert (
+        await passkey_store.record_assertion(
+            credential.credential_id,
+            expected_version=99,
+            sign_count=1,
+            backup_eligible=False,
+            backup_state=False,
+            clone_risk=False,
+            now=now,
+        )
+        is accounts_module.AssertionRecordResult.CONFLICT
+    )
+    assert len(await passkey_store.list_credentials("account-1")) == 1
+    assert await passkey_store.rename_credential("other", credential.credential_id, "No") is None
+    renamed = await passkey_store.rename_credential("account-1", credential.credential_id, "Laptop")
+    assert renamed is not None
+    assert renamed.display_name == "Laptop"
+    assert await challenge_store.consume(b"x" * 32, binding_digest=b"y" * 32, purpose="registration", now=now) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        accounts_module.TOTPEnrollmentRequest(label="User", step_up_grant="grant-secret"),
+        accounts_module.TOTPEnrollmentResponse(
+            enrollment_id="e1",
+            method_id="m1",
+            provisioning_uri="otpauth://secret",
+            expires_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
+        ),
+        accounts_module.TOTPVerificationRequest(enrollment_id="e1", code="123456"),
+        accounts_module.RecoveryCodesRequest(step_up_grant="grant-secret"),
+        accounts_module.StepUpRequest(method="totp", credential="123456", method_id="m1"),
+        accounts_module.StepUpResponse(
+            grant="grant-secret", purpose="settings", expires_at=datetime(2026, 7, 27, tzinfo=timezone.utc)
+        ),
+        accounts_module.RecoveryCodesResponse(codes=("rc_v1_SECRET",)),
+        accounts_module.PasskeyVerifyRequest(account_id="account-1", response="browser-secret"),
+        accounts_module.PasskeyRegistrationOptionsRequest(user_name="person@example.com", step_up_grant="grant-secret"),
+        accounts_module.PasskeyOptionsResponse(
+            options="challenge-secret", expires_at=datetime(2026, 7, 27, tzinfo=timezone.utc)
+        ),
+    ],
+)
+def test_mfa_route_dto_representations_redact_secret_material(value: object) -> None:
+    rendered = repr(value)
+
+    assert "<redacted>" in rendered
+    assert all(
+        secret not in rendered
+        for secret in (
+            "123456",
+            "grant-secret",
+            "rc_v1_SECRET",
+            "browser-secret",
+            "otpauth://secret",
+            "challenge-secret",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"origins": ("http://example.com",)}, "HTTPS"),
+        ({"origins": ("https://other.example",)}, "HTTPS"),
+        ({"algorithms": (-999,)}, "algorithm"),
+        ({"challenge_ttl": timedelta()}, "expiry"),
+    ],
+)
+def test_passkey_service_rejects_insecure_or_unsupported_configuration(kwargs: dict[str, object], match: str) -> None:
+    config: dict[str, object] = {
+        "store": _PasskeyStore(),
+        "challenge_store": _ChallengeStore(),
+        "rp_id": "example.com",
+        "rp_name": "Example",
+        "origins": ("https://example.com",),
+    }
+    config.update(kwargs)
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        accounts_module.PasskeyService(**config)  # type: ignore[arg-type]
+
+
+def test_mfa_value_and_service_configuration_rejects_invalid_contracts() -> None:
+    now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    protected = accounts_module.ProtectedSecret(b"cipher", "v1")
+    with pytest.raises(ValueError, match="Protected secret"):
+        accounts_module.ProtectedSecret(b"", "v1")
+    with pytest.raises(ValueError, match="Pending TOTP"):
+        accounts_module.PendingTOTPEnrollment(
+            enrollment_id=" ",
+            method_id="m1",
+            account_id="a1",
+            protected_secret=protected,
+            policy=accounts_module.TOTPPolicy(),
+            created_at=now,
+            expires_at=now + timedelta(minutes=1),
+        )
+    with pytest.raises(ValueError, match="TOTP method"):
+        accounts_module.TOTPMethod(
+            method_id="m1",
+            account_id="a1",
+            protected_secret=protected,
+            policy=accounts_module.TOTPPolicy(),
+            last_accepted_counter=-1,
+            created_at=now,
+        )
+    with pytest.raises(ValueError, match="Recovery-code digest"):
+        accounts_module.RecoveryCodeDigest("a1", "v1", b"short")
+    with pytest.raises(ValueError, match="Step-up record"):
+        accounts_module.StepUpRecord(
+            grant_digest=b"short",
+            transport_digest=b"t" * 32,
+            principal_id="a1",
+            security_epoch=1,
+            purpose="settings",
+            methods=frozenset(),
+            traits=frozenset(),
+            authenticated_at=now,
+            expires_at=now + timedelta(minutes=1),
+        )
+    with pytest.raises(ImproperlyConfiguredException, match="store"):
+        accounts_module.MFAService(cast("Any", object()), _MFAProtector())
+    with pytest.raises(ImproperlyConfiguredException, match="protector"):
+        accounts_module.MFAService(_MFAStore(), cast("Any", object()))
+    with pytest.raises(ImproperlyConfiguredException, match="issuer"):
+        accounts_module.MFAService(_MFAStore(), _MFAProtector(), issuer=" ")
+    with pytest.raises(ImproperlyConfiguredException, match="store"):
+        accounts_module.StepUpService(cast("Any", object()))
+    with pytest.raises(ImproperlyConfiguredException, match="lifetime"):
+        accounts_module.StepUpService(_StepUpStore(), ttl=timedelta())
+
+
+def test_pywebauthn_adapter_projects_pinned_dependency_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    client_data = b'{"type":"webauthn.get"}'
+    credential = SimpleNamespace(raw_id=b"credential", response=SimpleNamespace(client_data_json=client_data))
+    verified = SimpleNamespace(
+        credential_id=b"credential",
+        credential_public_key=b"public-key",
+        sign_count=1,
+        new_sign_count=2,
+        credential_device_type=passkeys_module.CredentialDeviceType.SINGLE_DEVICE,
+        credential_backed_up=False,
+        user_verified=True,
+        aaguid="00000000-0000-0000-0000-000000000000",
+        fmt=SimpleNamespace(value="none"),
+    )
+    monkeypatch.setattr(passkeys_module, "generate_registration_options", lambda **_kwargs: object())
+    monkeypatch.setattr(passkeys_module, "generate_authentication_options", lambda **_kwargs: object())
+    monkeypatch.setattr(passkeys_module, "options_to_json", lambda _options: "{}")
+    monkeypatch.setattr(passkeys_module, "parse_registration_credential_json", lambda _response: credential)
+    monkeypatch.setattr(passkeys_module, "parse_authentication_credential_json", lambda _response: credential)
+    monkeypatch.setattr(
+        passkeys_module, "parse_client_data_json", lambda _value: SimpleNamespace(challenge=b"challenge")
+    )
+    monkeypatch.setattr(passkeys_module, "verify_registration_response", lambda **_kwargs: verified)
+    monkeypatch.setattr(passkeys_module, "verify_authentication_response", lambda **_kwargs: verified)
+    adapter = accounts_module.PyWebAuthnVerifier()
+    options_kwargs = {
+        "challenge": b"challenge",
+        "rp_id": "example.com",
+        "rp_name": "Example",
+        "account_id": "account-1",
+        "user_name": "person@example.com",
+        "timeout_ms": 300_000,
+        "user_verification": "required",
+        "algorithms": (-7,),
+    }
+
+    assert adapter.registration_options(**options_kwargs) == "{}"
+    assert adapter.authentication_options(**options_kwargs) == "{}"
+    assert adapter.registration_challenge("{}") == b"challenge"
+    assert adapter.authentication_challenge("{}") == b"challenge"
+    assert adapter.credential_id("{}") == b"credential"
+    registration = adapter.verify_registration(
+        response="{}",
+        challenge=b"challenge",
+        rp_id="example.com",
+        origins=("https://example.com",),
+        require_user_verification=True,
+        algorithms=(-7,),
+    )
+    authentication = adapter.verify_authentication(
+        response="{}",
+        challenge=b"challenge",
+        rp_id="example.com",
+        origins=("https://example.com",),
+        public_key=b"public-key",
+        require_user_verification=True,
+    )
+    assert registration.credential_id == b"credential"
+    assert authentication.sign_count == 2
+
+    monkeypatch.setattr(passkeys_module, "options_to_json", lambda _options: 1 / 0)
+    with pytest.raises(accounts_module.InvalidWebAuthnResponseError):
+        adapter.registration_options(**options_kwargs)
+    with pytest.raises(accounts_module.InvalidWebAuthnResponseError):
+        adapter.authentication_options(**options_kwargs)
+    monkeypatch.setattr(passkeys_module, "verify_registration_response", lambda **_kwargs: 1 / 0)
+    monkeypatch.setattr(passkeys_module, "verify_authentication_response", lambda **_kwargs: 1 / 0)
+    with pytest.raises(accounts_module.InvalidWebAuthnResponseError):
+        adapter.verify_registration(
+            response="{}",
+            challenge=b"challenge",
+            rp_id="example.com",
+            origins=("https://example.com",),
+            require_user_verification=True,
+            algorithms=(-7,),
+        )
+    with pytest.raises(accounts_module.InvalidWebAuthnResponseError):
+        adapter.verify_authentication(
+            response="{}",
+            challenge=b"challenge",
+            rp_id="example.com",
+            origins=("https://example.com",),
+            public_key=b"public-key",
+            require_user_verification=True,
+        )
+
+
+def test_passkey_values_and_dependency_configuration_reject_invalid_shapes() -> None:
+    now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="challenge"):
+        accounts_module.WebAuthnChallenge(
+            challenge_digest=b"short",
+            binding_digest=b"b" * 32,
+            purpose="registration",
+            account_id="account-1",
+            rp_id="example.com",
+            origins=("https://example.com",),
+            user_verification=accounts_module.UserVerification.REQUIRED,
+            algorithms=(-7,),
+            expires_at=now,
+        )
+    with pytest.raises(ValueError, match="Passkey credential"):
+        replace(_stored_passkey(), backup_state=True)
+    base: dict[str, object] = {
+        "store": _PasskeyStore(),
+        "challenge_store": _ChallengeStore(),
+        "verifier": _WebAuthnVerifier(),
+        "rp_id": "example.com",
+        "rp_name": "Example",
+        "origins": ("https://example.com",),
+    }
+    for replacement, match in (
+        ({"store": object()}, "Store"),
+        ({"challenge_store": object()}, "Store"),
+        ({"verifier": object()}, "verifier"),
+        ({"worker_limiter": object()}, "limiter"),
+        ({"origins": ("https://user@example.com",)}, "HTTPS"),
+        ({"origins": ("https://example.com/path",)}, "HTTPS"),
+        ({"origins": ("https://example.com:bad",)}, "HTTPS"),
+    ):
+        config = {**base, **replacement}
+        with pytest.raises(ImproperlyConfiguredException, match=match):
+            accounts_module.PasskeyService(**config)  # type: ignore[arg-type]
+    localhost_config = {
+        **base,
+        "origins": ("http://localhost:8000",),
+        "rp_id": "localhost",
+        "allow_insecure_localhost": True,
+    }
+    localhost = accounts_module.PasskeyService(**localhost_config)  # type: ignore[arg-type]
+    assert localhost.allow_insecure_localhost is True
+
+
+@pytest.mark.anyio
+async def test_passkey_service_defensive_store_and_ceremony_outcomes_are_sanitized() -> None:
+    store = _PasskeyStore()
+    service = _passkey_service(store=store)
+    assert isinstance(await service.remove_credential("account-1", b"credential"), VerificationUnavailable)
+    assert await service.rename_credential("account-1", b"credential", " ") is None
+    store.fail = True
+    assert isinstance(await service.list_credentials("account-1"), VerificationUnavailable)
+    assert isinstance(await service.rename_credential("account-1", b"credential", "Laptop"), VerificationUnavailable)
+    store.fail = False
+    service.challenge_entropy = cast("Any", lambda _size: b"short")
+    assert isinstance(await service.begin_authentication("account-1", binding=b"session"), VerificationUnavailable)
+    service.challenge_entropy = lambda size: b"c" * size
+    assert isinstance(await service.begin_authentication("account-1", binding=b""), VerificationUnavailable)
+
+    class ConflictingStore(_PasskeyStore):
+        async def record_assertion(self, *args: object, **kwargs: object) -> accounts_module.AssertionRecordResult:
+            del args, kwargs
+            return accounts_module.AssertionRecordResult.CONFLICT
+
+    conflict_store = ConflictingStore()
+    conflict_store.credentials[b"credential-1"] = _stored_passkey()
+    conflict_service = _passkey_service(store=conflict_store)
+    options = await conflict_service.begin_authentication("account-1", binding=b"session")
+    assert isinstance(options, accounts_module.WebAuthnOptions)
+    assert isinstance(
+        await conflict_service.verify_authentication("account-1", binding=b"session", response="{}"), InvalidCredentials
+    )
+
+
+@pytest.mark.anyio
+async def test_local_auth_passkey_login_selects_only_configured_transport() -> None:
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=1,
+    )
+
+    class Accounts:
+        value: object = account
+
+        async def get_by_id(self, account_id: str) -> object:
+            del account_id
+            if isinstance(self.value, BaseException):
+                raise self.value
+            return self.value
+
+    class Session:
+        result: object = accounts_module.SessionAuthentication(
+            session_id="c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",
+            binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+            account_id="account-1",
+            security_epoch=1,
+            authenticated_at=_JWT_NOW,
+            expires_at=_JWT_NOW + timedelta(hours=1),
+        )
+
+        async def establish(self, request: object, projected: object) -> object:
+            del request, projected
+            return self.result
+
+    class Tokens:
+        result = object()
+
+        async def issue(self, projected: object) -> object:
+            del projected
+            return self.result
+
+    accounts = Accounts()
+    session = Session()
+    tokens = Tokens()
+
+    def services(
+        *, session_auth: object | None, refresh_tokens: object | None
+    ) -> accounts_module.LocalAuthServices[Any]:
+        return accounts_module.LocalAuthServices(
+            accounts=cast("Any", accounts),
+            password_login=cast("Any", object()),
+            password_reauthentication=cast("Any", object()),
+            password_change=cast("Any", object()),
+            verification=cast("Any", object()),
+            recovery=cast("Any", object()),
+            session_auth=cast("Any", session_auth),
+            refresh_tokens=cast("Any", refresh_tokens),
+        )
+
+    result = await services(session_auth=session, refresh_tokens=None).passkey_login(
+        cast("Any", object()), "account-1", transport=None
+    )
+    assert isinstance(result, accounts_module.LocalAccountResponse)
+    assert (
+        await services(session_auth=None, refresh_tokens=tokens).passkey_login(
+            cast("Any", object()), "account-1", transport=None
+        )
+        is tokens.result
+    )
+    assert isinstance(
+        await services(session_auth=session, refresh_tokens=tokens).passkey_login(
+            cast("Any", object()), "account-1", transport=None
+        ),
+        InvalidCredentials,
+    )
+    assert isinstance(
+        await services(session_auth=None, refresh_tokens=None).passkey_login(
+            cast("Any", object()), "account-1", transport="session"
+        ),
+        InvalidCredentials,
+    )
+    assert isinstance(
+        await services(session_auth=None, refresh_tokens=None).passkey_login(
+            cast("Any", object()), "account-1", transport="tokens"
+        ),
+        InvalidCredentials,
+    )
+    original_session_result = session.result
+    session.result = VerificationUnavailable()
+    assert isinstance(
+        await services(session_auth=session, refresh_tokens=None).passkey_login(
+            cast("Any", object()), "account-1", transport="session"
+        ),
+        VerificationUnavailable,
+    )
+    session.result = original_session_result
+    accounts.value = None
+    assert isinstance(
+        await services(session_auth=session, refresh_tokens=None).passkey_login(
+            cast("Any", object()), "account-1", transport="session"
+        ),
+        InvalidCredentials,
+    )
+    accounts.value = OSError()
+    assert isinstance(
+        await services(session_auth=session, refresh_tokens=None).passkey_login(
+            cast("Any", object()), "account-1", transport="session"
+        ),
+        VerificationUnavailable,
+    )
+
+
+@pytest.mark.anyio
+async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
+    request = cast("Any", SimpleNamespace(headers={"authorization": "Bearer transport"}))
+    with pytest.raises(ValueError, match="At least one"):
+        mfa_controllers_module.build_mfa_routes(step_up=cast("Any", object()), epochs=cast("Any", object()))
+    mfa_controllers_module.build_mfa_routes(
+        step_up=cast("Any", object()), epochs=cast("Any", object()), mfa=cast("Any", object())
+    )
+    mfa_controllers_module.build_mfa_routes(
+        step_up=cast("Any", object()), epochs=cast("Any", object()), passkeys=cast("Any", object())
+    )
+    assert mfa_controllers_module._error(accounts_module.RateLimited(retry_after=3)).status_code == 429  # noqa: SLF001
+    assert mfa_controllers_module._error(accounts_module.RateLimited()).status_code == 429  # noqa: SLF001
+    assert mfa_controllers_module._error(VerificationUnavailable()).status_code == 503  # noqa: SLF001
+    assert mfa_controllers_module._error(InvalidCredentials()).status_code == 401  # noqa: SLF001
+    assert mfa_controllers_module._principal_id(Principal.anonymous()) is None  # noqa: SLF001
+    assert (
+        mfa_controllers_module._transport_binding(  # noqa: SLF001
+            cast("Any", SimpleNamespace(headers={"cookie": "session=value"}))
+        )
+        == b"session=value"
+    )
+    assert (
+        mfa_controllers_module._transport_binding(  # noqa: SLF001
+            cast("Any", SimpleNamespace(headers={}))
+        )
+        == b""
+    )
+
+    class Epochs:
+        value: object = 1
+
+        async def current_epoch(self, account_id: str) -> object:
+            del account_id
+            if isinstance(self.value, BaseException):
+                raise self.value
+            return self.value
+
+    epochs = Epochs()
+    services = mfa_controllers_module._MFAFeatureServices(  # noqa: SLF001
+        mfa=None,
+        passkeys=None,
+        step_up=cast("Any", object()),
+        epochs=cast("Any", epochs),
+        rate_limits=None,
+        client_key=None,
+        local_auth=None,
+    )
+    assert await mfa_controllers_module._current_epoch(services, "account-1") == 1  # noqa: SLF001
+    epochs.value = False
+    assert isinstance(
+        await mfa_controllers_module._current_epoch(services, "account-1"),  # noqa: SLF001
+        VerificationUnavailable,
+    )
+    epochs.value = OSError()
+    assert isinstance(
+        await mfa_controllers_module._consume_step_up(  # noqa: SLF001
+            services=services, request=request, account_id="account-1", purpose="settings", grant="grant"
+        ),
+        VerificationUnavailable,
+    )
+
+    class Guard:
+        async def check(self, *args: object, **kwargs: object) -> accounts_module.RateLimited:
+            del args, kwargs
+            return accounts_module.RateLimited()
+
+    services = replace(services, rate_limits=cast("Any", Guard()), client_key=cast("Any", lambda _request: "client"))
+    assert isinstance(
+        await mfa_controllers_module._check_rate_limit(  # noqa: SLF001
+            services, request, "operation", "account-1"
+        ),
+        accounts_module.RateLimited,
+    )
+    assert mfa_controllers_module._options_response(VerificationUnavailable()).status_code == 503  # noqa: SLF001
+    assert mfa_controllers_module._removal_response(VerificationUnavailable()).status_code == 503  # noqa: SLF001
+    assert (
+        mfa_controllers_module._removal_response(  # noqa: SLF001 - exercises the private HTTP projection matrix
+            accounts_module.RevokeLoginMethodResult(accounts_module.RevokeLoginMethodStatus.FINAL_METHOD)
+        ).status_code
+        == 409
+    )
+    assert (
+        mfa_controllers_module._removal_response(  # noqa: SLF001 - exercises the private HTTP projection matrix
+            accounts_module.RevokeLoginMethodResult(accounts_module.RevokeLoginMethodStatus.NOT_FOUND)
+        ).status_code
+        == 400
+    )
+
+
+@pytest.mark.anyio
+async def test_mfa_and_step_up_defensive_failures_are_sanitized() -> None:
+    now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+
+    class WrongVersionProtector(_MFAProtector):
+        async def protect(self, secret: bytes, *, associated_data: bytes) -> accounts_module.ProtectedSecret:
+            protected = await super().protect(secret, associated_data=associated_data)
+            return replace(protected, key_version="other")
+
+    service = _mfa_service(_MFAStore(), WrongVersionProtector(), now=now)
+    assert isinstance(
+        await service.begin_totp_enrollment("account-1", label="person@example.com"), VerificationUnavailable
+    )
+    service = _mfa_service(_MFAStore(), _MFAProtector(), now=now)
+    enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
+    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    assert isinstance(await service.activate_totp("account-1", enrollment.enrollment_id, "000000"), InvalidCredentials)
+    assert isinstance(await service.remove_totp_method("account-1", "method-1"), VerificationUnavailable)
+    assert isinstance(await service.consume_recovery_code("account-1", 1), InvalidCredentials)  # type: ignore[arg-type]
+    assert isinstance(
+        await service.begin_totp_enrollment("bad\x00account", label="person@example.com"), VerificationUnavailable
+    )
+    service.secret_generator = cast("Any", lambda: b"bytes")
+    assert isinstance(
+        await service.begin_totp_enrollment("account-1", label="person@example.com"), VerificationUnavailable
+    )
+    service.secret_generator = lambda: "SHORT"
+    assert isinstance(
+        await service.begin_totp_enrollment("account-1", label="person@example.com"), VerificationUnavailable
+    )
+
+    step_up = accounts_module.StepUpService(
+        _StepUpStore(), clock=lambda: now, entropy=cast("Any", lambda _size: b"short")
+    )
+    evidence = AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=now, methods=frozenset({"totp"}))
+    assert isinstance(
+        await step_up.issue(
+            principal_id="account-1",
+            security_epoch=1,
+            purpose="settings",
+            transport_binding=b"session",
+            evidence=evidence,
+        ),
+        VerificationUnavailable,
+    )
+    assert isinstance(
+        await step_up.issue(
+            principal_id=" ", security_epoch=1, purpose="settings", transport_binding=b"session", evidence=evidence
+        ),
+        InvalidCredentials,
+    )
+    assert isinstance(
+        await step_up.consume(
+            " ", principal_id="account-1", security_epoch=1, purpose="settings", transport_binding=b"session"
+        ),
+        InvalidCredentials,
+    )
+
+
+@pytest.mark.anyio
+async def test_testing_stores_cover_expiry_update_and_clone_risk_outcomes() -> None:
+    now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        testing_module.FakeClock(now.replace(tzinfo=None))
+    store = testing_module.InMemoryMFAStore()
+    pending = accounts_module.PendingTOTPEnrollment(
+        enrollment_id="e1",
+        method_id="m1",
+        account_id="a1",
+        protected_secret=accounts_module.ProtectedSecret(b"cipher", "v1"),
+        policy=accounts_module.TOTPPolicy(),
+        created_at=now - timedelta(minutes=2),
+        expires_at=now - timedelta(minutes=1),
+    )
+    await store.create_totp_enrollment(pending)
+    assert await store.get_totp_enrollment("e1") is pending
+    assert await store.activate_totp("a1", "e1", accepted_counter=1, now=now) is None
+    active = replace(pending, enrollment_id="e2", expires_at=now + timedelta(minutes=1))
+    await store.create_totp_enrollment(active)
+    activated = await store.activate_totp("a1", "e2", accepted_counter=1, now=now)
+    assert activated is not None
+    assert await store.advance_totp_counter("m1", accepted_counter=2, now=now)
+
+    credential = _stored_passkey()
+    passkeys = testing_module.InMemoryPasskeyStore()
+    assert await passkeys.add_credential(credential)
+    assert (
+        await passkeys.record_assertion(
+            credential.credential_id,
+            expected_version=0,
+            sign_count=0,
+            backup_eligible=False,
+            backup_state=False,
+            clone_risk=True,
+            now=now,
+        )
+        is accounts_module.AssertionRecordResult.CLONE_RISK
+    )
+
+
+def test_mfa_and_passkey_feature_configs_build_services_and_validate_route_controls() -> None:
+    class CombinedMFAStore(_MFAStore, _StepUpStore):
+        def __init__(self) -> None:
+            _MFAStore.__init__(self)
+            _StepUpStore.__init__(self)
+
+    combined = CombinedMFAStore()
+    login_methods = _RecoveryLoginMethods()
+    events = _SecurityEvents()
+    policy = accounts_module.TOTPPolicy(algorithm="SHA256")
+    pepper = accounts_module.RecoveryCodePepper("v1", b"p" * 32)
+    mfa = MFAConfig(
+        store=combined,
+        secret_protector=_MFAProtector(),
+        policy=policy,
+        recovery_peppers=(pepper,),
+        login_methods=login_methods,
+        events=events,
+        route_prefix="/security/",
+        register_routes=False,
+    )
+    assert isinstance(mfa.service, accounts_module.MFAService)
+    assert isinstance(mfa.step_up_service, accounts_module.StepUpService)
+    assert mfa.service.policy is policy
+    assert mfa.service.recovery_peppers == (pepper,)
+    assert mfa.service.login_methods is login_methods
+    assert mfa.service.events is events
+    assert mfa.route_prefix == "/security"
+
+    passkeys = PasskeyConfig(
+        store=_PasskeyStore(),
+        challenge_store=_ChallengeStore(),
+        rp_id="example.com",
+        origins=("https://example.com",),
+        login_methods=login_methods,
+        events=events,
+        step_up_store=_StepUpStore(),
+        register_routes=False,
+    )
+    assert isinstance(passkeys.service, accounts_module.PasskeyService)
+    assert isinstance(passkeys.step_up_service, accounts_module.StepUpService)
+    assert passkeys.service.login_methods is login_methods
+    assert passkeys.service.events is events
+
+    for config in (
+        lambda: MFAConfig(_MFAStore(), _MFAProtector(), route_prefix="relative"),
+        lambda: MFAConfig(_MFAStore(), _MFAProtector(), route_prefix=cast("Any", 1)),
+        lambda: MFAConfig(_MFAStore(), _MFAProtector(), register_routes=cast("Any", 1)),
+        lambda: PasskeyConfig(
+            _PasskeyStore(), _ChallengeStore(), "example.com", ("https://example.com",), register_routes=cast("Any", 1)
+        ),
+    ):
+        with pytest.raises(ImproperlyConfiguredException):
+            config()
 
 
 @pytest.mark.parametrize(
@@ -8547,6 +9270,163 @@ def _refresh_service(
         store,
         accounts,
         account,
+    )
+
+
+@pytest.mark.anyio
+async def test_mfa_operational_and_format_failure_branches_are_sanitized() -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    store = _MFAStore()
+    protector = _MFAProtector()
+    service = _mfa_service(store, protector, now=now)
+    enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
+    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").at(now)
+    method = await service.activate_totp("account-1", enrollment.enrollment_id, code)
+    assert isinstance(method, accounts_module.TOTPMethod)
+    next_time = now + timedelta(seconds=30)
+    next_code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").at(next_time)
+    service.clock = lambda: next_time
+    store.fail = True
+    assert isinstance(await service.verify_totp("account-1", method.method_id, next_code), VerificationUnavailable)
+
+    class FailingLoginMethods(_RecoveryLoginMethods):
+        async def revoke_login_method(self, *args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise OSError
+
+    service.login_methods = cast("Any", FailingLoginMethods(accounts_module.RevokeLoginMethodStatus.REVOKED))
+    assert isinstance(await service.remove_totp_method("account-1", method.method_id), VerificationUnavailable)
+
+    failing_step_store = _StepUpStore()
+    step_up = accounts_module.StepUpService(failing_step_store, clock=lambda: now)
+    failing_step_store.consume = cast("Any", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError()))
+    assert isinstance(
+        await step_up.consume(
+            "token", principal_id="account-1", security_epoch=1, purpose="settings", transport_binding=b"session"
+        ),
+        VerificationUnavailable,
+    )
+
+    for invalid_secret in (1, "!!!!", "GEZA", base64.b32encode(b"x").decode()):
+        invalid = _mfa_service(_MFAStore(), _MFAProtector(), now=now)
+        invalid.secret_generator = cast("Any", lambda value=invalid_secret: value)
+        assert isinstance(
+            await invalid.begin_totp_enrollment("account-1", label="person@example.com"), VerificationUnavailable
+        )
+    invalid = _mfa_service(_MFAStore(), _MFAProtector(), now=now)
+    invalid.recovery_peppers = (accounts_module.RecoveryCodePepper("v1", b"p" * 32),)
+    invalid.recovery_entropy = cast("Any", lambda _size: b"short")
+    assert isinstance(await invalid.generate_recovery_codes("account-1"), VerificationUnavailable)
+
+
+@pytest.mark.anyio
+async def test_mfa_atomic_rejection_and_step_up_storage_failure_are_sanitized() -> None:
+    class RejectingAdvanceStore(_MFAStore):
+        async def advance_totp_counter(self, method_id: str, *, accepted_counter: int, now: datetime) -> bool:
+            del method_id, accepted_counter, now
+            return False
+
+    class FailingStepUpStore(_StepUpStore):
+        async def put(self, record: accounts_module.StepUpRecord) -> None:
+            del record
+            raise OSError
+
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    store = RejectingAdvanceStore()
+    service = _mfa_service(store, _MFAProtector(), now=now)
+    enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
+    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    activation_code = pyotp.TOTP(_MFA_ENCODED_SEED).at(now)
+    method = await service.activate_totp("account-1", enrollment.enrollment_id, activation_code)
+    assert isinstance(method, accounts_module.TOTPMethod)
+    next_time = now + timedelta(seconds=30)
+    service.clock = lambda: next_time
+    assert isinstance(
+        await service.verify_totp("account-1", method.method_id, pyotp.TOTP(_MFA_ENCODED_SEED).at(next_time)),
+        InvalidCredentials,
+    )
+    assert isinstance(
+        await service.verify_totp("account-1", method.method_id, "１２３４５６"),  # noqa: RUF001 - non-ASCII digits
+        InvalidCredentials,
+    )
+    assert isinstance(await service.verify_totp("account-1", method.method_id, "ABCDEF"), InvalidCredentials)
+
+    invalid_context = _mfa_service(_MFAStore(), _MFAProtector(), now=now)
+    invalid_context.identifiers = iter(("enrollment", "bad\x00method")).__next__
+    assert isinstance(
+        await invalid_context.begin_totp_enrollment("account-1", label="person@example.com"), VerificationUnavailable
+    )
+
+    step_up = accounts_module.StepUpService(FailingStepUpStore(), clock=lambda: now)
+    evidence = AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=now, methods=frozenset({"totp"}))
+    assert isinstance(
+        await step_up.issue(
+            principal_id="account-1",
+            security_epoch=1,
+            purpose="settings",
+            transport_binding=b"session",
+            evidence=evidence,
+        ),
+        VerificationUnavailable,
+    )
+
+
+@pytest.mark.anyio
+async def test_passkey_defensive_registration_authentication_and_audit_outcomes() -> None:
+    class InvalidAttestationVerifier(_WebAuthnVerifier):
+        def verify_registration(self, **kwargs: object) -> accounts_module.RegistrationVerification:
+            return replace(super().verify_registration(**kwargs), attestation_format="packed")
+
+    binding = b"session-binding"
+    service = _passkey_service(verifier=InvalidAttestationVerifier())
+    await service.begin_registration("account-1", user_name="person@example.com", binding=binding)
+    assert isinstance(
+        await service.verify_registration("account-1", binding=binding, response="{}"), InvalidCredentials
+    )
+
+    store = _PasskeyStore()
+    store.credentials[b"credential-1"] = _stored_passkey()
+    service = _passkey_service(store=store)
+    await service.begin_registration("account-1", user_name="person@example.com", binding=binding)
+    assert isinstance(
+        await service.verify_registration("account-1", binding=binding, response="{}"), InvalidCredentials
+    )
+
+    service = _passkey_service(store=store)
+    await service.begin_authentication("account-1", binding=binding)
+    assert isinstance(await service.verify_authentication("other", binding=binding, response="{}"), InvalidCredentials)
+
+    service = _passkey_service(store=store, verifier=_WebAuthnVerifier(failure="authentication"))
+    await service.begin_authentication("account-1", binding=binding)
+    assert isinstance(
+        await service.verify_authentication("account-1", binding=binding, response="{}"), InvalidCredentials
+    )
+
+    challenge_store = _ChallengeStore()
+    service = _passkey_service(challenge_store=challenge_store, store=store)
+    await service.begin_authentication("account-1", binding=binding)
+    challenge_store.fail = True
+    assert isinstance(
+        await service.verify_authentication("account-1", binding=binding, response="{}"), VerificationUnavailable
+    )
+
+    service = _passkey_service(store=store, verifier=_WebAuthnVerifier(user_verified=False, sign_count=2))
+    await service.begin_authentication("account-1", binding=binding)
+    evidence = await service.verify_authentication("account-1", binding=binding, response="{}")
+    assert isinstance(evidence, AuthenticationEvidence)
+    assert "user-verified" not in evidence.traits
+
+    class FailingLoginMethods(_RecoveryLoginMethods):
+        async def revoke_login_method(self, *args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise OSError
+
+    service.login_methods = cast("Any", FailingLoginMethods())
+    assert isinstance(await service.remove_credential("account-1", b"credential-1"), VerificationUnavailable)
+    service.events = _SecurityEvents(fail=True)
+    await service._emit_event(  # noqa: SLF001 - verifies best-effort audit isolation directly
+        operation="passkey.assert", outcome="clone_risk", account_id="account-1", occurred_at=_JWT_NOW
     )
 
 

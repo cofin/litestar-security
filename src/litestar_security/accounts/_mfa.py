@@ -769,13 +769,7 @@ class StepUpService:
         return StepUpGrant(token=token, purpose=purpose, expires_at=expires_at)
 
     async def consume(
-        self,
-        token: str,
-        *,
-        principal_id: str,
-        security_epoch: int,
-        purpose: str,
-        transport_binding: bytes,
+        self, token: str, *, principal_id: str, security_epoch: int, purpose: str, transport_binding: bytes
     ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
         """Consume one exact principal, epoch, purpose, and transport binding.
 
