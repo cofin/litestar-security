@@ -13,7 +13,9 @@ __all__ = (
     "LOGIN",
     "MFA_RECOVERY_CONSUME",
     "MFA_RECOVERY_REPLACE",
+    "MFA_TOTP_ENROLL",
     "MFA_TOTP_REMOVE",
+    "MFA_TOTP_VERIFY",
     "OUTCOME_ATTEMPTED",
     "OUTCOME_CHANGED",
     "OUTCOME_CLONE_RISK",
@@ -27,6 +29,9 @@ __all__ = (
     "OUTCOME_UPDATED",
     "OUTCOME_VERIFIED",
     "PASSKEY_ASSERT",
+    "PASSKEY_AUTH_OPTIONS",
+    "PASSKEY_REGISTER_OPTIONS",
+    "PASSKEY_REGISTER_VERIFY",
     "PASSKEY_REMOVE",
     "PASSWORD_CHANGE",
     "PASSWORD_FORCE_RESET",
@@ -90,8 +95,13 @@ SESSION_REVOKE_ALL_SUFFIX = ".session_revoke_all"
 LOGIN = "local.login"
 MFA_RECOVERY_CONSUME = "local.mfa.recovery.consume"
 MFA_RECOVERY_REPLACE = "local.mfa.recovery.replace"
+MFA_TOTP_ENROLL = "local.mfa.totp.enroll"
 MFA_TOTP_REMOVE = "local.mfa.totp.remove"
+MFA_TOTP_VERIFY = "local.mfa.totp.verify"
 PASSKEY_ASSERT = "local.passkey.assert"
+PASSKEY_AUTH_OPTIONS = "local.passkey.authentication.options"
+PASSKEY_REGISTER_OPTIONS = "local.passkey.registration.options"
+PASSKEY_REGISTER_VERIFY = "local.passkey.registration.verify"
 PASSKEY_REMOVE = "local.passkey.remove"
 PASSWORD_RESET = "local.password.reset"
 VERIFICATION_RESEND = "local.verification.resend"

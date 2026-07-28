@@ -32,6 +32,7 @@ __all__ = (
 UserT = TypeVar("UserT")
 _EMPTY_METRIC_ATTRIBUTES: Mapping[str, str] = MappingProxyType({})
 _MAXIMUM_WORKER_TOKENS = 1_024
+_ASCII_CONTROL_LIMIT = 32
 
 
 @runtime_checkable
@@ -137,7 +138,41 @@ class MFAConfig:
 
     store: object
     secret_protector: object = field(repr=False)
+    step_up_store: object | None = field(default=None, repr=False)
+    route_prefix: str = "/auth"
+    issuer: str = "Litestar Security"
     register_routes: bool = True
+    service: object = field(init=False, repr=False, compare=False)
+    step_up_service: object | None = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Build project-owned services from explicit application ports."""
+        from litestar_security.accounts import (  # noqa: PLC0415 - avoids the accounts profile/config cycle
+            MFAService,
+            StepUpService,
+            StepUpStore,
+        )
+
+        object.__setattr__(
+            self,
+            "service",
+            MFAService(
+                store=cast("Any", self.store),
+                secret_protector=cast("Any", self.secret_protector),
+                issuer=self.issuer,
+            ),
+        )
+        step_up_store = self.step_up_store if self.step_up_store is not None else self.store
+        object.__setattr__(
+            self,
+            "step_up_service",
+            StepUpService(cast("Any", step_up_store)) if isinstance(step_up_store, StepUpStore) else None,
+        )
+        object.__setattr__(self, "route_prefix", _feature_route_prefix(self.route_prefix))
+        register_routes_value = cast("object", self.register_routes)
+        if register_routes_value.__class__ is not bool:
+            msg = "MFA route registration must be boolean"
+            raise ImproperlyConfiguredException(detail=msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,11 +183,61 @@ class PasskeyConfig:
     challenge_store: object
     rp_id: str
     origins: Sequence[str]
+    rp_name: str = "Litestar Security"
+    step_up_store: object | None = field(default=None, repr=False)
+    route_prefix: str = "/auth"
     register_routes: bool = True
+    service: object = field(init=False, repr=False, compare=False)
+    step_up_service: object | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Freeze relying-party origins for deterministic validation."""
+        """Freeze relying-party origins and build the project-owned service."""
+        from litestar_security.accounts import (  # noqa: PLC0415 - avoids the accounts profile/config cycle
+            PasskeyService,
+            StepUpService,
+            StepUpStore,
+        )
+
         object.__setattr__(self, "origins", tuple(self.origins))
+        object.__setattr__(
+            self,
+            "service",
+            PasskeyService(
+                store=cast("Any", self.store),
+                challenge_store=cast("Any", self.challenge_store),
+                rp_id=self.rp_id,
+                rp_name=self.rp_name,
+                origins=cast("tuple[str, ...]", self.origins),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "step_up_service",
+            StepUpService(cast("Any", self.step_up_store))
+            if isinstance(self.step_up_store, StepUpStore)
+            else None,
+        )
+        object.__setattr__(self, "route_prefix", _feature_route_prefix(self.route_prefix))
+        register_routes_value = cast("object", self.register_routes)
+        if register_routes_value.__class__ is not bool:
+            msg = "Passkey route registration must be boolean"
+            raise ImproperlyConfiguredException(detail=msg)
+
+
+def _feature_route_prefix(value: object) -> str:
+    if not isinstance(value, str):
+        msg = "MFA and passkey route prefixes must be absolute non-root paths"
+        raise ImproperlyConfiguredException(detail=msg)
+    normalized = value.rstrip("/")
+    if (
+        not normalized.startswith("/")
+        or normalized == ""
+        or "//" in normalized
+        or any(character.isspace() or ord(character) < _ASCII_CONTROL_LIMIT for character in normalized)
+    ):
+        msg = "MFA and passkey route prefixes must be absolute non-root paths"
+        raise ImproperlyConfiguredException(detail=msg)
+    return normalized
 
 
 @dataclass(slots=True)

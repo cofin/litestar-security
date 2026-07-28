@@ -7995,6 +7995,118 @@ async def test_passkey_listing_rename_and_removal_are_safe_and_final_method_guar
     assert removal.status is accounts_module.RevokeLoginMethodStatus.FINAL_METHOD
 
 
+class _StepUpStore:
+    def __init__(self) -> None:
+        self.records: dict[bytes, accounts_module.StepUpRecord] = {}
+
+    async def put(self, record: accounts_module.StepUpRecord) -> None:
+        self.records[record.grant_digest] = record
+
+    async def consume(  # noqa: PLR0913 - mirrors the exact atomic StepUpStore contract
+        self,
+        grant_digest: bytes,
+        *,
+        principal_id: str,
+        security_epoch: int,
+        purpose: str,
+        transport_digest: bytes,
+        now: datetime,
+    ) -> accounts_module.StepUpRecord | None:
+        record = self.records.pop(grant_digest, None)
+        if (
+            record is None
+            or record.principal_id != principal_id
+            or record.security_epoch != security_epoch
+            or record.purpose != purpose
+            or record.transport_digest != transport_digest
+            or record.expires_at <= now
+        ):
+            return None
+        return record
+
+
+@pytest.mark.anyio
+async def test_step_up_grant_is_exactly_bound_expiring_and_single_use() -> None:
+    store = _StepUpStore()
+    now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    service = accounts_module.StepUpService(
+        store=store,
+        clock=lambda: now,
+        entropy=lambda _size: b"g" * 32,
+    )
+    source = AuthenticationEvidence(
+        mechanism="totp",
+        slot="mfa",
+        authenticated_at=now,
+        methods=frozenset({"totp"}),
+    )
+
+    grant = await service.issue(
+        principal_id="account-1",
+        security_epoch=2,
+        purpose="password-change",
+        transport_binding=b"session-1",
+        evidence=source,
+    )
+
+    assert isinstance(grant, accounts_module.StepUpGrant)
+    assert "gggg" not in repr(grant)
+    assert isinstance(
+        await service.consume(
+            grant.token,
+            principal_id="account-1",
+            security_epoch=2,
+            purpose="different-action",
+            transport_binding=b"session-1",
+        ),
+        InvalidCredentials,
+    )
+    replay = await service.consume(
+        grant.token,
+        principal_id="account-1",
+        security_epoch=2,
+        purpose="password-change",
+        transport_binding=b"session-1",
+    )
+    assert isinstance(replay, InvalidCredentials)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("changed"),
+    ["principal", "epoch", "transport", "expiry"],
+)
+async def test_step_up_grant_rejects_changed_binding(changed: str) -> None:
+    store = _StepUpStore()
+    now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    service = accounts_module.StepUpService(store=store, clock=lambda: now)
+    source = AuthenticationEvidence(
+        mechanism="passkey",
+        slot="mfa",
+        authenticated_at=now,
+        methods=frozenset({"passkey"}),
+        traits=frozenset({"phishing-resistant"}),
+    )
+    grant = await service.issue(
+        principal_id="account-1",
+        security_epoch=2,
+        purpose="credential-remove",
+        transport_binding=b"token-1",
+        evidence=source,
+    )
+    assert isinstance(grant, accounts_module.StepUpGrant)
+    if changed == "expiry":
+        service.clock = lambda: now + timedelta(minutes=6)
+    result = await service.consume(
+        grant.token,
+        principal_id="account-2" if changed == "principal" else "account-1",
+        security_epoch=3 if changed == "epoch" else 2,
+        purpose="credential-remove",
+        transport_binding=b"token-2" if changed == "transport" else b"token-1",
+    )
+    assert isinstance(result, InvalidCredentials)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [

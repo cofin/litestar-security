@@ -1,6 +1,6 @@
 """MFA assurance, TOTP, recovery, and step-up contracts."""
 
-from base64 import b32decode
+from base64 import b32decode, urlsafe_b64encode
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -13,7 +13,13 @@ from typing import Literal, Protocol, cast, runtime_checkable
 import pyotp
 from litestar.exceptions import ImproperlyConfiguredException
 
-from litestar_security.accounts._internal import aware_utc_time, new_event_id, strict_context_text, utc_now
+from litestar_security.accounts._internal import (
+    aware_utc_time,
+    new_event_id,
+    strict_context_text,
+    utc_now,
+    valid_security_epoch,
+)
 from litestar_security.accounts._operations import (
     MFA_RECOVERY_CONSUME,
     MFA_RECOVERY_REPLACE,
@@ -41,6 +47,10 @@ __all__ = (
     "RecoveryCodePepper",
     "RecoveryCodes",
     "SecretProtector",
+    "StepUpGrant",
+    "StepUpRecord",
+    "StepUpService",
+    "StepUpStore",
     "TOTPEnrollment",
     "TOTPMethod",
     "TOTPPolicy",
@@ -50,7 +60,10 @@ _MINIMUM_SECRET_BITS = 160
 _MAXIMUM_DRIFT_STEPS = 10
 _MAXIMUM_PERIOD_SECONDS = 300
 _MAXIMUM_ENROLLMENT_TTL = timedelta(hours=1)
+_DEFAULT_STEP_UP_TTL = timedelta(minutes=5)
+_MAXIMUM_STEP_UP_TTL = timedelta(minutes=15)
 _RECOVERY_CODE_BYTES = 16
+_STEP_UP_TOKEN_BYTES = 32
 _RECOVERY_CODE_COUNT = 10
 _MAXIMUM_RECOVERY_CODE_COUNT = 100
 _MINIMUM_PEPPER_BYTES = 32
@@ -264,6 +277,86 @@ class RecoveryCodes:
     """Reveal-once recovery-code response."""
 
     codes: tuple[str, ...] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class StepUpGrant:
+    """Reveal-once transport-bound step-up credential."""
+
+    token: str = field(repr=False)
+    purpose: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StepUpRecord:
+    """Digest-only one-time step-up state."""
+
+    grant_digest: bytes = field(repr=False)
+    transport_digest: bytes = field(repr=False)
+    principal_id: str
+    security_epoch: int
+    purpose: str
+    methods: frozenset[str]
+    traits: frozenset[str]
+    authenticated_at: datetime
+    expires_at: datetime
+
+    def __post_init__(self) -> None:
+        """Validate exact bindings and a bounded UTC lifetime."""
+        authenticated_at = aware_utc_time(self.authenticated_at)
+        expires_at = aware_utc_time(self.expires_at)
+        if (
+            not strict_context_text(self.principal_id)
+            or not valid_security_epoch(self.security_epoch)
+            or not strict_context_text(self.purpose)
+            or len(self.grant_digest) != sha256().digest_size
+            or len(self.transport_digest) != sha256().digest_size
+            or expires_at <= authenticated_at
+            or expires_at - authenticated_at > _MAXIMUM_STEP_UP_TTL
+        ):
+            message = "Step-up record requires exact identity, transport, purpose, epoch, and lifetime bindings"
+            raise ValueError(message)
+        object.__setattr__(self, "authenticated_at", authenticated_at)
+        object.__setattr__(self, "expires_at", expires_at)
+
+
+@runtime_checkable
+class StepUpStore(Protocol):
+    """Persist and atomically consume digest-only step-up grants."""
+
+    async def put(self, record: StepUpRecord) -> None:
+        """Persist one unconsumed grant.
+
+        Args:
+            record: The complete digest-only grant state.
+        """
+        ...  # pragma: no cover
+
+    async def consume(  # noqa: PLR0913 - every exact grant binding is an independent store predicate
+        self,
+        grant_digest: bytes,
+        *,
+        principal_id: str,
+        security_epoch: int,
+        purpose: str,
+        transport_digest: bytes,
+        now: datetime,
+    ) -> StepUpRecord | None:
+        """Atomically consume only an exact, current binding match.
+
+        Args:
+            grant_digest: Digest of the reveal-once credential.
+            principal_id: Current authenticated principal.
+            security_epoch: Current authoritative account epoch.
+            purpose: Exact protected action.
+            transport_digest: Digest of the current session or token transport.
+            now: UTC consumption time.
+
+        Returns:
+            The consumed record only for the single winning exact match.
+        """
+        ...  # pragma: no cover
 
 
 @runtime_checkable
@@ -600,6 +693,132 @@ class MFAService:
             )
         except Exception:  # noqa: BLE001 - observational audit failure cannot change a settled decision
             return
+
+
+@dataclass(slots=True)
+class StepUpService:
+    """Issue and consume opaque grants bound to one authenticated transport."""
+
+    store: StepUpStore
+    ttl: timedelta = _DEFAULT_STEP_UP_TTL
+    clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
+    entropy: Callable[[int], bytes] = field(default=token_bytes, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate the atomic store and bounded grant lifetime."""
+        if not isinstance(cast("object", self.store), StepUpStore):
+            message = "Step-up service store must implement StepUpStore"
+            raise ImproperlyConfiguredException(detail=message)
+        if not timedelta() < self.ttl <= _MAXIMUM_STEP_UP_TTL:
+            message = "Step-up grant lifetime must be positive and at most fifteen minutes"
+            raise ImproperlyConfiguredException(detail=message)
+
+    async def issue(
+        self,
+        *,
+        principal_id: str,
+        security_epoch: int,
+        purpose: str,
+        transport_binding: bytes,
+        evidence: AuthenticationEvidence,
+    ) -> StepUpGrant | InvalidCredentials | VerificationUnavailable:
+        """Issue one opaque grant from freshly verified factor evidence.
+
+        Args:
+            principal_id: Current authenticated principal.
+            security_epoch: Current authoritative account epoch.
+            purpose: Exact action the grant may authorize.
+            transport_binding: Current session or token proof bytes.
+            evidence: Factor evidence verified by an MFA or passkey service.
+
+        Returns:
+            A reveal-once grant or a sanitized rejection.
+        """
+        try:
+            now = aware_utc_time(self.clock())
+            if (
+                not strict_context_text(principal_id)
+                or not valid_security_epoch(security_epoch)
+                or not strict_context_text(purpose)
+                or not transport_binding
+                or evidence.authenticated_at > now
+                or now - evidence.authenticated_at > self.ttl
+            ):
+                return InvalidCredentials()
+            raw_value = cast("object", self.entropy(_STEP_UP_TOKEN_BYTES))
+            if not isinstance(raw_value, bytes) or len(raw_value) != _STEP_UP_TOKEN_BYTES:
+                return VerificationUnavailable()
+            raw = raw_value
+            token = urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+            expires_at = now + self.ttl
+            await self.store.put(
+                StepUpRecord(
+                    grant_digest=sha256(token.encode("ascii")).digest(),
+                    transport_digest=sha256(transport_binding).digest(),
+                    principal_id=principal_id,
+                    security_epoch=security_epoch,
+                    purpose=purpose,
+                    methods=evidence.methods,
+                    traits=evidence.traits,
+                    authenticated_at=now,
+                    expires_at=expires_at,
+                )
+            )
+        except Exception:  # noqa: BLE001 - sanitize application stores, clocks, and entropy failures
+            return VerificationUnavailable()
+        return StepUpGrant(token=token, purpose=purpose, expires_at=expires_at)
+
+    async def consume(
+        self,
+        token: str,
+        *,
+        principal_id: str,
+        security_epoch: int,
+        purpose: str,
+        transport_binding: bytes,
+    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        """Consume one exact principal, epoch, purpose, and transport binding.
+
+        Args:
+            token: Reveal-once opaque grant.
+            principal_id: Current authenticated principal.
+            security_epoch: Current authoritative account epoch.
+            purpose: Exact protected action.
+            transport_binding: Current session or token proof bytes.
+
+        Returns:
+            Purpose evidence only for the one winning atomic consumption.
+        """
+        try:
+            now = aware_utc_time(self.clock())
+            if (
+                not strict_context_text(token)
+                or not strict_context_text(principal_id)
+                or not valid_security_epoch(security_epoch)
+                or not strict_context_text(purpose)
+                or not transport_binding
+            ):
+                return InvalidCredentials()
+            record = await self.store.consume(
+                sha256(token.encode("ascii")).digest(),
+                principal_id=principal_id,
+                security_epoch=security_epoch,
+                purpose=purpose,
+                transport_digest=sha256(transport_binding).digest(),
+                now=now,
+            )
+        except Exception:  # noqa: BLE001 - sanitize application store and clock failures
+            return VerificationUnavailable()
+        if record is None:
+            return InvalidCredentials()
+        return AuthenticationEvidence(
+            mechanism="step-up",
+            slot="mfa",
+            authenticated_at=record.authenticated_at,
+            expires_at=record.expires_at,
+            methods=record.methods,
+            traits=record.traits | frozenset({f"purpose:{purpose}"}),
+        )
 
 
 def _validate_secret(secret: str) -> None:

@@ -26,7 +26,7 @@ from litestar_security.authentication import (
     required,
     security,
 )
-from litestar_security.config import ExternalCSRF, SecurityConfig
+from litestar_security.config import ExternalCSRF, MFAConfig, PasskeyConfig, SecurityConfig
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -40,8 +40,11 @@ from litestar_security.context import (
     SessionUnavailableError,
 )
 from litestar_security.guards import (
+    AssuranceRequirement,
+    AssuranceTrait,
     AuthorizationDecision,
     AuthorizationPredicate,
+    requires_assurance,
     requires_authenticated,
     requires_capability,
     requires_role,
@@ -56,6 +59,8 @@ from litestar_security.guards import one_of as guard_one_of
 from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency, SecurityPlugin
 
 __all__ = (
+    "AssuranceRequirement",
+    "AssuranceTrait",
     "Authenticated",
     "AuthenticationEvidence",
     "AuthenticationMechanism",
@@ -74,9 +79,11 @@ __all__ = (
     "IdentityResolver",
     "InvalidCredentials",
     "LitestarSessionHandle",
+    "MFAConfig",
     "MechanismRequirement",
     "NoCredentials",
     "NullSessionHandle",
+    "PasskeyConfig",
     "PresentedCredential",
     "Principal",
     "PrincipalDependency",
@@ -102,6 +109,7 @@ __all__ = (
     "optional",
     "public",
     "required",
+    "requires_assurance",
     "requires_authenticated",
     "requires_capability",
     "requires_role",

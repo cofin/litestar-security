@@ -46,6 +46,7 @@ from litestar_security.accounts import (
     RegistrationPolicy,
     SessionBindingConfig,
     SessionSummary,
+    build_mfa_routes,
 )
 from litestar_security.authentication import (
     Authenticated,
@@ -173,6 +174,53 @@ def _operation_security(app: Litestar, path: str) -> list[dict[str, list[str]]] 
     operation = app.openapi_schema.paths[path].get
     assert operation is not None
     return cast("list[dict[str, list[str]]] | None", operation.security)
+
+
+def test_generated_mfa_route_bundle_has_exact_paths_policies_and_secret_free_openapi() -> None:
+    router = build_mfa_routes(
+        step_up=cast("Any", object()),
+        epochs=cast("Any", object()),
+        mfa=cast("Any", object()),
+        passkeys=cast("Any", object()),
+    )
+    app = Litestar(
+        route_handlers=[router],
+        openapi_config=OpenAPIConfig(title="MFA", version="1.0"),
+        plugins=[
+            SecurityPlugin(
+                _compiler_config(
+                    names=("session", "bearer"),
+                    session_names=frozenset({"session"}),
+                    csrf_config=CSRFConfig(secret=token_hex()),
+                )
+            )
+        ],
+    )
+
+    paths = {
+        route_value.path
+        for route_value in app.routes
+        if isinstance(route_value, HTTPRoute) and route_value.path.startswith("/auth/")
+    }
+    assert paths == {
+        "/auth/mfa/recovery-codes",
+        "/auth/mfa/totp/enroll",
+        "/auth/mfa/totp/verify",
+        "/auth/mfa/totp/{method_id:str}",
+        "/auth/passkeys",
+        "/auth/passkeys/authentication/options",
+        "/auth/passkeys/authentication/verify",
+        "/auth/passkeys/registration/options",
+        "/auth/passkeys/registration/verify",
+        "/auth/passkeys/{credential_id:str}",
+        "/auth/step-up/{purpose:str}",
+    }
+    assert router.cache_control is not None
+    assert router.cache_control.no_store is True
+    schema = repr(app.openapi_schema)
+    assert "otpauth://" not in schema
+    assert "rc_v1_" not in schema
+    assert "private credential" not in schema.lower()
 
 
 def _local_session_accounts() -> Any:
