@@ -132,6 +132,12 @@ performance:                                        ## Run deterministic local p
 	@uv run pytest -m performance
 	@echo "${OK} Performance regression gates passed 📊"
 
+.PHONY: downstream-check
+downstream-check:                                   ## Verify the installed wheel from an isolated downstream package
+	@echo "${INFO} Checking downstream consumer compatibility... 📦"
+	@uv run python tools/check_downstream_consumer.py
+	@echo "${OK} Downstream consumer compatibility passed 📦"
+
 .PHONY: coverage
 coverage:                                           ## Run the test suite with branch coverage
 	@echo "${INFO} Running tests with coverage... 🧪"
@@ -198,4 +204,4 @@ lint: prek type-check slotscheck zizmor              ## Run all linting checks
 # =============================================================================
 
 .PHONY: check-all
-check-all: lint test-all coverage docs docs-linkcheck build ## Run the complete validation suite
+check-all: lint test-all coverage docs docs-linkcheck downstream-check build ## Run the complete validation suite
