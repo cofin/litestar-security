@@ -68,6 +68,9 @@ class _MemoryAPIKeyStore:
     ) -> None:
         async with self._lock:
             current = self.records[current_key_id]
+            if current.revoked_at is not None:
+                message = "API key already rotated"
+                raise ValueError(message)
             if replacement.key_id in self.records:
                 message = "duplicate API-key id"
                 raise ValueError(message)
@@ -541,6 +544,22 @@ async def test_api_key_service_issues_rotates_and_revokes_through_atomic_store_p
 
 
 @pytest.mark.anyio
+async def test_api_key_rotation_has_one_atomic_winner() -> None:
+    store = _MemoryAPIKeyStore()
+    _, _, service, _ = _api_key_runtime(store)
+    issued = await service.issue(subject_id="subject-1")
+
+    results = await asyncio.gather(
+        service.rotate(current_key_id=issued.key_id, subject_id="subject-1"),
+        service.rotate(current_key_id=issued.key_id, subject_id="subject-1"),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(result, IssuedAPIKey) for result in results) == 1
+    assert sum(isinstance(result, ValueError) for result in results) == 1
+
+
+@pytest.mark.anyio
 async def test_api_key_runtime_defaults_and_absent_usage_are_safe() -> None:
     store = _MemoryAPIKeyStore()
     resolver = _Resolver()
@@ -565,6 +584,24 @@ async def test_api_key_runtime_defaults_and_absent_usage_are_safe() -> None:
 def test_api_key_build_requires_configured_or_explicit_identity_resolver() -> None:
     with pytest.raises(ImproperlyConfiguredException, match="identity resolver"):
         APIKeyConfig(store=_MemoryAPIKeyStore(), pepper=_PEPPER).build()
+
+
+def test_api_key_config_names_missing_store_capabilities() -> None:
+    class CRUDOnlyStore:
+        async def add(self, _value: object) -> None:
+            return None
+
+        async def update(self, _value: object) -> None:
+            return None
+
+        async def delete(self, _value: object) -> None:
+            return None
+
+    with pytest.raises(
+        ImproperlyConfiguredException,
+        match=r"API-key store CRUDOnlyStore is missing capabilities: get, create, rotate, revoke",
+    ):
+        APIKeyConfig(store=CRUDOnlyStore(), pepper=_PEPPER)  # type: ignore[arg-type]
 
 
 @pytest.mark.anyio

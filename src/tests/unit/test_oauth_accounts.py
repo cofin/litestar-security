@@ -259,6 +259,19 @@ async def test_exact_lookup_cross_account_link_and_atomic_final_unlink() -> None
 
 
 @pytest.mark.anyio
+async def test_simultaneous_oauth_unlink_has_one_atomic_winner() -> None:
+    store = MemoryOAuthAccountStore(login_method_counts={"account-1": 2})
+    linked = await store.link_identity("account-1", identity(), grant(), now=NOW)
+
+    results = await asyncio.gather(
+        store.unlink_identity("account-1", linked.provider_account_id, require_remaining=True, now=NOW),
+        store.unlink_identity("account-1", linked.provider_account_id, require_remaining=True, now=NOW),
+    )
+
+    assert {result.status for result in results} == {UnlinkStatus.UNLINKED, UnlinkStatus.NOT_FOUND}
+
+
+@pytest.mark.anyio
 async def test_account_store_rejects_invalid_inputs_and_missing_grant_target() -> None:
     store = MemoryOAuthAccountStore()
     naive = NOW.replace(tzinfo=None)

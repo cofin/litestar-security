@@ -44,6 +44,7 @@ _DIGEST_BYTES = 32
 _MINIMUM_PEPPER_BYTES = 32
 _MAXIMUM_PREFIX_CHARACTERS = 32
 _MAXIMUM_USAGE_BUFFER_CAPACITY = 1_000_000
+_API_KEY_STORE_METHODS = ("get", "create", "rotate", "revoke")
 _KEY_COMPONENTS = 3
 _ASCII_CONTROL_LIMIT = 32
 _DOMAIN = b"litestar-security:api-key:v1\x00"
@@ -195,8 +196,9 @@ class APIKeyStore(Protocol):
 
     Implementations must reject duplicate IDs. ``rotate()`` must create the
     replacement and transition the current record in one atomic operation,
-    bounding overlap by the current record's original expiry. No method may
-    accept or persist a raw key or secret component.
+    bounding overlap by the current record's original expiry and rejecting an
+    already-revoked current record so concurrent rotations have one winner. No
+    method may accept or persist a raw key or secret component.
     """
 
     async def get(self, key_id: str) -> APIKeyRecord | None:
@@ -226,9 +228,10 @@ class APIKeyStore(Protocol):
     ) -> None:
         """Atomically create a successor and revoke the current record.
 
-        Implementations must set the current record's revocation to ``now``.
-        When overlap is requested, they must cap it at the current record's
-        original expiry; ``None`` means the current key stops immediately.
+        Implementations must reject a missing or already-revoked current record
+        and set a live current record's revocation to ``now``. When overlap is
+        requested, they must cap it at the current record's original expiry;
+        ``None`` means the current key stops immediately.
 
         Args:
             current_key_id: The public lookup being replaced.
@@ -285,9 +288,16 @@ class APIKeyConfig:
         """Reject weak peppers, malformed namespaces, and invalid ports."""
         store = cast("object", self.store)
         usage_sink = cast("object", self.usage_sink)
+        missing_store_methods = tuple(
+            method for method in _API_KEY_STORE_METHODS if not callable(getattr(store, method, None))
+        )
+        if missing_store_methods:
+            missing = ", ".join(missing_store_methods)
+            raise ImproperlyConfiguredException(
+                detail=f"API-key store {type(store).__name__} is missing capabilities: {missing}"
+            )
         if (
-            not isinstance(store, APIKeyStore)
-            or self.pepper.__class__ is not bytes
+            self.pepper.__class__ is not bytes
             or len(self.pepper) < _MINIMUM_PEPPER_BYTES
             or (self.identity_resolver is not None and not callable(getattr(self.identity_resolver, "resolve", None)))
             or (usage_sink is not None and not isinstance(usage_sink, APIKeyUsageSink))
