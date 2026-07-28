@@ -290,7 +290,7 @@ def oauth_app(*, openapi: bool, service: RouteService | None = None, authenticat
     config = OAuthConfig(service=service or RouteService(), providers=(Provider(),))
 
     def provide_principal() -> Principal[object]:
-        return Principal[object](id="account-1") if authenticated else Principal[object].anonymous()
+        return Principal(id="account-1") if authenticated else Principal[object].anonymous()
 
     kwargs = {
         "route_handlers": [build_oauth_routes(config)],
