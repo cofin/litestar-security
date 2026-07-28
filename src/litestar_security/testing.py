@@ -555,7 +555,7 @@ class _DeterministicProtector:
 
     async def unprotect(self, protected: ProtectedOAuthSecret, *, associated_data: bytes) -> bytes:
         prefix = sha256(associated_data).digest()
-        if not protected.ciphertext.startswith(prefix):
+        if not protected.ciphertext.startswith(prefix):  # pragma: no cover - only corrupted private store state
             message = "Protected test secret has different associated data"
             raise ValueError(message)
         return protected.ciphertext[len(prefix) :][::-1]

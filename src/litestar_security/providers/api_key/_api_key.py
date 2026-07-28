@@ -272,15 +272,15 @@ class APIKeyUsageSink(Protocol):
 
 
 class _SyncAPIKeyStore(Protocol):
-    def get(self, key_id: str) -> APIKeyRecord | None: ...
+    def get(self, key_id: str) -> APIKeyRecord | None: ...  # pragma: no cover
 
-    def create(self, record: APIKeyRecord) -> None: ...
+    def create(self, record: APIKeyRecord) -> None: ...  # pragma: no cover
 
     def rotate(
         self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
-    ) -> None: ...
+    ) -> None: ...  # pragma: no cover
 
-    def revoke(self, *, key_id: str, now: datetime) -> None: ...
+    def revoke(self, *, key_id: str, now: datetime) -> None: ...  # pragma: no cover
 
 
 @dataclass(slots=True)

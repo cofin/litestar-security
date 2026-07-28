@@ -121,6 +121,7 @@ _PUBLIC_API = (
     "AuthorizationResolver",
     "AuthorizationSnapshot",
     "AuthorizationSnapshotRefresher",
+    "BlockingIntegration",
     "CredentialExtraction",
     "CredentialRestrictions",
     "CredentialSlot",

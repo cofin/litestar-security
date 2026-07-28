@@ -656,14 +656,19 @@ async def test_blocking_api_key_store_is_normalized_once_per_runtime(monkeypatch
 
     monkeypatch.setattr(config_module.to_thread, "run_sync", count_submission)
 
-    first_service = config.build(resolver, clock=lambda: _NOW)[2]
+    _, first_mechanism, first_service = config.build(resolver, clock=lambda: _NOW)
     second_service = config.build(resolver, clock=lambda: _NOW)[2]
     first = await first_service.issue(subject_id="subject-1")
-    await first_service.revoke(first.key_id)
+    outcome = await first_mechanism.authenticator.authenticate(
+        first.value, type("Connection", (), {"scope": {"headers": []}})()
+    )
+    replacement = await first_service.rotate(current_key_id=first.key_id, subject_id="subject-1")
+    await first_service.revoke(replacement.key_id)
 
+    assert isinstance(outcome, Authenticated)
     assert store.thread_ids
     assert all(thread_id != current_thread for thread_id in store.thread_ids)
-    assert len(submissions) == len(store.thread_ids) == 2
+    assert len(submissions) == len(store.thread_ids) == 4
     assert first_service.config.store is not second_service.config.store
     assert config.store == BlockingIntegration(store)
 

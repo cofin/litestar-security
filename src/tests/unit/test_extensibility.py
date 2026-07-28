@@ -2,8 +2,11 @@
 
 import ast
 import inspect
+import sys
+from dataclasses import FrozenInstanceError
 from importlib.metadata import metadata
 from pathlib import Path
+from subprocess import run
 from threading import Event as ThreadEvent
 from threading import Lock
 from typing import Protocol
@@ -107,7 +110,26 @@ def test_capability_protocols_do_not_expose_generic_persistence_methods() -> Non
 
 
 def test_blocking_integration_marker_is_public_configuration() -> None:
+    marker = config_module.BlockingIntegration(object())
+
     assert hasattr(config_module, "BlockingIntegration")
+    assert marker.__slots__ == ("implementation",)
+    with pytest.raises(FrozenInstanceError):
+        marker.implementation = object()  # type: ignore[misc]
+
+
+def test_package_root_does_not_eagerly_import_testing_surface() -> None:
+    script = (
+        "import sys; import litestar_security; "
+        "assert 'litestar_security.testing' not in sys.modules; "
+        "assert not hasattr(litestar_security, 'InMemorySecurityBackend')"
+    )
+
+    result = run(  # noqa: S603 - fixed interpreter-only import isolation
+        [sys.executable, "-I", "-c", script], check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_normalized_runtime_has_no_per_call_awaitability_branch() -> None:
