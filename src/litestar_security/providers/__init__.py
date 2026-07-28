@@ -13,6 +13,7 @@ from litestar_security.providers.api_key import (
     BufferedAPIKeyUsage,
     IssuedAPIKey,
 )
+from litestar_security.providers.iap import GoogleIAPClaims, GoogleIAPConfig
 from litestar_security.providers.jwks import (
     AsyncJWKSFetcher,
     CachedJWKSProvider,
@@ -88,6 +89,8 @@ __all__ = (
     "CompositeBearerConfig",
     "DiscoveryPolicy",
     "GitHubOAuthProvider",
+    "GoogleIAPClaims",
+    "GoogleIAPConfig",
     "IssuedAPIKey",
     "JSONValue",
     "JWKSCacheEntry",
