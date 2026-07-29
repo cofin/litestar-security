@@ -69,6 +69,23 @@ destroy:                                            ## Destroy virtual environme
 	@echo "${OK} Virtual environment destroyed 🗑️"
 
 # =============================================================================
+# Cleaning and Maintenance
+# =============================================================================
+
+.PHONY: clean
+clean:                                              ## Cleanup temporary build artifacts
+	@echo "${INFO} Cleaning working directory... 🧹"
+	@rm -rf .pytest_cache .ruff_cache .hypothesis build/ dist/ .eggs/ .coverage coverage.xml coverage.json htmlcov/ src/tests/.pytest_cache src/tests/**/.pytest_cache .mypy_cache >/dev/null 2>&1
+	@find . -name '*.egg-info' -exec rm -rf {} + >/dev/null 2>&1
+	@find . -type f -name '*.egg' -exec rm -f {} + >/dev/null 2>&1
+	@find . -name '*.pyc' -exec rm -f {} + >/dev/null 2>&1
+	@find . -name '*.pyo' -exec rm -f {} + >/dev/null 2>&1
+	@find . -name '*~' -exec rm -f {} + >/dev/null 2>&1
+	@find . -name '__pycache__' -exec rm -rf {} + >/dev/null 2>&1
+	@find . -name '.ipynb_checkpoints' -exec rm -rf {} + >/dev/null 2>&1
+	@echo "${OK} Working directory cleaned 🧹"
+
+# =============================================================================
 # Dependency Management
 # =============================================================================
 
