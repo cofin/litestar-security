@@ -121,6 +121,9 @@ _PUBLIC_API = (
     "AuthorizationResolver",
     "AuthorizationSnapshot",
     "AuthorizationSnapshotRefresher",
+    "BlockingIntegration",
+    "CSPMode",
+    "ContentSecurityPolicy",
     "CredentialExtraction",
     "CredentialRestrictions",
     "CredentialSlot",
@@ -151,6 +154,7 @@ _PUBLIC_API = (
     "SecurityConfig",
     "SecurityContext",
     "SecurityContextDependency",
+    "SecurityHeadersConfig",
     "SecurityPlugin",
     "SessionHandle",
     "SessionPersistenceUnavailableError",
@@ -169,6 +173,7 @@ _PUBLIC_API = (
     "all_of",
     "any_of",
     "at_least",
+    "csp_nonce",
     "guard_all_of",
     "guard_any_of",
     "guard_at_least",
@@ -849,7 +854,7 @@ def test_package_root_exports_only_foundational_contract() -> None:
     assert litestar_security.__all__ == _PUBLIC_API
     assert all(hasattr(litestar_security, name) for name in _PUBLIC_API)
     assert litestar_security.__project__ == "litestar-security"
-    assert litestar_security.__version__ == "0.1.0"
+    assert litestar_security.__version__ == "1.0.0"
     for private_name in (
         "OwnedSessionBackend",
         "SecurityMiddleware",
@@ -2705,6 +2710,7 @@ def test_security_config_is_typed_and_slotted() -> None:
         "api_key",
         "iap",
         "service_token",
+        "headers",
         "websocket",
         "authorization_resolver",
         "jwks_providers",
@@ -2718,6 +2724,11 @@ def test_security_config_is_typed_and_slotted() -> None:
 def test_security_config_rejects_invalid_jwks_warmup_failure_mode() -> None:
     with pytest.raises(ImproperlyConfiguredException, match="JWKS warmup failure mode"):
         litestar_security.SecurityConfig(jwks_warmup_failure="invalid")  # type: ignore[arg-type]
+
+
+def test_security_config_rejects_invalid_headers_config() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Browser security headers"):
+        litestar_security.SecurityConfig(headers=object())  # type: ignore[arg-type]
 
 
 def test_root_import_has_no_optional_integration_dependencies() -> None:

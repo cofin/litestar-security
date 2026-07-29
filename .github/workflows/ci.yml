@@ -66,12 +66,8 @@ jobs:
       - run: uv sync --all-groups --python 3.14
       - run: make slotscheck
 
-  tests:
+  property:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,12 +75,38 @@ jobs:
       - uses: astral-sh/setup-uv@f98e06938123ccabd21905ea5d0069192241f9f1 # v8.3.2
         with:
           enable-cache: true
-      - run: uv python install ${{ matrix.python-version }}
-      - run: uv sync --group tests --python ${{ matrix.python-version }}
-      - if: matrix.python-version != '3.14'
-        run: make test
-      - if: matrix.python-version == '3.14'
-        run: make coverage
+      - run: uv python install 3.14
+      - run: uv sync --group tests --python 3.14
+      - run: make property
+
+  test_python:
+    name: test (python ${{ matrix.python-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    uses: ./.github/workflows/test.yml
+    with:
+      coverage: ${{ matrix.python-version == '3.14' }}
+      python-version: ${{ matrix.python-version }}
+      timeout: 60
+
+  codecov:
+    needs: test_python
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download coverage artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: coverage-xml
+          path: .
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
+        with:
+          files: coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: cofin/litestar-security
 
   docs:
     runs-on: ubuntu-latest
@@ -123,7 +145,7 @@ jobs:
           from litestar_security import SecurityConfig, SecurityPlugin
 
           assert litestar_security.__project__ == "litestar-security"
-          assert litestar_security.__version__ == "0.1.0"
+          assert litestar_security.__version__ == "1.0.0"
           assert SecurityConfig is not None
           assert SecurityPlugin is not None
           assert files("litestar_security").joinpath("py.typed").is_file()

@@ -1,23 +1,29 @@
 .. title:: Litestar Security
 
 .. meta::
-   :description: A typed, pre-alpha security integration scaffold for Litestar.
+   :description: Typed authentication, authorization, and provider integration for Litestar.
    :keywords: Litestar, security, authentication, authorization, plugin
 
 Litestar Security
 =================
 
-Litestar Security is a pre-alpha plugin library for typed security integrations
-in Litestar applications. Its initial runtime includes authentication policy,
-guards, local JWT signing, strict OIDC discovery, and bounded JWKS rotation.
+Litestar Security 1.0 provides typed, backend-agnostic security integration for
+Litestar: explicit local transports, provider authentication, policy and guard
+algebra, account lifecycle, WebSockets, browser headers, and conformance tools.
 
 .. toctree::
    :hidden:
    :titlesonly:
 
    introduction
+   getting-started
+   authentication
+   accounts
+   websockets
+   customization
+   hardening
+   examples
    development-installation
-   plugin-scaffold
    jwt-and-jwks
    generated-routes
    rate-limiting
@@ -28,35 +34,35 @@ guards, local JWT signing, strict OIDC discovery, and bounded JWKS rotation.
 .. grid:: 1 1 2 2
    :gutter: 2
 
-   .. grid-item-card:: Generated routes
-      :link: generated-routes
+   .. grid-item-card:: Choose a transport
+      :link: getting-started
       :link-type: doc
 
-      See what a local-auth profile adds to your application and its OpenAPI document.
+      Configure an explicit session, token, hybrid, or provider boundary.
 
-   .. grid-item-card:: Rate limiting
-      :link: rate-limiting
+   .. grid-item-card:: Authentication and policy
+      :link: authentication
       :link-type: doc
 
-      Understand the default budgets and make them correct across worker processes.
+      Compose strict credential handling, route policy, guards, and OpenAPI.
 
-   .. grid-item-card:: Introduction
-      :link: introduction
+   .. grid-item-card:: Accounts and factors
+      :link: accounts
       :link-type: doc
 
-      Learn what the initial scaffold includes and what remains out of scope.
+      Build local lifecycle, refresh, MFA, passkey, and step-up workflows.
 
-   .. grid-item-card:: Development installation
-      :link: development-installation
+   .. grid-item-card:: Hardening
+      :link: hardening
       :link-type: doc
 
-      Install the locked environment and run the local validation commands.
+      Operate CSRF, CSP, JWKS, secrets, workers, and revocation safely.
 
-   .. grid-item-card:: Plugin scaffold
-      :link: plugin-scaffold
+   .. grid-item-card:: Runnable examples
+      :link: examples
       :link-type: doc
 
-      Add the typed security plugin to a Litestar application.
+      Boot every supported example mode with deterministic local dependencies.
 
    .. grid-item-card:: JWT and JWKS
       :link: jwt-and-jwks

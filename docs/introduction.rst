@@ -1,29 +1,28 @@
 Introduction
 ============
 
-Litestar Security provides typed, backend-agnostic security primitives for
-Litestar applications. The project remains pre-alpha while the initial runtime
-is implemented chapter by chapter.
+Litestar Security provides typed, backend-agnostic authentication and
+authorization for Litestar applications. The plugin owns framework integration;
+the application owns identity, persistence, key custody, delivery, and
+deployment trust.
 
-What exists
------------
+Stable 1.0 model
+----------------
 
 The current runtime provides:
 
-* an installable ``litestar-security`` distribution;
-* a typed ``litestar_security`` package;
-* typed principal, security-context, session, and authentication outcomes;
-* composable authentication policies and authorization guards;
-* native Litestar plugin, middleware, dependency, and OpenAPI integration;
-* explicit local JWT signing and public JWKS;
-* strict OIDC discovery and bounded remote JWKS rotation;
-* a ``litestar security`` CLI group; and
-* development, test, documentation, and build automation.
+``Principal[UserT]`` is always present. Anonymous callers receive an anonymous
+principal; authenticated service principals may intentionally have no
+application ``UserT``. ``SecurityContext`` always carries evidence,
+authorization, credential restrictions, and either a native
+``LitestarSessionHandle`` or ``NullSessionHandle``.
 
-What does not exist
--------------------
+Authentication answers who presented acceptable evidence. Route policy decides
+which evidence combinations are admitted. Guards evaluate application
+authorization snapshots. Session persistence, CSRF, OpenAPI, exceptions, and
+WebSocket close outcomes are composed through native Litestar boundaries.
 
-Provider login and callback flows, local account/password management, OAuth
-grants, API keys, service authentication, team membership, and administrative
-workflows are not implemented yet. The core does not choose a database,
-identity model, key store, or HTTP transport for the application.
+Applications implement small atomic protocols. They may use async ports
+directly, explicitly normalize complete synchronous integrations with
+``BlockingIntegration``, and validate stores with the public conformance kit.
+No adapter dependency or application database leaks into core.

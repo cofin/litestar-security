@@ -126,11 +126,38 @@ test:                                               ## Run the test suite
 .PHONY: test-all
 test-all: test                                      ## Run all tests
 
-.PHONY: performance
-performance:                                        ## Run deterministic local performance regression gates
+.PHONY: property
+property:                                           ## Run deterministic property and fuzz regression tests
+	@echo "${INFO} Running property tests... 🧪"
+	@uv run pytest src/tests/property
+	@echo "${OK} Property tests passed 🧪"
+
+.PHONY: examples
+examples:                                           ## Run the runnable example applications
+	@echo "${INFO} Running example applications... 🧪"
+	@uv run pytest src/tests/examples
+	@echo "${OK} Example applications passed 🧪"
+
+.PHONY: benchmark
+benchmark:                                          ## Run deterministic local performance regression gates
 	@echo "${INFO} Running performance regression gates... 📊"
 	@uv run pytest -m performance
 	@echo "${OK} Performance regression gates passed 📊"
+
+.PHONY: performance
+performance: benchmark                              ## Alias for deterministic performance regression gates
+
+.PHONY: downstream-check
+downstream-check:                                   ## Verify the installed wheel from an isolated downstream package
+	@echo "${INFO} Checking downstream consumer compatibility... 📦"
+	@uv run python tools/check_downstream_consumer.py
+	@echo "${OK} Downstream consumer compatibility passed 📦"
+
+.PHONY: release-smoke
+release-smoke:                                      ## Verify release archives and installed wheels on every supported Python
+	@echo "${INFO} Checking release archives and installed wheels... 📦"
+	@uv run python tools/check_release.py
+	@echo "${OK} Release archive and wheel checks passed 📦"
 
 .PHONY: coverage
 coverage:                                           ## Run the test suite with branch coverage
@@ -198,4 +225,7 @@ lint: prek type-check slotscheck zizmor              ## Run all linting checks
 # =============================================================================
 
 .PHONY: check-all
-check-all: lint test-all coverage docs docs-linkcheck build ## Run the complete validation suite
+check-all: lint test-all property coverage docs docs-linkcheck downstream-check build ## Run all checks
+
+.PHONY: release-check
+release-check: property downstream-check examples benchmark check-all release-smoke ## Run every local 1.0 release gate

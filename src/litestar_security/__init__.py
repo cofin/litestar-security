@@ -29,7 +29,7 @@ from litestar_security.authentication import (
     required,
     security,
 )
-from litestar_security.config import ExternalCSRF, MFAConfig, PasskeyConfig, SecurityConfig
+from litestar_security.config import BlockingIntegration, ExternalCSRF, MFAConfig, PasskeyConfig, SecurityConfig
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -61,6 +61,7 @@ from litestar_security.guards import all_of as guard_all_of
 from litestar_security.guards import any_of as guard_any_of
 from litestar_security.guards import at_least as guard_at_least
 from litestar_security.guards import one_of as guard_one_of
+from litestar_security.headers import ContentSecurityPolicy, CSPMode, SecurityHeadersConfig, csp_nonce
 from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency, SecurityPlugin
 from litestar_security.websocket import (
     AuthorizationSnapshotRefresher,
@@ -102,6 +103,9 @@ __all__ = (
     "AuthorizationResolver",
     "AuthorizationSnapshot",
     "AuthorizationSnapshotRefresher",
+    "BlockingIntegration",
+    "CSPMode",
+    "ContentSecurityPolicy",
     "CredentialExtraction",
     "CredentialRestrictions",
     "CredentialSlot",
@@ -132,6 +136,7 @@ __all__ = (
     "SecurityConfig",
     "SecurityContext",
     "SecurityContextDependency",
+    "SecurityHeadersConfig",
     "SecurityPlugin",
     "SessionHandle",
     "SessionPersistenceUnavailableError",
@@ -150,6 +155,7 @@ __all__ = (
     "all_of",
     "any_of",
     "at_least",
+    "csp_nonce",
     "guard_all_of",
     "guard_any_of",
     "guard_at_least",

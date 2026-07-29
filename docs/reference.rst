@@ -6,6 +6,7 @@ Public package
 
 .. automodule:: litestar_security
    :members:
+   :no-index:
 
 Configuration
 -------------
@@ -17,6 +18,12 @@ Plugin
 ------
 
 .. automodule:: litestar_security.plugin
+   :members:
+
+Browser response headers
+------------------------
+
+.. automodule:: litestar_security.headers
    :members:
 
 Authentication
@@ -52,6 +59,12 @@ Testing helpers
 Providers
 ---------
 
+.. automodule:: litestar_security.providers.api_key
+   :members:
+
+.. automodule:: litestar_security.providers.iap
+   :members:
+
 .. automodule:: litestar_security.providers.jwt
    :members:
 
@@ -59,4 +72,11 @@ Providers
    :members:
 
 .. automodule:: litestar_security.providers.jwks
+   :members:
+
+.. automodule:: litestar_security.providers.oauth
+   :members:
+   :no-index:
+
+.. automodule:: litestar_security.websocket
    :members:
