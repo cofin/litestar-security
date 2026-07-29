@@ -19,6 +19,3 @@ attestation roots in application secret management. Never log raw credentials,
 nonces, refresh tokens, API keys, recovery codes, or passkey challenges. Use
 shared atomic rate-limit and revocation stores across workers and monitor
 verification-unavailable outcomes.
-
-The three intentional post-1.0 deferrals are DPoP, production mTLS, and full
-Keycloak UMA. No other deferred integration is implied.

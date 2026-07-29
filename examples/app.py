@@ -44,18 +44,18 @@ EXAMPLE_MODES = (
 )
 
 
-@get("/", opt=security(public()), sync_to_thread=False)
+@get("/", sync_to_thread=False, **security(public()))
 def example_home(security_context: SecurityContextDependency) -> dict[str, object]:
     """Describe the active request-local security boundary."""
     return {"authenticated": bool(security_context.evidence), "session": type(security_context.session).__name__}
 
 
-@get("/csrf", opt=security(public(), csrf_required=True), sync_to_thread=False)
+@get("/csrf", sync_to_thread=False, **security(public(), csrf_required=True))
 def csrf_seed() -> None:
     """Issue the native CSRF cookie for browser example clients."""
 
 
-@websocket("/ws", opt=security(any_of("session", "bearer")))  # type: ignore[arg-type]  # Litestar accepts opt mappings
+@websocket("/ws", **security(any_of("session", "bearer")))
 async def example_socket(socket: WebSocket[Any, Any, Any]) -> None:
     """Echo the authenticated principal over a short-lived socket."""
     await socket.accept()
@@ -68,17 +68,17 @@ class ExampleSecurityAdmin(Controller):
 
     path = "/admin/security"
 
-    @post("/disable", opt=security(required()), guards=[requires_role("security-admin")], sync_to_thread=False)
+    @post("/disable", guards=[requires_role("security-admin")], sync_to_thread=False, **security(required()))
     def disable_account(self) -> dict[str, str]:
         """Demonstrate application-owned account disable orchestration."""
         return {"detail": "Account disabled by application service."}
 
-    @post("/force-reset", opt=security(required()), guards=[requires_role("security-admin")], sync_to_thread=False)
+    @post("/force-reset", guards=[requires_role("security-admin")], sync_to_thread=False, **security(required()))
     def force_reset(self) -> dict[str, str]:
         """Demonstrate application-owned forced password reset."""
         return {"detail": "Password reset required by application service."}
 
-    @post("/revoke", opt=security(required()), guards=[requires_role("security-admin")], sync_to_thread=False)
+    @post("/revoke", guards=[requires_role("security-admin")], sync_to_thread=False, **security(required()))
     def revoke_security_state(self) -> dict[str, str]:
         """Demonstrate factor, session, and key revocation."""
         return {"detail": "Application security state revoked."}

@@ -1,12 +1,14 @@
 # Litestar Security
 
-Litestar Security is a typed, backend-agnostic authentication and authorization
-plugin for [Litestar](https://litestar.dev/) applications. Version 1.0 provides
-explicit local session, token, and hybrid authentication; policy and guard
-algebra; OAuth/OIDC, IAP, API-key, workload-JWT, MFA, passkey, WebSocket, CSP,
-JWKS, and testing/conformance boundaries.
+Authentication and authorization for [Litestar](https://litestar.dev/)
+applications.
 
-## Installation
+Litestar Security connects authentication providers to Litestar's middleware,
+dependency injection, guards, OpenAPI schema, and WebSocket lifecycle. Use
+local sessions or tokens, OAuth and OIDC, Google IAP, API keys, or workload
+JWTs without tying your application to a database library.
+
+## Quickstart
 
 Install the package:
 
@@ -14,82 +16,58 @@ Install the package:
 pip install litestar-security
 ```
 
-For repository development, use `make install`.
-
-## Choose the transport
-
-Local authentication never infers transport from installed middleware. Choose
-one profile explicitly and pass the application-owned stores and secrets:
+Create `app.py`:
 
 ```python
-from litestar import Litestar
-from litestar.config.csrf import CSRFConfig
-from litestar.middleware.session.client_side import CookieBackendConfig
+from litestar import Litestar, get
 
-from litestar_security import SecurityConfig, SecurityPlugin
-from litestar_security.accounts import LocalAuth, LocalAuthSecrets, SessionBindingConfig
-
-local_auth = LocalAuth.session(
-    accounts=accounts,
-    secrets=LocalAuthSecrets.session(purpose_token_pepper=purpose_token_pepper),
-    csrf=CSRFConfig(secret=csrf_secret),
-    binding=SessionBindingConfig(pepper=binding_pepper),
+from litestar_security import (
+    SecurityConfig,
+    SecurityContextDependency,
+    SecurityPlugin,
+    public,
+    security,
 )
-session_backend = CookieBackendConfig(secret=session_secret).middleware.kwargs["backend"]
 
-app = Litestar(
-    plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, session_backend=session_backend))]
-)
+
+@get("/", sync_to_thread=False, **security(public()))
+def index(security_context: SecurityContextDependency) -> dict[str, bool]:
+    return {"authenticated": bool(security_context.evidence)}
+
+
+app = Litestar(route_handlers=[index], plugins=[SecurityPlugin(SecurityConfig())])
 ```
 
-For APIs, use `LocalAuth.tokens(...)` with a `LocalKeyRing`, rotating opaque
-refresh-token secrets, and no Litestar session backend. `LocalAuth.hybrid(...)`
-registers distinct browser-session and token endpoints; it does not
-auto-detect a transport.
-
-Every request gets typed `principal` and `security_context` dependencies.
-Authentication policies are declared with `public()`, `required()`, `any_of()`,
-`all_of()`, and `at_least()`. Authorization stays separate through typed guards
-for scopes, roles, capabilities, assurance, teams, and tenants.
-
-## Run the complete examples
+Run the application:
 
 ```console
-LITESTAR_SECURITY_EXAMPLE=local-session uv run litestar --app examples.app:create_app run
-LITESTAR_SECURITY_EXAMPLE=local-token uv run litestar --app examples.app:create_app run
-LITESTAR_SECURITY_EXAMPLE=google-oauth uv run litestar --app examples.app:create_app run
-LITESTAR_SECURITY_EXAMPLE=websocket uv run litestar --app examples.app:create_app run
+litestar --app app:app run
 ```
 
-See [examples/README.md](examples/README.md) for all modes and their production
-boundaries. The examples use ephemeral keys, deterministic stores, and
-loopback-only settings; they are not production secret or persistence
-configuration.
+Public routes must be explicit. Once an authentication provider and
+authorization resolver are configured, routes are protected by default and
+guards can enforce application permissions:
 
-## Security boundaries
+```python
+from litestar import get
 
-- Applications own users, databases, atomic store implementations, key
-  custody, provider HTTP clients, delivery, administrator controllers, and
-  deployment trust.
-- Presented invalid credentials are terminal. Multiple successful credentials
-  must resolve to one subject, and their restrictions intersect.
-- Native session authentication requires explicit CSRF configuration.
-- Blocking application ports must be wrapped with `BlockingIntegration`; the
-  runtime dispatches them through bounded workers.
-- Static browser headers use Litestar response headers. Nonce CSP uses one
-  native send hook and never accepts a client nonce.
+from litestar_security import requires_team_role
 
-## Development
 
-```console
-make check-all
-make release-check
+@get(
+    "/teams/{team_id:str}",
+    guards=[requires_team_role(team_parameter="team_id", roles={"owner"})],
+)
+async def team_settings(team_id: str) -> dict[str, str]:
+    return {"team_id": team_id}
 ```
 
-See [CONTRIBUTING.rst](CONTRIBUTING.rst) for setup, testing, documentation, and
-contribution guidance.
+## Next steps
 
-## License
+- [Read the documentation](https://cofin.github.io/litestar-security/)
+- [Choose an authentication provider](https://cofin.github.io/litestar-security/providers.html)
+- [Configure local accounts](https://cofin.github.io/litestar-security/getting-started.html)
+- [Run the API, team, and local-auth examples](examples/README.md)
+- [Browse the API reference](https://cofin.github.io/litestar-security/reference.html)
 
-The `litestar security --version` command reports the installed distribution
-version. Litestar Security is distributed under the MIT license.
+Litestar Security supports Python 3.10 through 3.14 and is licensed under MIT.

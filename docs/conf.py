@@ -49,8 +49,9 @@ html_theme_options = {
                 {
                     "title": "Getting started",
                     "url": "getting-started",
-                    "summary": "Choose an explicit authentication transport.",
+                    "summary": "Install the plugin and choose authentication.",
                 },
+                {"title": "Providers", "url": "providers", "summary": "Choose an authentication source."},
                 {
                     "title": "Hardening",
                     "url": "hardening",

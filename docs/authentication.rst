@@ -24,12 +24,4 @@ The ``principal`` and ``security_context`` dependencies remain typed on public
 and protected routes. ``current_user`` is the explicit narrowing dependency
 that rejects anonymous and userless service principals.
 
-Provider boundaries
--------------------
-
-Google IAP accepts only its signed assertion for an exact audience. OAuth/OIDC
-uses state, nonce where applicable, PKCE, exact callback allowlists, safe
-link/unlink rules, incremental scopes, local logout, and upstream revocation.
-API keys store only HMAC-keyed digests. External workload JWTs create service
-principals without requiring ``UserT``. Keycloak mapping preserves issuer,
-audience, roles, scopes, JWKS rotation, and already-issued RPT permissions.
+See :doc:`providers` to choose and configure an authentication source.
