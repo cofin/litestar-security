@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
 from examples.app import create_app
-from litestar.config.csrf import CSRFConfig
+from litestar.middleware import DefineMiddleware
+from litestar.middleware.session.base import SessionMiddleware
 from litestar.routes import HTTPRoute
 from litestar.testing import TestClient
 
@@ -50,7 +51,15 @@ def test_local_example_modes_boot_with_explicit_transports(
     has_session = session_kind == "native"
     assert response.json()["session"] == ("LitestarSessionHandle" if has_session else "NullSessionHandle")
     assert (plugin.config.local_auth.mode if plugin.config.local_auth is not None else None) is profile
-    assert (plugin.config.session_backend is not None) is has_session
+    assert (
+        any(
+            isinstance(item, DefineMiddleware)
+            and isinstance(item.middleware, type)
+            and issubclass(item.middleware, SessionMiddleware)
+            for item in app.middleware
+        )
+        is has_session
+    )
     paths = {route.path for route in app.routes if isinstance(route, HTTPRoute)}
     assert required_routes <= paths
 
@@ -69,8 +78,8 @@ def test_local_session_example_completes_registration_login_and_logout(monkeypat
     local_auth = plugin.config.local_auth
     assert local_auth is not None
     store = cast("ExampleAccountStore", local_auth.accounts)
-    csrf = local_auth.csrf
-    assert isinstance(csrf, CSRFConfig)
+    csrf = app.csrf_config
+    assert csrf is not None
     password = "example password 123"  # noqa: S105 - local example credential
 
     with TestClient(app) as client:

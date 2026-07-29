@@ -4,12 +4,23 @@
 [project]
 name = "litestar-security"
 version = "1.0.0"
-description = "Security integration primitives for Litestar applications"
+description = "Authentication and authorization for Litestar applications"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Cody Fincher", email = "cody@litestar.dev" }]
-keywords = ["authentication", "authorization", "litestar", "security"]
+keywords = [
+  "api-keys",
+  "authentication",
+  "authorization",
+  "litestar",
+  "oauth2",
+  "oidc",
+  "passkeys",
+  "security",
+  "webauthn",
+  "websockets",
+]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Environment :: Web Environment",
@@ -37,6 +48,7 @@ dependencies = [
 ]
 
 [project.urls]
+Documentation = "https://cofin.github.io/litestar-security/"
 Issues = "https://github.com/cofin/litestar-security/issues"
 Source = "https://github.com/cofin/litestar-security"
 

@@ -128,7 +128,6 @@ Behind a proxy, supply an extractor that knows which hops you trust:
    local_auth = LocalAuth.session(
        accounts=accounts,
        secrets=secrets,
-       csrf=csrf,
        binding=binding,
        client_key=client_key,
    )

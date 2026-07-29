@@ -320,17 +320,3 @@ fetching, and single-flight waits. ``security.jwt.*`` covers signing and
 verification durations; ``security.worker.*`` covers saturation, queue wait,
 and execution. Metric inputs never include token contents, claims, keys,
 untrusted key IDs, raw issuers, or exception messages.
-
-Performance regression gates
-----------------------------
-
-Run the deterministic, local-only chapter benchmarks separately from the
-normal test suite:
-
-.. code-block:: console
-
-   make performance
-
-The committed baseline uses relative budgets rather than cross-machine
-absolute timing claims. The scenarios use generated keys and in-memory
-transports; they never contact the public network.

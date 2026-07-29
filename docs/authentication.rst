@@ -8,10 +8,54 @@ and credential-granted scopes, teams, roles, capabilities, tenants, and
 resource permissions intersect.
 
 Use ``public()``, ``required()``, ``any_of()``, ``all_of()``, or ``at_least()``
-in route ``security(...)`` metadata. Runtime admission and native OpenAPI
+through the route ``auth`` keyword. Runtime admission and native OpenAPI
 security projection compile from the same normalized policy. Authentication
 failure is ``401``, guard denial is ``403``, and unavailable verification fails
 closed as ``503``.
+
+Native ownership
+----------------
+
+Route decorators accept ``auth`` directly:
+
+.. code-block:: python
+
+   @get("/", auth=public())
+   async def index() -> None:
+       return None
+
+Applications, routers, and controllers inherit policy through Litestar's
+native ``opt`` mapping:
+
+.. code-block:: python
+
+   app = Litestar(
+       route_handlers=[api_router],
+       opt={"auth": required()},
+       plugins=[SecurityPlugin(config)],
+   )
+
+.. code-block:: python
+
+   class AccountController(Controller):
+       opt = {"auth": required("session")}
+
+Custom controller class attributes are not propagated by Litestar; put
+``auth`` in ``opt``. The nearest native owner wins. With configured mechanisms
+and no inherited policy, the plugin uses implicit ``required()``; without
+mechanisms it uses ``public()``.
+
+The ``auth`` policy also compiles for WebSocket and raw ASGI handlers.
+``csrf_required=True`` is HTTP-only and is reserved for exceptional public
+routes that establish cookie-authenticated state. Session-capable policies
+derive CSRF coverage automatically. A native CSRF exclusion key such as
+``exclude_from_csrf=True`` is accepted only when the derived policy is not
+session-capable.
+
+Keep authorization in Litestar's native ``guards=[...]``. Litestar's
+``security=`` parameter remains reserved for the OpenAPI requirements projected
+from ``auth``. To protect schema endpoints, supply a custom OpenAPI router or
+controller with ``opt={"auth": ...}``.
 
 Authorization guards compose separately:
 
@@ -24,12 +68,4 @@ The ``principal`` and ``security_context`` dependencies remain typed on public
 and protected routes. ``current_user`` is the explicit narrowing dependency
 that rejects anonymous and userless service principals.
 
-Provider boundaries
--------------------
-
-Google IAP accepts only its signed assertion for an exact audience. OAuth/OIDC
-uses state, nonce where applicable, PKCE, exact callback allowlists, safe
-link/unlink rules, incremental scopes, local logout, and upstream revocation.
-API keys store only HMAC-keyed digests. External workload JWTs create service
-principals without requiring ``UserT``. Keycloak mapping preserves issuer,
-audience, roles, scopes, JWKS rotation, and already-issued RPT permissions.
+See :doc:`providers` to choose and configure an authentication source.

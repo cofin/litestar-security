@@ -1,15 +1,17 @@
 .. title:: Litestar Security
 
 .. meta::
-   :description: Typed authentication, authorization, and provider integration for Litestar.
+   :description: Authentication and authorization for Litestar applications.
    :keywords: Litestar, security, authentication, authorization, plugin
 
 Litestar Security
 =================
 
-Litestar Security 1.0 provides typed, backend-agnostic security integration for
-Litestar: explicit local transports, provider authentication, policy and guard
-algebra, account lifecycle, WebSockets, browser headers, and conformance tools.
+Authentication and authorization for Litestar applications.
+
+Litestar Security connects local accounts, external identity providers, API
+keys, and workload tokens to Litestar's middleware, dependency injection,
+guards, OpenAPI schema, and WebSocket lifecycle.
 
 .. toctree::
    :hidden:
@@ -19,59 +21,47 @@ algebra, account lifecycle, WebSockets, browser headers, and conformance tools.
    getting-started
    authentication
    accounts
-   websockets
-   customization
-   hardening
-   examples
-   development-installation
-   jwt-and-jwks
+   providers
    generated-routes
    rate-limiting
-   contributing
+   jwt-and-jwks
+   websockets
+   hardening
+   customization
+   examples
    reference
+   contributing
    changelog
 
 .. grid:: 1 1 2 2
    :gutter: 2
 
-   .. grid-item-card:: Choose a transport
+   .. grid-item-card:: Get started
       :link: getting-started
       :link-type: doc
 
-      Configure an explicit session, token, hybrid, or provider boundary.
+      Install the plugin and choose an authentication method.
 
-   .. grid-item-card:: Authentication and policy
+   .. grid-item-card:: Choose a provider
+      :link: providers
+      :link-type: doc
+
+      Use local accounts, OAuth, OIDC, IAP, API keys, or workload JWTs.
+
+   .. grid-item-card:: Protect routes
       :link: authentication
       :link-type: doc
 
-      Compose strict credential handling, route policy, guards, and OpenAPI.
+      Declare public routes and enforce scopes, roles, teams, and tenants.
 
-   .. grid-item-card:: Accounts and factors
-      :link: accounts
-      :link-type: doc
-
-      Build local lifecycle, refresh, MFA, passkey, and step-up workflows.
-
-   .. grid-item-card:: Hardening
-      :link: hardening
-      :link-type: doc
-
-      Operate CSRF, CSP, JWKS, secrets, workers, and revocation safely.
-
-   .. grid-item-card:: Runnable examples
+   .. grid-item-card:: Run an example
       :link: examples
       :link-type: doc
 
-      Boot every supported example mode with deterministic local dependencies.
-
-   .. grid-item-card:: JWT and JWKS
-      :link: jwt-and-jwks
-      :link-type: doc
-
-      Configure explicit local keys, strict discovery, and bounded rotation.
+      Try each supported authentication method with local dependencies.
 
    .. grid-item-card:: API reference
       :link: reference
       :link-type: doc
 
-      Browse the package metadata, configuration, and plugin classes.
+      Browse the public packages and types.

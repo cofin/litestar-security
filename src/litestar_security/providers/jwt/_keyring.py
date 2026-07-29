@@ -23,7 +23,7 @@ from litestar.openapi.datastructures import ResponseSpec
 from litestar.response import Response
 from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
-from litestar_security.authentication import AuthenticationOutcome, InvalidCredentials, public, security
+from litestar_security.authentication import AuthenticationOutcome, InvalidCredentials, public
 from litestar_security.config import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 from litestar_security.providers._internal import JSONValue, raise_config
 from litestar_security.providers.jwt._claims import JWTClaims, JWTValidationConfig, validate_local_access_claims
@@ -271,7 +271,7 @@ def build_local_jwks_handler(config: LocalJWKSConfig) -> HTTPRouteHandler:
         name="litestar_security_local_jwks",
         operation_id="LitestarSecurityLocalJWKS",
         media_type="application/jwk-set+json",
-        opt=security(public()),
+        auth=public(),
         response_headers=(
             ResponseHeader(
                 name="Cache-Control",

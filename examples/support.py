@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from secrets import token_hex
 from typing import TYPE_CHECKING, Any, cast
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from litestar.config.csrf import CSRFConfig
 from litestar.datastructures import Cookie
 from litestar.middleware.session.client_side import CookieBackendConfig
 
@@ -80,7 +78,7 @@ __all__ = (
     "build_oauth_config",
     "build_websocket_config",
     "example_account_store",
-    "example_session_backend",
+    "example_session_config",
 )
 
 _PURPOSE_PEPPER = b"p" * 32
@@ -513,16 +511,13 @@ def example_account_store() -> LocalAccountCapabilities[object]:
     return cast("LocalAccountCapabilities[object]", ExampleAccountStore())
 
 
-def example_session_backend() -> object:
-    """Build the explicit insecure-loopback session backend.
+def example_session_config() -> CookieBackendConfig:
+    """Build the explicit insecure-loopback session configuration.
 
     Returns:
-        A native Litestar client-side session backend.
+        A native Litestar client-side session configuration.
     """
-    config = CookieBackendConfig(
-        secret=bytes(range(16)), key="example-session", max_age=600, secure=False, httponly=True
-    )
-    return config.middleware.kwargs["backend"]
+    return CookieBackendConfig(secret=bytes(range(16)), key="example-session", max_age=600, secure=False, httponly=True)
 
 
 def build_local_auth(mode: str) -> LocalAuthConfig[object]:
@@ -545,7 +540,6 @@ def build_local_auth(mode: str) -> LocalAuthConfig[object]:
             **cast("Any", shared),
             secrets=LocalAuthSecrets.session(purpose_token_pepper=_PURPOSE_PEPPER),
             password_hasher=_ExamplePasswordHasher(),
-            csrf=CSRFConfig(secret=token_hex()),
             binding=SessionBindingConfig(
                 pepper=_BINDING_PEPPER, cookie_name="example-binding", secure=False, allow_insecure=True, max_age=600
             ),
@@ -576,7 +570,6 @@ def build_local_auth(mode: str) -> LocalAuthConfig[object]:
         return LocalAuth.hybrid(
             **cast("Any", shared),
             secrets=secrets,
-            csrf=CSRFConfig(secret=token_hex()),
             binding=SessionBindingConfig(
                 pepper=_BINDING_PEPPER, cookie_name="example-binding", secure=False, allow_insecure=True, max_age=600
             ),

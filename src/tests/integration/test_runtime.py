@@ -80,7 +80,6 @@ from litestar_security.authentication import (
     VerificationUnavailable,
     public,
     required,
-    security,
 )
 from litestar_security.config import ExternalCSRF
 from litestar_security.context import (
@@ -1064,7 +1063,7 @@ async def test_local_access_token_runtime_enforces_scope_account_and_epoch(
     invalid_verification = await bearer_slot.verifier.verify("malformed", now=datetime.now(timezone.utc))
     assert isinstance(invalid_verification, InvalidCredentials)
 
-    @get("/", opt=security(required("bearer")), guards=[requires_scope("reports:read")])
+    @get("/", auth=required("bearer"), guards=[requires_scope("reports:read")])
     async def handler(request: Request) -> dict[str, object]:
         return {
             "id": request.user.id,
@@ -1100,12 +1099,8 @@ def test_real_native_session_backends_preserve_anonymous_state_and_resist_fixati
     binding = SessionBindingConfig(
         pepper=b"p" * 32, cookie_name="binding", secure=False, allow_insecure=True, max_age=600
     )
-    local_auth = LocalAuth.session(
-        accounts=cast("Any", accounts),
-        secrets=_local_auth_secrets(),
-        csrf=ExternalCSRF("runtime", lambda _method, _path, _policy: True),
-        binding=binding,
-    )
+    local_auth = LocalAuth.session(accounts=cast("Any", accounts), secrets=_local_auth_secrets(), binding=binding)
+    external_csrf = ExternalCSRF("runtime", lambda _method, _path, _policy: True)
     current_time = [datetime(2026, 7, 27, tzinfo=timezone.utc)]
     session_auth = cast("Any", local_auth.session_auth)
     session_auth.clock = lambda: current_time[0]
@@ -1126,33 +1121,32 @@ def test_real_native_session_backends_preserve_anonymous_state_and_resist_fixati
             store="sessions",
         )
     )
-    backend = cast("BaseSessionBackend[Any]", session_config.middleware.kwargs["backend"])
 
-    @get("/anonymous", opt=security(public()))
+    @get("/anonymous", auth=public())
     async def anonymous_handler(request: Request) -> dict[str, int]:
         visits = cast("int", request.session.get("visits", 0)) + 1
         request.session["visits"] = visits
         return {"visits": visits}
 
-    @get("/me", opt=security(required("session")))
+    @get("/me", auth=required("session"))
     async def current_handler(request: Request) -> dict[str, str]:
         return {"id": request.user.id}
 
-    @get("/login", opt=security(public()))
+    @get("/login", auth=public())
     async def login_handler(request: Request) -> dict[str, str]:
         result = await session_auth.establish(request, account)
         assert not isinstance(result, VerificationUnavailable)
         return {"session_id": result.session_id}
 
-    @post("/logout", opt=security(required("session")))
+    @post("/logout", auth=required("session"))
     async def logout_handler(request: Request) -> dict[str, bool]:
         return {"revoked": bool(await session_auth.logout(request))}
 
-    @post("/revoke/{session_id:str}", opt=security(required("session")))
+    @post("/revoke/{session_id:str}", auth=required("session"))
     async def revoke_handler(request: Request, session_id: FromPath[str]) -> dict[str, bool]:
         return {"revoked": bool(await session_auth.revoke_session(request, request.user.id, session_id))}
 
-    @websocket("/ws", opt=security(required("session")))
+    @websocket("/ws", auth=required("session"))
     async def websocket_handler(socket: WebSocket) -> None:
         await socket.accept()
         await socket.send_json({"id": socket.user.id})
@@ -1167,13 +1161,14 @@ def test_real_native_session_backends_preserve_anonymous_state_and_resist_fixati
             revoke_handler,
             websocket_handler,
         ],
+        middleware=[session_config.middleware],
         openapi_config=None,
         stores={"sessions": MemoryStore()},
         plugins=[
             SecurityPlugin(
                 SecurityConfig(
+                    external_csrf=external_csrf,
                     local_auth=local_auth,
-                    session_backend=backend,
                     websocket=WebSocketSecurityConfig(
                         allowed_origins=frozenset({"http://testserver.local"}), clock=lambda: current_time[0]
                     ),
@@ -1255,30 +1250,28 @@ def test_generated_session_routes_complete_local_account_lifecycle() -> None:
     local_auth = LocalAuth.session(
         accounts=accounts,
         secrets=_local_auth_secrets(),
-        csrf=csrf,
         binding=binding,
         password_hasher=_RoutePasswordHasher(),
         registration=RegistrationPolicy.public(),
     )
-    backend = cast(
-        "BaseSessionBackend[Any]",
-        CookieBackendConfig(
-            secret=bytes(range(16)),
-            key="native-session",
-            max_age=600,
-            scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
-            secure=False,
-        ).middleware.kwargs["backend"],
+    session_config = CookieBackendConfig(
+        secret=bytes(range(16)),
+        key="native-session",
+        max_age=600,
+        scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+        secure=False,
     )
 
-    @get("/csrf", opt=security(public(), csrf_required=True))
+    @get("/csrf", auth=public(), csrf_required=True)
     async def csrf_seed() -> None:
         return None
 
     app = Litestar(
         route_handlers=[csrf_seed],
+        csrf_config=csrf,
+        middleware=[session_config.middleware],
         openapi_config=None,
-        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, session_backend=backend))],
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))],
     )
     initial_password = "initial password 123"  # noqa: S105
     changed_password = "changed password 123"  # noqa: S105
@@ -1399,11 +1392,11 @@ def test_native_guard_layers_remain_cumulative_for_http_and_websocket_with_child
         path = "/guarded"
         guards: ClassVar = [probe("controller")]
 
-        @get("/http", guards=[probe("handler")], opt=security(public()))
+        @get("/http", guards=[probe("handler")], auth=public())
         async def http_handler(self) -> dict[str, bool]:
             return {"ok": True}
 
-        @websocket("/ws", guards=[probe("handler")], opt=security(public()))
+        @websocket("/ws", guards=[probe("handler")], auth=public())
         async def websocket_handler(self, socket: WebSocket) -> None:
             await socket.accept()
             await socket.send_text("ok")
@@ -1774,12 +1767,12 @@ async def test_anonymous_websocket_ticket_uses_authorization_resolver(
 async def test_public_websocket_and_http_install_the_same_anonymous_context_with_async_client() -> None:
     observed: list[tuple[Principal[object], SecurityContext]] = []
 
-    @get("/http", opt=security(public()))
+    @get("/http", auth=public())
     async def http_handler(request: Request) -> dict[str, bool]:
         observed.append((request.user, request.auth))
         return {"anonymous": not request.user.is_authenticated}
 
-    @websocket("/ws", opt=security(public()))
+    @websocket("/ws", auth=public())
     async def websocket_handler(socket: WebSocket) -> None:
         observed.append((socket.user, socket.auth))
         await socket.accept()
@@ -1806,7 +1799,7 @@ def test_websocket_native_session_is_read_only_and_never_persisted() -> None:
     backend = _MemorySessionBackend()
     backend.stored = {"existing": "value"}
 
-    @websocket("/ws", opt=security(public()))
+    @websocket("/ws", auth=public())
     async def websocket_handler(socket: WebSocket) -> None:
         assert socket.auth.session.is_available
         assert not socket.auth.session.can_persist
@@ -1824,12 +1817,12 @@ def test_websocket_native_session_is_read_only_and_never_persisted() -> None:
 
     app = Litestar(
         route_handlers=[websocket_handler],
+        middleware=[DefineMiddleware(SessionMiddleware, backend=backend)],
         openapi_config=None,
         plugins=[
             SecurityPlugin(
                 SecurityConfig(
-                    session_backend=backend,
-                    websocket=WebSocketSecurityConfig(allowed_origins=frozenset({"http://testserver.local"})),
+                    websocket=WebSocketSecurityConfig(allowed_origins=frozenset({"http://testserver.local"}))
                 )
             )
         ],

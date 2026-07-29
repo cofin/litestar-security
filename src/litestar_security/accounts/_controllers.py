@@ -48,7 +48,7 @@ from litestar_security.accounts._schemas import (
     LocalSessionResponse,
     LocalTokenRequest,
 )
-from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required, security
+from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import Principal, SecurityContext
 
 __all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "requires_local_bearer")
@@ -223,7 +223,8 @@ class _LocalSessionController(Controller):
         response_description="The signed-in account projection.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
-        **security(public(), csrf_required=True),
+        auth=public(),
+        csrf_required=True,
     )
     async def login(
         self,
@@ -246,7 +247,7 @@ class _LocalSessionController(Controller):
         response_description="The session was revoked.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
-        **security(required("session")),
+        auth=required("session"),
     )
     async def logout(
         self, request: Request[Any, Any, Any], local_auth_services: _LocalAuthServicesDependency
@@ -271,7 +272,7 @@ class _LocalSessionController(Controller):
         ),
         response_description="The caller's active sessions.",
         responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
-        **security(required("session")),
+        auth=required("session"),
     )
     async def list_sessions(
         self,
@@ -320,7 +321,7 @@ class _LocalSessionController(Controller):
         response_description="The session was revoked.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
-        **security(required("session")),
+        auth=required("session"),
     )
     async def revoke_session(
         self,
@@ -356,7 +357,7 @@ class _LocalTokenController(Controller):
         response_description="A newly issued access and refresh token pair.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
-        **security(public(), csrf_required=False),
+        auth=public(),
     )
     async def login(
         self,
@@ -383,7 +384,7 @@ class _LocalTokenController(Controller):
         response_description="A newly rotated access and refresh token pair.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
-        **security(public(), csrf_required=False),
+        auth=public(),
     )
     async def refresh(
         self,
@@ -416,7 +417,7 @@ class _LocalTokenController(Controller):
         status_code=HTTP_200_OK,
         guards=(requires_local_bearer,),
         responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
-        **security(required("bearer"), csrf_required=False),
+        auth=required("bearer"),
     )
     async def revoke(
         self,
@@ -454,7 +455,7 @@ class _LocalLifecycleController(Controller):
         status_code=HTTP_202_ACCEPTED,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
         tags=(_PASSWORDS_TAG,),
-        **security(public()),
+        auth=public(),
     )
     async def recovery(
         self,
@@ -483,7 +484,7 @@ class _LocalLifecycleController(Controller):
         status_code=HTTP_200_OK,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
         tags=(_PASSWORDS_TAG,),
-        **security(public()),
+        auth=public(),
     )
     async def reset(
         self,
@@ -512,7 +513,7 @@ class _LocalLifecycleController(Controller):
         status_code=HTTP_202_ACCEPTED,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
         tags=(_VERIFICATION_TAG,),
-        **security(public()),
+        auth=public(),
     )
     async def verification(
         self,
@@ -538,7 +539,7 @@ class _LocalLifecycleController(Controller):
         status_code=HTTP_200_OK,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
         tags=(_VERIFICATION_TAG,),
-        **security(public()),
+        auth=public(),
     )
     async def confirm_verification(
         self, data: JSONBody[LocalTokenRequest], local_auth_services: _LocalAuthServicesDependency
@@ -566,7 +567,7 @@ class _LocalRegistrationController(Controller):
         response_description="The registration was accepted for processing.",
         status_code=HTTP_202_ACCEPTED,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
-        **security(public()),
+        auth=public(),
     )
     async def register(
         self,
@@ -606,7 +607,7 @@ class _LocalInvitationRegistrationController(Controller):
         response_description="The registration was accepted for processing.",
         status_code=HTTP_202_ACCEPTED,
         responses=_LOCAL_BAD_REQUEST_RESPONSES,
-        **security(public()),
+        auth=public(),
     )
     async def register(
         self,
@@ -646,7 +647,7 @@ class _LocalSessionPasswordController(Controller):
         response_description="The password was replaced.",
         status_code=HTTP_200_OK,
         responses=_LOCAL_REAUTHENTICATION_RESPONSES,
-        **security(required("session")),
+        auth=required("session"),
     )
     async def change(
         self,
@@ -680,7 +681,7 @@ class _LocalTokenPasswordController(Controller):
         status_code=HTTP_200_OK,
         guards=(requires_local_bearer,),
         responses=_LOCAL_REAUTHENTICATION_RESPONSES,
-        **security(required("bearer"), csrf_required=False),
+        auth=required("bearer"),
     )
     async def change(
         self,
@@ -715,7 +716,7 @@ class _LocalTokenOnlyPasswordController(Controller):
         status_code=HTTP_200_OK,
         guards=(requires_local_bearer,),
         responses=_LOCAL_REAUTHENTICATION_RESPONSES,
-        **security(required("bearer"), csrf_required=False),
+        auth=required("bearer"),
     )
     async def change(
         self,

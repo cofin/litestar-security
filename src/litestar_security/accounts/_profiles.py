@@ -9,7 +9,6 @@ from logging import getLogger
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from litestar import Request, Router
-from litestar.config.csrf import CSRFConfig
 from litestar.connection import ASGIConnection
 from litestar.exceptions import ImproperlyConfiguredException
 
@@ -59,7 +58,6 @@ from litestar_security.accounts._stores import (
     VerificationTokenStore,
 )
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
-from litestar_security.config import ExternalCSRF
 from litestar_security.context import AuthenticationEvidence
 from litestar_security.providers.jwt import BearerSlotSelector, BearerTokenSlot, JWTValidationConfig, LocalKeyRing
 
@@ -422,7 +420,6 @@ class LocalAuthConfig(Generic[UserT]):
     registration: RegistrationPolicy
     route_prefix: str
     register_routes: bool = True
-    csrf: CSRFConfig | ExternalCSRF | None = field(default=None, repr=False)
     binding: SessionBindingConfig | None = field(default=None, repr=False)
     key_ring: LocalKeyRing | None = field(default=None, repr=False)
     token_audience: str | None = None
@@ -481,10 +478,10 @@ class LocalAuthConfig(Generic[UserT]):
             msg = "Local authentication route prefix must be an absolute non-root path"
             raise ImproperlyConfiguredException(detail=msg)
         object.__setattr__(self, "route_prefix", route_prefix)
-        if self.mode in {LocalAuthMode.SESSION, LocalAuthMode.HYBRID} and (
-            not isinstance(self.csrf, (CSRFConfig, ExternalCSRF)) or not isinstance(self.binding, SessionBindingConfig)
+        if self.mode in {LocalAuthMode.SESSION, LocalAuthMode.HYBRID} and not isinstance(
+            self.binding, SessionBindingConfig
         ):
-            msg = "Session local authentication requires explicit CSRF and binding configuration"
+            msg = "Session local authentication requires explicit binding configuration"
             raise ImproperlyConfiguredException(detail=msg)
         if self.mode in {LocalAuthMode.TOKENS, LocalAuthMode.HYBRID}:
             audience = self.token_audience.strip() if isinstance(self.token_audience, str) else ""
@@ -751,7 +748,6 @@ class LocalAuth:
         *,
         accounts: LocalAccountCapabilities[UserT],
         secrets: LocalAuthSecrets,
-        csrf: CSRFConfig | ExternalCSRF,
         binding: SessionBindingConfig,
         session_auth: NativeSessionAuth[UserT] | None = None,
         password_hasher: PasswordHasher | None = None,
@@ -765,7 +761,6 @@ class LocalAuth:
         """Select native-session local authentication.
 
         Args:
-            csrf: Native CSRF configuration, or a named external integration.
             binding: The proof-of-possession cookie configuration bound to each session.
             session_auth: Override the bundled native session backend.
             accounts: The application store implementing every local account capability.
@@ -791,7 +786,6 @@ class LocalAuth:
             mode=LocalAuthMode.SESSION,
             accounts=accounts,
             secrets=secrets,
-            csrf=csrf,
             binding=binding,
             session_auth=session_auth,
             password_hasher=Argon2PasswordHasher() if password_hasher is None else password_hasher,
@@ -874,7 +868,6 @@ class LocalAuth:
         *,
         accounts: LocalAccountCapabilities[UserT],
         secrets: LocalAuthSecrets,
-        csrf: CSRFConfig | ExternalCSRF,
         binding: SessionBindingConfig,
         key_ring: LocalKeyRing,
         token_audience: str,
@@ -892,7 +885,6 @@ class LocalAuth:
         """Select distinct native-session and bearer-token local transports.
 
         Args:
-            csrf: Native CSRF configuration, or a named external integration.
             binding: The proof-of-possession cookie configuration bound to each session.
             session_auth: Override the bundled native session backend.
             key_ring: The signing keys and issuer for local access tokens.
@@ -924,7 +916,6 @@ class LocalAuth:
             mode=LocalAuthMode.HYBRID,
             accounts=accounts,
             secrets=secrets,
-            csrf=csrf,
             binding=binding,
             key_ring=key_ring,
             token_audience=token_audience,

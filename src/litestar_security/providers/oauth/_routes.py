@@ -15,7 +15,7 @@ from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedExce
 from litestar.params import Body, FromPath, FromQuery, JSONBody, QueryParameter, SkipValidation
 from litestar.status_codes import HTTP_200_OK, HTTP_302_FOUND
 
-from litestar_security.authentication import public, required, security
+from litestar_security.authentication import public, required
 from litestar_security.context import Principal
 from litestar_security.providers.oauth._accounts import (
     OAuthAccountError,
@@ -699,7 +699,7 @@ class _OAuthController(Controller):
     path = "/oauth/{provider:str}"
     tags = ("OAuth providers",)
 
-    @get("/login", operation_id="OAuthLogin", status_code=HTTP_302_FOUND, **security(public(), csrf_required=False))
+    @get("/login", operation_id="OAuthLogin", status_code=HTTP_302_FOUND, auth=public())
     async def login(
         self,
         provider: FromPath[str],
@@ -720,7 +720,7 @@ class _OAuthController(Controller):
         )
         return _authorization_response(result)
 
-    @get("/callback", operation_id="OAuthCallback", **security(public(), csrf_required=False))
+    @get("/callback", operation_id="OAuthCallback", auth=public())
     async def callback(
         self,
         provider: FromPath[str],
@@ -732,7 +732,7 @@ class _OAuthController(Controller):
         """Consume a transaction-bound callback and issue local authentication."""
         return await oauth_route_service.callback(provider=provider, code=code, state=oauth_state, request=request)
 
-    @post("/link", operation_id="OAuthLink", status_code=HTTP_302_FOUND, **security(required()))
+    @post("/link", operation_id="OAuthLink", status_code=HTTP_302_FOUND, auth=required())
     async def link(
         self,
         provider: FromPath[str],
@@ -754,9 +754,7 @@ class _OAuthController(Controller):
         )
         return _authorization_response(result)
 
-    @delete(
-        "/links/{provider_account_id:str}", operation_id="OAuthUnlink", status_code=HTTP_200_OK, **security(required())
-    )
+    @delete("/links/{provider_account_id:str}", operation_id="OAuthUnlink", status_code=HTTP_200_OK, auth=required())
     async def unlink(  # noqa: PLR0913 - Litestar injects each route binding explicitly
         self,
         provider: FromPath[str],
@@ -775,7 +773,7 @@ class _OAuthController(Controller):
             request=request,
         )
 
-    @post("/scopes", operation_id="OAuthScopeUpgrade", status_code=HTTP_302_FOUND, **security(required()))
+    @post("/scopes", operation_id="OAuthScopeUpgrade", status_code=HTTP_302_FOUND, auth=required())
     async def scopes(
         self,
         provider: FromPath[str],
@@ -797,7 +795,7 @@ class _OAuthController(Controller):
         )
         return _authorization_response(result)
 
-    @post("/revoke", operation_id="OAuthRevoke", **security(required()))
+    @post("/revoke", operation_id="OAuthRevoke", auth=required())
     async def revoke(
         self,
         provider: FromPath[str],
@@ -811,7 +809,7 @@ class _OAuthController(Controller):
             provider=provider, account_id=_account_id(principal), step_up_grant=data.step_up_grant, request=request
         )
 
-    @post("/logout", operation_id="OAuthLogout", **security(required()))
+    @post("/logout", operation_id="OAuthLogout", auth=required())
     async def logout(
         self,
         provider: FromPath[str],
@@ -834,7 +832,7 @@ class _OIDCLogoutController(Controller):
     path = "/oidc/{provider:str}"
     tags = ("OIDC logout",)
 
-    @get("/frontchannel-logout", operation_id="OIDCFrontchannelLogout", **security(public(), csrf_required=False))
+    @get("/frontchannel-logout", operation_id="OIDCFrontchannelLogout", auth=public())
     async def frontchannel_logout(
         self,
         provider: FromPath[str],
@@ -845,12 +843,7 @@ class _OIDCLogoutController(Controller):
         """Revoke local sessions mapped to one exact issuer and provider sid."""
         return await oidc_logout_service.frontchannel(provider, issuer, session_id)
 
-    @post(
-        "/backchannel-logout",
-        operation_id="OIDCBackchannelLogout",
-        status_code=HTTP_200_OK,
-        **security(public(), csrf_required=False),
-    )
+    @post("/backchannel-logout", operation_id="OIDCBackchannelLogout", status_code=HTTP_200_OK, auth=public())
     async def backchannel_logout(
         self,
         provider: FromPath[str],

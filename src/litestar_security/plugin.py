@@ -28,7 +28,6 @@ from litestar_security.authentication import (
     AuthenticationMechanism,
     AuthenticationRegistry,
     CredentialSlot,
-    OwnedSessionBackend,
     SecurityMiddlewareWrapper,
     SecurityRuntimeConfig,
     VerificationUnavailable,
@@ -124,7 +123,6 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 middleware, CSRF config, or reserved dependency name.
         """
         self._configure_headers(app_config)
-        self._configure_local_auth()
         self._configure_local_auth_rate_limits(app_config)
         self._configure_local_auth_routes(app_config)
         self._configure_mfa_routes(app_config)
@@ -148,13 +146,10 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if len(native_sessions) > 1:
             message = "Application config contains multiple native Litestar session middleware definitions"
             raise ImproperlyConfiguredException(detail=message)
-        if native_sessions and self.config.session_backend is not None:
-            message = "Security config and application middleware both configure native Litestar session handling"
-            raise ImproperlyConfiguredException(detail=message)
         self._configure_csrf(app_config)
         self._validate_local_session_backend(app_config, native_sessions)
 
-        runtime, middleware = self._get_runtime(existing_session=bool(native_sessions))
+        runtime, middleware = self._get_runtime()
         self._configure_api_key_lifespan(app_config)
         openapi_config = app_config.openapi_config
         if openapi_config is not None:
@@ -167,8 +162,6 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if self._route_compiler is None:
             self._route_compiler = RouteCompiler(
                 registry=runtime.registry,
-                default_policy=self.config.default_policy,
-                openapi_policy=self.config.openapi_policy,
                 openapi_config=openapi_config,
                 max_openapi_combinations=self.config.max_openapi_combinations,
                 csrf_exclude_key=(
@@ -225,7 +218,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if headers is not None:
             self._headers_hook = configure_security_headers(app_config, headers, self._headers_hook)
 
-    def _get_runtime(self, *, existing_session: bool) -> tuple[SecurityRuntimeConfig[UserT], DefineMiddleware]:
+    def _get_runtime(self) -> tuple[SecurityRuntimeConfig[UserT], DefineMiddleware]:
         if self._runtime_config is None:
             slots = list(self.config.slots)
             mechanisms = list(self.config.mechanisms)
@@ -292,15 +285,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 authorization_resolver=self.config.authorization_resolver,
                 require_default=self.config.require_default,
             )
-            owned_session = None
-            if self.config.session_backend is not None and not existing_session:
-                backend = self.config.session_backend
-                owned_session = OwnedSessionBackend(
-                    middleware=DefineMiddleware(SessionMiddleware, backend=backend), backend=backend
-                )
-            self._runtime_config = SecurityRuntimeConfig(
-                registry=registry, owned_session_backend=owned_session, websocket=self.config.websocket
-            )
+            self._runtime_config = SecurityRuntimeConfig(registry=registry, websocket=self.config.websocket)
             self._middleware = DefineMiddleware(SecurityMiddlewareWrapper, config=self._runtime_config)
         return self._runtime_config, cast("DefineMiddleware", self._middleware)
 
@@ -370,21 +355,12 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                     raise ImproperlyConfiguredException(detail=message)
 
     def _configure_csrf(self, app_config: AppConfig) -> None:
-        configured = self.config.csrf_config
         existing = app_config.csrf_config
         if existing is not None:
             self._validate_csrf_config(existing)
-        if configured is not None:
-            self._validate_csrf_config(configured)
-        if configured is not None and existing is not None and existing != configured:
-            message = "Security config and application configure unequal native Litestar CSRF settings"
-            raise ImproperlyConfiguredException(detail=message)
-        effective = configured if configured is not None else existing
-        if effective is not None and self.config.external_csrf is not None:
+        if existing is not None and self.config.external_csrf is not None:
             message = "Security configuration cannot combine native and external CSRF enforcement"
             raise ImproperlyConfiguredException(detail=message)
-        if configured is not None:
-            app_config.csrf_config = configured
 
     @staticmethod
     def _validate_csrf_config(config: object) -> None:
@@ -412,37 +388,11 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             message = "Native CSRF route exclusion opt key must be non-empty text"
             raise ImproperlyConfiguredException(detail=message)
 
-    def _configure_local_auth(self) -> None:
-        local_auth = self.config.local_auth
-        if local_auth is None:
-            return
-        _validate_local_auth(local_auth)
-        from litestar.config.csrf import CSRFConfig  # noqa: PLC0415 - read only when a policy asks
-
-        from litestar_security.config import ExternalCSRF  # noqa: PLC0415 - read only when a policy asks
-
-        local_csrf = local_auth.csrf
-        if isinstance(local_csrf, CSRFConfig):
-            if self.config.external_csrf is not None:
-                message = "Local native CSRF cannot be combined with external CSRF configuration"
-                raise ImproperlyConfiguredException(detail=message)
-            if self.config.csrf_config is not None and self.config.csrf_config != local_csrf:
-                message = "Local and security native CSRF settings must be equal"
-                raise ImproperlyConfiguredException(detail=message)
-            self.config.csrf_config = local_csrf
-        elif isinstance(local_csrf, ExternalCSRF):
-            if self.config.csrf_config is not None:
-                message = "Local external CSRF cannot be combined with native CSRF configuration"
-                raise ImproperlyConfiguredException(detail=message)
-            if self.config.external_csrf is not None and self.config.external_csrf != local_csrf:
-                message = "Local and security external CSRF settings must be equal"
-                raise ImproperlyConfiguredException(detail=message)
-            self.config.external_csrf = local_csrf
-
     def _configure_local_auth_rate_limits(self, app_config: AppConfig) -> None:
         local_auth = self.config.local_auth
         if local_auth is None:
             return
+        _validate_local_auth(local_auth)
         if self._rate_limit_lifespan is None:
             # The bundled limiter names a store rather than holding one, so the
             # application can point that name at a shared backend. The registry only
@@ -583,15 +533,12 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         local_auth = self.config.local_auth
         if local_auth is None or local_auth.session_auth is None:
             return
-        backend = (
-            self.config.session_backend
-            if self.config.session_backend is not None
-            else native_sessions[0][1].kwargs.get("backend")
-            if native_sessions
-            else None
-        )
+        backend = native_sessions[0][1].kwargs.get("backend") if native_sessions else None
         if backend is None:
-            message = "Session local authentication requires one native Litestar session backend"
+            message = "Session local authentication requires one native Litestar session middleware"
+            raise ImproperlyConfiguredException(detail=message)
+        if app_config.csrf_config is None and self.config.external_csrf is None:
+            message = "Session local authentication requires exactly one native or external CSRF implementation"
             raise ImproperlyConfiguredException(detail=message)
         backend_config = getattr(backend, "config", None)
         scopes = getattr(backend_config, "scopes", ())

@@ -191,7 +191,6 @@ _PUBLIC_API = (
     "requires_scope",
     "requires_team_role",
     "requires_tenant",
-    "security",
     "websocket_policy_fingerprint",
 )
 
@@ -1864,7 +1863,6 @@ def test_password_reauthentication_proof_requires_aware_timestamps(
 
 
 def test_local_auth_profiles_validate_only_structural_enabled_capabilities(local_key_ring: LocalKeyRing) -> None:
-    csrf = litestar_security.ExternalCSRF("application", lambda _method, _path, _policy: True)
     binding = accounts_module.SessionBindingConfig(pepper=b"p" * 32)
     key_ring = local_key_ring
     audience = "local-client"
@@ -1874,7 +1872,7 @@ def test_local_auth_profiles_validate_only_structural_enabled_capabilities(local
     registration_store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | {"register"}))
 
     session = accounts_module.LocalAuth.session(
-        accounts=session_store, secrets=_local_auth_secrets(), csrf=csrf, binding=binding, route_prefix="/security/"
+        accounts=session_store, secrets=_local_auth_secrets(), binding=binding, route_prefix="/security/"
     )
     tokens = accounts_module.LocalAuth.tokens(
         accounts=token_store,
@@ -1885,7 +1883,6 @@ def test_local_auth_profiles_validate_only_structural_enabled_capabilities(local
     hybrid = accounts_module.LocalAuth.hybrid(
         accounts=hybrid_store,
         secrets=_local_auth_secrets(refresh=True),
-        csrf=csrf,
         binding=binding,
         key_ring=key_ring,
         token_audience=audience,
@@ -1893,7 +1890,6 @@ def test_local_auth_profiles_validate_only_structural_enabled_capabilities(local
     registration = accounts_module.LocalAuth.session(
         accounts=registration_store,
         secrets=_local_auth_secrets(),
-        csrf=csrf,
         binding=binding,
         registration=accounts_module.RegistrationPolicy.public(),
     )
@@ -1928,14 +1924,13 @@ def test_local_auth_profiles_validate_only_structural_enabled_capabilities(local
 def test_local_auth_profiles_report_only_missing_enabled_capabilities(
     profile: str, methods: set[str], match: str, local_key_ring: LocalKeyRing
 ) -> None:
-    csrf = litestar_security.ExternalCSRF("application", lambda _method, _path, _policy: True)
     binding = accounts_module.SessionBindingConfig(pepper=b"p" * 32)
     store = _structural_capabilities(*methods)
     audience = "local-client"
 
     if profile == "session":
         operation = partial(
-            accounts_module.LocalAuth.session, accounts=store, secrets=_local_auth_secrets(), csrf=csrf, binding=binding
+            accounts_module.LocalAuth.session, accounts=store, secrets=_local_auth_secrets(), binding=binding
         )
     elif profile == "tokens":
         operation = partial(
@@ -1950,7 +1945,6 @@ def test_local_auth_profiles_report_only_missing_enabled_capabilities(
             accounts_module.LocalAuth.session,
             accounts=store,
             secrets=_local_auth_secrets(),
-            csrf=csrf,
             binding=binding,
             registration=accounts_module.RegistrationPolicy.public(),
         )
@@ -1959,14 +1953,13 @@ def test_local_auth_profiles_report_only_missing_enabled_capabilities(
 
 
 def test_local_auth_rejects_transport_inconsistent_custom_session_runtime(local_key_ring: LocalKeyRing) -> None:
-    csrf = litestar_security.ExternalCSRF("application", lambda _method, _path, _policy: True)
     binding = accounts_module.SessionBindingConfig(pepper=b"p" * 32)
     audience = "local-client"
     store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES))
     other_store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES))
     runtime = accounts_module.NativeSessionAuth(accounts=store, binding=binding)
     matching = accounts_module.LocalAuth.session(
-        accounts=store, secrets=_local_auth_secrets(), csrf=csrf, binding=binding, session_auth=runtime
+        accounts=store, secrets=_local_auth_secrets(), binding=binding, session_auth=runtime
     )
     assert matching.session_auth is runtime
 
@@ -1989,7 +1982,7 @@ def test_local_auth_rejects_transport_inconsistent_custom_session_runtime(local_
     ):
         with pytest.raises(ImproperlyConfiguredException, match="must share"):
             accounts_module.LocalAuth.session(
-                accounts=store, secrets=_local_auth_secrets(), csrf=csrf, binding=binding, session_auth=mismatched
+                accounts=store, secrets=_local_auth_secrets(), binding=binding, session_auth=mismatched
             )
 
 
@@ -2010,10 +2003,8 @@ def test_local_auth_rejects_transport_inconsistent_custom_session_runtime(local_
         ("route_prefix", "/auth/./login", "absolute non-root path"),
         ("route_prefix", "/auth /login", "absolute non-root path"),
         ("route_prefix", "/auth\n/login", "absolute non-root path"),
-        ("csrf", None, "requires explicit CSRF"),
-        ("csrf", object(), "requires explicit CSRF"),
-        ("binding", None, "requires explicit CSRF"),
-        ("binding", object(), "requires explicit CSRF"),
+        ("binding", None, "explicit binding"),
+        ("binding", object(), "explicit binding"),
         ("key_ring", None, "explicit key ring and audience"),
         ("key_ring", object(), "explicit key ring and audience"),
         ("token_audience", " ", "explicit key ring and audience"),
@@ -2023,7 +2014,6 @@ def test_local_auth_rejects_transport_inconsistent_custom_session_runtime(local_
 def test_local_auth_config_rejects_incomplete_transport_values(
     field_name: str, invalid_value: object, match: str, local_key_ring: LocalKeyRing
 ) -> None:
-    csrf = litestar_security.ExternalCSRF("application", lambda _method, _path, _policy: True)
     binding = accounts_module.SessionBindingConfig(pepper=b"p" * 32)
     store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES))
     kwargs = {
@@ -2032,7 +2022,6 @@ def test_local_auth_config_rejects_incomplete_transport_values(
         "secrets": _local_auth_secrets(refresh=True),
         "registration": accounts_module.RegistrationPolicy.disabled(),
         "route_prefix": "/auth",
-        "csrf": csrf,
         "binding": binding,
         "key_ring": local_key_ring,
         "token_audience": "local-client",
@@ -2160,7 +2149,6 @@ def test_local_auth_config_rejects_invalid_route_and_secret_mode_combinations(
         "registration": accounts_module.RegistrationPolicy.disabled(),
         "route_prefix": "/auth",
         "register_routes": register_routes,
-        "csrf": litestar_security.ExternalCSRF("application", lambda _method, _path, _policy: True),
         "binding": accounts_module.SessionBindingConfig(pepper=b"b" * 32),
         "key_ring": local_key_ring,
         "token_audience": "local-client",
@@ -2695,13 +2683,9 @@ def test_security_config_is_typed_and_slotted() -> None:
     expected_fields = (
         "slots",
         "mechanisms",
-        "default_policy",
-        "openapi_policy",
         "max_openapi_combinations",
-        "csrf_config",
         "external_csrf",
         "require_default",
-        "session_backend",
         "local_auth",
         "local_jwks",
         "oauth",
@@ -2751,7 +2735,6 @@ def _local_auth_rate_limit_config(**kwargs: Any) -> "accounts_module.LocalAuthCo
     return accounts_module.LocalAuth.session(
         accounts=_structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES)),
         secrets=_local_auth_secrets(),
-        csrf=litestar_security.ExternalCSRF("application", lambda _method, _path, _policy: True),
         binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
         **kwargs,
     )
