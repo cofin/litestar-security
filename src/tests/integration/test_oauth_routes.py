@@ -244,7 +244,7 @@ class LogoutSessions:
 
 
 def oauth_config(*, register_routes: bool = True) -> OAuthConfig:
-    return OAuthConfig(service=RouteService(), providers=(Provider(),), register_routes=register_routes)
+    return OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), register_routes=register_routes)
 
 
 def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycle dependencies
@@ -286,8 +286,8 @@ def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycl
     )
 
 
-def oauth_app(*, openapi: bool, service: RouteService | None = None, authenticated: bool = True) -> Litestar:
-    config = OAuthConfig(service=service or RouteService(), providers=(Provider(),))
+def oauth_app(*, openapi: bool, oauth_service: RouteService | None = None, authenticated: bool = True) -> Litestar:
+    config = OAuthConfig(oauth_service=oauth_service or RouteService(), providers=(Provider(),))
 
     def provide_principal() -> Principal[object]:
         return Principal(id="account-1") if authenticated else Principal[object].anonymous()
@@ -302,6 +302,7 @@ def oauth_app(*, openapi: bool, service: RouteService | None = None, authenticat
 def test_oauth_config_caches_routes_and_plugin_registers_once() -> None:
     config = oauth_config()
     assert config.build_route_handlers() is config.build_route_handlers()
+    assert set(config.build_route_handlers()[0].dependencies) == {"oauth_service"}
 
     plugin: SecurityPlugin[object] = SecurityPlugin(SecurityConfig(oauth=config))
     app_config = plugin.on_app_init(AppConfig())
@@ -343,7 +344,7 @@ async def test_concrete_lifecycle_composes_login_transaction_provider_account_an
         return "account-1"
 
     local_services = VerifiedLocalServices()
-    local = OAuthLocalAuthTransport(services=cast("Any", local_services), transport="session")
+    local = OAuthLocalAuthTransport(local_auth_service=cast("Any", local_services), transport="session")
     service = OAuthLifecycleService(
         registrations=(
             OAuthProviderRegistration(
@@ -366,7 +367,7 @@ async def test_concrete_lifecycle_composes_login_transaction_provider_account_an
         clock=lambda: NOW,
     )
     app = Litestar(
-        route_handlers=[build_oauth_routes(OAuthConfig(service=service, providers=(provider,)))],
+        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service, providers=(provider,)))],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
         openapi_config=None,
     )
@@ -550,14 +551,15 @@ async def test_lifecycle_and_local_transport_reject_invalid_or_unavailable_paths
         (object(), NotAuthorizedException),
     ):
         transport = OAuthLocalAuthTransport(
-            services=cast("Any", ConfigurableLocalServices(result, session_auth=SessionLogout())), transport="session"
+            local_auth_service=cast("Any", ConfigurableLocalServices(result, session_auth=SessionLogout())),
+            transport="session",
         )
         with pytest.raises(exception):
             await transport.establish(
                 account_id="account-1", identity=provider.identity, request=request, authenticated_at=NOW
             )
     token_transport = OAuthLocalAuthTransport(
-        services=cast("Any", ConfigurableLocalServices(refresh_response, refresh_tokens=object())),
+        local_auth_service=cast("Any", ConfigurableLocalServices(refresh_response, refresh_tokens=object())),
         transport="tokens",
         token_logout=token_logout,
     )
@@ -700,7 +702,7 @@ async def test_lifecycle_logout_omits_unsupported_route_and_survives_provider_st
 
 
 @pytest.mark.parametrize(
-    ("services", "transport", "token_logout"),
+    ("local_auth_service", "transport", "token_logout"),
     [
         (object(), None, None),
         (ConfigurableLocalServices(object()), "invalid", None),
@@ -710,11 +712,13 @@ async def test_lifecycle_logout_omits_unsupported_route_and_survives_provider_st
     ],
 )
 def test_local_transport_rejects_incomplete_configuration(
-    services: object, transport: str | None, token_logout: object
+    local_auth_service: object, transport: str | None, token_logout: object
 ) -> None:
     with pytest.raises(ImproperlyConfiguredException, match="transport"):
         OAuthLocalAuthTransport(
-            services=cast("Any", services), transport=transport, token_logout=cast("Any", token_logout)
+            local_auth_service=cast("Any", local_auth_service),
+            transport=transport,
+            token_logout=cast("Any", token_logout),
         )
 
 
@@ -732,7 +736,7 @@ async def test_local_transport_logout_reports_each_unavailable_transport() -> No
         raise RuntimeError
 
     transport = OAuthLocalAuthTransport(
-        services=cast(
+        local_auth_service=cast(
             "Any", ConfigurableLocalServices(object(), session_auth=UnavailableSession(), refresh_tokens=object())
         ),
         token_logout=failing_token_logout,
@@ -744,7 +748,7 @@ async def test_local_transport_logout_reports_each_unavailable_transport() -> No
         del account_id
 
     session_unavailable = OAuthLocalAuthTransport(
-        services=cast(
+        local_auth_service=cast(
             "Any", ConfigurableLocalServices(object(), session_auth=UnavailableSession(), refresh_tokens=object())
         ),
         token_logout=successful_token_logout,
@@ -753,7 +757,7 @@ async def test_local_transport_logout_reports_each_unavailable_transport() -> No
         await session_unavailable.logout(account_id="account-1", request=request)
 
     session_only = OAuthLocalAuthTransport(
-        services=cast("Any", ConfigurableLocalServices(object(), session_auth=UnavailableSession())),
+        local_auth_service=cast("Any", ConfigurableLocalServices(object(), session_auth=UnavailableSession())),
         transport="session",
     )
     with pytest.raises(ServiceUnavailableException, match="logout"):
@@ -767,9 +771,11 @@ async def test_oidc_front_and_backchannel_logout_routes_delegate_verified_lifecy
     oidc_logout = OIDCLogoutLifecycleService(
         provider_issuers={"example": "https://issuer.example"}, consumer=consumer, sessions=sessions, clock=lambda: NOW
     )
-    config = OAuthConfig(service=RouteService(), providers=(Provider(),), oidc_logout=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    router = build_oauth_routes(config)
+    assert set(router.dependencies) == {"oauth_service", "oidc_service"}
     app = Litestar(
-        route_handlers=[build_oauth_routes(config)],
+        route_handlers=[router],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
         openapi_config=None,
     )
@@ -852,7 +858,7 @@ async def test_plugin_closes_lifecycle_owned_oauth_providers() -> None:
         async def aclose(self) -> None:
             events.append("close")
 
-    config = OAuthConfig(service=RouteService(), providers=(ClosableProvider(),), register_routes=False)
+    config = OAuthConfig(oauth_service=RouteService(), providers=(ClosableProvider(),), register_routes=False)
     plugin = SecurityPlugin[object](SecurityConfig[object](oauth=config))
     app_config = plugin.on_app_init(AppConfig())
     assert plugin.on_app_init(app_config).lifespan == app_config.lifespan
@@ -872,7 +878,7 @@ async def test_plugin_reports_oauth_provider_shutdown_failure() -> None:
         async def aclose(self) -> None:
             raise RuntimeError
 
-    config = OAuthConfig(service=RouteService(), providers=(BrokenProvider(),), register_routes=False)
+    config = OAuthConfig(oauth_service=RouteService(), providers=(BrokenProvider(),), register_routes=False)
     app = Litestar(route_handlers=[], plugins=[SecurityPlugin[object](SecurityConfig[object](oauth=config))])
 
     with pytest.RaisesGroup(pytest.RaisesExc(ImproperlyConfiguredException, match="shutdown")):
@@ -883,7 +889,7 @@ async def test_plugin_reports_oauth_provider_shutdown_failure() -> None:
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"service": object()},
+        {"oauth_service": object()},
         {"providers": ()},
         {"providers": (Provider(), Provider())},
         {"route_prefix": "auth"},
@@ -891,7 +897,7 @@ async def test_plugin_reports_oauth_provider_shutdown_failure() -> None:
     ],
 )
 def test_oauth_config_rejects_invalid_startup(kwargs: dict[str, object]) -> None:
-    values: dict[str, object] = {"service": RouteService(), "providers": (Provider(),)}
+    values: dict[str, object] = {"oauth_service": RouteService(), "providers": (Provider(),)}
     values.update(kwargs)
 
     with pytest.raises(ImproperlyConfiguredException, match="OAuth"):
@@ -906,7 +912,7 @@ def test_oauth_config_rejects_mismatched_oidc_logout_providers() -> None:
         clock=lambda: NOW,
     )
     with pytest.raises(ImproperlyConfiguredException, match="OIDC logout providers"):
-        OAuthConfig(service=RouteService(), providers=(Provider(),), oidc_logout=oidc_logout)
+        OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
 
 
 @pytest.mark.anyio
@@ -948,7 +954,7 @@ def test_oauth_dtos_are_frozen_camel_case_and_redact_step_up() -> None:
 @pytest.mark.anyio
 async def test_authenticated_routes_delegate_to_shared_service() -> None:
     service = RouteService()
-    app = oauth_app(openapi=False, service=service)
+    app = oauth_app(openapi=False, oauth_service=service)
 
     async with AsyncTestClient(app=app) as client:
         link = await client.post(

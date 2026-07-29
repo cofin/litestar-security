@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from litestar.openapi.spec import Tag
     from litestar.stores.registry import StoreRegistry
 
-__all__ = ("LocalAuth", "LocalAuthConfig", "LocalAuthSecrets", "LocalAuthServices", "trusted_client_key")
+__all__ = ("LocalAuth", "LocalAuthConfig", "LocalAuthSecrets", "LocalAuthService", "trusted_client_key")
 
 UserT = TypeVar("UserT")
 _ASCII_CONTROL_LIMIT = 32
@@ -175,7 +175,7 @@ class LocalAuthSecrets:
 
 
 @dataclass(frozen=True, slots=True)
-class LocalAuthServices(Generic[UserT]):
+class LocalAuthService(Generic[UserT]):
     """Singleton service graph shared by generated and application controllers."""
 
     accounts: LocalAccountCapabilities[UserT] = field(repr=False)
@@ -441,7 +441,7 @@ class LocalAuthConfig(Generic[UserT]):
     bearer_resolver: LocalBearerIdentityResolver[UserT] | None = field(
         init=False, default=None, repr=False, compare=False
     )
-    services: LocalAuthServices[UserT] = field(init=False, repr=False, compare=False)
+    local_auth_service: LocalAuthService[UserT] = field(init=False, repr=False, compare=False)
     _route_handlers: tuple[Router, ...] | None = field(init=False, default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:  # noqa: C901 - explicit transport invariants remain centralized
@@ -696,8 +696,8 @@ class LocalAuthConfig(Generic[UserT]):
             )
         object.__setattr__(
             self,
-            "services",
-            LocalAuthServices(
+            "local_auth_service",
+            LocalAuthService(
                 accounts=self.accounts,
                 password_login=self.password_login,
                 password_reauthentication=password_reauthentication,

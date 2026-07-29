@@ -36,16 +36,10 @@ from litestar_security.config import SecurityConfig
 from litestar_security.context import Principal, SecurityContext
 from litestar_security.headers import CSPHook, configure_security_headers
 
-__all__ = ("CurrentUser", "PrincipalDependency", "SecurityContextDependency", "SecurityPlugin")
+__all__ = ("CurrentUser", "SecurityPlugin")
 
 
 UserT = TypeVar("UserT")
-
-
-PrincipalDependency: TypeAlias = NamedDependency[Principal[UserT]]
-
-
-SecurityContextDependency: TypeAlias = NamedDependency[SecurityContext]
 
 
 CurrentUser: TypeAlias = NamedDependency[UserT]
@@ -60,9 +54,7 @@ _SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _SIGNATURE_NAMESPACE: Mapping[str, object] = {
     "CurrentUser": CurrentUser,
     "Principal": Principal,
-    "PrincipalDependency": PrincipalDependency,
     "SecurityContext": SecurityContext,
-    "SecurityContextDependency": SecurityContextDependency,
 }
 
 
@@ -313,8 +305,8 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         return slots, mechanisms
 
     def _configure_api_key_lifespan(self, app_config: AppConfig) -> None:
-        service = self._api_key_service
-        if service is None:
+        api_key_service = self._api_key_service
+        if api_key_service is None:
             return
         if self._api_key_lifespan is None:
 
@@ -323,7 +315,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 try:
                     yield
                 finally:
-                    await cast("Any", service).close()
+                    await cast("Any", api_key_service).close()
 
             self._api_key_lifespan = api_key_lifespan
         lifespan_handlers = cast(
@@ -463,20 +455,20 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 step_up=step_up,
                 epochs=local_auth.accounts,
                 mfa=(
-                    enabled_mfa.service
-                    if enabled_mfa is not None and isinstance(enabled_mfa.service, MFAService)
+                    enabled_mfa.mfa_service
+                    if enabled_mfa is not None and isinstance(enabled_mfa.mfa_service, MFAService)
                     else None
                 ),
                 passkeys=(
-                    enabled_passkeys.service
-                    if enabled_passkeys is not None and isinstance(enabled_passkeys.service, PasskeyService)
+                    enabled_passkeys.passkey_service
+                    if enabled_passkeys is not None and isinstance(enabled_passkeys.passkey_service, PasskeyService)
                     else None
                 ),
                 rate_limits=local_auth.rate_limits,
-                client_key=local_auth.services.client_key_for,
-                local_auth=local_auth.services,
+                client_key=local_auth.local_auth_service.client_key_for,
+                local_auth=local_auth.local_auth_service,
                 session_capable=local_auth.session_auth is not None,
-                token_capable=local_auth.services.refresh_tokens is not None,
+                token_capable=local_auth.local_auth_service.refresh_tokens is not None,
                 route_prefix=prefixes.pop(),
             )
             route_handlers = (router,)

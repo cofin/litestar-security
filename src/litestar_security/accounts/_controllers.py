@@ -20,7 +20,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
-from litestar_security.accounts._profiles import LocalAuthConfig, LocalAuthServices
+from litestar_security.accounts._profiles import LocalAuthConfig, LocalAuthService
 from litestar_security.accounts._rate_limits import RateLimited
 from litestar_security.accounts._records import (
     ConsumeResult,
@@ -120,9 +120,6 @@ _LOCAL_AUTH_REQUIRED_RESPONSES = {
 _LOCAL_REAUTHENTICATION_RESPONSES = {**_LOCAL_BAD_REQUEST_RESPONSES, **_LOCAL_AUTH_REQUIRED_RESPONSES}
 
 
-_LocalAuthServicesDependency = NamedDependency[SkipValidation[LocalAuthServices[Any]]]
-
-
 def requires_local_bearer(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler) -> None:
     """Require bearer evidence produced by the configured local JWT slot.
 
@@ -153,8 +150,8 @@ def build_local_auth_routes(config: LocalAuthConfig[Any]) -> Router:
         and the shared service graph provided as a dependency.
     """
 
-    def provide_local_auth_services() -> LocalAuthServices[Any]:
-        return config.services
+    def provide_local_auth_service() -> LocalAuthService[Any]:
+        return config.local_auth_service
 
     route_handlers: list[type[Controller]] = [_LocalLifecycleController]
     if config.mode in {LocalAuthMode.SESSION, LocalAuthMode.HYBRID}:
@@ -173,9 +170,7 @@ def build_local_auth_routes(config: LocalAuthConfig[Any]) -> Router:
         path=config.route_prefix,
         route_handlers=route_handlers,
         cache_control=CacheControlHeader(no_store=True),
-        dependencies={
-            "local_auth_services": Provide(provide_local_auth_services, sync_to_thread=False, use_cache=False)
-        },
+        dependencies={"local_auth_service": Provide(provide_local_auth_service, sync_to_thread=False, use_cache=False)},
         response_headers={"Pragma": "no-cache"},
     )
 
@@ -230,10 +225,10 @@ class _LocalSessionController(Controller):
         self,
         data: JSONBody[LocalCredentials],
         request: Request[Any, Any, Any],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LocalAccountResponse | LocalRouteResponse]:
         """Authenticate a password and establish one native session."""
-        result = await local_auth_services.session_login(request, data)
+        result = await local_auth_service.session_login(request, data)
         if not isinstance(result, LocalAccountResponse):
             return _route_error(result)
         return Response(content=result, status_code=HTTP_200_OK)
@@ -250,10 +245,12 @@ class _LocalSessionController(Controller):
         auth=required("session"),
     )
     async def logout(
-        self, request: Request[Any, Any, Any], local_auth_services: _LocalAuthServicesDependency
+        self,
+        request: Request[Any, Any, Any],
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LocalRouteResponse]:
         """Revoke the caller's current session and clear browser authentication."""
-        session_auth = local_auth_services.session_auth
+        session_auth = local_auth_service.session_auth
         if session_auth is None:
             return _route_error(VerificationUnavailable())
         result = await session_auth.logout(request)
@@ -278,11 +275,11 @@ class _LocalSessionController(Controller):
         self,
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LocalSessionListResponse | LocalRouteResponse]:
         """List only the authenticated caller's safe session projections."""
         account_id = _principal_account_id(principal)
-        session_auth = local_auth_services.session_auth
+        session_auth = local_auth_service.session_auth
         if account_id is None or session_auth is None:
             return _route_error(InvalidCredentials(), credentials=True)
         current = session_auth.current_authentication(request)
@@ -328,11 +325,11 @@ class _LocalSessionController(Controller):
         session_id: FromPath[str],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LocalRouteResponse]:
         """Revoke one session qualified by caller ownership."""
         account_id = _principal_account_id(principal)
-        session_auth = local_auth_services.session_auth
+        session_auth = local_auth_service.session_auth
         if account_id is None or session_auth is None:
             return _route_error(InvalidCredentials(), credentials=True)
         result = await session_auth.revoke_session(request, account_id, session_id)
@@ -363,10 +360,10 @@ class _LocalTokenController(Controller):
         self,
         data: JSONBody[LocalCredentials],
         request: Request[Any, Any, Any],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[RefreshTokenResponse | LocalRouteResponse]:
         """Authenticate a password and issue a local access/refresh pair."""
-        result = await local_auth_services.token_login(request, data)
+        result = await local_auth_service.token_login(request, data)
         if not isinstance(result, RefreshTokenResponse):
             return _route_error(result)
         return Response(content=result, status_code=HTTP_200_OK)
@@ -390,15 +387,15 @@ class _LocalTokenController(Controller):
         self,
         data: JSONBody[LocalTokenRequest],
         request: Request[Any, Any, Any],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
         idempotency_key: Annotated[str | None, HeaderParameter(name="Idempotency-Key")] = None,
     ) -> Response[RefreshTokenResponse | LocalRouteResponse]:
         """Strictly rotate one opaque refresh token."""
-        refresh_tokens = local_auth_services.refresh_tokens
+        refresh_tokens = local_auth_service.refresh_tokens
         if refresh_tokens is None:
             return _route_error(VerificationUnavailable())
         result = await refresh_tokens.rotate(
-            data.token, idempotency_key=idempotency_key, client_key=local_auth_services.client_key_for(request)
+            data.token, idempotency_key=idempotency_key, client_key=local_auth_service.client_key_for(request)
         )
         if not isinstance(result, RefreshTokenResponse):
             return _route_error(result)
@@ -423,11 +420,11 @@ class _LocalTokenController(Controller):
         self,
         data: JSONBody[LocalTokenRequest],
         principal: NamedDependency[Principal[Any]],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LocalRouteResponse]:
         """Revoke the authenticated caller's presented local refresh family."""
         account_id = _principal_account_id(principal)
-        refresh_tokens = local_auth_services.refresh_tokens
+        refresh_tokens = local_auth_service.refresh_tokens
         if account_id is None or refresh_tokens is None:
             return _route_error(InvalidCredentials(), credentials=True)
         result = await refresh_tokens.revoke_for_account(account_id, data.token)
@@ -461,11 +458,11 @@ class _LocalLifecycleController(Controller):
         self,
         data: JSONBody[LocalIdentifierRequest],
         request: Request[Any, Any, Any],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LifecycleAccepted | LocalRouteResponse]:
         """Return the common recovery-request response for every identifier."""
-        result = await local_auth_services.recovery.request(
-            data.identifier, client_key=local_auth_services.client_key_for(request)
+        result = await local_auth_service.recovery.request(
+            data.identifier, client_key=local_auth_service.client_key_for(request)
         )
         if not isinstance(result, LifecycleAccepted):
             return _route_error(result)
@@ -490,11 +487,11 @@ class _LocalLifecycleController(Controller):
         self,
         data: JSONBody[LocalPasswordResetRequest],
         request: Request[Any, Any, Any],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LocalRouteResponse]:
         """Consume one recovery token and replace its account password."""
-        result = await local_auth_services.recovery.reset(
-            data.token, data.password, client_key=local_auth_services.client_key_for(request)
+        result = await local_auth_service.recovery.reset(
+            data.token, data.password, client_key=local_auth_service.client_key_for(request)
         )
         if isinstance(result, PasswordResetResult) and result.status is PasswordResetStatus.RESET:
             return _route_response(LocalRouteResponse(detail="Password reset complete."), status_code=HTTP_200_OK)
@@ -519,11 +516,11 @@ class _LocalLifecycleController(Controller):
         self,
         data: JSONBody[LocalIdentifierRequest],
         request: Request[Any, Any, Any],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LifecycleAccepted | LocalRouteResponse]:
         """Return the common verification-request response for every identifier."""
-        result = await local_auth_services.verification.resend(
-            data.identifier, client_key=local_auth_services.client_key_for(request)
+        result = await local_auth_service.verification.resend(
+            data.identifier, client_key=local_auth_service.client_key_for(request)
         )
         if not isinstance(result, LifecycleAccepted):
             return _route_error(result)
@@ -542,10 +539,12 @@ class _LocalLifecycleController(Controller):
         auth=public(),
     )
     async def confirm_verification(
-        self, data: JSONBody[LocalTokenRequest], local_auth_services: _LocalAuthServicesDependency
+        self,
+        data: JSONBody[LocalTokenRequest],
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LocalRouteResponse]:
         """Consume one account-verification token."""
-        result = await local_auth_services.verification.consume(data.token)
+        result = await local_auth_service.verification.consume(data.token)
         if isinstance(result, ConsumeResult) and result.status is ConsumeStatus.CONSUMED:
             return _route_response(LocalRouteResponse(detail="Account verified."), status_code=HTTP_200_OK)
         return _route_error(result)
@@ -573,10 +572,10 @@ class _LocalRegistrationController(Controller):
         self,
         data: JSONBody[LocalRegistrationRequest],
         request: Request[Any, Any, Any],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LifecycleAccepted | LocalRouteResponse]:
         """Apply the configured public registration policy."""
-        registration = local_auth_services.registration
+        registration = local_auth_service.registration
         if registration is None:
             return _route_error(InvalidLifecycleRequest())
         result = await registration.register(
@@ -584,7 +583,7 @@ class _LocalRegistrationController(Controller):
             data.password,
             display_name=data.display_name,
             invitation_token=None,
-            client_key=local_auth_services.client_key_for(request),
+            client_key=local_auth_service.client_key_for(request),
         )
         if isinstance(result, LifecycleAccepted):
             return Response(content=result, status_code=HTTP_202_ACCEPTED)
@@ -613,10 +612,10 @@ class _LocalInvitationRegistrationController(Controller):
         self,
         data: JSONBody[LocalInvitationRegistrationRequest],
         request: Request[Any, Any, Any],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LifecycleAccepted | LocalRouteResponse]:
         """Apply the configured invite-only registration policy."""
-        registration = local_auth_services.registration
+        registration = local_auth_service.registration
         if registration is None:
             return _route_error(InvalidLifecycleRequest())
         result = await registration.register(
@@ -624,7 +623,7 @@ class _LocalInvitationRegistrationController(Controller):
             data.password,
             display_name=data.display_name,
             invitation_token=data.invitation_token,
-            client_key=local_auth_services.client_key_for(request),
+            client_key=local_auth_service.client_key_for(request),
         )
         if isinstance(result, LifecycleAccepted):
             return Response(content=result, status_code=HTTP_202_ACCEPTED)
@@ -654,13 +653,13 @@ class _LocalSessionPasswordController(Controller):
         data: JSONBody[LocalPasswordChangeRequest],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LocalRouteResponse]:
         """Change the session caller's password and rebind its session."""
         account_id = _principal_account_id(principal)
         if account_id is None:
             return _route_error(InvalidCredentials(), credentials=True)
-        result = await local_auth_services.change_session_password(request, account_id, data)
+        result = await local_auth_service.change_session_password(request, account_id, data)
         return _password_change_response(result)
 
 
@@ -687,13 +686,13 @@ class _LocalTokenPasswordController(Controller):
         self,
         data: JSONBody[LocalPasswordChangeRequest],
         principal: NamedDependency[Principal[Any]],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LocalRouteResponse]:
         """Change the local bearer caller's password."""
         account_id = _principal_account_id(principal)
         if account_id is None:
             return _route_error(InvalidCredentials(), credentials=True)
-        result = await local_auth_services.change_token_password(account_id, data)
+        result = await local_auth_service.change_token_password(account_id, data)
         return _password_change_response(result)
 
 
@@ -722,13 +721,13 @@ class _LocalTokenOnlyPasswordController(Controller):
         self,
         data: JSONBody[LocalPasswordChangeRequest],
         principal: NamedDependency[Principal[Any]],
-        local_auth_services: _LocalAuthServicesDependency,
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[LocalRouteResponse]:
         """Change the local bearer caller's password."""
         account_id = _principal_account_id(principal)
         if account_id is None:
             return _route_error(InvalidCredentials(), credentials=True)
-        result = await local_auth_services.change_token_password(account_id, data)
+        result = await local_auth_service.change_token_password(account_id, data)
         return _password_change_response(result)
 
 

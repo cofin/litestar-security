@@ -36,7 +36,7 @@ def test_provider_modes_boot_with_native_openapi(monkeypatch: pytest.MonkeyPatch
     else:
         assert plugin.config.oauth is not None
         provider_name = {"google-oauth": "google", "github-oauth": "github", "keycloak": "keycloak"}[mode]
-        assert plugin.config.oauth.service.provider_names == frozenset({provider_name})
+        assert plugin.config.oauth.oauth_service.provider_names == frozenset({provider_name})
         assert "/auth/oauth/{provider}/login" in app.openapi_schema.paths
 
 

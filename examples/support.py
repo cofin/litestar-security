@@ -188,7 +188,7 @@ def build_oauth_config(mode: str) -> OAuthConfig:
             raw_claims={},
         ),
     )
-    return OAuthConfig(service=_ExampleOAuthService(provider_name), providers=(provider,))
+    return OAuthConfig(oauth_service=_ExampleOAuthService(provider_name), providers=(provider,))
 
 
 def build_api_team_config() -> tuple[APIKeyConfig, ServiceTokenConfig]:

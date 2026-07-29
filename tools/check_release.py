@@ -21,12 +21,12 @@ from importlib.resources import files
 from pkgutil import walk_packages
 
 from litestar import Litestar, get
+from litestar.di import NamedDependency
 from litestar.openapi.config import OpenAPIConfig
 from litestar.testing import TestClient
 
 import litestar_security
 from litestar_security import Principal, SecurityConfig, SecurityPlugin
-from litestar_security.plugin import PrincipalDependency
 from litestar_security.providers.api_key import APIKeyClaims, APIKeyConfig
 from litestar_security.testing import (
     InMemorySecurityBackend,
@@ -53,7 +53,7 @@ api_key = APIKeyConfig(store=backend.api_keys, pepper=b"p" * 32, identity_resolv
 issued = asyncio.run(api_key.build()[2].issue(subject_id="release-actor"))
 
 @get("/protected")
-async def protected(principal: PrincipalDependency[object]) -> dict[str, str]:
+async def protected(principal: NamedDependency[Principal[object]]) -> dict[str, str]:
     return {"principal": principal.id or ""}
 
 app = Litestar(

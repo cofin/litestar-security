@@ -300,8 +300,8 @@ def build_api_key_runtime(  # noqa: PLR0913 - explicit runtime dependencies are 
         scheme_name="APIKey",
         security_scheme=SecurityScheme(type="apiKey", name=config.header_name, security_scheme_in="header"),
     )
-    service = APIKeyService(config=config, codec=codec, clock=clock, usage=usage)
-    return slot, mechanism, service
+    api_key_service = APIKeyService(config=config, codec=codec, clock=clock, usage=usage)
+    return slot, mechanism, api_key_service
 
 
 def _runtime_store(config: APIKeyConfig) -> APIKeyStore:

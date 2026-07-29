@@ -199,7 +199,7 @@ class MFAConfig:
     route_prefix: str = "/auth"
     issuer: str = "Litestar Security"
     register_routes: bool = True
-    service: object = field(init=False, repr=False, compare=False)
+    mfa_service: object = field(init=False, repr=False, compare=False)
     step_up_service: object | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -210,7 +210,7 @@ class MFAConfig:
             StepUpStore,
         )
 
-        service_kwargs: dict[str, object] = {
+        mfa_service_kwargs: dict[str, object] = {
             "store": self.store,
             "secret_protector": self.secret_protector,
             "issuer": self.issuer,
@@ -218,10 +218,10 @@ class MFAConfig:
             "login_methods": self.login_methods,
         }
         if self.policy is not None:
-            service_kwargs["policy"] = self.policy
+            mfa_service_kwargs["policy"] = self.policy
         if self.events is not None:
-            service_kwargs["events"] = self.events
-        object.__setattr__(self, "service", MFAService(**cast("Any", service_kwargs)))
+            mfa_service_kwargs["events"] = self.events
+        object.__setattr__(self, "mfa_service", MFAService(**cast("Any", mfa_service_kwargs)))
         step_up_store = self.step_up_store if self.step_up_store is not None else self.store
         object.__setattr__(
             self,
@@ -257,7 +257,7 @@ class PasskeyConfig:
     step_up_store: object | None = field(default=None, repr=False)
     route_prefix: str = "/auth"
     register_routes: bool = True
-    service: object = field(init=False, repr=False, compare=False)
+    passkey_service: object = field(init=False, repr=False, compare=False)
     step_up_service: object | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -270,7 +270,7 @@ class PasskeyConfig:
 
         object.__setattr__(self, "origins", tuple(self.origins))
         object.__setattr__(self, "algorithms", tuple(self.algorithms))
-        service_kwargs = {
+        passkey_service_kwargs = {
             "store": self.store,
             "challenge_store": self.challenge_store,
             "rp_id": self.rp_id,
@@ -284,8 +284,8 @@ class PasskeyConfig:
             "login_methods": self.login_methods,
         }
         if self.events is not None:
-            service_kwargs["events"] = self.events
-        object.__setattr__(self, "service", PasskeyService(**cast("Any", service_kwargs)))
+            passkey_service_kwargs["events"] = self.events
+        object.__setattr__(self, "passkey_service", PasskeyService(**cast("Any", passkey_service_kwargs)))
         object.__setattr__(
             self,
             "step_up_service",
