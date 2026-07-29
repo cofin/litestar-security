@@ -61,6 +61,30 @@ jobs:
           --cov-report=term-missing
           --cov-report=xml
 
+      - name: Build and smoke-test installed wheel
+        run: |
+          uv build --wheel --out-dir /tmp/litestar-security-dist
+          uv venv --python "$PYTHON_VERSION" /tmp/litestar-security-wheel
+          uv pip install --python /tmp/litestar-security-wheel/bin/python /tmp/litestar-security-dist/*.whl
+          cd /tmp
+          /tmp/litestar-security-wheel/bin/python -I - <<'PY'
+          from importlib.resources import files
+          from pkgutil import walk_packages
+          import importlib
+          import sys
+
+          import litestar_security
+
+          for module in walk_packages(litestar_security.__path__, "litestar_security."):
+              if not any(part.startswith("_") for part in module.name.split(".")):
+                  importlib.import_module(module.name)
+
+          assert litestar_security.__version__ == "1.0.0"
+          assert files("litestar_security").joinpath("py.typed").is_file()
+          assert "pytest" not in sys.modules
+          PY
+          /tmp/litestar-security-wheel/bin/litestar security --version
+
       - name: Upload coverage artifact
         if: ${{ inputs.coverage }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

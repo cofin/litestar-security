@@ -136,8 +136,7 @@ def test_nonce_csp_dependency_matches_fresh_response_header() -> None:
             default_policy=public(),
             headers=SecurityHeadersConfig(
                 csp=ContentSecurityPolicy(
-                    directives={"default-src": ("'self'",), "script-src": ("'self'",)},
-                    nonce_directives=("script-src",),
+                    directives={"default-src": ("'self'",), "script-src": ("'self'",)}, nonce_directives=("script-src",)
                 )
             ),
         )
@@ -155,6 +154,62 @@ def test_nonce_csp_dependency_matches_fresh_response_header() -> None:
     assert f"'nonce-{first_nonce}'" in first.headers["content-security-policy"]
     assert f"'nonce-{second_nonce}'" in second.headers["content-security-policy"]
     assert len(app.before_send) == 1
+
+
+def test_security_headers_reject_application_ownership_collisions() -> None:
+    static_plugin = SecurityPlugin[object](
+        SecurityConfig[object](
+            default_policy=public(), headers=SecurityHeadersConfig(static={"X-Content-Type-Options": "nosniff"})
+        )
+    )
+    with pytest.raises(ImproperlyConfiguredException, match="Application response header conflicts"):
+        static_plugin.on_app_init(AppConfig(response_headers={"X-Content-Type-Options": "unsafe"}))
+
+    matching = static_plugin.on_app_init(AppConfig(response_headers={"X-Content-Type-Options": "nosniff"}))
+    assert len(matching.response_headers) == 1
+
+    nonce_plugin = SecurityPlugin[object](
+        SecurityConfig[object](
+            default_policy=public(),
+            headers=SecurityHeadersConfig(
+                csp=ContentSecurityPolicy(directives={"script-src": ("'self'",)}, nonce_directives=("script-src",))
+            ),
+        )
+    )
+    with pytest.raises(ImproperlyConfiguredException, match=r"already owns.*csp_nonce"):
+        nonce_plugin.on_app_init(
+            AppConfig(dependencies={"csp_nonce": Provide(lambda: "application", sync_to_thread=False)})
+        )
+
+
+@pytest.mark.anyio
+async def test_nonce_csp_hook_is_idempotent_and_rejects_response_conflicts() -> None:
+    plugin = SecurityPlugin[object](
+        SecurityConfig[object](
+            default_policy=public(),
+            headers=SecurityHeadersConfig(
+                csp=ContentSecurityPolicy(directives={"script-src": ("'self'",)}, nonce_directives=("script-src",))
+            ),
+        )
+    )
+    app_config = plugin.on_app_init(AppConfig())
+    assert plugin.on_app_init(app_config) is app_config
+    assert len(app_config.before_send) == 1
+    hook = app_config.before_send[0]
+    scope = cast("Any", {"type": "http"})
+
+    await hook(cast("Any", {"type": "http.response.body"}), scope)
+    message = cast("Any", {"type": "http.response.start", "headers": []})
+    await hook(message, scope)
+    header = message["headers"][0]
+    message["headers"].append(header)
+    await hook(message, scope)
+    assert message["headers"] == [header]
+
+    message["headers"][0] = (header[0], b"script-src 'none'")
+    with pytest.raises(ImproperlyConfiguredException, match="conflicting Content-Security-Policy"):
+        await hook(message, scope)
+
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -3174,7 +3229,7 @@ def test_cli_entry_point_and_lazy_plugin_registration() -> None:
     ("arguments", "expected"),
     [
         (["security", "--help"], "Litestar Security operations."),
-        (["security", "--version"], "litestar-security, version 0.1.0"),
+        (["security", "--version"], "litestar-security, version 1.0.0"),
     ],
 )
 def test_cli_output(arguments: list[str], expected: str) -> None:

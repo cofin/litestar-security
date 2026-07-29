@@ -1,7 +1,5 @@
 """Opt-in browser response security headers for Litestar applications."""
 
-from __future__ import annotations
-
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -157,7 +155,7 @@ class SecurityHeadersConfig:
 
 
 def configure_security_headers(
-    app_config: AppConfig, config: SecurityHeadersConfig, hook: CSPHook | None = None
+    app_config: "AppConfig", config: SecurityHeadersConfig, hook: CSPHook | None = None
 ) -> CSPHook | None:
     """Install validated headers through native Litestar configuration.
 
@@ -181,10 +179,11 @@ def configure_security_headers(
     if csp is None or not csp.nonce_directives:
         return None
     existing_dependency = app_config.dependencies.get("csp_nonce")
-    if existing_dependency is not None:
+    if existing_dependency is not None and hook is None:
         message = "Application config already owns the reserved 'csp_nonce' dependency"
         raise ImproperlyConfiguredException(detail=message)
-    app_config.dependencies["csp_nonce"] = Provide(_provide_csp_nonce, sync_to_thread=False, use_cache=False)
+    if existing_dependency is None:
+        app_config.dependencies["csp_nonce"] = Provide(_provide_csp_nonce, sync_to_thread=False, use_cache=False)
     app_config.signature_namespace.setdefault("csp_nonce", csp_nonce)
     nonce_hook = hook if hook is not None else _create_csp_hook(csp)
     if nonce_hook not in app_config.before_send:
@@ -225,7 +224,7 @@ def _create_csp_hook(policy: ContentSecurityPolicy) -> CSPHook:
     return add_csp_header
 
 
-def _merge_native_headers(app_config: AppConfig, configured: Mapping[str, str]) -> None:
+def _merge_native_headers(app_config: "AppConfig", configured: Mapping[str, str]) -> None:
     current = app_config.response_headers
     headers = (
         [ResponseHeader(name=name, value=value) for name, value in current.items()]

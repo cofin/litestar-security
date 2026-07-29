@@ -132,6 +132,12 @@ property:                                           ## Run deterministic propert
 	@uv run pytest src/tests/property
 	@echo "${OK} Property tests passed 🧪"
 
+.PHONY: examples
+examples:                                           ## Run the runnable example applications
+	@echo "${INFO} Running example applications... 🧪"
+	@uv run pytest src/tests/examples
+	@echo "${OK} Example applications passed 🧪"
+
 .PHONY: benchmark
 benchmark:                                          ## Run deterministic local performance regression gates
 	@echo "${INFO} Running performance regression gates... 📊"
@@ -146,6 +152,12 @@ downstream-check:                                   ## Verify the installed whee
 	@echo "${INFO} Checking downstream consumer compatibility... 📦"
 	@uv run python tools/check_downstream_consumer.py
 	@echo "${OK} Downstream consumer compatibility passed 📦"
+
+.PHONY: release-smoke
+release-smoke:                                      ## Verify release archives and installed wheels on every supported Python
+	@echo "${INFO} Checking release archives and installed wheels... 📦"
+	@uv run python tools/check_release.py
+	@echo "${OK} Release archive and wheel checks passed 📦"
 
 .PHONY: coverage
 coverage:                                           ## Run the test suite with branch coverage
@@ -214,3 +226,6 @@ lint: prek type-check slotscheck zizmor              ## Run all linting checks
 
 .PHONY: check-all
 check-all: lint test-all property coverage docs docs-linkcheck downstream-check build ## Run all checks
+
+.PHONY: release-check
+release-check: property downstream-check examples benchmark check-all release-smoke ## Run every local 1.0 release gate
