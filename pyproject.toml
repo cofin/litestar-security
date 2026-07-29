@@ -109,7 +109,10 @@ tests = [
   "coverage[toml]",
   "pytest",
   "pytest-cov",
+  { include-group = "property" },
 ]
+property = ["hypothesis"]
+benchmark = ["pytest-benchmark"]
 lint = [
   "codespell",
   "mypy",
@@ -122,6 +125,7 @@ dev = [
   { include-group = "build" },
   { include-group = "docs" },
   { include-group = "tests" },
+  { include-group = "benchmark" },
   { include-group = "lint" },
 ]
 
@@ -131,7 +135,7 @@ dev = [
 [tool.pytest.ini_options]
 addopts = ["-ra", "--strict-config", "--strict-markers"]
 markers = ["performance: deterministic local regression gates excluded from the normal suite"]
-norecursedirs = ["src/tests/fixtures"]
+norecursedirs = [".hypothesis", "src/tests/fixtures"]
 pythonpath = ["."]
 testpaths = ["src/tests"]
 

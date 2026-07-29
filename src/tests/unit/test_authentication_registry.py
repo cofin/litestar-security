@@ -10,7 +10,6 @@ from collections.abc import Set as AbstractSet
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 from math import inf, nan
-from pathlib import Path
 from threading import Event as ThreadEvent
 from threading import Lock as ThreadLock
 from time import perf_counter, perf_counter_ns, sleep
@@ -873,8 +872,19 @@ def _jwks_entry(
 
 
 def _jwks_performance_baseline() -> dict[str, Any]:
-    baseline_path = Path(__file__).parents[3] / "benchmarks" / "jwks-runtime-v1.json"
-    return cast("dict[str, Any]", json.loads(baseline_path.read_text(encoding="utf-8")))
+    return {
+        "schema_version": 1,
+        "benchmark": "jwks-runtime-foundation",
+        "interpretation": "relative regression gates; not absolute cross-machine claims",
+        "budgets": {
+            "fresh_hit_p95_ratio": {
+                "comparison": "fresh_selection_and_verify/direct_lookup_and_verify",
+                "maximum": 1.2,
+            },
+            "sync_ticker_delay_p95_ms": {"comparison": "event_loop_tick_overshoot", "maximum": 10.0},
+        },
+        "observed": {"fresh_hit_p95_ratio": 1.2, "sync_ticker_delay_p95_ms": 10.0},
+    }
 
 
 _PERFORMANCE_TRIALS = 3

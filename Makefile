@@ -126,11 +126,20 @@ test:                                               ## Run the test suite
 .PHONY: test-all
 test-all: test                                      ## Run all tests
 
-.PHONY: performance
-performance:                                        ## Run deterministic local performance regression gates
+.PHONY: property
+property:                                           ## Run deterministic property and fuzz regression tests
+	@echo "${INFO} Running property tests... 🧪"
+	@uv run pytest src/tests/property
+	@echo "${OK} Property tests passed 🧪"
+
+.PHONY: benchmark
+benchmark:                                          ## Run deterministic local performance regression gates
 	@echo "${INFO} Running performance regression gates... 📊"
 	@uv run pytest -m performance
 	@echo "${OK} Performance regression gates passed 📊"
+
+.PHONY: performance
+performance: benchmark                              ## Alias for deterministic performance regression gates
 
 .PHONY: downstream-check
 downstream-check:                                   ## Verify the installed wheel from an isolated downstream package
@@ -204,4 +213,4 @@ lint: prek type-check slotscheck zizmor              ## Run all linting checks
 # =============================================================================
 
 .PHONY: check-all
-check-all: lint test-all coverage docs docs-linkcheck downstream-check build ## Run the complete validation suite
+check-all: lint test-all property coverage docs docs-linkcheck downstream-check build ## Run all checks
