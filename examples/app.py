@@ -104,7 +104,7 @@ def create_app() -> Litestar:
         route_handlers=route_handlers,
         csrf_config=CSRFConfig(secret=token_hex()) if session_config is not None else None,
         middleware=[session_config.middleware] if session_config is not None else None,
-        openapi_config=OpenAPIConfig(title=f"Litestar Security: {mode}", version="1.0.0"),
+        openapi_config=OpenAPIConfig(title=f"Litestar Security: {mode}", version="0.1.0"),
         opt={"auth": public()},
         plugins=[SecurityPlugin[object](config)],
     )

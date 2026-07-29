@@ -79,7 +79,7 @@ jobs:
               if not any(part.startswith("_") for part in module.name.split(".")):
                   importlib.import_module(module.name)
 
-          assert litestar_security.__version__ == "1.0.0"
+          assert litestar_security.__version__ == "0.1.0"
           assert files("litestar_security").joinpath("py.typed").is_file()
           assert "pytest" not in sys.modules
           PY
