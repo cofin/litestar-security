@@ -2271,11 +2271,7 @@ def test_csrf_config_is_application_owned_and_route_override_is_strict() -> None
         Litestar(
             route_handlers=[excluded_session],
             csrf_config=configured,
-            plugins=[
-                SecurityPlugin(
-                    _compiler_config(names=("session",), session_names=frozenset({"session"}))
-                )
-            ],
+            plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
         )
 
 

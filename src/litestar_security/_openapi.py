@@ -16,7 +16,6 @@ from litestar.handlers.base import BaseRouteHandler
 from litestar.handlers.http_handlers import HTTPRouteHandler
 from litestar.openapi.config import OpenAPIConfig
 from litestar.openapi.spec import Components, Reference, SecurityRequirement, SecurityScheme, Tag
-from litestar.router import Router
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 
 from litestar_security.authentication import (
@@ -320,7 +319,7 @@ class RouteCompiler(Generic[UserT]):
         if self._is_generated_options(route_handler):
             policy = public()
             csrf_override = False
-        elif self._is_openapi_handler(route, route_handler):
+        elif self._is_openapi_handler(route):
             policy = self._nearest_non_application_policy(route, route_handler) or public()
             csrf_override = self._http_csrf_override(route, route_handler)
         else:
@@ -352,10 +351,6 @@ class RouteCompiler(Generic[UserT]):
             and any(requirement.name == name for alternative in base_plan.alternatives for requirement in alternative)
         )
         derived = bool(session_names)
-        if csrf_override is False and derived:
-            self._raise_route_error(
-                route, route_handler, f"CSRF cannot be excluded from session-capable mechanism {session_names[0]}"
-            )
         effective = derived if csrf_override is None else csrf_override
         return self._compile_policy(route, route_handler, policy, csrf_required=effective)
 
@@ -448,7 +443,7 @@ class RouteCompiler(Generic[UserT]):
         for layer in reversed(route_handler.ownership_layers):
             layer_opt = getattr(layer, "opt", None)
             if not isinstance(layer_opt, Mapping):
-                continue
+                continue  # pragma: no cover - Litestar ownership layers expose opt as mappings
             policy = self._policy_from_opt(route, route_handler, cast("Mapping[str, object]", layer_opt))
             if policy is not None:
                 return policy
@@ -460,7 +455,7 @@ class RouteCompiler(Generic[UserT]):
         for layer in reversed(route_handler.ownership_layers[1:-1]):
             layer_opt = getattr(layer, "opt", None)
             if not isinstance(layer_opt, Mapping):
-                continue
+                continue  # pragma: no cover - Litestar ownership layers expose opt as mappings
             policy = self._policy_from_opt(route, route_handler, cast("Mapping[str, object]", layer_opt))
             if policy is not None:
                 return policy
@@ -497,7 +492,7 @@ class RouteCompiler(Generic[UserT]):
             if isinstance(layer_opt, Mapping) and CSRF_REQUIRED_OPT_KEY in layer_opt:
                 self._raise_route_error(route, route_handler, "csrf_required is supported only on HTTP routes")
 
-    def _is_openapi_handler(self, route: HTTPRoute, route_handler: BaseRouteHandler) -> bool:
+    def _is_openapi_handler(self, route: HTTPRoute) -> bool:
         if self.openapi_config is None:
             return False
         configured_router = self.openapi_config.openapi_router
@@ -509,12 +504,7 @@ class RouteCompiler(Generic[UserT]):
             if configured_controller is not None
             else self.openapi_config.path or "/schema"
         )
-        if route.path == base_path or route.path.startswith(f"{base_path}/"):
-            return True
-        for layer in route_handler.ownership_layers[1:]:
-            if isinstance(layer, Router) and layer.path == base_path:
-                return True
-        return False
+        return route.path == base_path or route.path.startswith(f"{base_path}/")
 
     def _attach_openapi_security(
         self, route: HTTPRoute, route_handler: HTTPRouteHandler, plan: SecurityRuntimePlan

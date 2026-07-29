@@ -1205,6 +1205,7 @@ def test_policy_helpers_are_immutable_hashable_and_deterministic() -> None:
     ("factory", "match"),
     [
         (AuthenticationPolicy, "policy helper"),
+        (lambda: optional(object()), "policy helper"),  # type: ignore[arg-type]  # test invalid runtime input
         (lambda: mechanism(" "), "mechanism name"),
         (lambda: mechanism("oidc", " "), "scope"),
         (lambda: mechanism("oidc", "read", " read "), "Duplicate scope"),
