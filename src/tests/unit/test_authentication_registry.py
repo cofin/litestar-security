@@ -8743,8 +8743,8 @@ async def test_local_auth_passkey_login_selects_only_configured_transport() -> N
 
     def services(
         *, session_auth: object | None, refresh_tokens: object | None
-    ) -> accounts_module.LocalAuthServices[Any]:
-        return accounts_module.LocalAuthServices(
+    ) -> accounts_module.LocalAuthService[Any]:
+        return accounts_module.LocalAuthService(
             accounts=cast("Any", accounts),
             password_login=cast("Any", object()),
             password_reauthentication=cast("Any", object()),
@@ -8855,7 +8855,7 @@ async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
             return self.value
 
     epochs = Epochs()
-    services = mfa_controllers_module._MFAFeatureServices(  # noqa: SLF001
+    services = mfa_controllers_module._MFAFeatureService(  # noqa: SLF001
         mfa=None,
         passkeys=None,
         step_up=cast("Any", object()),
@@ -8873,7 +8873,7 @@ async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
     epochs.value = OSError()
     assert isinstance(
         await mfa_controllers_module._consume_step_up(  # noqa: SLF001
-            services=services, request=request, account_id="account-1", purpose="settings", grant="grant"
+            mfa_service=services, request=request, account_id="account-1", purpose="settings", grant="grant"
         ),
         VerificationUnavailable,
     )
@@ -9057,12 +9057,12 @@ def test_mfa_and_passkey_feature_configs_build_services_and_validate_route_contr
         route_prefix="/security/",
         register_routes=False,
     )
-    assert isinstance(mfa.service, accounts_module.MFAService)
+    assert isinstance(mfa.mfa_service, accounts_module.MFAService)
     assert isinstance(mfa.step_up_service, accounts_module.StepUpService)
-    assert mfa.service.policy is policy
-    assert mfa.service.recovery_peppers == (pepper,)
-    assert mfa.service.login_methods is login_methods
-    assert mfa.service.events is events
+    assert mfa.mfa_service.policy is policy
+    assert mfa.mfa_service.recovery_peppers == (pepper,)
+    assert mfa.mfa_service.login_methods is login_methods
+    assert mfa.mfa_service.events is events
     assert mfa.route_prefix == "/security"
 
     passkeys = PasskeyConfig(
@@ -9075,10 +9075,10 @@ def test_mfa_and_passkey_feature_configs_build_services_and_validate_route_contr
         step_up_store=_StepUpStore(),
         register_routes=False,
     )
-    assert isinstance(passkeys.service, accounts_module.PasskeyService)
+    assert isinstance(passkeys.passkey_service, accounts_module.PasskeyService)
     assert isinstance(passkeys.step_up_service, accounts_module.StepUpService)
-    assert passkeys.service.login_methods is login_methods
-    assert passkeys.service.events is events
+    assert passkeys.passkey_service.login_methods is login_methods
+    assert passkeys.passkey_service.events is events
 
     with pytest.raises(ImproperlyConfiguredException, match="recovery-code pepper"):
         MFAConfig(store=combined, secret_protector=_MFAProtector())
@@ -10917,7 +10917,7 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
         logout=AsyncOutcome(bool(0)),
     )
     accounts = SimpleNamespace(get_by_id=AsyncOutcome(account, OSError(), None))
-    services = accounts_module.LocalAuthServices(
+    services = accounts_module.LocalAuthService(
         accounts=cast("Any", accounts),
         password_login=cast("Any", SimpleNamespace(authenticate=AsyncOutcome(InvalidCredentials(), account, account))),
         password_reauthentication=cast(

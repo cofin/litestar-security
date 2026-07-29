@@ -24,7 +24,7 @@ class _SessionLogout(Protocol):
 
 
 @runtime_checkable
-class _VerifiedLocalAuthServices(Protocol):
+class _VerifiedLocalAuthService(Protocol):
     session_auth: _SessionLogout | None
     refresh_tokens: object | None
 
@@ -42,19 +42,19 @@ class _VerifiedLocalAuthServices(Protocol):
 class OAuthLocalAuthTransport:
     """Establish session, token, or hybrid local credentials after OAuth login."""
 
-    services: _VerifiedLocalAuthServices = field(repr=False)
+    local_auth_service: _VerifiedLocalAuthService = field(repr=False)
     transport: str | None = None
     token_logout: Callable[[str], Awaitable[None]] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Require an explicit valid local transport selection."""
         if (
-            not isinstance(cast("object", self.services), _VerifiedLocalAuthServices)
+            not isinstance(cast("object", self.local_auth_service), _VerifiedLocalAuthService)
             or self.transport not in {None, "session", "tokens"}
             or (self.token_logout is not None and not callable(self.token_logout))
-            or (self.transport == "session" and self.services.session_auth is None)
-            or (self.transport == "tokens" and self.services.refresh_tokens is None)
-            or (self.services.refresh_tokens is not None and self.token_logout is None)
+            or (self.transport == "session" and self.local_auth_service.session_auth is None)
+            or (self.transport == "tokens" and self.local_auth_service.refresh_tokens is None)
+            or (self.local_auth_service.refresh_tokens is not None and self.token_logout is None)
         ):
             message = "OAuth local authentication transport is invalid"
             raise ImproperlyConfiguredException(detail=message)
@@ -68,7 +68,7 @@ class OAuthLocalAuthTransport:
         authenticated_at: datetime,
     ) -> OAuthRouteResponse | Response[Any]:
         """Establish the selected local transport with normalized OAuth evidence."""
-        result = await self.services.verified_login(
+        result = await self.local_auth_service.verified_login(
             request,
             account_id,
             transport=self.transport,
@@ -93,8 +93,8 @@ class OAuthLocalAuthTransport:
     async def logout(self, *, account_id: str, request: Request[Any, Any, Any]) -> None:
         """Invalidate every configured local transport independently."""
         unavailable = False
-        if self.services.session_auth is not None:
-            result = await self.services.session_auth.logout(request)
+        if self.local_auth_service.session_auth is not None:
+            result = await self.local_auth_service.session_auth.logout(request)
             unavailable = isinstance(result, VerificationUnavailable)
         if self.token_logout is not None:
             try:

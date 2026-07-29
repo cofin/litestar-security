@@ -12,17 +12,18 @@ Add the plugin and mark public routes explicitly:
 .. code-block:: python
 
    from litestar import Litestar, get
+   from litestar.di import NamedDependency
 
    from litestar_security import (
        SecurityConfig,
-       SecurityContextDependency,
+       SecurityContext,
        SecurityPlugin,
        public,
    )
 
 
    @get("/", auth=public(), sync_to_thread=False)
-   def index(security_context: SecurityContextDependency) -> dict[str, bool]:
+   def index(security_context: NamedDependency[SecurityContext]) -> dict[str, bool]:
        return {"authenticated": bool(security_context.evidence)}
 
 

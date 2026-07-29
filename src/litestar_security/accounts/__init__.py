@@ -70,7 +70,7 @@ from litestar_security.accounts._profiles import (
     LocalAuth,
     LocalAuthConfig,
     LocalAuthSecrets,
-    LocalAuthServices,
+    LocalAuthService,
     trusted_client_key,
 )
 from litestar_security.accounts._purpose_tokens import (
@@ -217,7 +217,7 @@ __all__ = (
     "LocalAuthConfig",
     "LocalAuthMode",
     "LocalAuthSecrets",
-    "LocalAuthServices",
+    "LocalAuthService",
     "LocalBearerIdentityResolver",
     "LocalCredentials",
     "LocalIdentifierRequest",

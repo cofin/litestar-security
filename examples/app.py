@@ -8,6 +8,7 @@ from typing import Any
 
 from litestar import Controller, Litestar, WebSocket, get, post, websocket
 from litestar.config.csrf import CSRFConfig
+from litestar.di import NamedDependency  # noqa: TC002 - Litestar resolves handler annotations at runtime
 from litestar.openapi import OpenAPIConfig
 
 from examples.support import (
@@ -18,7 +19,7 @@ from examples.support import (
     build_websocket_config,
     example_session_config,
 )
-from litestar_security import SecurityConfig, SecurityContextDependency, SecurityPlugin, any_of, public, required
+from litestar_security import SecurityConfig, SecurityContext, SecurityPlugin, any_of, public, required
 from litestar_security.guards import requires_role
 
 __all__ = ("EXAMPLE_MODES", "create_app")
@@ -39,7 +40,7 @@ EXAMPLE_MODES = (
 
 
 @get("/", auth=public(), sync_to_thread=False)
-def example_home(security_context: SecurityContextDependency) -> dict[str, object]:
+def example_home(security_context: NamedDependency[SecurityContext]) -> dict[str, object]:
     """Describe the active request-local security boundary."""
     return {"authenticated": bool(security_context.evidence), "session": type(security_context.session).__name__}
 

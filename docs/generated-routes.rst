@@ -110,7 +110,7 @@ Turning them off
 ================
 
 Pass ``register_routes=False`` to build the services without the route tree, and
-mount your own controllers against ``local_auth.services``:
+mount your own controllers against ``local_auth.local_auth_service``:
 
 .. code-block:: python
 

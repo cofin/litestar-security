@@ -117,7 +117,7 @@ if TYPE_CHECKING:
     from litestar.connection import ASGIConnection
     from litestar.types import ASGIApp, Message, Receive, Scope, Send
 
-    from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency
+    from litestar_security.plugin import CurrentUser
 
 _NOW = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -583,7 +583,7 @@ def test_dependency_providers_are_non_threaded_and_request_local(empty_security_
 def test_anonymous_dependency_injection_is_typed() -> None:
     @get("/")
     async def handler(
-        principal: PrincipalDependency[_DependencyUser], security_context: SecurityContextDependency
+        principal: NamedDependency[Principal[_DependencyUser]], security_context: NamedDependency[SecurityContext]
     ) -> dict[str, bool]:
         return {
             "anonymous": not principal.is_authenticated,
@@ -1972,7 +1972,7 @@ def test_authenticated_dependency_injection_for_user_and_service_principals(
 ) -> None:
     @get("/principal")
     async def principal_handler(
-        principal: PrincipalDependency[_DependencyUser], security_context: SecurityContextDependency
+        principal: NamedDependency[Principal[_DependencyUser]], security_context: NamedDependency[SecurityContext]
     ) -> dict[str, object]:
         return {"id": principal.id, "has_user": principal.has_user, "evidence": security_context.evidence[0].mechanism}
 

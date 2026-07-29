@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from litestar import Controller, Litestar, Router, get
+from litestar.di import NamedDependency  # noqa: TC002 - Litestar resolves handler annotations at runtime
 from typing_extensions import assert_type
 
 from litestar_security import (
@@ -14,9 +15,7 @@ from litestar_security import (
     LitestarSessionHandle,
     NullSessionHandle,
     Principal,
-    PrincipalDependency,
     SecurityContext,
-    SecurityContextDependency,
     all_of,
     any_of,
     guard_any_of,
@@ -39,7 +38,9 @@ class User:
     id: str
 
 
-async def handler(principal: PrincipalDependency[User], security_context: SecurityContextDependency) -> None:
+async def handler(
+    principal: NamedDependency[Principal[User]], security_context: NamedDependency[SecurityContext]
+) -> None:
     """Use one signature for every principal/session state."""
     assert_type(principal, Principal[User])
     assert_type(security_context, SecurityContext)
@@ -51,10 +52,10 @@ def narrow_current_user(current_user: CurrentUser[User], principal: Principal[Us
     assert_type(principal.user, User | None)
 
 
-anonymous: PrincipalDependency[User] = Principal[User].anonymous()
-no_session: SecurityContextDependency = SecurityContext(session=NullSessionHandle())
+anonymous: Principal[User] = Principal[User].anonymous()
+no_session: SecurityContext = SecurityContext(session=NullSessionHandle())
 native_scope = cast("Scope", {"type": "http", "session": {}})
-native_session: SecurityContextDependency = SecurityContext(session=LitestarSessionHandle(native_scope))
+native_session: SecurityContext = SecurityContext(session=LitestarSessionHandle(native_scope))
 
 authorization_guard: AuthorizationPredicate = guard_any_of(requires_authenticated(), requires_scope("reports:read"))
 public_metadata = {"auth": public()}

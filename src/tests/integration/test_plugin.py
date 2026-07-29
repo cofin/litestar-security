@@ -83,7 +83,7 @@ from litestar_security.authentication import (
 from litestar_security.config import ExternalCSRF
 from litestar_security.context import AuthenticationEvidence, Principal, SecurityContext
 from litestar_security.headers import ContentSecurityPolicy, SecurityHeadersConfig
-from litestar_security.plugin import CurrentUser, PrincipalDependency, SecurityContextDependency
+from litestar_security.plugin import CurrentUser
 from litestar_security.providers.api_key import APIKeyConfig
 from litestar_security.providers.iap import GoogleIAPConfig
 from litestar_security.providers.jwt import (
@@ -382,6 +382,7 @@ def test_generated_mfa_route_bundle_has_exact_paths_policies_and_secret_free_ope
         mfa=cast("Any", object()),
         passkeys=cast("Any", object()),
     )
+    assert set(router.dependencies) == {"mfa_service"}
     app = Litestar(
         route_handlers=[router],
         csrf_config=CSRFConfig(secret=token_hex()),
@@ -1860,8 +1861,8 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
     plugin._configure_local_auth_rate_limits(app_config)  # noqa: SLF001
     plugin._configure_local_auth_rate_limits(app_config)  # noqa: SLF001
     assert len(app_config.lifespan) == 1
-    provider = cast("Provide", local_auth.build_route_handlers()[0].dependencies["local_auth_services"])
-    assert provider.dependency() is local_auth.services
+    provider = cast("Provide", local_auth.build_route_handlers()[0].dependencies["local_auth_service"])
+    assert provider.dependency() is local_auth.local_auth_service
 
 
 def test_generated_local_routes_are_grouped_documented_and_uniquely_identified(
@@ -1945,7 +1946,7 @@ def test_custom_local_controllers_keep_services_without_generated_routes(
     )
 
     assert local_auth.build_route_handlers() == ()
-    assert local_auth.services.password_login is local_auth.password_login
+    assert local_auth.local_auth_service.password_login is local_auth.password_login
     assert not any(path.startswith("/auth") for path in app.openapi_schema.paths)
 
 
@@ -2544,13 +2545,7 @@ def test_plugin_registers_runtime_contract_idempotently() -> None:
     assert len(middleware) == 1
     assert isinstance(middleware[0], DefineMiddleware)
     assert middleware[0].middleware is SecurityMiddlewareWrapper
-    assert namespace == {
-        "CurrentUser": CurrentUser,
-        "Principal": Principal,
-        "PrincipalDependency": PrincipalDependency,
-        "SecurityContext": SecurityContext,
-        "SecurityContextDependency": SecurityContextDependency,
-    }
+    assert namespace == {"CurrentUser": CurrentUser, "Principal": Principal, "SecurityContext": SecurityContext}
 
     assert plugin.on_app_init(app_config) is app_config
     assert app_config.dependencies == providers
