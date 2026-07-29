@@ -132,6 +132,7 @@ dev = [
 addopts = ["-ra", "--strict-config", "--strict-markers"]
 markers = ["performance: deterministic local regression gates excluded from the normal suite"]
 norecursedirs = ["src/tests/fixtures"]
+pythonpath = ["."]
 testpaths = ["src/tests"]
 
 [tool.coverage.run]
