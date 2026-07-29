@@ -28,7 +28,11 @@ import litestar_security
 from litestar_security import Principal, SecurityConfig, SecurityPlugin
 from litestar_security.plugin import PrincipalDependency
 from litestar_security.providers.api_key import APIKeyClaims, APIKeyConfig
-from litestar_security.testing import InMemorySecurityBackend, StoreConformanceFactories, assert_security_backend_conformance
+from litestar_security.testing import (
+    InMemorySecurityBackend,
+    StoreConformanceFactories,
+    assert_security_backend_conformance,
+)
 
 for module in walk_packages(litestar_security.__path__, "litestar_security."):
     if not any(part.startswith("_") for part in module.name.split(".")):
