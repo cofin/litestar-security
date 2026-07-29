@@ -10,16 +10,13 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 from anyio import CapacityLimiter, to_thread
-from litestar.config.csrf import CSRFConfig
 from litestar.exceptions import ImproperlyConfiguredException
-from litestar.middleware.session.base import BaseSessionBackend
 
 from litestar_security.authentication import (
     AuthenticationMechanism,
     AuthenticationPolicy,
     AuthorizationResolver,
     CredentialSlot,
-    required,
 )
 from litestar_security.headers import SecurityHeadersConfig
 from litestar_security.websocket import WebSocketSecurityConfig
@@ -326,13 +323,9 @@ class SecurityConfig(Generic[UserT]):
 
     slots: Sequence[CredentialSlot[Any]] = ()
     mechanisms: Sequence[AuthenticationMechanism[Any, Any, UserT]] = ()
-    default_policy: AuthenticationPolicy = field(default_factory=required)
-    openapi_policy: AuthenticationPolicy | None = None
     max_openapi_combinations: int = 32
-    csrf_config: CSRFConfig | None = None
     external_csrf: ExternalCSRF | None = None
     require_default: bool = False
-    session_backend: BaseSessionBackend[Any] | None = None
     local_auth: "LocalAuthConfig[UserT] | None" = None
     local_jwks: "LocalJWKSConfig | None" = None
     oauth: "OAuthConfig | None" = None
@@ -352,20 +345,13 @@ class SecurityConfig(Generic[UserT]):
         if self.max_openapi_combinations < 1:
             msg = "max_openapi_combinations must be positive"
             raise ImproperlyConfiguredException(detail=msg)
-        csrf_config = cast("object | None", self.csrf_config)
         external_csrf = cast("object | None", self.external_csrf)
-        if csrf_config is not None and not isinstance(csrf_config, CSRFConfig):
-            msg = "Native CSRF configuration must be a Litestar CSRFConfig"
-            raise ImproperlyConfiguredException(detail=msg)
         if external_csrf is not None and not isinstance(external_csrf, ExternalCSRF):
             msg = "External CSRF configuration must be an ExternalCSRF assertion"
             raise ImproperlyConfiguredException(detail=msg)
         headers = cast("object | None", self.headers)
         if headers is not None and not isinstance(headers, SecurityHeadersConfig):
             msg = "Browser security headers must be a SecurityHeadersConfig"
-            raise ImproperlyConfiguredException(detail=msg)
-        if csrf_config is not None and external_csrf is not None:
-            msg = "Security configuration cannot combine native and external CSRF enforcement"
             raise ImproperlyConfiguredException(detail=msg)
         self.slots = tuple(self.slots)
         self.mechanisms = tuple(self.mechanisms)

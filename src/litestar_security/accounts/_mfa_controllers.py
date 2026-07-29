@@ -57,14 +57,7 @@ from litestar_security.accounts._records import (
     RevokeLoginMethodStatus,
 )
 from litestar_security.accounts._stores import SecurityEpochStore
-from litestar_security.authentication import (
-    InvalidCredentials,
-    VerificationUnavailable,
-    optional,
-    public,
-    required,
-    security,
-)
+from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, optional, public, required
 from litestar_security.context import AuthenticationEvidence, Principal
 
 __all__ = ("build_mfa_routes",)
@@ -226,12 +219,7 @@ async def _consume_step_up(
 class _StepUpController(Controller):
     tags = (_STEP_UP_TAG,)
 
-    @post(
-        "/step-up/{purpose:str}",
-        operation_id="SecurityStepUp",
-        status_code=HTTP_200_OK,
-        **security(required(), csrf_required=None),
-    )
+    @post("/step-up/{purpose:str}", operation_id="SecurityStepUp", status_code=HTTP_200_OK, auth=required())
     async def issue(  # noqa: PLR0911 - each authentication boundary has one explicit safe outcome
         self,
         purpose: FromPath[str],
@@ -303,7 +291,7 @@ class _StepUpController(Controller):
 class _MFAController(Controller):
     tags = (_MFA_TAG,)
 
-    @post("/mfa/totp/enroll", operation_id="MFAEnrollTOTP", **security(required(), csrf_required=None))
+    @post("/mfa/totp/enroll", operation_id="MFAEnrollTOTP", auth=required())
     async def enroll_totp(
         self,
         data: JSONBody[TOTPEnrollmentRequest],
@@ -341,7 +329,7 @@ class _MFAController(Controller):
             HTTP_201_CREATED,
         )
 
-    @post("/mfa/totp/verify", operation_id="MFAVerifyTOTPEnrollment", **security(required(), csrf_required=None))
+    @post("/mfa/totp/verify", operation_id="MFAVerifyTOTPEnrollment", auth=required())
     async def verify_totp(
         self,
         data: JSONBody[TOTPVerificationRequest],
@@ -362,12 +350,7 @@ class _MFAController(Controller):
             return _error(recovery)
         return _response(RecoveryCodesResponse(codes=recovery.codes))
 
-    @delete(
-        "/mfa/totp/{method_id:str}",
-        operation_id="MFARemoveTOTP",
-        status_code=HTTP_200_OK,
-        **security(required(), csrf_required=None),
-    )
+    @delete("/mfa/totp/{method_id:str}", operation_id="MFARemoveTOTP", status_code=HTTP_200_OK, auth=required())
     async def remove_totp(
         self,
         method_id: FromPath[str],
@@ -393,7 +376,7 @@ class _MFAController(Controller):
         result = await service.remove_totp_method(account_id, method_id)
         return _removal_response(result)
 
-    @post("/mfa/recovery-codes", operation_id="MFAReplaceRecoveryCodes", **security(required(), csrf_required=None))
+    @post("/mfa/recovery-codes", operation_id="MFAReplaceRecoveryCodes", auth=required())
     async def recovery_codes(
         self,
         data: JSONBody[RecoveryCodesRequest],
@@ -427,11 +410,7 @@ class _MFAController(Controller):
 class _PasskeyController(Controller):
     tags = (_PASSKEY_TAG,)
 
-    @post(
-        "/passkeys/registration/options",
-        operation_id="PasskeyRegistrationOptions",
-        **security(required(), csrf_required=None),
-    )
+    @post("/passkeys/registration/options", operation_id="PasskeyRegistrationOptions", auth=required())
     async def registration_options(
         self,
         data: JSONBody[PasskeyRegistrationOptionsRequest],
@@ -461,11 +440,7 @@ class _PasskeyController(Controller):
         )
         return _options_response(result)
 
-    @post(
-        "/passkeys/registration/verify",
-        operation_id="PasskeyRegistrationVerify",
-        **security(required(), csrf_required=None),
-    )
+    @post("/passkeys/registration/verify", operation_id="PasskeyRegistrationVerify", auth=required())
     async def registration_verify(
         self,
         data: JSONBody[PasskeyVerifyRequest],
@@ -488,11 +463,7 @@ class _PasskeyController(Controller):
             return _error(result)
         return _response(MFAStatusResponse(detail="Passkey registered."), HTTP_201_CREATED)
 
-    @post(
-        "/passkeys/authentication/options",
-        operation_id="PasskeyAuthenticationOptions",
-        **security(optional(required()), csrf_required=None),
-    )
+    @post("/passkeys/authentication/options", operation_id="PasskeyAuthenticationOptions", auth=optional(required()))
     async def authentication_options(
         self,
         data: JSONBody[PasskeyAuthenticationOptionsRequest],
@@ -510,7 +481,7 @@ class _PasskeyController(Controller):
         result = await service.begin_authentication(data.account_id, binding=binding.encode("ascii"))
         return _options_response(result, binding=binding)
 
-    @get("/passkeys", operation_id="PasskeyList", **security(required()))
+    @get("/passkeys", operation_id="PasskeyList", auth=required())
     async def list_passkeys(
         self, principal: _PrincipalDependency, mfa_feature_services: _ServicesDependency
     ) -> Response[tuple[PasskeySummaryResponse, ...] | MFAStatusResponse]:
@@ -524,12 +495,7 @@ class _PasskeyController(Controller):
             return _error(result)
         return _response(tuple(_summary_response(summary) for summary in result))
 
-    @delete(
-        "/passkeys/{credential_id:str}",
-        operation_id="PasskeyRemove",
-        status_code=HTTP_200_OK,
-        **security(required(), csrf_required=None),
-    )
+    @delete("/passkeys/{credential_id:str}", operation_id="PasskeyRemove", status_code=HTTP_200_OK, auth=required())
     async def remove_passkey(
         self,
         credential_id: FromPath[str],
@@ -564,9 +530,7 @@ class _PasskeySessionAuthenticationController(Controller):
     tags = (_PASSKEY_TAG,)
 
     @post(
-        "/passkeys/authentication/verify",
-        operation_id="PasskeyAuthenticationVerify",
-        **security(public(), csrf_required=True),
+        "/passkeys/authentication/verify", operation_id="PasskeyAuthenticationVerify", auth=public(), csrf_required=True
     )
     async def authentication_verify(
         self,
@@ -583,11 +547,7 @@ class _PasskeySessionAuthenticationController(Controller):
 class _PasskeyTokenAuthenticationController(Controller):
     tags = (_PASSKEY_TAG,)
 
-    @post(
-        "/passkeys/authentication/verify",
-        operation_id="PasskeyAuthenticationVerify",
-        **security(public(), csrf_required=False),
-    )
+    @post("/passkeys/authentication/verify", operation_id="PasskeyAuthenticationVerify", auth=public())
     async def authentication_verify(
         self,
         data: JSONBody[PasskeyVerifyRequest],
@@ -604,7 +564,8 @@ class _PasskeyHybridSessionController(Controller):
     @post(
         "/passkeys/authentication/session/verify",
         operation_id="PasskeySessionAuthenticationVerify",
-        **security(public(), csrf_required=True),
+        auth=public(),
+        csrf_required=True,
     )
     async def authentication_verify(
         self,
@@ -621,11 +582,7 @@ class _PasskeyHybridSessionController(Controller):
 class _PasskeyHybridTokenController(Controller):
     tags = (_PASSKEY_TAG,)
 
-    @post(
-        "/passkeys/authentication/tokens/verify",
-        operation_id="PasskeyTokenAuthenticationVerify",
-        **security(public(), csrf_required=False),
-    )
+    @post("/passkeys/authentication/tokens/verify", operation_id="PasskeyTokenAuthenticationVerify", auth=public())
     async def authentication_verify(
         self,
         data: JSONBody[PasskeyVerifyRequest],

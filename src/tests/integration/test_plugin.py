@@ -79,7 +79,6 @@ from litestar_security.authentication import (
     optional,
     public,
     required,
-    security,
 )
 from litestar_security.config import ExternalCSRF
 from litestar_security.context import AuthenticationEvidence, Principal, SecurityContext
@@ -109,11 +108,10 @@ def test_static_security_headers_use_native_response_headers_without_hook() -> N
 
     plugin = SecurityPlugin[object](
         SecurityConfig[object](
-            default_policy=public(),
             headers=SecurityHeadersConfig(
                 static={"X-Content-Type-Options": "nosniff"},
                 csp=ContentSecurityPolicy(directives={"default-src": ("'self'",)}),
-            ),
+            )
         )
     )
     app = Litestar(route_handlers=[handler], plugins=[plugin])
@@ -133,12 +131,11 @@ def test_nonce_csp_dependency_matches_fresh_response_header() -> None:
 
     plugin = SecurityPlugin[object](
         SecurityConfig[object](
-            default_policy=public(),
             headers=SecurityHeadersConfig(
                 csp=ContentSecurityPolicy(
                     directives={"default-src": ("'self'",), "script-src": ("'self'",)}, nonce_directives=("script-src",)
                 )
-            ),
+            )
         )
     )
     app = Litestar(route_handlers=[handler], plugins=[plugin])
@@ -158,9 +155,7 @@ def test_nonce_csp_dependency_matches_fresh_response_header() -> None:
 
 def test_security_headers_reject_application_ownership_collisions() -> None:
     static_plugin = SecurityPlugin[object](
-        SecurityConfig[object](
-            default_policy=public(), headers=SecurityHeadersConfig(static={"X-Content-Type-Options": "nosniff"})
-        )
+        SecurityConfig[object](headers=SecurityHeadersConfig(static={"X-Content-Type-Options": "nosniff"}))
     )
     with pytest.raises(ImproperlyConfiguredException, match="Application response header conflicts"):
         static_plugin.on_app_init(AppConfig(response_headers={"X-Content-Type-Options": "unsafe"}))
@@ -170,10 +165,9 @@ def test_security_headers_reject_application_ownership_collisions() -> None:
 
     nonce_plugin = SecurityPlugin[object](
         SecurityConfig[object](
-            default_policy=public(),
             headers=SecurityHeadersConfig(
                 csp=ContentSecurityPolicy(directives={"script-src": ("'self'",)}, nonce_directives=("script-src",))
-            ),
+            )
         )
     )
     with pytest.raises(ImproperlyConfiguredException, match=r"already owns.*csp_nonce"):
@@ -186,10 +180,9 @@ def test_security_headers_reject_application_ownership_collisions() -> None:
 async def test_nonce_csp_hook_is_idempotent_and_rejects_response_conflicts() -> None:
     plugin = SecurityPlugin[object](
         SecurityConfig[object](
-            default_policy=public(),
             headers=SecurityHeadersConfig(
                 csp=ContentSecurityPolicy(directives={"script-src": ("'self'",)}, nonce_directives=("script-src",))
-            ),
+            )
         )
     )
     app_config = plugin.on_app_init(AppConfig())
@@ -294,7 +287,6 @@ def test_chapter_seven_provider_configs_register_native_openapi_schemes() -> Non
             jwks=jwks,
             jwks_uri="https://id.example.com/jwks",
         ),
-        default_policy=any_of("api-key", "google-iap", "service-jwt"),
     )
 
     @get("/protected")
@@ -336,13 +328,11 @@ def test_chapter_seven_provider_configs_register_native_openapi_schemes() -> Non
 
 def _compiler_config(  # noqa: PLR0913
     *,
-    openapi_policy: AuthenticationPolicy | None = None,
     names: tuple[str, ...] = ("a", "b"),
     scheme_names: dict[str, str] | None = None,
     scheme_types: dict[str, Literal["apiKey", "http", "mutualTLS", "oauth2", "openIdConnect"]] | None = None,
     max_openapi_combinations: int = 32,
     session_names: frozenset[str] = frozenset(),
-    csrf_config: CSRFConfig | None = None,
     external_csrf: ExternalCSRF | None = None,
 ) -> SecurityConfig[object]:
     slots = tuple(_CompilerSlot(name=f"slot-{name}") for name in names)
@@ -367,9 +357,7 @@ def _compiler_config(  # noqa: PLR0913
     return SecurityConfig(
         slots=slots,  # type: ignore[arg-type]
         mechanisms=mechanisms,
-        openapi_policy=openapi_policy,
         max_openapi_combinations=max_openapi_combinations,
-        csrf_config=csrf_config,
         external_csrf=external_csrf,
     )
 
@@ -396,16 +384,9 @@ def test_generated_mfa_route_bundle_has_exact_paths_policies_and_secret_free_ope
     )
     app = Litestar(
         route_handlers=[router],
+        csrf_config=CSRFConfig(secret=token_hex()),
         openapi_config=OpenAPIConfig(title="MFA", version="1.0"),
-        plugins=[
-            SecurityPlugin(
-                _compiler_config(
-                    names=("session", "bearer"),
-                    session_names=frozenset({"session"}),
-                    csrf_config=CSRFConfig(secret=token_hex()),
-                )
-            )
-        ],
+        plugins=[SecurityPlugin(_compiler_config(names=("session", "bearer"), session_names=frozenset({"session"})))],
     )
 
     paths = {
@@ -978,9 +959,7 @@ def test_plugin_mfa_route_registration_validates_ownership_and_is_idempotent() -
     with pytest.raises(ImproperlyConfiguredException, match="local authentication"):
         SecurityPlugin(SecurityConfig(mfa=enabled))._configure_mfa_routes(AppConfig())  # noqa: SLF001
 
-    local_auth = _local_session_auth(
-        csrf=CSRFConfig(secret=token_hex()), binding=SessionBindingConfig(pepper=b"b" * 32, max_age=600)
-    )
+    local_auth = _local_session_auth(binding=SessionBindingConfig(pepper=b"b" * 32, max_age=600))
     no_step_store = SimpleNamespace(**{
         name: getattr(mfa_store, name)
         for name in (
@@ -1101,11 +1080,10 @@ def _native_session_backend(  # noqa: PLR0913
     return cast("BaseSessionBackend[Any]", middleware.kwargs["backend"]), middleware
 
 
-def _local_session_auth(*, csrf: CSRFConfig | ExternalCSRF, binding: SessionBindingConfig | None = None) -> Any:
+def _local_session_auth(*, binding: SessionBindingConfig | None = None) -> Any:
     return LocalAuth.session(
         accounts=cast("Any", _local_session_accounts()),
         secrets=_local_auth_secrets(),
-        csrf=csrf,
         binding=binding or SessionBindingConfig(pepper=b"binding-pepper-for-plugin-tests!", max_age=600),
         register_routes=False,
     )
@@ -1318,17 +1296,20 @@ def test_plugin_is_an_init_and_cli_plugin() -> None:
 
 
 def test_plugin_receives_routes_and_attaches_public_runtime_plan() -> None:
-    @get("/", **security(public()))
+    @get("/", auth=public())
     async def handler() -> None:
         return None
 
-    plugin = SecurityPlugin()
-    app = Litestar(route_handlers=[handler], openapi_config=None, plugins=[plugin])
+    plugin = SecurityPlugin(_compiler_config())
+    app = Litestar(
+        route_handlers=[handler], openapi_config=OpenAPIConfig(title="Test", version="1.0"), plugins=[plugin]
+    )
     route = next(route for route in app.routes if isinstance(route, HTTPRoute))
     route_handler = route.route_handler_map["GET"][0]
 
     assert isinstance(plugin, ReceiveRoutePlugin)
     assert route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(authenticate=False, csrf_required=False)
+    assert app.openapi_schema.paths["/"].get.security == [{}]
 
 
 def test_route_policy_uses_native_nearest_owner_inheritance() -> None:
@@ -1342,30 +1323,45 @@ def test_route_policy_uses_native_nearest_owner_inheritance() -> None:
 
     class PolicyController(Controller):
         path = "/controller"
-        opt: ClassVar = security(required("b"))
+        opt: ClassVar = {"auth": required("b")}
 
         @get("/owned")
         async def owned(self) -> None:
             return None
 
-        @get("/handler", **security(required("a")))
+        @get("/handler", auth=required("a"))
         async def handler_override(self) -> None:
+            return None
+
+    class AttributeController(Controller):
+        path = "/attribute"
+        auth = public()
+
+        @get("/ignored")
+        async def ignored(self) -> None:
             return None
 
     csrf_config = CSRFConfig(secret=token_hex())
     app = Litestar(
         route_handlers=[
             application_handler,
-            Router(path="/router", route_handlers=[router_handler], opt=security(required("b"))),
+            Router(path="/router", route_handlers=[router_handler], opt={"auth": required("b")}),
             PolicyController,
+            AttributeController,
         ],
-        opt=security(required("a")),
+        opt={"auth": required("a")},
         csrf_config=csrf_config,
         openapi_config=OpenAPIConfig(title="Test", version="1.0"),
         plugins=[SecurityPlugin(_compiler_config(session_names=frozenset({"b"})))],
     )
 
-    expected_by_path = {"/application": "a", "/router/owned": "b", "/controller/owned": "b", "/controller/handler": "a"}
+    expected_by_path = {
+        "/application": "a",
+        "/router/owned": "b",
+        "/controller/owned": "b",
+        "/controller/handler": "a",
+        "/attribute/ignored": "a",
+    }
     with TestClient(app) as client:
         for path, mechanism_name in expected_by_path.items():
             plan = _http_plan(app, path)
@@ -1385,11 +1381,11 @@ def test_route_policy_uses_native_nearest_owner_inheritance() -> None:
 
 
 def test_http_methods_and_options_receive_distinct_compiled_plans() -> None:
-    @get("/resource", opt=security(public()))
+    @get("/resource", auth=public())
     async def read_resource() -> None:
         return None
 
-    @post("/resource", opt=security(required("b"), csrf_required=True))
+    @post("/resource", auth=required("b"), csrf_required=True)
     async def write_resource() -> None:
         return None
 
@@ -1407,8 +1403,8 @@ def test_http_methods_and_options_receive_distinct_compiled_plans() -> None:
     assert _http_plan(app, "/resource", "OPTIONS").csrf_required is False
 
 
-def test_websocket_compiles_runtime_only_and_explicit_asgi_policy_fails() -> None:
-    @websocket("/socket", opt=security(required("b")))
+def test_websocket_and_asgi_compile_native_auth_runtime_plans() -> None:
+    @websocket("/socket", auth=required("b"))
     async def socket_handler(socket: WebSocket) -> None:
         del socket
 
@@ -1418,12 +1414,14 @@ def test_websocket_compiles_runtime_only_and_explicit_asgi_policy_fails() -> Non
     assert socket_route.route_handler.opt["litestar_security_plan"].participant_names == frozenset({"b"})
     assert not hasattr(socket_route.route_handler, "security")
 
-    @asgi("/mount", opt=security(public()), copy_scope=True)
+    @asgi("/mount", auth=public(), copy_scope=True)
     async def mounted_app(scope: Scope, receive: Receive, send: Send) -> None:
         del scope, receive, send
 
-    with pytest.raises(ImproperlyConfiguredException, match=r"Raw ASGI.*asgi /mount"):
-        Litestar(route_handlers=[mounted_app], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+    asgi_app = Litestar(route_handlers=[mounted_app], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+    asgi_route = next(route_value for route_value in asgi_app.routes if isinstance(route_value, ASGIRoute))
+
+    assert not asgi_route.route_handler.opt["litestar_security_plan"].authenticate
 
     @websocket("/anonymous")
     async def anonymous_socket(socket: WebSocket) -> None:
@@ -1437,8 +1435,24 @@ def test_websocket_compiles_runtime_only_and_explicit_asgi_policy_fails() -> Non
     assert not anonymous_route.route_handler.opt["litestar_security_plan"].authenticate
 
 
+def test_csrf_required_is_rejected_outside_http_routes() -> None:
+    @websocket("/socket", auth=public(), csrf_required=True)
+    async def socket_handler(socket: WebSocket) -> None:
+        del socket
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"only on HTTP routes.*websocket /socket"):
+        Litestar(route_handlers=[socket_handler], openapi_config=None, plugins=[SecurityPlugin()])
+
+    @asgi("/mount", auth=public(), csrf_required=True, copy_scope=True)
+    async def mounted_app(scope: Scope, receive: Receive, send: Send) -> None:
+        del scope, receive, send
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"only on HTTP routes.*asgi /mount"):
+        Litestar(route_handlers=[mounted_app], openapi_config=None, plugins=[SecurityPlugin()])
+
+
 def test_session_capable_websocket_requires_trusted_origin_at_startup() -> None:
-    @websocket("/socket", opt=security(required("session")))
+    @websocket("/socket", auth=required("session"))
     async def socket_handler(socket: WebSocket) -> None:
         del socket
 
@@ -1464,7 +1478,7 @@ def test_asgi_default_dynamic_registration_and_receive_route_are_idempotent() ->
     mount_route = next(route_value for route_value in app.routes if isinstance(route_value, ASGIRoute))
     mount_plan = mount_route.route_handler.opt["litestar_security_plan"]
 
-    @get("/dynamic", opt=security(required("b")))
+    @get("/dynamic", auth=required("b"))
     async def dynamic_handler() -> None:
         return None
 
@@ -1483,11 +1497,11 @@ def test_asgi_default_dynamic_registration_and_receive_route_are_idempotent() ->
 
 
 def test_generated_and_explicit_options_are_distinguished() -> None:
-    @post("/generated", opt=security(public(), csrf_required=True))
+    @post("/generated", auth=public(), csrf_required=True)
     async def generated() -> None:
         return None
 
-    @route("/explicit", http_method=HttpMethod.OPTIONS, opt=security(required("b")))
+    @route("/explicit", http_method=HttpMethod.OPTIONS, auth=required("b"))
     async def explicit() -> None:
         return None
 
@@ -1504,12 +1518,16 @@ def test_generated_and_explicit_options_are_distinguished() -> None:
 
 
 @pytest.mark.parametrize(
-    ("openapi_config", "plugin_policy", "expected_path", "expected_participants"),
+    ("openapi_config", "expected_path", "expected_participants"),
     [
-        (OpenAPIConfig(title="Test", version="1.0"), None, "/schema/openapi.json", None),
+        (OpenAPIConfig(title="Test", version="1.0"), "/schema/openapi.json", None),
         (
-            OpenAPIConfig(title="Test", version="1.0", path="/docs"),
-            required("b"),
+            OpenAPIConfig(
+                title="Test",
+                version="1.0",
+                openapi_router=Router(path="/docs", route_handlers=[], opt={"auth": required("b")}),
+                render_plugins=[JsonRenderPlugin()],
+            ),
             "/docs/openapi.json",
             frozenset({"b"}),
         ),
@@ -1517,20 +1535,16 @@ def test_generated_and_explicit_options_are_distinguished() -> None:
             OpenAPIConfig(
                 title="Test",
                 version="1.0",
-                openapi_router=Router(path="/reference", route_handlers=[], opt=security(required("a"))),
+                openapi_router=Router(path="/reference", route_handlers=[], opt={"auth": required("a")}),
                 render_plugins=[JsonRenderPlugin()],
             ),
-            required("b"),
             "/reference/openapi.json",
             frozenset({"a"}),
         ),
     ],
 )
 def test_openapi_routes_use_default_configured_and_custom_router_policy(
-    openapi_config: OpenAPIConfig,
-    plugin_policy: AuthenticationPolicy | None,
-    expected_path: str,
-    expected_participants: frozenset[str] | None,
+    openapi_config: OpenAPIConfig, expected_path: str, expected_participants: frozenset[str] | None
 ) -> None:
     @get("/application")
     async def application_handler() -> None:
@@ -1538,9 +1552,9 @@ def test_openapi_routes_use_default_configured_and_custom_router_policy(
 
     app = Litestar(
         route_handlers=[application_handler],
-        opt=security(required("a")),
+        opt={"auth": required("a")},
         openapi_config=openapi_config,
-        plugins=[SecurityPlugin(_compiler_config(openapi_policy=plugin_policy))],
+        plugins=[SecurityPlugin(_compiler_config())],
     )
     plan = _http_plan(app, expected_path)
 
@@ -1576,7 +1590,7 @@ def test_native_openapi_projection_matches_runtime_policy(
     accepted: tuple[frozenset[str], ...],
     rejected: tuple[frozenset[str], ...],
 ) -> None:
-    @get("/resource", opt=security(policy))
+    @get("/resource", auth=policy)
     async def handler() -> None:
         return None
 
@@ -1610,7 +1624,7 @@ def test_native_openapi_projection_matches_runtime_policy(
 
 
 def test_openapi_scope_and_combination_limits_fail_with_route_context() -> None:
-    @get("/scoped", opt=security(required(mechanism("a", "read"))))
+    @get("/scoped", auth=required(mechanism("a", "read")))
     async def scoped_handler() -> None:
         return None
 
@@ -1623,7 +1637,7 @@ def test_openapi_scope_and_combination_limits_fail_with_route_context() -> None:
 
     names = tuple(f"m{index}" for index in range(9))
 
-    @get("/threshold", opt=security(at_least(2, *names)))
+    @get("/threshold", auth=at_least(2, *names))
     async def threshold_handler() -> None:
         return None
 
@@ -1636,7 +1650,7 @@ def test_openapi_scope_and_combination_limits_fail_with_route_context() -> None:
             plugins=[SecurityPlugin(_compiler_config(names=names))],
         )
 
-    @get("/threshold", opt=security(at_least(2, *names)))
+    @get("/threshold", auth=at_least(2, *names))
     async def threshold_success() -> None:
         return None
 
@@ -1754,12 +1768,12 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
         "registration": registration,
         "route_prefix": "/identity",
     }
-    security_config_kwargs: dict[str, object] = {}
+    session_middleware: DefineMiddleware | None = None
+    csrf_config: CSRFConfig | None = None
     if mode in {"session", "hybrid"}:
-        config_kwargs.update(
-            csrf=CSRFConfig(secret=token_hex()), binding=SessionBindingConfig(pepper=b"b" * 32, max_age=600)
-        )
-        security_config_kwargs["session_backend"] = _native_session_backend("client")[0]
+        config_kwargs["binding"] = SessionBindingConfig(pepper=b"b" * 32, max_age=600)
+        session_middleware = _native_session_backend("client")[1]
+        csrf_config = CSRFConfig(secret=token_hex())
     if mode in {"tokens", "hybrid"}:
         config_kwargs.update(
             key_ring=LocalKeyRing(
@@ -1771,8 +1785,10 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
     local_auth = getattr(LocalAuth, mode)(**config_kwargs)
     app = Litestar(
         route_handlers=[],
+        csrf_config=csrf_config,
+        middleware=[session_middleware] if session_middleware is not None else None,
         openapi_config=OpenAPIConfig(title="Test", version="1.0"),
-        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, **cast("Any", security_config_kwargs)))],
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))],
     )
 
     observed = {
@@ -1855,7 +1871,6 @@ def test_generated_local_routes_are_grouped_documented_and_uniquely_identified(
     local_auth = LocalAuth.hybrid(
         accounts=cast("Any", _local_session_accounts()),
         secrets=_local_auth_secrets(refresh=True),
-        csrf=CSRFConfig(secret=token_hex()),
         binding=SessionBindingConfig(pepper=b"b" * 32, max_age=600),
         key_ring=LocalKeyRing(
             issuer="https://local.example",
@@ -1867,10 +1882,10 @@ def test_generated_local_routes_are_grouped_documented_and_uniquely_identified(
     caller_tag = Tag(name="Local sessions", description="Caller owns this description.")
     app = Litestar(
         route_handlers=[],
+        csrf_config=CSRFConfig(secret=token_hex()),
+        middleware=[_native_session_backend("client")[1]],
         openapi_config=OpenAPIConfig(title="Test", version="1.0", tags=[caller_tag]),
-        plugins=[
-            SecurityPlugin(SecurityConfig(local_auth=local_auth, session_backend=_native_session_backend("client")[0]))
-        ],
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))],
     )
 
     declared = {tag.name: tag for tag in app.openapi_schema.tags or ()}
@@ -2010,7 +2025,7 @@ def test_composite_bearer_contributes_one_native_openapi_scheme() -> None:
     )
     slot, bearer_mechanism = composite.build(_CompilerResolver())  # type: ignore[arg-type]
 
-    @get("/bearer", opt=security(required("bearer")))
+    @get("/bearer", auth=required("bearer"))
     async def bearer_handler() -> None:
         return None
 
@@ -2028,7 +2043,7 @@ def test_composite_bearer_contributes_one_native_openapi_scheme() -> None:
 
 
 def test_openapi_rejects_conflicting_shared_scheme_scopes_and_dynamic_native_security() -> None:
-    @get("/scopes", opt=security(all_of(mechanism("a", "one"), mechanism("b", "two"))))
+    @get("/scopes", auth=all_of(mechanism("a", "one"), mechanism("b", "two")))
     async def scoped_handler() -> None:
         return None
 
@@ -2098,7 +2113,7 @@ def test_memoized_native_security_is_replaced_and_openapi_disabled_needs_no_sche
                 for route_handler in route_value.route_handlers:
                     route_handler.resolve_security()
 
-    @get("/memoized", opt=security(required("a")))
+    @get("/memoized", auth=required("a"))
     async def memoized_handler() -> None:
         return None
 
@@ -2123,7 +2138,7 @@ def test_memoized_native_security_is_replaced_and_openapi_disabled_needs_no_sche
     with pytest.raises(ImproperlyConfiguredException, match="a has no native OpenAPI security scheme"):
         Litestar(route_handlers=[], plugins=[SecurityPlugin(runtime_config)])
 
-    @get("/memoized", opt=security(required("a")))
+    @get("/memoized", auth=required("a"))
     async def runtime_handler() -> None:
         return None
 
@@ -2134,11 +2149,8 @@ def test_memoized_native_security_is_replaced_and_openapi_disabled_needs_no_sche
     assert _http_plan(runtime_only, "/memoized").participant_names == frozenset({"a"})
 
 
-@pytest.mark.parametrize("csrf_owner", ["application", "plugin"])
-def test_session_capable_routes_require_and_derive_declared_csrf_enforcement(
-    csrf_owner: Literal["application", "plugin"],
-) -> None:
-    @post("/session", opt=security(required("session")))
+def test_session_capable_routes_require_and_derive_declared_csrf_enforcement() -> None:
+    @post("/session", auth=required("session"))
     async def session_handler() -> None:
         return None
 
@@ -2146,29 +2158,25 @@ def test_session_capable_routes_require_and_derive_declared_csrf_enforcement(
     with pytest.raises(ImproperlyConfiguredException, match=r"requires native CSRF.*POST /session"):
         Litestar(route_handlers=[session_handler], plugins=[SecurityPlugin(config)])
 
-    @get("/session", opt=security(required("session")))
+    @get("/session", auth=required("session"))
     async def read_session() -> None:
         return None
 
-    @post("/hybrid", opt=security(any_of("session", "bearer")))
+    @post("/hybrid", auth=any_of("session", "bearer"))
     async def hybrid_handler() -> None:
         return None
 
-    @post("/bearer", opt=security(required("bearer"), csrf_required=False))
+    @post("/bearer", auth=required("bearer"), opt={"exclude_from_csrf": True})
     async def bearer_handler() -> None:
         return None
 
     csrf_config = CSRFConfig(secret=token_hex())
     security_plugin = SecurityPlugin(
-        _compiler_config(
-            names=("session", "bearer"),
-            session_names=frozenset({"session"}),
-            csrf_config=csrf_config if csrf_owner == "plugin" else None,
-        )
+        _compiler_config(names=("session", "bearer"), session_names=frozenset({"session"}))
     )
     app = Litestar(
         route_handlers=[read_session, session_handler, hybrid_handler, bearer_handler],
-        csrf_config=csrf_config if csrf_owner == "application" else None,
+        csrf_config=csrf_config,
         plugins=[security_plugin],
     )
     session_plan = _http_plan(app, "/session", "POST")
@@ -2223,32 +2231,51 @@ def test_session_capable_routes_require_and_derive_declared_csrf_enforcement(
         security_plugin.receive_route(session_route)
 
 
-def test_csrf_config_ownership_and_false_override_are_strict() -> None:
-    configured_secret = token_hex()
-    configured = CSRFConfig(secret=configured_secret)
-    app_config = AppConfig(csrf_config=CSRFConfig(secret=configured_secret))
+def test_csrf_config_is_application_owned_and_route_override_is_strict() -> None:
+    configured = CSRFConfig(secret=token_hex())
+    app_config = AppConfig(csrf_config=configured)
 
-    result = SecurityPlugin(SecurityConfig(csrf_config=configured)).on_app_init(app_config)
+    result = SecurityPlugin().on_app_init(app_config)
 
     assert result.csrf_config is configured
-
-    with pytest.raises(ImproperlyConfiguredException, match="unequal native Litestar CSRF"):
-        SecurityPlugin(SecurityConfig(csrf_config=configured)).on_app_init(
-            AppConfig(csrf_config=CSRFConfig(secret=token_hex()))
-        )
     external = ExternalCSRF(name="edge", validate=lambda _path, _method, _policy: True)
     with pytest.raises(ImproperlyConfiguredException, match="native and external CSRF"):
         SecurityPlugin(SecurityConfig(external_csrf=external)).on_app_init(AppConfig(csrf_config=configured))
 
-    @post("/unsafe", opt=security(required("session"), csrf_required=False))
-    async def unsafe_handler() -> None:
+    for value in (False, None, 1, "yes"):
+
+        @post(f"/invalid-{value!s}", auth=public(), csrf_required=value)
+        async def invalid_handler() -> None:
+            return None
+
+        with pytest.raises(ImproperlyConfiguredException, match=r"csrf_required must be exactly True"):
+            Litestar(route_handlers=[invalid_handler], csrf_config=configured, plugins=[SecurityPlugin()])
+
+    @post("/owned", auth=public())
+    async def owned_handler() -> None:
         return None
 
-    with pytest.raises(ImproperlyConfiguredException, match=r"session-capable mechanism session.*POST /unsafe"):
+    with pytest.raises(ImproperlyConfiguredException, match=r"only on individual HTTP route handlers"):
         Litestar(
-            route_handlers=[unsafe_handler],
+            route_handlers=[owned_handler],
+            opt={"csrf_required": True},
             csrf_config=configured,
-            plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+            plugins=[SecurityPlugin()],
+        )
+
+    @post("/session", auth=required("session"), opt={configured.exclude_from_csrf_key: True})
+    async def excluded_session() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"Session-capable routes cannot exclude native CSRF"):
+        Litestar(
+            route_handlers=[excluded_session],
+            csrf_config=configured,
+            plugins=[
+                SecurityPlugin(
+                    _compiler_config(names=("session",), session_names=frozenset({"session"}))
+                )
+            ],
         )
 
 
@@ -2259,7 +2286,8 @@ def test_csrf_config_ownership_and_false_override_are_strict() -> None:
         (CSRFConfig(secret=token_hex(), safe_methods={"GET", "POST"}), "unsafe HTTP methods"),
         (CSRFConfig(secret=token_hex(), safe_methods={"GET", "HEAD"}), "GET, HEAD, and OPTIONS"),
         (CSRFConfig(secret=token_hex(), exclude_from_csrf_key=" "), "opt key"),
-        (CSRFConfig(secret=token_hex(), exclude_from_csrf_key="litestar_security_policy"), "reserved"),
+        (CSRFConfig(secret=token_hex(), exclude_from_csrf_key="auth"), "reserved"),
+        (CSRFConfig(secret=token_hex(), exclude_from_csrf_key="csrf_required"), "reserved"),
         (CSRFConfig(secret=token_hex(), exclude_from_csrf_key="litestar_security_plan"), "reserved"),
         (CSRFConfig(secret=token_hex(), exclude_from_csrf_key="litestar_security_csrf"), "reserved"),
     ],
@@ -2269,20 +2297,21 @@ def test_csrf_config_ownership_and_false_override_are_strict() -> None:
         "missing-safe-method",
         "blank-opt-key",
         "policy-opt-key",
+        "csrf-required-opt-key",
         "plan-opt-key",
         "csrf-opt-key",
     ],
 )
 def test_native_csrf_rejects_competing_bypass_configuration(csrf_config: CSRFConfig, match: str) -> None:
     with pytest.raises(ImproperlyConfiguredException, match=match):
-        SecurityPlugin(SecurityConfig(csrf_config=csrf_config)).on_app_init(AppConfig())
+        SecurityPlugin().on_app_init(AppConfig(csrf_config=csrf_config))
 
 
 def test_native_csrf_rejects_invalid_runtime_configuration_shapes() -> None:
     invalid_safe_methods = CSRFConfig(secret=token_hex())
     invalid_safe_methods.safe_methods = cast("Any", None)
     with pytest.raises(ImproperlyConfiguredException, match="safe methods"):
-        SecurityPlugin(SecurityConfig(csrf_config=invalid_safe_methods)).on_app_init(AppConfig())
+        SecurityPlugin().on_app_init(AppConfig(csrf_config=invalid_safe_methods))
 
     app_config = AppConfig()
     app_config.csrf_config = cast("Any", object())
@@ -2291,19 +2320,7 @@ def test_native_csrf_rejects_invalid_runtime_configuration_shapes() -> None:
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "match"),
-    [
-        ({"csrf_config": object()}, "Litestar CSRFConfig"),
-        ({"external_csrf": object()}, "ExternalCSRF assertion"),
-        (
-            {
-                "csrf_config": CSRFConfig(secret=token_hex()),
-                "external_csrf": ExternalCSRF("edge", lambda _path, _method, _policy: True),
-            },
-            "native and external CSRF",
-        ),
-    ],
-    ids=["invalid-native", "invalid-external", "mixed-ownership"],
+    ("kwargs", "match"), [({"external_csrf": object()}, "ExternalCSRF assertion")], ids=["invalid-external"]
 )
 def test_security_config_rejects_invalid_csrf_ownership(kwargs: dict[str, object], match: str) -> None:
     with pytest.raises(ImproperlyConfiguredException, match=match):
@@ -2319,15 +2336,15 @@ def test_external_csrf_validates_required_routes_and_installs_no_native_middlewa
 
     external = ExternalCSRF(name="edge", validate=validate)
 
-    @post("/session", opt=security(required("session")))
+    @post("/session", auth=required("session"))
     async def session_handler() -> None:
         return None
 
-    @post("/login", opt=security(public(), csrf_required=True))
+    @post("/login", auth=public(), csrf_required=True)
     async def login_handler() -> None:
         return None
 
-    @post("/public", opt=security(public()))
+    @post("/public", auth=public())
     async def public_handler() -> None:
         return None
 
@@ -2357,7 +2374,7 @@ def test_external_csrf_validates_required_routes_and_installs_no_native_middlewa
 
     rejecting = ExternalCSRF(name="rejecting-edge", validate=lambda _path, _method, _policy: False)
 
-    @post("/rejected", opt=security(public(), csrf_required=True))
+    @post("/rejected", auth=public(), csrf_required=True)
     async def rejected_handler() -> None:
         return None
 
@@ -2381,22 +2398,22 @@ def test_external_csrf_validates_required_routes_and_installs_no_native_middlewa
         )
 
 
-@pytest.mark.parametrize("manual_exclusion", [False, None])
+@pytest.mark.parametrize("manual_exclusion", [False, None, 0, "true"])
 def test_native_csrf_rejects_manual_exclusion_and_uses_litestar_cookie_header_flow(manual_exclusion: Any) -> None:
     csrf_config = CSRFConfig(secret=token_hex())
 
-    @post("/manual", opt={**security(public()), csrf_config.exclude_from_csrf_key: manual_exclusion})
+    @post("/manual", auth=public(), opt={csrf_config.exclude_from_csrf_key: manual_exclusion})
     async def manual_handler() -> None:
         return None
 
-    with pytest.raises(ImproperlyConfiguredException, match=r"manual native CSRF.*POST /manual"):
+    with pytest.raises(ImproperlyConfiguredException, match=r"exclusions must be exactly True.*POST /manual"):
         Litestar(route_handlers=[manual_handler], csrf_config=csrf_config, plugins=[SecurityPlugin()])
 
-    @get("/login", opt=security(public(), csrf_required=True))
+    @get("/login", auth=public(), csrf_required=True)
     async def login_form() -> str:
         return "form"
 
-    @post("/login", opt=security(public(), csrf_required=True))
+    @post("/login", auth=public(), csrf_required=True)
     async def login_submit() -> str:
         return "ok"
 
@@ -2418,7 +2435,7 @@ def test_native_csrf_rejects_manual_exclusion_and_uses_litestar_cookie_header_fl
 
 
 def test_route_compiler_errors_include_method_and_path() -> None:
-    @get("/missing", opt=security(required("missing")))
+    @get("/missing", auth=required("missing"))
     async def handler() -> None:
         return None
 
@@ -2427,14 +2444,23 @@ def test_route_compiler_errors_include_method_and_path() -> None:
 
 
 def test_route_compiler_rejects_invalid_metadata_and_conflicting_private_plan() -> None:
-    @get("/invalid", opt={"litestar_security_policy": object()})
+    @get("/invalid", opt={"auth": object()})
     async def invalid_handler() -> None:
         return None
 
     with pytest.raises(ImproperlyConfiguredException, match=r"Invalid.*GET /invalid"):
         Litestar(route_handlers=[invalid_handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
 
-    @get("/conflict", opt=security(public()))
+    @get("/invalid-auth", auth=object())
+    async def invalid_auth_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"Invalid.*GET /invalid-auth"):
+        Litestar(
+            route_handlers=[invalid_auth_handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())]
+        )
+
+    @get("/conflict", auth=public())
     async def conflict_handler() -> None:
         return None
 
@@ -2461,7 +2487,7 @@ def test_openapi_controller_and_invalid_custom_router_metadata_use_native_owners
 
     assert not _http_plan(app, "/legacy-docs/openapi.json").authenticate
 
-    invalid_router = Router(path="/reference", route_handlers=[], opt={"litestar_security_policy": object()})
+    invalid_router = Router(path="/reference", route_handlers=[], opt={"auth": object()})
     invalid_config = OpenAPIConfig(
         title="Test", version="1.0", openapi_router=invalid_router, render_plugins=[JsonRenderPlugin()]
     )
@@ -2609,41 +2635,34 @@ def test_controller_handler_collision_is_reported_as_handler_owned() -> None:
         SecurityPlugin().on_app_init(AppConfig(route_handlers=[TestController]))
 
 
-def test_local_auth_native_csrf_becomes_the_effective_plugin_config() -> None:
+def test_local_session_requires_application_session_and_csrf_middleware() -> None:
     csrf = CSRFConfig(secret=token_hex())
-    backend, _ = _native_session_backend("client")
-    local_auth = _local_session_auth(csrf=csrf)
+    _, native_middleware = _native_session_backend("client")
+    local_auth = _local_session_auth()
 
-    result = SecurityPlugin(SecurityConfig(local_auth=local_auth, session_backend=backend)).on_app_init(AppConfig())
+    with pytest.raises(ImproperlyConfiguredException, match="native Litestar session middleware"):
+        SecurityPlugin(SecurityConfig(local_auth=local_auth)).on_app_init(AppConfig(csrf_config=csrf))
+
+    with pytest.raises(ImproperlyConfiguredException, match="exactly one native or external CSRF"):
+        SecurityPlugin(SecurityConfig(local_auth=local_auth)).on_app_init(AppConfig(middleware=[native_middleware]))
+
+    result = SecurityPlugin(SecurityConfig(local_auth=local_auth)).on_app_init(
+        AppConfig(csrf_config=csrf, middleware=[native_middleware])
+    )
 
     assert result.csrf_config is csrf
+    assert native_middleware in result.middleware
 
 
-@pytest.mark.parametrize("owner", ["security", "application"])
-def test_local_auth_rejects_conflicting_native_csrf_sources(owner: str) -> None:
-    local_csrf = CSRFConfig(secret=token_hex())
-    conflicting = CSRFConfig(secret=token_hex())
-    backend, _ = _native_session_backend("client")
-    config = SecurityConfig(
-        local_auth=_local_session_auth(csrf=local_csrf),
-        session_backend=backend,
-        csrf_config=conflicting if owner == "security" else None,
-    )
-    app_config = AppConfig(csrf_config=conflicting if owner == "application" else None)
-
-    with pytest.raises(ImproperlyConfiguredException, match="CSRF"):
-        SecurityPlugin(config).on_app_init(app_config)
-
-
-def test_local_auth_rejects_native_and_external_csrf_combination() -> None:
-    backend, _ = _native_session_backend("client")
+def test_local_session_rejects_native_and_external_csrf_combination() -> None:
+    _, native_middleware = _native_session_backend("client")
     native = CSRFConfig(secret=token_hex())
     external = ExternalCSRF(name="edge", validate=lambda _path, _method, _policy: True)
 
-    with pytest.raises(ImproperlyConfiguredException, match="cannot be combined"):
-        SecurityPlugin(
-            SecurityConfig(local_auth=_local_session_auth(csrf=native), session_backend=backend, external_csrf=external)
-        ).on_app_init(AppConfig())
+    with pytest.raises(ImproperlyConfiguredException, match="combine native and external CSRF"):
+        SecurityPlugin(SecurityConfig(local_auth=_local_session_auth(), external_csrf=external)).on_app_init(
+            AppConfig(csrf_config=native, middleware=[native_middleware])
+        )
 
 
 def test_local_auth_external_csrf_becomes_route_enforcement_and_rejects_conflicts() -> None:
@@ -2654,38 +2673,21 @@ def test_local_auth_external_csrf_becomes_route_enforcement_and_rejects_conflict
         return True
 
     external = ExternalCSRF(name="local-edge", validate=validate)
-    backend, _ = _native_session_backend("client")
+    _, native_middleware = _native_session_backend("client")
 
-    @post("/session", opt=security(required("session")))
+    @post("/session", auth=required("session"))
     async def session_handler() -> None:
         return None
 
     app = Litestar(
         route_handlers=[session_handler],
-        plugins=[
-            SecurityPlugin(SecurityConfig(local_auth=_local_session_auth(csrf=external), session_backend=backend))
-        ],
+        middleware=[native_middleware],
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=_local_session_auth(), external_csrf=external))],
     )
 
     assert app.csrf_config is None
     assert _http_plan(app, "/session", "POST").csrf_enforcement == "local-edge"
     assert [(path, method) for path, method, _ in calls] == [("/session", "POST")]
-
-    conflicting = ExternalCSRF(name="other-edge", validate=lambda _path, _method, _policy: True)
-    with pytest.raises(ImproperlyConfiguredException, match="CSRF"):
-        SecurityPlugin(
-            SecurityConfig(
-                local_auth=_local_session_auth(csrf=external), session_backend=backend, external_csrf=conflicting
-            )
-        ).on_app_init(AppConfig())
-    with pytest.raises(ImproperlyConfiguredException, match="cannot be combined"):
-        SecurityPlugin(
-            SecurityConfig(
-                local_auth=_local_session_auth(csrf=external),
-                session_backend=backend,
-                csrf_config=CSRFConfig(secret=token_hex()),
-            )
-        ).on_app_init(AppConfig())
 
 
 @pytest.mark.parametrize(
@@ -2697,13 +2699,13 @@ def test_local_session_cookie_names_must_be_pairwise_distinct(
     native_cookie: str, csrf_cookie: str, binding_cookie: str
 ) -> None:
     csrf = CSRFConfig(secret=token_hex(), cookie_name=csrf_cookie)
-    backend, _ = _native_session_backend("client", key=native_cookie)
+    _, native_middleware = _native_session_backend("client", key=native_cookie)
     binding = SessionBindingConfig(pepper=b"binding-pepper-for-plugin-tests!", cookie_name=binding_cookie, max_age=600)
 
     with pytest.raises(ImproperlyConfiguredException, match="cookie names must be distinct"):
-        SecurityPlugin(
-            SecurityConfig(local_auth=_local_session_auth(csrf=csrf, binding=binding), session_backend=backend)
-        ).on_app_init(AppConfig())
+        SecurityPlugin(SecurityConfig(local_auth=_local_session_auth(binding=binding))).on_app_init(
+            AppConfig(csrf_config=csrf, middleware=[native_middleware])
+        )
 
 
 @pytest.mark.parametrize(
@@ -2748,7 +2750,7 @@ def test_local_session_backend_constraints(  # noqa: PLR0913
     match: str | None,
 ) -> None:
     csrf = CSRFConfig(secret=token_hex())
-    backend, _ = _native_session_backend(
+    _, native_middleware = _native_session_backend(
         "client", max_age=native_max_age, scopes=scopes, secure=native_secure, httponly=native_httponly
     )
     binding = SessionBindingConfig(
@@ -2759,16 +2761,15 @@ def test_local_session_backend_constraints(  # noqa: PLR0913
         allow_insecure=allow_insecure,
         touch_interval=timedelta(minutes=5),
     )
-    plugin = SecurityPlugin(
-        SecurityConfig(local_auth=_local_session_auth(csrf=csrf, binding=binding), session_backend=backend)
-    )
+    plugin = SecurityPlugin(SecurityConfig(local_auth=_local_session_auth(binding=binding)))
+    app_config = AppConfig(csrf_config=csrf, middleware=[native_middleware])
 
     if match is None:
-        result = plugin.on_app_init(AppConfig())
+        result = plugin.on_app_init(app_config)
         assert result.csrf_config is csrf
     else:
         with pytest.raises(ImproperlyConfiguredException, match=match):
-            plugin.on_app_init(AppConfig())
+            plugin.on_app_init(app_config)
 
 
 def test_local_session_requires_a_backend_and_secure_samesite_none() -> None:
@@ -2780,7 +2781,7 @@ def test_local_session_requires_a_backend_and_secure_samesite_none() -> None:
         allow_insecure=True,
         max_age=600,
     )
-    local_auth = _local_session_auth(csrf=csrf, binding=binding)
+    local_auth = _local_session_auth(binding=binding)
 
     with pytest.raises(ImproperlyConfiguredException, match="requires one native"):
         SecurityPlugin(SecurityConfig(local_auth=local_auth)).on_app_init(AppConfig())
@@ -2794,29 +2795,30 @@ def test_local_session_requires_a_backend_and_secure_samesite_none() -> None:
         httponly=True,
         samesite="none",
     )
-    backend = cast("BaseSessionBackend[Any]", config.middleware.kwargs["backend"])
     with pytest.raises(ImproperlyConfiguredException, match="SameSite=None"):
-        SecurityPlugin(SecurityConfig(local_auth=local_auth, session_backend=backend)).on_app_init(AppConfig())
+        SecurityPlugin(SecurityConfig(local_auth=local_auth)).on_app_init(
+            AppConfig(csrf_config=csrf, middleware=[config.middleware])
+        )
 
 
 @pytest.mark.parametrize("backend_kind", ["client", "server"])
-@pytest.mark.parametrize("ownership", ["owned", "existing"])
-def test_local_session_owned_and_existing_backends_have_registry_and_openapi_parity(
-    backend_kind: Literal["client", "server"], ownership: Literal["owned", "existing"]
+def test_local_session_native_backends_have_registry_and_openapi_parity(
+    backend_kind: Literal["client", "server"],
 ) -> None:
     csrf = CSRFConfig(secret=token_hex())
     binding = SessionBindingConfig(pepper=b"binding-pepper-for-plugin-tests!", max_age=600)
-    local_auth = _local_session_auth(csrf=csrf, binding=binding)
-    backend, native_middleware = _native_session_backend(backend_kind)
-    config = SecurityConfig(local_auth=local_auth, session_backend=backend if ownership == "owned" else None)
+    local_auth = _local_session_auth(binding=binding)
+    _, native_middleware = _native_session_backend(backend_kind)
+    config = SecurityConfig(local_auth=local_auth)
 
-    @get("/session", opt=security(required("session")))
+    @get("/session", auth=required("session"))
     async def session_handler() -> None:
         return None
 
     app = Litestar(
         route_handlers=[session_handler],
-        middleware=[] if ownership == "owned" else [native_middleware],
+        csrf_config=csrf,
+        middleware=[native_middleware],
         openapi_config=OpenAPIConfig(title="Test", version="1.0"),
         plugins=[SecurityPlugin(config)],
     )
@@ -2855,12 +2857,9 @@ def test_local_session_owned_and_existing_backends_have_registry_and_openapi_par
             description="Litestar native session plus independent binding cookie.",
         )
     }
-    assert native_middleware_count == (0 if ownership == "owned" else 1)
-    assert (runtime.owned_session_backend is not None) is (ownership == "owned")
-    if ownership == "owned":
-        assert runtime.owned_session_backend.backend is backend
-    else:
-        assert app.middleware.index(native_middleware) < app.middleware.index(security_middleware)
+    assert native_middleware_count == 1
+    assert runtime.owned_session_backend is None
+    assert app.middleware.index(native_middleware) < app.middleware.index(security_middleware)
 
 
 def test_local_token_profile_registers_one_composite_bearer_and_native_openapi(
@@ -3053,14 +3052,6 @@ def test_duplicate_native_sessions_fail_startup() -> None:
 
     with pytest.raises(ImproperlyConfiguredException, match="multiple native Litestar session"):
         SecurityPlugin().on_app_init(AppConfig(middleware=sessions))
-
-
-def test_plugin_owned_and_application_session_conflict_fails_startup() -> None:
-    session = DefineMiddleware(SessionMiddleware, backend=object())
-    config = SecurityConfig(session_backend=cast("BaseSessionBackend[Any]", object()))
-
-    with pytest.raises(ImproperlyConfiguredException, match="both configure native Litestar session"):
-        SecurityPlugin(config).on_app_init(AppConfig(middleware=[session]))
 
 
 def test_foreign_security_wrapper_fails_startup() -> None:

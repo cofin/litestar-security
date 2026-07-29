@@ -27,7 +27,6 @@ from litestar_security.authentication import (
     optional,
     public,
     required,
-    security,
 )
 from litestar_security.config import BlockingIntegration, ExternalCSRF, MFAConfig, PasskeyConfig, SecurityConfig
 from litestar_security.context import (
@@ -173,7 +172,6 @@ __all__ = (
     "requires_scope",
     "requires_team_role",
     "requires_tenant",
-    "security",
     "websocket_policy_fingerprint",
 )
 

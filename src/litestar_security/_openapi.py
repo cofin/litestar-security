@@ -20,18 +20,19 @@ from litestar.router import Router
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 
 from litestar_security.authentication import (
+    AUTH_POLICY_OPT_KEY,
+    CSRF_REQUIRED_OPT_KEY,
     RUNTIME_PLAN_OPT_KEY,
-    SECURITY_POLICY_OPT_KEY,
     AuthenticationPolicy,
     AuthenticationRegistry,
     MechanismPolicy,
     MechanismRequirement,
     OptionalPolicy,
     PublicPolicy,
-    RouteSecurityDeclaration,
     SecurityRuntimePlan,
     mechanism,
     public,
+    required,
 )
 from litestar_security.config import ExternalCSRF
 from litestar_security.websocket import WebSocketSecurityConfig
@@ -42,10 +43,11 @@ UserT = TypeVar("UserT")
 _OPENAPI_SECURITY_OPT_KEY = "litestar_security_openapi_security"
 _CSRF_COVERAGE_OPT_KEY = "litestar_security_csrf"
 _RESERVED_OPT_KEYS = frozenset({
+    AUTH_POLICY_OPT_KEY,
+    CSRF_REQUIRED_OPT_KEY,
     _CSRF_COVERAGE_OPT_KEY,
     _OPENAPI_SECURITY_OPT_KEY,
     RUNTIME_PLAN_OPT_KEY,
-    SECURITY_POLICY_OPT_KEY,
 })
 _MISSING = object()
 
@@ -260,8 +262,6 @@ class RouteCompiler(Generic[UserT]):
     """Compile one effective runtime plan for every registered Litestar handler."""
 
     registry: AuthenticationRegistry[UserT]
-    default_policy: AuthenticationPolicy
-    openapi_policy: AuthenticationPolicy | None = None
     openapi_config: OpenAPIConfig | None = None
     max_openapi_combinations: int = 32
     csrf_exclude_key: str | None = None
@@ -298,6 +298,7 @@ class RouteCompiler(Generic[UserT]):
                 self._compile_http_handler(route, route_handler)
             return
         if isinstance(route, WebSocketRoute):
+            self._reject_csrf_metadata(route, route.route_handler)
             plan = self._effective_plan(route, route.route_handler)
             if not self.websocket_config.allowed_origins and any(
                 self.registry.get_mechanism(name).session_capable for name in plan.participant_names or ()
@@ -308,35 +309,27 @@ class RouteCompiler(Generic[UserT]):
             self._attach_plan(route, route.route_handler, plan)
             return
         asgi_route = cast("ASGIRoute", route)
-        declaration = self._resolved_declaration(asgi_route, asgi_route.route_handler)
-        if declaration is not None:
-            self._raise_route_error(
-                asgi_route, asgi_route.route_handler, "Raw ASGI routes do not support security policy"
-            )
+        self._reject_csrf_metadata(asgi_route, asgi_route.route_handler)
         self._attach_plan(
-            asgi_route, asgi_route.route_handler, self._default_plan(asgi_route, asgi_route.route_handler)
+            asgi_route, asgi_route.route_handler, self._effective_plan(asgi_route, asgi_route.route_handler)
         )
 
     def _compile_http_handler(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> None:
+        policy: AuthenticationPolicy
         csrf_override: bool | None
         if self._is_generated_options(route_handler):
             policy = public()
             csrf_override = False
-        elif self._is_openapi_handler(route_handler):
-            declaration = self._nearest_non_application_declaration(route, route_handler)
-            policy = declaration.policy if declaration is not None else self.openapi_policy or public()
-            csrf_override = declaration.csrf_required if declaration is not None else None
+        elif self._is_openapi_handler(route, route_handler):
+            policy = self._nearest_non_application_policy(route, route_handler) or public()
+            csrf_override = self._http_csrf_override(route, route_handler)
         else:
-            declaration = self._resolved_declaration(route, route_handler)
-            if declaration is not None:
-                policy = declaration.policy
-                csrf_override = declaration.csrf_required
-            elif not self.registry.mechanism_names:
-                policy = public()
-                csrf_override = None
+            resolved_policy = self._resolved_policy(route, route_handler)
+            if resolved_policy is None:
+                policy = required() if self.registry.mechanism_names else public()
             else:
-                policy = self.default_policy
-                csrf_override = None
+                policy = resolved_policy
+            csrf_override = self._http_csrf_override(route, route_handler)
         plan = self._compile_http_policy(route, route_handler, policy, csrf_override=csrf_override)
         plan = self._apply_csrf_enforcement(route, route_handler, policy, plan)
         self._attach_plan(route, route_handler, plan)
@@ -361,7 +354,7 @@ class RouteCompiler(Generic[UserT]):
         derived = bool(session_names)
         if csrf_override is False and derived:
             self._raise_route_error(
-                route, route_handler, f"csrf_required=False cannot exclude session-capable mechanism {session_names[0]}"
+                route, route_handler, f"CSRF cannot be excluded from session-capable mechanism {session_names[0]}"
             )
         effective = derived if csrf_override is None else csrf_override
         return self._compile_policy(route, route_handler, policy, csrf_required=effective)
@@ -393,7 +386,10 @@ class RouteCompiler(Generic[UserT]):
             route_handler.opt.get(self.csrf_exclude_key, _MISSING) if self.csrf_exclude_key is not None else _MISSING
         )
         if marker is None and existing is not _MISSING:
-            self._raise_route_error(route, route_handler, "Conflicting manual native CSRF exclusion metadata")
+            if existing is not True:
+                self._raise_route_error(route, route_handler, "Native CSRF exclusions must be exactly True")
+            if not desired_exclusion:
+                self._raise_route_error(route, route_handler, "Session-capable routes cannot exclude native CSRF")
         if marker is not None and marker != desired_exclusion:
             self._raise_route_error(route, route_handler, "Conflicting compiled native CSRF coverage")
         if marker is not None and (
@@ -426,16 +422,14 @@ class RouteCompiler(Generic[UserT]):
                 )
 
     def _effective_plan(self, route: BaseRoute, route_handler: BaseRouteHandler) -> SecurityRuntimePlan:
-        if declaration := self._resolved_declaration(route, route_handler):
-            return self._compile_policy(
-                route, route_handler, declaration.policy, csrf_required=declaration.csrf_required
-            )
+        if policy := self._resolved_policy(route, route_handler):
+            return self._compile_policy(route, route_handler, policy)
         return self._default_plan(route, route_handler)
 
     def _default_plan(self, route: BaseRoute, route_handler: BaseRouteHandler) -> SecurityRuntimePlan:
         if not self.registry.mechanism_names:
             return self._compile_policy(route, route_handler, public())
-        return self._compile_policy(route, route_handler, self.default_policy)
+        return self._compile_policy(route, route_handler, required())
 
     def _compile_policy(
         self,
@@ -450,30 +444,60 @@ class RouteCompiler(Generic[UserT]):
         except ImproperlyConfiguredException as exc:
             self._raise_route_error(route, route_handler, exc.detail)
 
-    def _resolved_declaration(
-        self, route: BaseRoute, route_handler: BaseRouteHandler
-    ) -> RouteSecurityDeclaration | None:
-        value = route_handler.opt.get(SECURITY_POLICY_OPT_KEY)
-        if value is None:
-            return None
-        if not isinstance(value, RouteSecurityDeclaration):
-            self._raise_route_error(route, route_handler, "Invalid Litestar Security route policy metadata")
-        return value
-
-    def _nearest_non_application_declaration(
-        self, route: BaseRoute, route_handler: BaseRouteHandler
-    ) -> RouteSecurityDeclaration | None:
-        for layer in reversed(route_handler.ownership_layers[1:-1]):
+    def _resolved_policy(self, route: BaseRoute, route_handler: BaseRouteHandler) -> AuthenticationPolicy | None:
+        for layer in reversed(route_handler.ownership_layers):
             layer_opt = getattr(layer, "opt", None)
-            if not isinstance(layer_opt, Mapping) or SECURITY_POLICY_OPT_KEY not in layer_opt:
+            if not isinstance(layer_opt, Mapping):
                 continue
-            value = cast("Mapping[str, object]", layer_opt)[SECURITY_POLICY_OPT_KEY]
-            if not isinstance(value, RouteSecurityDeclaration):
-                self._raise_route_error(route, route_handler, "Invalid Litestar Security route policy metadata")
-            return value
+            policy = self._policy_from_opt(route, route_handler, cast("Mapping[str, object]", layer_opt))
+            if policy is not None:
+                return policy
         return None
 
-    def _is_openapi_handler(self, route_handler: BaseRouteHandler) -> bool:
+    def _nearest_non_application_policy(
+        self, route: BaseRoute, route_handler: BaseRouteHandler
+    ) -> AuthenticationPolicy | None:
+        for layer in reversed(route_handler.ownership_layers[1:-1]):
+            layer_opt = getattr(layer, "opt", None)
+            if not isinstance(layer_opt, Mapping):
+                continue
+            policy = self._policy_from_opt(route, route_handler, cast("Mapping[str, object]", layer_opt))
+            if policy is not None:
+                return policy
+        return None
+
+    def _policy_from_opt(
+        self, route: BaseRoute, route_handler: BaseRouteHandler, opt: Mapping[str, object]
+    ) -> AuthenticationPolicy | None:
+        if AUTH_POLICY_OPT_KEY not in opt:
+            return None
+        value = opt[AUTH_POLICY_OPT_KEY]
+        if isinstance(value, AuthenticationPolicy):
+            return value
+        self._raise_route_error(route, route_handler, "Invalid Litestar Security auth policy")
+        return None  # type: ignore[unreachable]  # pragma: no cover - preceding helper is typed NoReturn
+
+    def _http_csrf_override(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> bool | None:
+        owner_layers = cast("Sequence[object]", route_handler.ownership_layers[:-1])
+        for layer in owner_layers:
+            layer_opt = getattr(layer, "opt", None)
+            if isinstance(layer_opt, Mapping) and CSRF_REQUIRED_OPT_KEY in layer_opt:
+                self._raise_route_error(
+                    route, route_handler, "csrf_required is supported only on individual HTTP route handlers"
+                )
+        if CSRF_REQUIRED_OPT_KEY not in route_handler.opt:
+            return None
+        if route_handler.opt[CSRF_REQUIRED_OPT_KEY] is not True:
+            self._raise_route_error(route, route_handler, "csrf_required must be exactly True when present")
+        return True
+
+    def _reject_csrf_metadata(self, route: BaseRoute, route_handler: BaseRouteHandler) -> None:
+        for layer in route_handler.ownership_layers:
+            layer_opt = getattr(layer, "opt", None)
+            if isinstance(layer_opt, Mapping) and CSRF_REQUIRED_OPT_KEY in layer_opt:
+                self._raise_route_error(route, route_handler, "csrf_required is supported only on HTTP routes")
+
+    def _is_openapi_handler(self, route: HTTPRoute, route_handler: BaseRouteHandler) -> bool:
         if self.openapi_config is None:
             return False
         configured_router = self.openapi_config.openapi_router
@@ -485,6 +509,8 @@ class RouteCompiler(Generic[UserT]):
             if configured_controller is not None
             else self.openapi_config.path or "/schema"
         )
+        if route.path == base_path or route.path.startswith(f"{base_path}/"):
+            return True
         for layer in route_handler.ownership_layers[1:]:
             if isinstance(layer, Router) and layer.path == base_path:
                 return True

@@ -23,7 +23,8 @@ def test_websocket_mode_accepts_exact_origin_session_and_rejects_url_bearer(monk
     local_auth = plugin.config.local_auth
     assert local_auth is not None
     store = cast("ExampleAccountStore", local_auth.accounts)
-    csrf = local_auth.csrf
+    csrf = app.csrf_config
+    assert csrf is not None
     assert isinstance(csrf, CSRFConfig)
     password = "example password 123"  # noqa: S105 - local example credential
 

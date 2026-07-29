@@ -11,6 +11,12 @@ Which routes exist depends on the profile. A session profile has no token
 routes, a token profile has no session routes, and registration routes exist
 only when a registration policy allows them.
 
+Session and hybrid profiles require application-owned Litestar session
+middleware and exactly one native or external CSRF implementation. The local
+profile receives neither a session backend nor a session store; configure
+``CookieBackendConfig`` or ``ServerSideSessionConfig`` directly on
+``Litestar``.
+
 Tag groups
 ==========
 

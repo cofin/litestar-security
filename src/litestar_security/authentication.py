@@ -20,7 +20,7 @@ from litestar.middleware import DefineMiddleware
 from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
 from litestar.openapi.spec import SecurityScheme
 from litestar.types import ASGIApp, HTTPScope, Message, Receive, Scope, Send
-from typing_extensions import Self, TypedDict
+from typing_extensions import Self
 
 from litestar_security.context import (
     AuthenticationEvidence,
@@ -72,7 +72,6 @@ __all__ = (
     "optional",
     "public",
     "required",
-    "security",
 )
 
 
@@ -109,7 +108,10 @@ _LITESTAR_INTERNAL_ERROR_CLOSE = 4500
 RUNTIME_PLAN_OPT_KEY = "litestar_security_plan"
 
 
-SECURITY_POLICY_OPT_KEY = "litestar_security_policy"
+AUTH_POLICY_OPT_KEY = "auth"
+
+
+CSRF_REQUIRED_OPT_KEY = "csrf_required"
 
 
 _SECURITY_RESPONSE_HEADERS_SCOPE_KEY = "_litestar_security_response_headers"
@@ -148,12 +150,6 @@ class PublicPolicy(AuthenticationPolicy):
 @dataclass(frozen=True, slots=True)
 class OptionalPolicy(AuthenticationPolicy):
     policy: AuthenticationPolicy
-
-
-@dataclass(frozen=True, slots=True)
-class RouteSecurityDeclaration:
-    policy: AuthenticationPolicy
-    csrf_required: bool | None = None
 
 
 def mechanism(name: str, *scopes: str) -> "MechanismRequirement":
@@ -293,27 +289,6 @@ class MechanismPolicy(AuthenticationPolicy):
     requirements: tuple[MechanismRequirement, ...]
     count: int | None = None
     implicit: bool = False
-
-
-def security(policy: AuthenticationPolicy, *, csrf_required: bool | None = None) -> "_SecurityMetadata":
-    """Return typed Litestar metadata for one immutable security declaration.
-
-    Spread the result into a route handler decorator, or pass it as ``opt`` on
-    an application, router, or controller ownership layer.
-
-    Args:
-        policy: The policy to attach.
-        csrf_required: Override CSRF coverage. Leave unset to derive it from
-            whether the policy admits a session-capable mechanism.
-
-    Returns:
-        Metadata to spread into a handler decorator or pass as ``opt``.
-    """
-    _validate_policy(policy)
-    return cast(
-        "_SecurityMetadata",
-        {SECURITY_POLICY_OPT_KEY: RouteSecurityDeclaration(policy=policy, csrf_required=csrf_required)},
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -926,10 +901,6 @@ def _normalize_name(value: str, label: str) -> str:
         message = f"{label} must not be blank"
         raise ImproperlyConfiguredException(detail=message)
     return normalized
-
-
-class _SecurityMetadata(TypedDict):
-    litestar_security_policy: RouteSecurityDeclaration
 
 
 def _validate_policy(policy: object) -> None:

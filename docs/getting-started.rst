@@ -18,11 +18,10 @@ Add the plugin and mark public routes explicitly:
        SecurityContextDependency,
        SecurityPlugin,
        public,
-       security,
    )
 
 
-   @get("/", sync_to_thread=False, **security(public()))
+   @get("/", auth=public(), sync_to_thread=False)
    def index(security_context: SecurityContextDependency) -> dict[str, bool]:
        return {"authenticated": bool(security_context.evidence)}
 
@@ -32,8 +31,10 @@ Add the plugin and mark public routes explicitly:
        plugins=[SecurityPlugin(SecurityConfig())],
    )
 
-``SecurityConfig`` requires authentication by default. The route above opts
-out explicitly, so it remains public before a provider is configured.
+With configured authentication mechanisms and no inherited ``auth`` policy,
+routes use implicit ``required()``. Without any mechanisms they are public.
+The route above stays explicit so adding a provider cannot silently change its
+contract.
 
 Choose authentication
 ---------------------
@@ -53,22 +54,31 @@ configuration:
 .. code-block:: python
 
    from litestar import Litestar
+   from litestar.config.csrf import CSRFConfig
    from litestar.middleware.session.client_side import CookieBackendConfig
 
    session_config = CookieBackendConfig(secret=session_secret)
 
    app = Litestar(
+       csrf_config=CSRFConfig(secret=csrf_secret),
        middleware=[session_config.middleware],
        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))],
    )
 
-The application supplies ``session_secret``, ``local_auth``, and its account
-store from its settings and persistence layers. See :doc:`accounts` for the
-store contracts and :doc:`providers` for external authentication.
+The application supplies ``session_secret``, ``csrf_secret``, ``local_auth``,
+and its account store from its settings and persistence layers. Exactly one
+native ``CSRFConfig`` or ``SecurityConfig.external_csrf`` integration is
+required for session authentication.
 
 Pass the account store to ``LocalAuth.session(accounts=...)``. Native session
 storage stays in Litestar's session middleware because Litestar owns the
-session cookie and serialization lifecycle.
+session cookie and serialization lifecycle. Client-side sessions need no
+store. For server-side sessions, configure
+``ServerSideSessionConfig(store="sessions")`` and register the matching
+``Litestar(stores={"sessions": ...})`` value.
+
+See :doc:`accounts` for the account-store contracts and :doc:`providers` for
+external authentication.
 
 Run an example
 --------------

@@ -57,7 +57,6 @@ from litestar_security.authentication import (
     optional,
     public,
     required,
-    security,
 )
 from litestar_security.config import ExternalCSRF, MFAConfig, PasskeyConfig, SecurityConfig
 from litestar_security.context import (
@@ -1206,7 +1205,6 @@ def test_policy_helpers_are_immutable_hashable_and_deterministic() -> None:
     ("factory", "match"),
     [
         (AuthenticationPolicy, "policy helper"),
-        (lambda: security(cast("AuthenticationPolicy", object())), "policy helper"),
         (lambda: mechanism(" "), "mechanism name"),
         (lambda: mechanism("oidc", " "), "scope"),
         (lambda: mechanism("oidc", "read", " read "), "Duplicate scope"),
@@ -1226,12 +1224,11 @@ def test_policy_helpers_reject_invalid_or_unfaithful_expressions(factory: Callab
         factory()
 
 
-def test_required_without_arguments_is_the_implicit_secure_default() -> None:
+def test_required_without_arguments_is_the_implicit_secure_policy() -> None:
     config = SecurityConfig()
 
-    assert isinstance(config.default_policy, AuthenticationPolicy)
-    assert config.default_policy == required()
-    assert config.default_policy != public()
+    assert not hasattr(config, "default_policy")
+    assert not hasattr(config, "openapi_policy")
     assert required() != required("session")
 
 
@@ -1276,25 +1273,6 @@ def test_external_csrf_requires_a_named_integration() -> None:
 def test_security_config_requires_positive_openapi_combination_limit(limit: int) -> None:
     with pytest.raises(ImproperlyConfiguredException, match=r"max_openapi_combinations.*positive"):
         SecurityConfig(max_openapi_combinations=limit)
-
-
-@pytest.mark.parametrize("case", [(None,), (True,), (False,)])
-def test_security_returns_fresh_route_metadata_without_changing_policy(case: tuple[bool | None]) -> None:
-    csrf_required = case[0]
-    policy = optional(required(mechanism("oidc", "profile")))
-
-    first = security(policy, csrf_required=csrf_required)
-    second = security(policy, csrf_required=csrf_required)
-    first_declaration = next(iter(first.values()))
-    second_declaration = next(iter(second.values()))
-
-    assert first is not second
-    assert first == second
-    assert first_declaration.policy is policy
-    assert first_declaration.csrf_required is csrf_required
-    assert first_declaration == second_declaration
-    with pytest.raises(FrozenInstanceError):
-        first_declaration.csrf_required = not csrf_required  # type: ignore[misc]
 
 
 @pytest.mark.anyio
