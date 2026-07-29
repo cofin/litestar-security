@@ -7,12 +7,28 @@ import os
 from litestar import Litestar, get
 from litestar.openapi import OpenAPIConfig
 
-from examples.support import build_local_auth, example_session_backend
+from examples.support import (
+    build_api_team_config,
+    build_iap_config,
+    build_local_auth,
+    build_oauth_config,
+    example_session_backend,
+)
 from litestar_security import SecurityConfig, SecurityContextDependency, SecurityPlugin, public, security
 
 __all__ = ("EXAMPLE_MODES", "create_app")
 
-EXAMPLE_MODES = ("local-session", "local-token", "local-hybrid", "no-session")
+EXAMPLE_MODES = (
+    "api-team-service",
+    "github-oauth",
+    "google-iap",
+    "google-oauth",
+    "keycloak",
+    "local-hybrid",
+    "local-session",
+    "local-token",
+    "no-session",
+)
 
 
 @get("/", opt=security(public()), sync_to_thread=False)
@@ -42,10 +58,19 @@ def create_app() -> Litestar:
         raise ValueError(message)
     config = SecurityConfig[object](default_policy=public())
     if mode != "no-session":
-        config.local_auth = build_local_auth(mode)
+        if mode.startswith("local-"):
+            config.local_auth = build_local_auth(mode)
+        elif mode == "google-iap":
+            config.iap = build_iap_config()
+        elif mode in {"google-oauth", "github-oauth", "keycloak"}:
+            config.local_auth = build_local_auth("local-session")
+            config.session_backend = example_session_backend()  # type: ignore[assignment]  # Litestar exposes it untyped
+            config.oauth = build_oauth_config(mode)
+        elif mode == "api-team-service":
+            config.api_key, config.service_token = build_api_team_config()
     if mode in {"local-session", "local-hybrid"}:
         config.session_backend = example_session_backend()  # type: ignore[assignment]  # Litestar exposes it untyped
-    route_handlers = [example_home, csrf_seed] if mode in {"local-session", "local-hybrid"} else [example_home]
+    route_handlers = [example_home, csrf_seed] if config.session_backend is not None else [example_home]
     return Litestar(
         route_handlers=route_handlers,
         openapi_config=OpenAPIConfig(title=f"Litestar Security: {mode}", version="1.0.0"),

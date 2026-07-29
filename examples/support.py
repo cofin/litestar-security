@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from secrets import token_hex
 from typing import TYPE_CHECKING, Any, cast
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from litestar.config.csrf import CSRFConfig
+from litestar.datastructures import Cookie
 from litestar.middleware.session.client_side import CookieBackendConfig
 
 from litestar_security.accounts import (
@@ -46,17 +48,163 @@ from litestar_security.accounts import (
     TokenIssue,
     TokenPurpose,
 )
+from litestar_security.context import Principal
+from litestar_security.providers.api_key import APIKeyClaims, APIKeyConfig
+from litestar_security.providers.iap import GoogleIAPClaims, GoogleIAPConfig
 from litestar_security.providers.jwt import LocalKeyRing, SigningKey
+from litestar_security.providers.oauth import (
+    OAuthAuthorization,
+    OAuthConfig,
+    OAuthLogoutResult,
+    OAuthOperation,
+    OAuthRouteResponse,
+    ProviderIdentity,
+    ProviderTokenSet,
+    SecretStr,
+)
+from litestar_security.providers.oidc import ServiceTokenConfig
+from litestar_security.testing import FakeOAuthProvider, InMemorySecurityBackend
 
 if TYPE_CHECKING:
-    from datetime import datetime
+    from litestar.connection import Request
 
-__all__ = ("ExampleAccountStore", "build_local_auth", "example_account_store", "example_session_backend")
+    from litestar_security.authentication import InvalidCredentials
+    from litestar_security.providers.jwks import JWKSProvider
+
+__all__ = (
+    "ExampleAccountStore",
+    "build_api_team_config",
+    "build_iap_config",
+    "build_local_auth",
+    "build_oauth_config",
+    "example_account_store",
+    "example_session_backend",
+)
 
 _PURPOSE_PEPPER = b"p" * 32
 _REFRESH_PEPPER = b"r" * 32
 _RECEIPT_KEY = b"k" * 32
 _BINDING_PEPPER = b"b" * 32
+_IAP_AUDIENCE = "/projects/123/global/backendServices/456"
+
+
+class _UnavailableJWKS:
+    async def select_key(
+        self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime
+    ) -> InvalidCredentials:
+        del issuer, jwks_uri, kid, algorithm, now
+        from litestar_security.authentication import InvalidCredentials  # noqa: PLC0415 - type used on request only
+
+        return InvalidCredentials()
+
+    async def warmup(self, *, now: datetime) -> None:
+        del now
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _ExampleIdentityResolver:
+    async def resolve(self, claims: APIKeyClaims | GoogleIAPClaims) -> Principal[object]:
+        subject = getattr(claims, "subject_id", None) or getattr(claims, "subject", None)
+        return Principal(id=cast("str", subject), user=object())
+
+
+class _ExampleOAuthService:
+    def __init__(self, provider_name: str) -> None:
+        self.provider_names = frozenset({provider_name})
+
+    async def begin(  # noqa: PLR0913 - mirrors the public OAuth service boundary
+        self,
+        *,
+        provider: str,
+        operation: OAuthOperation,
+        account_id: str | None,
+        provider_account_id: str | None,
+        return_to: str,
+        scopes: frozenset[str] | None,
+        step_up_grant: str | None,
+        request: Request[Any, Any, Any],
+    ) -> OAuthAuthorization:
+        del operation, account_id, provider_account_id, return_to, scopes, step_up_grant, request
+        return OAuthAuthorization(
+            url=f"https://provider.example/authorize?provider={provider}&code_challenge=example",
+            binding_cookie=Cookie(
+                key="__Host-litestar-security-oauth",
+                value="example-binding",
+                path="/",
+                secure=True,
+                httponly=True,
+                samesite="lax",
+            ),
+        )
+
+    async def callback(
+        self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
+    ) -> OAuthRouteResponse:
+        del code, state, request
+        return OAuthRouteResponse(detail="Authenticated.", provider_account_id=f"{provider}-account")
+
+    async def unlink(self, **_kwargs: object) -> OAuthRouteResponse:
+        return OAuthRouteResponse(detail="Unlinked.")
+
+    async def revoke(self, **_kwargs: object) -> OAuthRouteResponse:
+        return OAuthRouteResponse(detail="Revoked.")
+
+    async def logout(self, **_kwargs: object) -> OAuthLogoutResult:
+        return OAuthLogoutResult()
+
+
+def build_iap_config() -> GoogleIAPConfig[object]:
+    """Build the deterministic exact-audience IAP trust boundary."""
+    return GoogleIAPConfig(
+        audience=_IAP_AUDIENCE,
+        identity_resolver=_ExampleIdentityResolver(),
+        jwks=cast("JWKSProvider", _UnavailableJWKS()),
+    )
+
+
+def build_oauth_config(mode: str) -> OAuthConfig:
+    """Build local-stub OAuth/OIDC routes for one provider mode."""
+    provider_name = {"google-oauth": "google", "github-oauth": "github", "keycloak": "keycloak"}.get(mode)
+    if provider_name is None:
+        message = f"Unsupported OAuth example mode: {mode}"
+        raise ValueError(message)
+    provider = FakeOAuthProvider(
+        name=provider_name,
+        tokens=ProviderTokenSet(
+            access_token=SecretStr("example-access"),
+            token_type="Bearer",  # noqa: S106 - standardized OAuth token type
+            scopes=frozenset({"openid", "profile", "email"}),
+            expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(hours=1),
+        ),
+        identity=ProviderIdentity(
+            provider=provider_name,
+            issuer=f"https://{provider_name}.example",
+            subject="example-subject",
+            display_name="Example User",
+            email="user@example.com",
+            email_verified=True,
+            raw_claims={},
+        ),
+    )
+    return OAuthConfig(service=_ExampleOAuthService(provider_name), providers=(provider,))
+
+
+def build_api_team_config() -> tuple[APIKeyConfig, ServiceTokenConfig]:
+    """Build API-key and userless workload-JWT boundaries for the API example."""
+    backend = InMemorySecurityBackend()
+    jwks = cast("JWKSProvider", _UnavailableJWKS())
+    return (
+        APIKeyConfig(store=backend.api_keys, pepper=b"a" * 32, identity_resolver=_ExampleIdentityResolver()),
+        ServiceTokenConfig(
+            issuer="https://workload.example",
+            audiences=frozenset({"team-api"}),
+            allowed_algorithms=frozenset({"ES256"}),
+            jwks=jwks,
+            jwks_uri="https://workload.example/jwks",
+        ),
+    )
 
 
 @dataclass(slots=True)

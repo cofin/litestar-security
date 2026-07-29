@@ -1,0 +1,18 @@
+{
+  "realm": "litestar-security-example",
+  "enabled": true,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 600,
+  "clients": [
+    {
+      "clientId": "litestar-security-example",
+      "publicClient": true,
+      "redirectUris": ["http://127.0.0.1:8000/auth/oauth/keycloak/callback"],
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false
+    }
+  ],
+  "roles": {
+    "realm": [{"name": "reports-reader"}]
+  }
+}
