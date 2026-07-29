@@ -48,7 +48,7 @@ from litestar_security.accounts import (
     TokenIssue,
     TokenPurpose,
 )
-from litestar_security.context import Principal
+from litestar_security.context import AuthorizationSnapshot, Principal
 from litestar_security.providers.api_key import APIKeyClaims, APIKeyConfig
 from litestar_security.providers.iap import GoogleIAPClaims, GoogleIAPConfig
 from litestar_security.providers.jwt import LocalKeyRing, SigningKey
@@ -64,6 +64,7 @@ from litestar_security.providers.oauth import (
 )
 from litestar_security.providers.oidc import ServiceTokenConfig
 from litestar_security.testing import FakeOAuthProvider, InMemorySecurityBackend
+from litestar_security.websocket import WebSocketSecurityConfig
 
 if TYPE_CHECKING:
     from litestar.connection import Request
@@ -77,6 +78,7 @@ __all__ = (
     "build_iap_config",
     "build_local_auth",
     "build_oauth_config",
+    "build_websocket_config",
     "example_account_store",
     "example_session_backend",
 )
@@ -204,6 +206,23 @@ def build_api_team_config() -> tuple[APIKeyConfig, ServiceTokenConfig]:
             jwks=jwks,
             jwks_uri="https://workload.example/jwks",
         ),
+    )
+
+
+class _ExampleSnapshotRefresher:
+    async def refresh(
+        self, *, principal: Principal[object], previous: AuthorizationSnapshot, route_name: str
+    ) -> AuthorizationSnapshot:
+        del principal, route_name
+        return previous
+
+
+def build_websocket_config() -> WebSocketSecurityConfig:
+    """Build exact-origin WebSocket policy with bounded snapshot refresh."""
+    return WebSocketSecurityConfig(
+        allowed_origins=frozenset({"http://testserver.local"}),
+        refresh_interval=timedelta(seconds=30),
+        snapshot_refresher=_ExampleSnapshotRefresher(),
     )
 
 

@@ -16,6 +16,8 @@ LITESTAR_SECURITY_EXAMPLE=google-oauth uv run litestar --app examples.app:create
 LITESTAR_SECURITY_EXAMPLE=github-oauth uv run litestar --app examples.app:create_app run
 LITESTAR_SECURITY_EXAMPLE=keycloak uv run litestar --app examples.app:create_app run
 LITESTAR_SECURITY_EXAMPLE=api-team-service uv run litestar --app examples.app:create_app run
+LITESTAR_SECURITY_EXAMPLE=websocket uv run litestar --app examples.app:create_app run
+LITESTAR_SECURITY_EXAMPLE=custom-admin uv run litestar --app examples.app:create_app run
 ```
 
 `local-session` and `local-hybrid` explicitly install native session and CSRF
@@ -36,3 +38,15 @@ The stub modes are not deployment configuration. Production IAP must be behind
 the intended Google load-balancer boundary, OAuth clients must load real
 credentials from a secret manager, and every discovery/JWKS issuer, audience,
 redirect URI, and egress destination must be pinned explicitly.
+
+`websocket` uses an explicit hybrid transport, exact same-origin checks,
+prohibits bearer credentials in URLs, and installs a bounded authorization
+snapshot refresher. Browser clients authenticate through the bound session
+cookie; non-browser clients use the `Authorization` header. Production socket
+handlers should also wire revocation events or one-time tickets where immediate
+disconnect is required.
+
+`custom-admin` is intentionally application code. Its guarded controller shows
+where an application composes account disable, forced reset, and
+factor/session/key revocation services. Litestar Security does not install an
+admin API or decide an application's administrator role model.
