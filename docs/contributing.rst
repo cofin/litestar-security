@@ -2,8 +2,8 @@ Contributing
 ============
 
 Litestar Security uses test-driven development and Conventional Commits. Keep
-changes focused on an approved contract, and do not introduce authentication or
-authorization behavior as incidental scaffold work.
+changes focused on an approved contract, and do not introduce unrelated
+authentication or authorization behavior incidentally.
 
 The essential commands are:
 

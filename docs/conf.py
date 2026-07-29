@@ -45,16 +45,16 @@ html_theme_options = {
         {
             "title": "Documentation",
             "children": [
-                {"title": "Introduction", "url": "introduction", "summary": "Understand the current pre-alpha scope."},
+                {"title": "Introduction", "url": "introduction", "summary": "Understand the stable 1.0 model."},
                 {
-                    "title": "Development installation",
-                    "url": "development-installation",
-                    "summary": "Install and validate the project locally.",
+                    "title": "Getting started",
+                    "url": "getting-started",
+                    "summary": "Choose an explicit authentication transport.",
                 },
                 {
-                    "title": "Plugin scaffold",
-                    "url": "plugin-scaffold",
-                    "summary": "Use the current configuration and plugin contracts.",
+                    "title": "Hardening",
+                    "url": "hardening",
+                    "summary": "Operate browser, provider, worker, and key boundaries.",
                 },
                 {"title": "API reference", "url": "reference", "summary": "Browse the typed public surface."},
             ],
