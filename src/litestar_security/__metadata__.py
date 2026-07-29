@@ -8,5 +8,5 @@ try:
     __version__ = version("litestar-security")
     __project__ = metadata("litestar-security")["Name"]
 except PackageNotFoundError:  # pragma: no cover
-    __version__ = "1.0.0"
+    __version__ = "0.1.0"
     __project__ = "litestar-security"

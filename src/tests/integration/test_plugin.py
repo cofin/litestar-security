@@ -3211,7 +3211,7 @@ def test_cli_entry_point_and_lazy_plugin_registration() -> None:
     ("arguments", "expected"),
     [
         (["security", "--help"], "Litestar Security operations."),
-        (["security", "--version"], "litestar-security, version 1.0.0"),
+        (["security", "--version"], "litestar-security, version 0.1.0"),
     ],
 )
 def test_cli_output(arguments: list[str], expected: str) -> None:
