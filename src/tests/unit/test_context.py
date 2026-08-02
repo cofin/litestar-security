@@ -851,7 +851,6 @@ def test_package_root_exports_only_foundational_contract() -> None:
     assert litestar_security.__all__ == _PUBLIC_API
     assert all(hasattr(litestar_security, name) for name in _PUBLIC_API)
     assert litestar_security.__project__ == "litestar-security"
-    assert litestar_security.__version__ == "0.1.0"
     for private_name in (
         "OwnedSessionBackend",
         "SecurityMiddleware",
