@@ -243,8 +243,7 @@ class RefreshTokenResponse(WireStruct, frozen=True):
     access_token: str
     refresh_token: str
     expires_in: int
-    # RFC 6749 section 5.1 member names, so none of these may be renamed. msgspec has
-    # no init=False, so the fixed token type is a default that callers never pass.
+    # RFC 6749 section 5.1 member names, so none of these may be renamed.
     token_type: Literal["Bearer"] = "Bearer"  # noqa: S105 - the public RFC 6749 token type, not a credential
 
     def __repr__(self) -> str:

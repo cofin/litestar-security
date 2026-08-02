@@ -30,7 +30,7 @@ from litestar.openapi.plugins import JsonRenderPlugin
 from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme, Tag
 from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
-from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
+from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED, HTTP_400_BAD_REQUEST
 from litestar.testing import TestClient
 
 import litestar_security.accounts as accounts_module
@@ -601,6 +601,44 @@ def _route_options() -> WebAuthnOptions:
     )
 
 
+def test_generated_mfa_bodies_are_snake_case_on_the_wire() -> None:
+    router = build_mfa_routes(
+        step_up=cast("Any", _RouteStepUpService()),
+        epochs=cast("Any", _RouteEpochs()),
+        mfa=cast("Any", _RouteMFAService()),
+        passkeys=cast("Any", _RoutePasskeyService()),
+        local_auth=cast("Any", _RouteLocalAuth()),
+    )
+    app = Litestar(
+        route_handlers=[router], openapi_config=None, plugins=[SecurityPlugin(_compiler_config(names=("a",)))]
+    )
+    authenticated = {"x-auth-a": "valid", "authorization": "Bearer transport"}
+
+    with TestClient(app) as client:
+        enrolled = client.post(
+            "/auth/mfa/totp/enroll",
+            headers=authenticated,
+            json={"label": "person@example.com", "step_up_grant": "grant"},
+        )
+        stepped_up = client.post(
+            "/auth/step-up/settings",
+            headers=authenticated,
+            json={"method": "totp", "credential": "123456", "method_id": "method-1"},
+        )
+        options = client.post("/auth/passkeys/authentication/options", json={"account_id": "user"})
+        rejected_casing = client.post(
+            "/auth/mfa/totp/enroll", headers=authenticated, json={"label": "person@example.com", "stepUpGrant": "grant"}
+        )
+
+    assert enrolled.status_code == HTTP_201_CREATED, enrolled.text
+    assert {"enrollment_id", "method_id", "provisioning_uri", "expires_at"} <= set(enrolled.json())
+    assert stepped_up.status_code == HTTP_200_OK, stepped_up.text
+    assert {"grant", "purpose", "expires_at"} <= set(stepped_up.json())
+    assert options.status_code == HTTP_200_OK, options.text
+    assert {"options", "expires_at", "binding"} <= set(options.json())
+    assert rejected_casing.status_code == HTTP_400_BAD_REQUEST, rejected_casing.text
+
+
 def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_responses() -> None:
     local_auth = _RouteLocalAuth()
     router = build_mfa_routes(
@@ -628,7 +666,7 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
             client.post(
                 "/auth/step-up/settings",
                 headers=authenticated,
-                json={"method": "totp", "credential": "123456", "methodId": "method-1"},
+                json={"method": "totp", "credential": "123456", "method_id": "method-1"},
             ).status_code
             == HTTP_200_OK
         )
@@ -642,7 +680,7 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
             client.post(
                 "/auth/step-up/totp-enroll",
                 headers=authenticated,
-                json={"method": "totp", "credential": "123456", "methodId": "method-1"},
+                json={"method": "totp", "credential": "123456", "method_id": "method-1"},
             ).status_code
             == 401
         )
@@ -650,31 +688,31 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
             client.post(
                 "/auth/mfa/totp/enroll",
                 headers=authenticated,
-                json={"label": "person@example.com", "stepUpGrant": "grant"},
+                json={"label": "person@example.com", "step_up_grant": "grant"},
             ).status_code
             == HTTP_201_CREATED
         )
         assert (
             client.post(
-                "/auth/mfa/totp/verify", headers=authenticated, json={"enrollmentId": "enrollment-1", "code": "123456"}
+                "/auth/mfa/totp/verify", headers=authenticated, json={"enrollment_id": "enrollment-1", "code": "123456"}
             ).status_code
             == HTTP_200_OK
         )
         assert (
             client.request(
-                "DELETE", "/auth/mfa/totp/method-1", headers=authenticated, json={"stepUpGrant": "grant"}
+                "DELETE", "/auth/mfa/totp/method-1", headers=authenticated, json={"step_up_grant": "grant"}
             ).status_code
             == HTTP_200_OK
         )
         assert (
-            client.post("/auth/mfa/recovery-codes", headers=authenticated, json={"stepUpGrant": "grant"}).status_code
+            client.post("/auth/mfa/recovery-codes", headers=authenticated, json={"step_up_grant": "grant"}).status_code
             == HTTP_200_OK
         )
         assert (
             client.post(
                 "/auth/passkeys/registration/options",
                 headers=authenticated,
-                json={"userName": "person@example.com", "stepUpGrant": "grant"},
+                json={"user_name": "person@example.com", "step_up_grant": "grant"},
             ).status_code
             == HTTP_200_OK
         )
@@ -682,16 +720,16 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
             client.post(
                 "/auth/passkeys/registration/verify",
                 headers=authenticated,
-                json={"accountId": "user", "response": "{}"},
+                json={"account_id": "user", "response": "{}"},
             ).status_code
             == HTTP_201_CREATED
         )
-        authentication_options = client.post("/auth/passkeys/authentication/options", json={"accountId": "user"})
+        authentication_options = client.post("/auth/passkeys/authentication/options", json={"account_id": "user"})
         assert authentication_options.status_code == HTTP_200_OK
         assert (
             client.post(
                 "/auth/passkeys/authentication/verify",
-                json={"accountId": "user", "response": "{}", "transport": "tokens"},
+                json={"account_id": "user", "response": "{}", "transport": "tokens"},
             ).status_code
             == 401
         )
@@ -699,7 +737,7 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
             client.post(
                 "/auth/passkeys/authentication/verify",
                 json={
-                    "accountId": "user",
+                    "account_id": "user",
                     "response": "{}",
                     "binding": authentication_options.json()["binding"],
                     "transport": "tokens",
@@ -712,7 +750,7 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
         assert "public_key" not in inventory.text
         assert (
             client.request(
-                "DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", headers=authenticated, json={"stepUpGrant": "grant"}
+                "DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", headers=authenticated, json={"step_up_grant": "grant"}
             ).status_code
             == HTTP_200_OK
         )
@@ -748,7 +786,7 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         mfa.failure = "factor"
         assert (
             client.post(
-                "/auth/step-up/settings", headers=headers, json={"method": "totp", "methodId": "m1", "credential": "x"}
+                "/auth/step-up/settings", headers=headers, json={"method": "totp", "method_id": "m1", "credential": "x"}
             ).status_code
             == 401
         )
@@ -772,7 +810,7 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         step_up.failure = "consume"
         assert (
             client.post(
-                "/auth/mfa/totp/enroll", headers=headers, json={"label": "User", "stepUpGrant": "bad"}
+                "/auth/mfa/totp/enroll", headers=headers, json={"label": "User", "step_up_grant": "bad"}
             ).status_code
             == 401
         )
@@ -780,30 +818,30 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         mfa.failure = "enroll"
         assert (
             client.post(
-                "/auth/mfa/totp/enroll", headers=headers, json={"label": "User", "stepUpGrant": "grant"}
+                "/auth/mfa/totp/enroll", headers=headers, json={"label": "User", "step_up_grant": "grant"}
             ).status_code
             == 503
         )
         mfa.failure = "activate"
         assert (
             client.post(
-                "/auth/mfa/totp/verify", headers=headers, json={"enrollmentId": "e1", "code": "123456"}
+                "/auth/mfa/totp/verify", headers=headers, json={"enrollment_id": "e1", "code": "123456"}
             ).status_code
             == 401
         )
         mfa.failure = "recovery"
         assert (
             client.post(
-                "/auth/mfa/totp/verify", headers=headers, json={"enrollmentId": "e1", "code": "123456"}
+                "/auth/mfa/totp/verify", headers=headers, json={"enrollment_id": "e1", "code": "123456"}
             ).status_code
             == 503
         )
         assert (
-            client.post("/auth/mfa/recovery-codes", headers=headers, json={"stepUpGrant": "grant"}).status_code == 503
+            client.post("/auth/mfa/recovery-codes", headers=headers, json={"step_up_grant": "grant"}).status_code == 503
         )
         mfa.failure = "remove"
         assert (
-            client.request("DELETE", "/auth/mfa/totp/m1", headers=headers, json={"stepUpGrant": "grant"}).status_code
+            client.request("DELETE", "/auth/mfa/totp/m1", headers=headers, json={"step_up_grant": "grant"}).status_code
             == 503
         )
         mfa.failure = None
@@ -812,30 +850,30 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
             client.post(
                 "/auth/passkeys/registration/options",
                 headers=headers,
-                json={"userName": "User", "stepUpGrant": "grant"},
+                json={"user_name": "User", "step_up_grant": "grant"},
             ).status_code
             == 503
         )
         passkeys.failure = "registration"
         assert (
             client.post(
-                "/auth/passkeys/registration/verify", headers=headers, json={"accountId": "user", "response": "{}"}
+                "/auth/passkeys/registration/verify", headers=headers, json={"account_id": "user", "response": "{}"}
             ).status_code
             == 401
         )
         assert (
             client.post(
-                "/auth/passkeys/registration/verify", headers=headers, json={"accountId": "other", "response": "{}"}
+                "/auth/passkeys/registration/verify", headers=headers, json={"account_id": "other", "response": "{}"}
             ).status_code
             == 401
         )
         passkeys.failure = "options"
-        assert client.post("/auth/passkeys/authentication/options", json={"accountId": "user"}).status_code == 503
+        assert client.post("/auth/passkeys/authentication/options", json={"account_id": "user"}).status_code == 503
         passkeys.failure = "authentication"
         assert (
             client.post(
                 "/auth/passkeys/authentication/verify",
-                json={"accountId": "user", "response": "{}", "binding": "binding"},
+                json={"account_id": "user", "response": "{}", "binding": "binding"},
             ).status_code
             == 401
         )
@@ -844,7 +882,7 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         assert (
             client.post(
                 "/auth/passkeys/authentication/verify",
-                json={"accountId": "user", "response": "{}", "binding": "binding"},
+                json={"account_id": "user", "response": "{}", "binding": "binding"},
             ).status_code
             == 401
         )
@@ -852,22 +890,22 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         passkeys.failure = "list"
         assert client.get("/auth/passkeys", headers=headers).status_code == 503
         assert (
-            client.request("DELETE", "/auth/passkeys/a", headers=headers, json={"stepUpGrant": "grant"}).status_code
+            client.request("DELETE", "/auth/passkeys/a", headers=headers, json={"step_up_grant": "grant"}).status_code
             == 400
         )
         passkeys.failure = "remove"
         assert (
             client.request(
-                "DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", headers=headers, json={"stepUpGrant": "grant"}
+                "DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", headers=headers, json={"step_up_grant": "grant"}
             ).status_code
             == 503
         )
         step_up.failure = "consume"
         for method, path, payload in (
-            ("DELETE", "/auth/mfa/totp/m1", {"stepUpGrant": "bad"}),
-            ("POST", "/auth/mfa/recovery-codes", {"stepUpGrant": "bad"}),
-            ("POST", "/auth/passkeys/registration/options", {"userName": "User", "stepUpGrant": "bad"}),
-            ("DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", {"stepUpGrant": "bad"}),
+            ("DELETE", "/auth/mfa/totp/m1", {"step_up_grant": "bad"}),
+            ("POST", "/auth/mfa/recovery-codes", {"step_up_grant": "bad"}),
+            ("POST", "/auth/passkeys/registration/options", {"user_name": "User", "step_up_grant": "bad"}),
+            ("DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", {"step_up_grant": "bad"}),
         ):
             assert client.request(method, path, headers=headers, json=payload).status_code == 401
 
@@ -892,14 +930,14 @@ def test_generated_mfa_handlers_apply_shared_rate_limit_before_factor_work() -> 
     )
     headers = {"x-auth-a": "valid", "authorization": "Bearer transport"}
     requests = (
-        ("POST", "/auth/step-up/settings", {"method": "totp", "methodId": "m1", "credential": "x"}, headers),
-        ("POST", "/auth/mfa/totp/enroll", {"label": "User", "stepUpGrant": "grant"}, headers),
-        ("POST", "/auth/mfa/totp/verify", {"enrollmentId": "e1", "code": "123456"}, headers),
-        ("POST", "/auth/mfa/recovery-codes", {"stepUpGrant": "grant"}, headers),
-        ("POST", "/auth/passkeys/registration/options", {"userName": "User", "stepUpGrant": "grant"}, headers),
-        ("POST", "/auth/passkeys/registration/verify", {"accountId": "user", "response": "{}"}, headers),
-        ("POST", "/auth/passkeys/authentication/options", {"accountId": "user"}, {}),
-        ("POST", "/auth/passkeys/authentication/verify", {"accountId": "user", "response": "{}"}, {}),
+        ("POST", "/auth/step-up/settings", {"method": "totp", "method_id": "m1", "credential": "x"}, headers),
+        ("POST", "/auth/mfa/totp/enroll", {"label": "User", "step_up_grant": "grant"}, headers),
+        ("POST", "/auth/mfa/totp/verify", {"enrollment_id": "e1", "code": "123456"}, headers),
+        ("POST", "/auth/mfa/recovery-codes", {"step_up_grant": "grant"}, headers),
+        ("POST", "/auth/passkeys/registration/options", {"user_name": "User", "step_up_grant": "grant"}, headers),
+        ("POST", "/auth/passkeys/registration/verify", {"account_id": "user", "response": "{}"}, headers),
+        ("POST", "/auth/passkeys/authentication/options", {"account_id": "user"}, {}),
+        ("POST", "/auth/passkeys/authentication/verify", {"account_id": "user", "response": "{}"}, {}),
     )
     with TestClient(app) as client:
         for method, path, payload, request_headers in requests:

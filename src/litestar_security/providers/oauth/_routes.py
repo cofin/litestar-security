@@ -31,6 +31,7 @@ from litestar_security.providers.oauth._transactions import (
     SecretStr,
     oauth_binding_cookie,
 )
+from litestar_security.schema import WireStruct
 
 __all__ = (
     "OAuthAuthorization",
@@ -55,14 +56,14 @@ __all__ = (
 )
 
 
-class OAuthRouteResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True, kw_only=True):
+class OAuthRouteResponse(WireStruct, frozen=True, kw_only=True):
     """Secret-free provider lifecycle response."""
 
     detail: str
     provider_account_id: str | None = None
 
 
-class OAuthLinkRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True, kw_only=True):
+class OAuthLinkRequest(WireStruct, frozen=True, kw_only=True):
     """Purpose-bound link request."""
 
     step_up_grant: str
@@ -73,7 +74,7 @@ class OAuthLinkRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unkno
         return f"{type(self).__name__}(step_up_grant=<redacted>, return_to={self.return_to!r})"
 
 
-class OAuthScopeRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True, kw_only=True):
+class OAuthScopeRequest(WireStruct, frozen=True, kw_only=True):
     """Incremental provider-scope request."""
 
     provider_account_id: str
@@ -89,7 +90,7 @@ class OAuthScopeRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unkn
         )
 
 
-class OAuthStepUpRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True, kw_only=True):
+class OAuthStepUpRequest(WireStruct, frozen=True, kw_only=True):
     """Provider-account action requiring fresh step-up."""
 
     step_up_grant: str
@@ -99,8 +100,8 @@ class OAuthStepUpRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unk
         return f"{type(self).__name__}(step_up_grant=<redacted>)"
 
 
-class OIDCBackchannelLogoutRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    """OIDC back-channel logout token form."""
+class OIDCBackchannelLogoutRequest(WireStruct, frozen=True, kw_only=True):
+    """OIDC back-channel logout token form, decoded from a form-encoded body."""
 
     logout_token: str
 

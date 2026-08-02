@@ -1432,9 +1432,8 @@ def test_refresh_value_contracts_are_frozen_slotted_and_secret_safe() -> None:
     assert sealer.unseal(sealed, receipt_context, now=now) == response
     for value in values:
         assert not hasattr(value, "__dict__")
-        # RefreshTokenResponse crosses the wire, so it is a frozen msgspec Struct
-        # rather than a frozen dataclass; both are slotted and reject assignment,
-        # but they name their fields and raise differently.
+        # RefreshTokenResponse crosses the wire, so it is a frozen Struct; it names
+        # its fields and raises on assignment differently from a frozen dataclass.
         if isinstance(value, msgspec.Struct):
             with pytest.raises(AttributeError):
                 setattr(value, value.__struct_fields__[0], None)

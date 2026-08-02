@@ -377,7 +377,7 @@ async def test_concrete_lifecycle_composes_login_transaction_provider_account_an
         state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
         callback = await client.get("/auth/oauth/example/callback", params={"code": "code", "state": state})
 
-    assert callback.json() == {"detail": "Authenticated.", "providerAccountId": "account-1"}
+    assert callback.json() == {"detail": "Authenticated.", "provider_account_id": "account-1"}
     assert local_services.established == ["account-1"]
     assert provider.calls == ["authorize", "exchange", "identity"]
 
@@ -930,7 +930,7 @@ async def test_public_login_and_callback_have_binding_and_no_store_headers() -> 
     assert "Secure" in login.headers["set-cookie"]
     assert login.headers["cache-control"] == "no-store"
     assert callback.status_code == 200
-    assert callback.json() == {"detail": "Authenticated.", "providerAccountId": "example-account"}
+    assert callback.json() == {"detail": "Authenticated.", "provider_account_id": "example-account"}
     assert callback.headers["cache-control"] == "no-store"
 
 
@@ -958,31 +958,31 @@ async def test_authenticated_routes_delegate_to_shared_service() -> None:
 
     async with AsyncTestClient(app=app) as client:
         link = await client.post(
-            "/auth/oauth/example/link", json={"stepUpGrant": "grant", "returnTo": "/"}, follow_redirects=False
+            "/auth/oauth/example/link", json={"step_up_grant": "grant", "return_to": "/"}, follow_redirects=False
         )
         scope = await client.post(
             "/auth/oauth/example/scopes",
             json={
-                "providerAccountId": "provider-account",
+                "provider_account_id": "provider-account",
                 "scopes": ["email"],
-                "stepUpGrant": "grant",
-                "returnTo": "/",
+                "step_up_grant": "grant",
+                "return_to": "/",
             },
             follow_redirects=False,
         )
         unlink = await client.request(
-            "DELETE", "/auth/oauth/example/links/provider-account", json={"stepUpGrant": "grant"}
+            "DELETE", "/auth/oauth/example/links/provider-account", json={"step_up_grant": "grant"}
         )
-        revoke = await client.post("/auth/oauth/example/revoke", json={"stepUpGrant": "grant"})
+        revoke = await client.post("/auth/oauth/example/revoke", json={"step_up_grant": "grant"})
         logout = await client.post("/auth/oauth/example/logout")
         service.logout_redirect = True
         redirected_logout = await client.post("/auth/oauth/example/logout", follow_redirects=False)
 
     assert link.status_code == 302
     assert scope.status_code == 302
-    assert unlink.json() == {"detail": "Unlinked.", "providerAccountId": None}
-    assert revoke.json() == {"detail": "Revoked.", "providerAccountId": None}
-    assert logout.json() == {"detail": "Logged out.", "providerAccountId": None}
+    assert unlink.json() == {"detail": "Unlinked.", "provider_account_id": None}
+    assert revoke.json() == {"detail": "Revoked.", "provider_account_id": None}
+    assert logout.json() == {"detail": "Logged out.", "provider_account_id": None}
     assert redirected_logout.headers["location"] == "https://issuer.example/logout"
     assert service.operations == [OAuthOperation.LINK, OAuthOperation.SCOPE_UPGRADE]
 
@@ -993,7 +993,7 @@ async def test_route_service_rejects_anonymous_principal() -> None:
 
     async with AsyncTestClient(app=app) as client:
         response = await client.post(
-            "/auth/oauth/example/link", json={"stepUpGrant": "grant", "returnTo": "/"}, follow_redirects=False
+            "/auth/oauth/example/link", json={"step_up_grant": "grant", "return_to": "/"}, follow_redirects=False
         )
 
     assert response.status_code == 401

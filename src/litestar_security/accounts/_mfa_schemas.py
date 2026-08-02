@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-import msgspec
+from litestar_security.schema import WireStruct
 
 __all__ = (
     "MFAStatusResponse",
@@ -21,7 +21,7 @@ __all__ = (
 )
 
 
-class TOTPEnrollmentRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class TOTPEnrollmentRequest(WireStruct, frozen=True):
     """Request a protected TOTP enrollment."""
 
     label: str
@@ -32,7 +32,7 @@ class TOTPEnrollmentRequest(msgspec.Struct, frozen=True, rename="camel", forbid_
         return f"{type(self).__name__}(label={self.label!r}, step_up_grant=<redacted>)"
 
 
-class TOTPEnrollmentResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class TOTPEnrollmentResponse(WireStruct, frozen=True):
     """Reveal one TOTP provisioning URI."""
 
     enrollment_id: str
@@ -48,7 +48,7 @@ class TOTPEnrollmentResponse(msgspec.Struct, frozen=True, rename="camel", forbid
         )
 
 
-class TOTPVerificationRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class TOTPVerificationRequest(WireStruct, frozen=True):
     """Activate one pending TOTP enrollment."""
 
     enrollment_id: str
@@ -59,7 +59,7 @@ class TOTPVerificationRequest(msgspec.Struct, frozen=True, rename="camel", forbi
         return f"{type(self).__name__}(enrollment_id={self.enrollment_id!r}, code=<redacted>)"
 
 
-class RecoveryCodesRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class RecoveryCodesRequest(WireStruct, frozen=True):
     """Authorize a recovery-code replacement."""
 
     step_up_grant: str
@@ -69,7 +69,7 @@ class RecoveryCodesRequest(msgspec.Struct, frozen=True, rename="camel", forbid_u
         return f"{type(self).__name__}(step_up_grant=<redacted>)"
 
 
-class RecoveryCodesResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class RecoveryCodesResponse(WireStruct, frozen=True):
     """Reveal a replacement recovery-code set once."""
 
     codes: tuple[str, ...]
@@ -79,13 +79,13 @@ class RecoveryCodesResponse(msgspec.Struct, frozen=True, rename="camel", forbid_
         return f"{type(self).__name__}(codes=<redacted>)"
 
 
-class MFAStatusResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class MFAStatusResponse(WireStruct, frozen=True):
     """Return one redacted generated-route outcome."""
 
     detail: str
 
 
-class StepUpRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class StepUpRequest(WireStruct, frozen=True):
     """Present one configured factor for a purpose-bound grant."""
 
     method: str
@@ -97,7 +97,7 @@ class StepUpRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_
         return f"{type(self).__name__}(method={self.method!r}, credential=<redacted>, method_id={self.method_id!r})"
 
 
-class StepUpResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class StepUpResponse(WireStruct, frozen=True):
     """Return one short-lived transport-bound grant."""
 
     grant: str
@@ -109,7 +109,7 @@ class StepUpResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown
         return f"{type(self).__name__}(grant=<redacted>, purpose={self.purpose!r}, expires_at={self.expires_at!r})"
 
 
-class PasskeyRegistrationOptionsRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class PasskeyRegistrationOptionsRequest(WireStruct, frozen=True):
     """Request bound passkey registration options."""
 
     user_name: str
@@ -120,13 +120,13 @@ class PasskeyRegistrationOptionsRequest(msgspec.Struct, frozen=True, rename="cam
         return f"{type(self).__name__}(user_name={self.user_name!r}, step_up_grant=<redacted>)"
 
 
-class PasskeyAuthenticationOptionsRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class PasskeyAuthenticationOptionsRequest(WireStruct, frozen=True):
     """Request bound passkey authentication options."""
 
     account_id: str
 
 
-class PasskeyVerifyRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class PasskeyVerifyRequest(WireStruct, frozen=True):
     """Submit one browser WebAuthn JSON response."""
 
     account_id: str
@@ -142,7 +142,7 @@ class PasskeyVerifyRequest(msgspec.Struct, frozen=True, rename="camel", forbid_u
         )
 
 
-class PasskeyOptionsResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class PasskeyOptionsResponse(WireStruct, frozen=True):
     """Carry dependency-independent WebAuthn JSON options."""
 
     options: str
@@ -154,7 +154,7 @@ class PasskeyOptionsResponse(msgspec.Struct, frozen=True, rename="camel", forbid
         return f"{type(self).__name__}(options=<redacted>, expires_at={self.expires_at!r}, binding=<redacted>)"
 
 
-class PasskeySummaryResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True):
+class PasskeySummaryResponse(WireStruct, frozen=True):
     """Safe caller-owned credential metadata."""
 
     credential_id: str

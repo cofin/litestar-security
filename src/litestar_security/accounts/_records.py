@@ -271,9 +271,8 @@ class NoOpSecurityEventSink:
 class LifecycleAccepted(WireStruct, frozen=True):
     """Shared enumeration-resistant response body for lifecycle requests."""
 
-    # The single wording is the whole point: an eligible and an ineligible request
-    # answer identically, so callers cannot probe for account existence. msgspec has
-    # no init=False, so the constant is a default that handlers never override.
+    # One fixed wording: an eligible and an ineligible request answer identically,
+    # so a caller cannot probe for account existence. Handlers never override it.
     detail: str = "If eligible, the request will be processed."
 
 

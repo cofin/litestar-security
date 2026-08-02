@@ -1404,8 +1404,8 @@ def test_generated_token_routes_reject_unknown_and_camel_case_body_members(
         unknown_member = client.post(
             "/auth/register", json={"identifier": "user@example.com", "password": password, "role": "admin"}
         )
-        # A stale camelCase spelling of an optional field must not resolve to its
-        # default: the registration would otherwise succeed with no display name.
+        # A camelCase spelling of an optional field must not resolve to its default,
+        # which would register the account with no display name.
         stale_casing = client.post(
             "/auth/register", json={"identifier": "user@example.com", "password": password, "displayName": "User"}
         )
