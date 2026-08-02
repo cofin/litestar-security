@@ -221,6 +221,7 @@ class IssuedWebSocketTicket:
         return f"IssuedWebSocketTicket(value='<redacted>', expires_at={self.expires_at!r})"
 
 
+# ai: is there a more user friendly name for tickets? this is a bit confusing but an incredibly useful thing.
 @runtime_checkable
 class WebSocketTicketStore(Protocol):
     """Application-owned atomic persistence port for one-time tickets."""
@@ -238,6 +239,8 @@ class WebSocketTicketUnavailableError(RuntimeError):
     """Raised when the application ticket store cannot verify a ticket."""
 
 
+# ai: these files are a mess of config, services, errors, etc.  we need to
+# consider all of this when refactoring and recording.
 @dataclass(slots=True)
 class InMemoryWebSocketTicketStore:
     """Deterministic concurrency-safe ticket store for tests and examples."""
@@ -374,7 +377,27 @@ async def issue_websocket_ticket(  # noqa: PLR0913 - the helper makes every tick
     clock: Callable[[], datetime],
     ttl: timedelta = timedelta(seconds=30),
 ) -> IssuedWebSocketTicket:
-    """Issue one reveal-once WebSocket ticket through an application store."""
+    """Issue one reveal-once WebSocket ticket through an application store.
+
+    Args:
+        principal: The authenticated principal the ticket speaks for.
+        context: The security context the ticket is bound to.
+        route_name: The single route the ticket authorizes; it is valid nowhere else.
+        origin: The exact origin the handshake must present.
+        policy_fingerprint: The compiled policy binding the handshake revalidates.
+        restrictions: The credential restrictions carried into the connection.
+        store: The application store that persists the digest-only record.
+        clock: The timezone-aware clock used for issuance and expiry.
+        ttl: How long the ticket stays valid, bounded by the two-minute maximum.
+
+    Returns:
+        The issued ticket, whose reveal-once value is not recoverable from the
+        stored record.
+
+    Raises:
+        ValueError: If the principal is unauthenticated, the context is not a
+            ``SecurityContext``, or any binding fails validation.
+    """
     return await WebSocketTicketService(store=store, ttl=ttl, clock=clock).issue(
         principal=principal,
         context=context,

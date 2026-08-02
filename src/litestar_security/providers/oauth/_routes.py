@@ -752,6 +752,7 @@ class _OAuthController(Controller):
     @delete("/links/{provider_account_id:str}", operation_id="OAuthUnlink", status_code=HTTP_200_OK, auth=required())
     async def unlink(  # noqa: PLR0913 - Litestar injects each route binding explicitly
         self,
+        *,
         provider: FromPath[str],
         provider_account_id: FromPath[str],
         data: JSONBody[OAuthStepUpRequest],

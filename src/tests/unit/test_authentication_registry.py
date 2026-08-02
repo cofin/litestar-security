@@ -9181,7 +9181,8 @@ def test_local_access_token_issuer_rejects_invalid_configuration(kwargs: dict[st
     ],
 )
 @pytest.mark.anyio
-async def test_local_access_token_issuer_maps_invalid_and_unavailable_composition(  # noqa: PLR0913
+async def test_local_access_token_issuer_maps_invalid_and_unavailable_composition(  # noqa: PLR0913 - one composition matrix per parametrized case
+    *,
     account: accounts_module.LocalAccount[object],
     signer: _AccessSigner,
     clock: Callable[[], datetime],

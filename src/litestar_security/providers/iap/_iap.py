@@ -208,7 +208,7 @@ class _GoogleIAPAuthenticator(Generic[UserT]):
         )
 
 
-def _optional_claim(claims: JWTClaims, name: str) -> str | None | bool:
+def _optional_claim(claims: JWTClaims, name: str) -> str | bool | None:
     value = claims.raw.get(name)
     if value is None:
         return None

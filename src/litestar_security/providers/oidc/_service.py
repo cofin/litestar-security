@@ -170,7 +170,7 @@ def _scopes(value: JSONValue | None) -> frozenset[str] | None:
     return frozenset(cast("Sequence[str]", value))
 
 
-def _optional_text(value: JSONValue | None) -> str | None | bool:
+def _optional_text(value: JSONValue | None) -> str | bool | None:
     if value is None:
         return None
     return value if isinstance(value, str) and value else False

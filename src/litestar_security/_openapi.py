@@ -467,10 +467,9 @@ class RouteCompiler(Generic[UserT]):
         if AUTH_POLICY_OPT_KEY not in opt:
             return None
         value = opt[AUTH_POLICY_OPT_KEY]
-        if isinstance(value, AuthenticationPolicy):
-            return value
-        self._raise_route_error(route, route_handler, "Invalid Litestar Security auth policy")
-        return None  # type: ignore[unreachable]  # pragma: no cover - preceding helper is typed NoReturn
+        if not isinstance(value, AuthenticationPolicy):
+            self._raise_route_error(route, route_handler, "Invalid Litestar Security auth policy")
+        return value
 
     def _http_csrf_override(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> bool | None:
         owner_layers = cast("Sequence[object]", route_handler.ownership_layers[:-1])

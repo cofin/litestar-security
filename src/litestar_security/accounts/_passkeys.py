@@ -897,7 +897,7 @@ class PasskeyService:
 
     async def rename_credential(
         self, account_id: str, credential_id: bytes, display_name: str
-    ) -> PasskeySummary | None | VerificationUnavailable:
+    ) -> PasskeySummary | VerificationUnavailable | None:
         """Rename one credential through its owner-checked store operation."""
         if not strict_context_text(display_name):
             return None

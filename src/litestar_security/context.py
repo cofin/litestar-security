@@ -371,6 +371,7 @@ class CredentialRestrictions:
         object.__setattr__(self, "resources", None if self.resources is None else frozenset(self.resources))
 
 
+# ai: rename to resolve_authorization or similar as "intersect" is not clear to users
 def intersect_authorization(
     snapshot: AuthorizationSnapshot, restrictions: Sequence[CredentialRestrictions]
 ) -> AuthorizationSnapshot:

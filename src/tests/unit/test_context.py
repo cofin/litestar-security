@@ -2720,6 +2720,29 @@ def test_security_config_rejects_invalid_headers_config() -> None:
         litestar_security.SecurityConfig(headers=object())  # type: ignore[arg-type]
 
 
+def test_local_route_schemas_redact_every_secret_they_carry() -> None:
+    secret = "s3cr3t-value"  # noqa: S105 - redaction fixture
+    identifier = "user@example.com"
+    schemas = (
+        accounts_module.LocalCredentials(identifier=identifier, password=secret),
+        accounts_module.LocalRegistrationRequest(identifier=identifier, password=secret, display_name="User"),
+        accounts_module.LocalInvitationRegistrationRequest(
+            identifier=identifier, password=secret, invitation_token=secret
+        ),
+        accounts_module.LocalTokenRequest(token=secret),
+        accounts_module.LocalPasswordResetRequest(token=secret, password=secret),
+        accounts_module.LocalPasswordChangeRequest(current_password=secret, password=secret, compromise=True),
+    )
+
+    for schema in schemas:
+        rendered = repr(schema)
+        assert secret not in rendered, type(schema).__name__
+        assert type(schema).__name__ in rendered
+    # Non-secret members stay visible so a representation is still worth reading.
+    assert identifier in repr(schemas[0])
+    assert "compromise=True" in repr(schemas[-1])
+
+
 def test_every_wire_schema_in_the_tree_shares_one_casing_and_strictness_policy() -> None:
     import_module("litestar_security.accounts")
     import_module("litestar_security.providers.oauth")
