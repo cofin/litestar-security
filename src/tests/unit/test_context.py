@@ -2720,6 +2720,30 @@ def test_security_config_rejects_invalid_headers_config() -> None:
         litestar_security.SecurityConfig(headers=object())  # type: ignore[arg-type]
 
 
+def test_every_wire_schema_in_the_tree_shares_one_casing_and_strictness_policy() -> None:
+    import_module("litestar_security.accounts")
+    import_module("litestar_security.providers.oauth")
+
+    def descendants(base: type) -> set[type]:
+        found: set[type] = set()
+        for subclass in base.__subclasses__():
+            found.add(subclass)
+            found |= descendants(subclass)
+        return found
+
+    schemas = descendants(litestar_security.WireStruct)
+    # A schema that must tolerate members it does not model states so on itself and
+    # is listed here with the reason. Nothing needs the exemption today.
+    tolerant: dict[str, str] = {}
+
+    assert len(schemas) >= 30
+    for schema in schemas:
+        assert schema.__struct_config__.frozen, schema.__name__
+        assert schema.__struct_encode_fields__ == schema.__struct_fields__, schema.__name__
+        strict = schema.__struct_config__.forbid_unknown_fields
+        assert strict is (schema.__name__ not in tolerant), schema.__name__
+
+
 def test_wire_struct_is_frozen_strict_and_never_renamed() -> None:
     class _Probe(litestar_security.WireStruct, frozen=True):
         account_identifier: str

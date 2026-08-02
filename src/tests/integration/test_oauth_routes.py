@@ -988,6 +988,53 @@ async def test_authenticated_routes_delegate_to_shared_service() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/auth/oauth/example/link", {"step_up_grant": "grant", "returnTo": "/dashboard"}),
+        ("/auth/oauth/example/link", {"step_up_grant": "grant", "return_to": "/", "prompt": "consent"}),
+        (
+            "/auth/oauth/example/scopes",
+            {"providerAccountId": "provider-account", "scopes": ["email"], "step_up_grant": "grant"},
+        ),
+        ("/auth/oauth/example/revoke", {"stepUpGrant": "grant"}),
+    ],
+)
+async def test_oauth_routes_reject_unknown_and_camel_case_body_members(path: str, payload: dict[str, object]) -> None:
+    app = oauth_app(openapi=False, oauth_service=RouteService())
+
+    async with AsyncTestClient(app=app) as client:
+        response = await client.post(path, json=payload, follow_redirects=False)
+
+    assert response.status_code == 400, response.text
+
+
+@pytest.mark.anyio
+async def test_backchannel_logout_form_rejects_unknown_members() -> None:
+    oidc_logout = OIDCLogoutLifecycleService(
+        provider_issuers={"example": "https://issuer.example"},
+        consumer=LogoutConsumer(),
+        sessions=LogoutSessions(),
+        clock=lambda: NOW,
+    )
+    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    app = Litestar(
+        route_handlers=[build_oauth_routes(config)],
+        dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
+        openapi_config=None,
+    )
+
+    async with AsyncTestClient(app=app) as client:
+        accepted = await client.post("/auth/oidc/example/backchannel-logout", data={"logout_token": "signed-token"})
+        rejected = await client.post(
+            "/auth/oidc/example/backchannel-logout", data={"logout_token": "signed-token", "state": "extra"}
+        )
+
+    assert accepted.status_code == 200, accepted.text
+    assert rejected.status_code == 400, rejected.text
+
+
+@pytest.mark.anyio
 async def test_route_service_rejects_anonymous_principal() -> None:
     app = oauth_app(openapi=False, authenticated=False)
 
