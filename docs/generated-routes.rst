@@ -17,6 +17,42 @@ profile receives neither a session backend nor a session store; configure
 ``CookieBackendConfig`` or ``ServerSideSessionConfig`` directly on
 ``Litestar``.
 
+Wire format
+===========
+
+Every request and response body in the generated tree uses ``snake_case``
+members, spelled exactly as the Python attribute is spelled, and rejects a
+member it does not model. A body carrying an unrecognized field is a
+``400``, not a silently discarded key.
+
+Rejecting the member is what keeps a stale or misspelled optional field from
+resolving to its default. A client sending ``returnTo`` where the schema
+declares ``return_to`` gets an error naming the field, rather than a successful
+request that quietly redirected somewhere else.
+
+Two surfaces are snake_case because their specifications say so rather than
+because of this convention: the JWKS document (:rfc:`7517`), the OIDC
+back-channel logout body, and the ``token_type``/``expires_in``/
+``refresh_token`` members of the token response (:rfc:`6749`, section 5.1).
+Their member names are fixed by the specification and are not ours to rename.
+
+Applications defining their own schemas alongside the generated routes can
+inherit :class:`~litestar_security.WireStruct` to hold the same convention
+across the whole tree:
+
+.. code-block:: python
+
+    from litestar_security import WireStruct
+
+
+    class TeamInvitation(WireStruct, frozen=True):
+        team_id: str
+        invited_identifier: str
+
+A schema that must tolerate members it does not model - a specification-defined
+body whose sender may legitimately add them - overrides the policy for itself
+with ``forbid_unknown_fields=False`` rather than relaxing the shared base.
+
 Tag groups
 ==========
 
@@ -144,9 +180,9 @@ current security epoch, exact purpose, and current session or token transport.
 A grant for one operation cannot authorize another operation.
 
 All secret- and challenge-bearing responses set ``Cache-Control: no-store`` and
-``Pragma: no-cache``. Generated schemas describe the typed camel-case JSON
-models without embedding sample TOTP secrets, recovery codes, browser
-credential responses, or public verification keys.
+``Pragma: no-cache``. Generated schemas describe the typed JSON models without
+embedding sample TOTP secrets, recovery codes, browser credential responses, or
+public verification keys.
 
 Passkey authentication options include a reveal-once ``binding`` alongside the
 browser options. Return that value unchanged in the verification request; it is

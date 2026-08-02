@@ -38,6 +38,12 @@ Security context
 .. automodule:: litestar_security.context
    :members:
 
+Wire schemas
+------------
+
+.. automodule:: litestar_security.schema
+   :members:
+
 Authorization guards
 --------------------
 

@@ -26,6 +26,10 @@ autodoc_default_options = {"members": True, "show-inheritance": True, "special-m
 autodoc_member_order = "bysource"
 autodoc_typehints_format = "short"
 autosectionlabel_prefix_document = True
+# Label page titles and their top-level sections only. Deeper headings repeat by
+# design - every changelog version carries its own "Added" - and labelling them
+# collides within one document, which the -W build treats as an error.
+autosectionlabel_maxdepth = 2
 napoleon_google_docstring = True
 
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]

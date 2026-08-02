@@ -1,6 +1,32 @@
 Changelog
 =========
 
+0.2.0
+-----
+
+Changed (breaking)
+~~~~~~~~~~~~~~~~~~
+
+* Every generated ``/auth`` body is now ``snake_case``. The MFA, passkey,
+  step-up, and OAuth provider routes previously used camel-case members on both
+  requests and responses: ``stepUpGrant``, ``methodId``, ``enrollmentId``,
+  ``userName``, ``accountId``, ``providerAccountId``, ``credentialId``,
+  ``displayName``, ``createdAt``, ``lastUsedAt``, ``expiresAt``,
+  ``provisioningUri``, ``backupEligible``, ``backupState``, and ``returnTo``
+  are now spelled with underscores. Local account, session, token, and password
+  routes were already ``snake_case`` and are unchanged.
+* Every generated ``/auth`` body now rejects a member it does not model with a
+  ``400``. Previously an unrecognized field was silently discarded, so a client
+  on a stale spelling of an optional field received a successful response with
+  the field's default rather than an error.
+
+Added
+~~~~~
+
+* ``WireStruct``, the shared base carrying that convention, is exported from the
+  package root so applications can define their own schemas on the same
+  casing and strictness policy.
+
 0.1.0
 -----
 
