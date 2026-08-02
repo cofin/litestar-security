@@ -11,6 +11,7 @@ from subprocess import run
 from types import SimpleNamespace
 from typing import Any, cast
 
+import msgspec
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, PermissionDeniedException
@@ -166,6 +167,7 @@ _PUBLIC_API = (
     "WebSocketTicketRecord",
     "WebSocketTicketService",
     "WebSocketTicketStore",
+    "WireStruct",
     "__project__",
     "__version__",
     "all_of",
@@ -2710,6 +2712,46 @@ def test_security_config_rejects_invalid_jwks_warmup_failure_mode() -> None:
 def test_security_config_rejects_invalid_headers_config() -> None:
     with pytest.raises(ImproperlyConfiguredException, match="Browser security headers"):
         litestar_security.SecurityConfig(headers=object())  # type: ignore[arg-type]
+
+
+def test_wire_struct_is_frozen_strict_and_never_renamed() -> None:
+    class _Probe(litestar_security.WireStruct, frozen=True):
+        account_identifier: str
+        step_up_grant: str
+
+    probe = _Probe(account_identifier="user@example.com", step_up_grant="grant")
+
+    assert _Probe.__struct_config__.frozen
+    assert _Probe.__struct_config__.forbid_unknown_fields
+    assert _Probe.__struct_encode_fields__ == _Probe.__struct_fields__
+    assert msgspec.json.encode(probe) == b'{"account_identifier":"user@example.com","step_up_grant":"grant"}'
+    with pytest.raises(AttributeError):
+        probe.account_identifier = "other@example.com"  # type: ignore[misc]
+
+
+def test_wire_struct_subclasses_reject_unknown_and_camel_case_members() -> None:
+    class _Probe(litestar_security.WireStruct, frozen=True):
+        account_identifier: str
+
+    with pytest.raises(msgspec.ValidationError, match="unknown field"):
+        msgspec.json.decode(b'{"account_identifier":"user@example.com","extra":1}', type=_Probe)
+    with pytest.raises(msgspec.ValidationError, match="accountIdentifier"):
+        msgspec.json.decode(b'{"accountIdentifier":"user@example.com"}', type=_Probe)
+
+
+def test_wire_struct_subclasses_may_relax_strictness_without_losing_casing_or_immutability() -> None:
+    class _Tolerant(litestar_security.WireStruct, frozen=True, forbid_unknown_fields=False):
+        account_identifier: str
+        return_to: str = "/"
+
+    decoded = msgspec.json.decode(
+        b'{"account_identifier":"user@example.com","return_to":"/dashboard","unrecognized":1}', type=_Tolerant
+    )
+
+    assert decoded.return_to == "/dashboard"
+    assert _Tolerant.__struct_config__.frozen
+    assert not _Tolerant.__struct_config__.forbid_unknown_fields
+    assert _Tolerant.__struct_encode_fields__ == _Tolerant.__struct_fields__
 
 
 def test_root_import_has_no_optional_integration_dependencies() -> None:

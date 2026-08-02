@@ -62,6 +62,7 @@ from litestar_security.guards import at_least as guard_at_least
 from litestar_security.guards import one_of as guard_one_of
 from litestar_security.headers import ContentSecurityPolicy, CSPMode, SecurityHeadersConfig, csp_nonce
 from litestar_security.plugin import CurrentUser, SecurityPlugin
+from litestar_security.schema import WireStruct
 from litestar_security.websocket import (
     AuthorizationSnapshotRefresher,
     InMemoryWebSocketTicketStore,
@@ -147,6 +148,7 @@ __all__ = (
     "WebSocketTicketRecord",
     "WebSocketTicketService",
     "WebSocketTicketStore",
+    "WireStruct",
     "__project__",
     "__version__",
     "all_of",
