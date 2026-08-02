@@ -33,6 +33,7 @@ from litestar_security.accounts._internal import (
 )
 from litestar_security.authentication import InvalidCredentials
 from litestar_security.context import AuthenticationEvidence
+from litestar_security.schema import WireStruct
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -236,14 +237,22 @@ class RefreshTokenCodec:
         return hmac_digest(self.pepper, _REFRESH_TOKEN_DOMAIN + token_id.encode("ascii") + b"\x00" + secret, sha256)
 
 
-@dataclass(frozen=True, slots=True)
-class RefreshTokenResponse:
+class RefreshTokenResponse(WireStruct, frozen=True):
     """Secret-safe token response recovered from a sealed rotation receipt."""
 
-    access_token: str = field(repr=False)
-    refresh_token: str = field(repr=False)
+    access_token: str
+    refresh_token: str
     expires_in: int
-    token_type: Literal["Bearer"] = field(default="Bearer", init=False)
+    # RFC 6749 section 5.1 member names, so none of these may be renamed. msgspec has
+    # no init=False, so the fixed token type is a default that callers never pass.
+    token_type: Literal["Bearer"] = "Bearer"  # noqa: S105 - the public RFC 6749 token type, not a credential
+
+    def __repr__(self) -> str:
+        """Redact both issued credentials."""
+        return (
+            f"{type(self).__name__}(access_token=<redacted>, refresh_token=<redacted>, "
+            f"expires_in={self.expires_in!r}, token_type={self.token_type!r})"
+        )
 
     def __post_init__(self) -> None:
         """Validate exact bearer response fields without exposing credentials."""

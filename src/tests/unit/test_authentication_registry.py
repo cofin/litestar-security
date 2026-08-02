@@ -10956,7 +10956,11 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
     assert isinstance(
         await services.change_session_password(request, "account-1", password_request), InvalidCredentials
     )
-    compromised = replace(password_request, compromise=True)
+    compromised = accounts_module.LocalPasswordChangeRequest(
+        current_password="old",  # noqa: S106 - request DTO fixture
+        password="new-password",  # noqa: S106 - request DTO fixture
+        compromise=True,
+    )
     assert await services.change_session_password(request, "account-1", compromised) == changed
     assert session_auth.logout.outcomes == []
     compromised_failure = replace(

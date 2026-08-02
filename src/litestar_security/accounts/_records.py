@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 
 from litestar_security.accounts._internal import aware_utc_time, strict_text, valid_security_epoch
+from litestar_security.schema import WireStruct
 
 __all__ = (
     "ConsumeResult",
@@ -267,11 +268,13 @@ class NoOpSecurityEventSink:
         del event
 
 
-@dataclass(frozen=True, slots=True)
-class LifecycleAccepted:
+class LifecycleAccepted(WireStruct, frozen=True):
     """Shared enumeration-resistant response body for lifecycle requests."""
 
-    detail: str = field(default="If eligible, the request will be processed.", init=False)
+    # The single wording is the whole point: an eligible and an ineligible request
+    # answer identically, so callers cannot probe for account existence. msgspec has
+    # no init=False, so the constant is a default that handlers never override.
+    detail: str = "If eligible, the request will be processed."
 
 
 @dataclass(frozen=True, slots=True)

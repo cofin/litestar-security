@@ -27,7 +27,7 @@ from litestar.middleware.session.base import BaseSessionBackend, SessionMiddlewa
 from litestar.middleware.session.client_side import CookieBackendConfig
 from litestar.middleware.session.server_side import ServerSideSessionConfig
 from litestar.params import FromPath  # noqa: TC002 - Litestar resolves handler annotations at runtime
-from litestar.status_codes import HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAILABLE
+from litestar.status_codes import HTTP_400_BAD_REQUEST, HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAILABLE
 from litestar.stores.memory import MemoryStore
 from litestar.testing import AsyncTestClient, TestClient
 
@@ -1377,6 +1377,49 @@ def test_generated_token_routes_register_verify_login_refresh_and_revoke(
     assert revoke.status_code == 200
     assert revoke.json() == {"detail": "Token revoked."}
     assert any(state.revoked for state in accounts.refresh_tokens.values())
+
+
+def test_generated_token_routes_reject_unknown_and_camel_case_body_members(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    accounts = _GeneratedRouteAccounts()
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth = LocalAuth.tokens(
+        accounts=accounts,
+        secrets=_local_auth_secrets(refresh=True),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-api",  # noqa: S106 - public JWT audience
+        password_hasher=_RoutePasswordHasher(),
+        registration=RegistrationPolicy.public(),
+    )
+    app = Litestar(
+        route_handlers=[], openapi_config=None, plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))]
+    )
+    password = "initial password 123"  # noqa: S105
+
+    with TestClient(app) as client:
+        unknown_member = client.post(
+            "/auth/register", json={"identifier": "user@example.com", "password": password, "role": "admin"}
+        )
+        # A stale camelCase spelling of an optional field must not resolve to its
+        # default: the registration would otherwise succeed with no display name.
+        stale_casing = client.post(
+            "/auth/register", json={"identifier": "user@example.com", "password": password, "displayName": "User"}
+        )
+        assert client.post("/auth/register", json={"identifier": "user@example.com", "password": password}).status_code
+        assert accounts.verification_token is not None
+        confirm = client.post("/auth/verification/confirm", json={"token": accounts.verification_token, "extra": 1})
+        credentials = client.post(
+            "/auth/token", json={"identifier": "user@example.com", "password": password, "remember": True}
+        )
+
+    assert unknown_member.status_code == HTTP_400_BAD_REQUEST, unknown_member.text
+    assert stale_casing.status_code == HTTP_400_BAD_REQUEST, stale_casing.text
+    assert confirm.status_code == HTTP_400_BAD_REQUEST, confirm.text
+    assert credentials.status_code == HTTP_400_BAD_REQUEST, credentials.text
 
 
 def test_native_guard_layers_remain_cumulative_for_http_and_websocket_with_child_policy() -> None:
