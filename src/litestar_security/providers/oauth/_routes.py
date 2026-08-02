@@ -56,11 +56,19 @@ __all__ = (
 )
 
 
-class OAuthRouteResponse(WireStruct, frozen=True, kw_only=True):
-    """Secret-free provider lifecycle response."""
+class OAuthRouteResponse(WireStruct, frozen=True, kw_only=True, omit_defaults=True):
+    """Secret-free provider lifecycle response.
+
+    Each identifier has its own member, and a response carries only the members
+    its operation actually resolved. Linking reports the provider account it
+    bound, establishing a local session reports the local account, and a logout
+    reports how many sessions it revoked.
+    """
 
     detail: str
     provider_account_id: str | None = None
+    account_id: str | None = None
+    revoked_sessions: int | None = None
 
 
 class OAuthLinkRequest(WireStruct, frozen=True, kw_only=True):
@@ -551,14 +559,14 @@ class OIDCLogoutLifecycleService:
         revoked = await self.sessions.consume_backchannel(identity, now=now)
         if revoked is None:
             raise NotAuthorizedException(detail="OIDC logout token is invalid")
-        return OAuthRouteResponse(detail="OIDC sessions revoked.", provider_account_id=str(revoked))
+        return OAuthRouteResponse(detail="OIDC sessions revoked.", revoked_sessions=revoked)
 
     async def frontchannel(self, provider: str, issuer: str, session_id: str) -> OAuthRouteResponse:
         """Validate fixed issuer and revoke one exact provider-session mapping."""
         if issuer != self._issuer(provider) or not session_id.strip():
             raise NotAuthorizedException(detail="OIDC logout request is invalid")
         revoked = await self.sessions.revoke_frontchannel(provider, issuer, session_id, now=self._now())
-        return OAuthRouteResponse(detail="OIDC sessions revoked.", provider_account_id=str(revoked))
+        return OAuthRouteResponse(detail="OIDC sessions revoked.", revoked_sessions=revoked)
 
     def _issuer(self, provider: str) -> str:
         issuer = self.provider_issuers.get(provider)
@@ -715,7 +723,7 @@ class _OAuthController(Controller):
         )
         return _authorization_response(result)
 
-    @get("/callback", operation_id="OAuthCallback", auth=public())
+    @get("/callback", operation_id="OAuthCallback", status_code=HTTP_200_OK, auth=public())
     async def callback(
         self,
         provider: FromPath[str],
@@ -791,7 +799,7 @@ class _OAuthController(Controller):
         )
         return _authorization_response(result)
 
-    @post("/revoke", operation_id="OAuthRevoke", auth=required())
+    @post("/revoke", operation_id="OAuthRevoke", status_code=HTTP_200_OK, auth=required())
     async def revoke(
         self,
         provider: FromPath[str],
@@ -805,7 +813,7 @@ class _OAuthController(Controller):
             provider=provider, account_id=_account_id(principal), step_up_grant=data.step_up_grant, request=request
         )
 
-    @post("/logout", operation_id="OAuthLogout", auth=required())
+    @post("/logout", operation_id="OAuthLogout", status_code=HTTP_200_OK, auth=required())
     async def logout(
         self,
         provider: FromPath[str],

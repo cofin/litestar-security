@@ -601,6 +601,43 @@ def _route_options() -> WebAuthnOptions:
     )
 
 
+def test_generated_mfa_routes_document_the_status_they_actually_return() -> None:
+    router = build_mfa_routes(
+        step_up=cast("Any", _RouteStepUpService()),
+        epochs=cast("Any", _RouteEpochs()),
+        mfa=cast("Any", _RouteMFAService()),
+        passkeys=cast("Any", _RoutePasskeyService()),
+        local_auth=cast("Any", _RouteLocalAuth()),
+    )
+    app = Litestar(
+        route_handlers=[router],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin(_compiler_config(names=("a",)))],
+    )
+    authenticated = {"x-auth-a": "valid", "authorization": "Bearer transport"}
+    calls: tuple[tuple[str, str, dict[str, object]], ...] = (
+        ("POST", "/auth/mfa/totp/enroll", {"label": "person@example.com", "step_up_grant": "grant"}),
+        ("POST", "/auth/mfa/totp/verify", {"enrollment_id": "enrollment-1", "code": "123456"}),
+        ("POST", "/auth/mfa/recovery-codes", {"step_up_grant": "grant"}),
+        ("POST", "/auth/passkeys/registration/options", {"user_name": "person@example.com", "step_up_grant": "grant"}),
+        ("POST", "/auth/passkeys/registration/verify", {"account_id": "user", "response": "{}"}),
+        ("POST", "/auth/passkeys/authentication/options", {"account_id": "user"}),
+    )
+
+    observed: dict[str, int] = {}
+    with TestClient(app) as client:
+        for method, path, payload in calls:
+            observed[path] = client.request(method, path, headers=authenticated, json=payload).status_code
+
+    documented = {
+        path: next(iter(app.openapi_schema.paths[path].post.responses))
+        for _method, path, _payload in calls
+        if app.openapi_schema.paths[path].post is not None
+    }
+
+    assert observed == {path: int(status) for path, status in documented.items()}
+
+
 def test_generated_mfa_bodies_are_snake_case_on_the_wire() -> None:
     router = build_mfa_routes(
         step_up=cast("Any", _RouteStepUpService()),

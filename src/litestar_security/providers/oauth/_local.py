@@ -83,7 +83,7 @@ class OAuthLocalAuthTransport:
             ),
         )
         if isinstance(result, LocalAccountResponse):
-            return OAuthRouteResponse(detail="Authenticated.", provider_account_id=account_id)
+            return OAuthRouteResponse(detail="Authenticated.", account_id=account_id)
         if isinstance(result, RefreshTokenResponse):
             return Response(content=result, status_code=HTTP_200_OK)
         if isinstance(result, VerificationUnavailable):

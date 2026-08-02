@@ -377,7 +377,7 @@ async def test_concrete_lifecycle_composes_login_transaction_provider_account_an
         state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
         callback = await client.get("/auth/oauth/example/callback", params={"code": "code", "state": state})
 
-    assert callback.json() == {"detail": "Authenticated.", "provider_account_id": "account-1"}
+    assert callback.json() == {"detail": "Authenticated.", "account_id": "account-1"}
     assert local_services.established == ["account-1"]
     assert provider.calls == ["authorize", "exchange", "identity"]
 
@@ -980,9 +980,12 @@ async def test_authenticated_routes_delegate_to_shared_service() -> None:
 
     assert link.status_code == 302
     assert scope.status_code == 302
-    assert unlink.json() == {"detail": "Unlinked.", "provider_account_id": None}
-    assert revoke.json() == {"detail": "Revoked.", "provider_account_id": None}
-    assert logout.json() == {"detail": "Logged out.", "provider_account_id": None}
+    # Neither revoking provider tokens nor logging out creates anything.
+    assert (unlink.status_code, revoke.status_code, logout.status_code) == (200, 200, 200)
+    # An operation that resolved no identifier omits the member rather than nulling it.
+    assert unlink.json() == {"detail": "Unlinked."}
+    assert revoke.json() == {"detail": "Revoked."}
+    assert logout.json() == {"detail": "Logged out."}
     assert redirected_logout.headers["location"] == "https://issuer.example/logout"
     assert service.operations == [OAuthOperation.LINK, OAuthOperation.SCOPE_UPGRADE]
 
@@ -1007,6 +1010,28 @@ async def test_oauth_routes_reject_unknown_and_camel_case_body_members(path: str
         response = await client.post(path, json=payload, follow_redirects=False)
 
     assert response.status_code == 400, response.text
+
+
+@pytest.mark.anyio
+async def test_lifecycle_response_names_each_identifier_it_carries() -> None:
+    oidc_logout = OIDCLogoutLifecycleService(
+        provider_issuers={"example": "https://issuer.example"},
+        consumer=LogoutConsumer(),
+        sessions=LogoutSessions(),
+        clock=lambda: NOW,
+    )
+    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    app = Litestar(
+        route_handlers=[build_oauth_routes(config)],
+        dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
+        openapi_config=None,
+    )
+
+    async with AsyncTestClient(app=app) as client:
+        logout = await client.post("/auth/oidc/example/backchannel-logout", data={"logout_token": "signed-token"})
+
+    # A revoked-session count is a count, not an account identifier.
+    assert logout.json() == {"detail": "OIDC sessions revoked.", "revoked_sessions": 1}
 
 
 @pytest.mark.anyio

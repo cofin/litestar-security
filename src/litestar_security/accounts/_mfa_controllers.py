@@ -287,7 +287,7 @@ class _StepUpController(Controller):
 class _MFAController(Controller):
     tags = (_MFA_TAG,)
 
-    @post("/mfa/totp/enroll", operation_id="MFAEnrollTOTP", auth=required())
+    @post("/mfa/totp/enroll", operation_id="MFAEnrollTOTP", status_code=HTTP_201_CREATED, auth=required())
     async def enroll_totp(
         self,
         data: JSONBody[TOTPEnrollmentRequest],
@@ -327,7 +327,7 @@ class _MFAController(Controller):
             HTTP_201_CREATED,
         )
 
-    @post("/mfa/totp/verify", operation_id="MFAVerifyTOTPEnrollment", auth=required())
+    @post("/mfa/totp/verify", operation_id="MFAVerifyTOTPEnrollment", status_code=HTTP_200_OK, auth=required())
     async def verify_totp(
         self,
         data: JSONBody[TOTPVerificationRequest],
@@ -378,7 +378,7 @@ class _MFAController(Controller):
         result = await totp_service.remove_totp_method(account_id, method_id)
         return _removal_response(result)
 
-    @post("/mfa/recovery-codes", operation_id="MFAReplaceRecoveryCodes", auth=required())
+    @post("/mfa/recovery-codes", operation_id="MFAReplaceRecoveryCodes", status_code=HTTP_200_OK, auth=required())
     async def recovery_codes(
         self,
         data: JSONBody[RecoveryCodesRequest],
@@ -414,7 +414,12 @@ class _MFAController(Controller):
 class _PasskeyController(Controller):
     tags = (_PASSKEY_TAG,)
 
-    @post("/passkeys/registration/options", operation_id="PasskeyRegistrationOptions", auth=required())
+    @post(
+        "/passkeys/registration/options",
+        operation_id="PasskeyRegistrationOptions",
+        status_code=HTTP_200_OK,
+        auth=required(),
+    )
     async def registration_options(
         self,
         data: JSONBody[PasskeyRegistrationOptionsRequest],
@@ -446,7 +451,12 @@ class _PasskeyController(Controller):
         )
         return _options_response(result)
 
-    @post("/passkeys/registration/verify", operation_id="PasskeyRegistrationVerify", auth=required())
+    @post(
+        "/passkeys/registration/verify",
+        operation_id="PasskeyRegistrationVerify",
+        status_code=HTTP_201_CREATED,
+        auth=required(),
+    )
     async def registration_verify(
         self,
         data: JSONBody[PasskeyVerifyRequest],
@@ -469,7 +479,12 @@ class _PasskeyController(Controller):
             return _error(result)
         return _response(MFAStatusResponse(detail="Passkey registered."), HTTP_201_CREATED)
 
-    @post("/passkeys/authentication/options", operation_id="PasskeyAuthenticationOptions", auth=optional(required()))
+    @post(
+        "/passkeys/authentication/options",
+        operation_id="PasskeyAuthenticationOptions",
+        status_code=HTTP_200_OK,
+        auth=optional(required()),
+    )
     async def authentication_options(
         self,
         data: JSONBody[PasskeyAuthenticationOptionsRequest],
@@ -542,7 +557,11 @@ class _PasskeySessionAuthenticationController(Controller):
     tags = (_PASSKEY_TAG,)
 
     @post(
-        "/passkeys/authentication/verify", operation_id="PasskeyAuthenticationVerify", auth=public(), csrf_required=True
+        "/passkeys/authentication/verify",
+        operation_id="PasskeyAuthenticationVerify",
+        status_code=HTTP_200_OK,
+        auth=public(),
+        csrf_required=True,
     )
     async def authentication_verify(
         self,
@@ -559,7 +578,12 @@ class _PasskeySessionAuthenticationController(Controller):
 class _PasskeyTokenAuthenticationController(Controller):
     tags = (_PASSKEY_TAG,)
 
-    @post("/passkeys/authentication/verify", operation_id="PasskeyAuthenticationVerify", auth=public())
+    @post(
+        "/passkeys/authentication/verify",
+        operation_id="PasskeyAuthenticationVerify",
+        status_code=HTTP_200_OK,
+        auth=public(),
+    )
     async def authentication_verify(
         self,
         data: JSONBody[PasskeyVerifyRequest],
@@ -576,6 +600,7 @@ class _PasskeyHybridSessionController(Controller):
     @post(
         "/passkeys/authentication/session/verify",
         operation_id="PasskeySessionAuthenticationVerify",
+        status_code=HTTP_200_OK,
         auth=public(),
         csrf_required=True,
     )
@@ -594,7 +619,12 @@ class _PasskeyHybridSessionController(Controller):
 class _PasskeyHybridTokenController(Controller):
     tags = (_PASSKEY_TAG,)
 
-    @post("/passkeys/authentication/tokens/verify", operation_id="PasskeyTokenAuthenticationVerify", auth=public())
+    @post(
+        "/passkeys/authentication/tokens/verify",
+        operation_id="PasskeyTokenAuthenticationVerify",
+        status_code=HTTP_200_OK,
+        auth=public(),
+    )
     async def authentication_verify(
         self,
         data: JSONBody[PasskeyVerifyRequest],
