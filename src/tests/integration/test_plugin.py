@@ -34,7 +34,7 @@ from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
 from litestar.testing import TestClient
 
 import litestar_security.accounts as accounts_module
-from litestar_security import MFAConfig, PasskeyConfig, SecurityConfig, SecurityPlugin, csp_nonce
+from litestar_security import MFAConfig, PasskeyConfig, SecurityConfig, SecurityPlugin, __version__, csp_nonce
 from litestar_security._cli import register, security_group
 from litestar_security.accounts import (
     LOCAL_AUTH_TAGS,
@@ -3211,7 +3211,7 @@ def test_cli_entry_point_and_lazy_plugin_registration() -> None:
     ("arguments", "expected"),
     [
         (["security", "--help"], "Litestar Security operations."),
-        (["security", "--version"], "litestar-security, version 0.1.0"),
+        (["security", "--version"], f"litestar-security, version {__version__}"),
     ],
 )
 def test_cli_output(arguments: list[str], expected: str) -> None:
