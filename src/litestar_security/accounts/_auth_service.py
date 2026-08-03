@@ -9,14 +9,15 @@ that constructs them.
 
 from dataclasses import dataclass, field
 from logging import getLogger
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from litestar import Request
 
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
-from litestar_security.accounts._mfa_login import MFARequired
+from litestar_security.accounts._mfa_login import MFALoginChallenge, MFALoginService, MFARequired
+from litestar_security.accounts._operations import LOGIN_MFA
 from litestar_security.accounts._passwords import PasswordPolicyResult
-from litestar_security.accounts._rate_limits import RateLimited
+from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
     InvalidLifecycleRequest,
     LocalAccount,
@@ -77,6 +78,8 @@ class LocalAuthService(Generic[UserT]):
     registration: RegistrationService[UserT] | None = field(default=None, repr=False)
     session_auth: NativeSessionAuth[UserT] | None = field(default=None, repr=False)
     refresh_tokens: RefreshTokenService[UserT] | None = field(default=None, repr=False)
+    rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
+    mfa_login: MFALoginService | None = field(default=None, repr=False, compare=False)
     client_key: "Callable[[ASGIConnection[Any, Any, Any, Any]], str | None]" = field(
         default=trusted_client_key, repr=False, compare=False
     )
@@ -112,11 +115,15 @@ class LocalAuthService(Generic[UserT]):
             The signed-in account projection, or a sanitized outcome. A rejected
             identifier and a rejected password produce the same outcome.
         """
+        client_key = self.client_key_for(request)
         account = await self.password_login.authenticate(
-            credentials.identifier, credentials.password, client_key=self.client_key_for(request)
+            credentials.identifier, credentials.password, client_key=client_key
         )
         if not isinstance(account, LocalAccount):
             return account
+        mfa_login = self.mfa_login
+        if mfa_login is not None:
+            return await mfa_login.issue(cast("LocalAccount[object]", account), client_key=client_key)
         session_auth = self.session_auth
         if session_auth is None:
             return VerificationUnavailable()
@@ -138,11 +145,15 @@ class LocalAuthService(Generic[UserT]):
             The issued token pair, or a sanitized outcome. A rejected identifier
             and a rejected password produce the same outcome.
         """
+        client_key = self.client_key_for(request)
         account = await self.password_login.authenticate(
-            credentials.identifier, credentials.password, client_key=self.client_key_for(request)
+            credentials.identifier, credentials.password, client_key=client_key
         )
         if not isinstance(account, LocalAccount):
             return account
+        mfa_login = self.mfa_login
+        if mfa_login is not None:
+            return await mfa_login.issue(cast("LocalAccount[object]", account), client_key=client_key)
         refresh_tokens = self.refresh_tokens
         if refresh_tokens is None:
             return VerificationUnavailable()
@@ -177,6 +188,7 @@ class LocalAuthService(Generic[UserT]):
         *,
         transport: str | None,
         evidence: AuthenticationEvidence,
+        expected_security_epoch: int | None = None,
     ) -> LocalAccountResponse | RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
         """Establish a local transport after externally verified authentication.
 
@@ -185,6 +197,8 @@ class LocalAuthService(Generic[UserT]):
             account_id: Account resolved by the verified authentication method.
             transport: ``session`` or ``tokens`` when both are configured.
             evidence: Fully verified evidence to preserve in local credentials.
+            expected_security_epoch: When set, reject an account whose epoch
+                changed since the preceding authentication boundary.
 
         Returns:
             The established session projection, issued token pair, or sanitized
@@ -194,7 +208,11 @@ class LocalAuthService(Generic[UserT]):
             account = await self.accounts.get_by_id(account_id)
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
-        if account is None or not account.active:
+        if (
+            account is None
+            or not account.active
+            or (expected_security_epoch is not None and account.security_epoch != expected_security_epoch)
+        ):
             return InvalidCredentials()
         if transport == "session" or (
             transport is None and self.session_auth is not None and self.refresh_tokens is None
@@ -214,6 +232,70 @@ class LocalAuthService(Generic[UserT]):
                 return InvalidCredentials()
             return await refresh_tokens.issue(account, evidence=evidence)
         return InvalidCredentials()
+
+    async def complete_mfa_login(  # noqa: PLR0911, PLR0913 - security order requires explicit inputs/outcomes
+        self,
+        request: Request[Any, Any, Any],
+        challenge: str,
+        *,
+        account_id: str,
+        method: str,
+        code: str,
+        method_id: str | None = None,
+        transport: str | None = None,
+    ) -> LocalAccountResponse | RefreshTokenResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
+        """Complete an MFA-gated password login through the normal issuer path.
+
+        The rate limit, authoritative account read, and atomic challenge consume
+        deliberately happen before factor verification and issuance. Therefore a
+        replay or concurrent completion cannot establish a second transport.
+        """
+        rate_limits = self.rate_limits
+        mfa_login = self.mfa_login
+        if rate_limits is None or mfa_login is None:
+            return VerificationUnavailable()
+        client_key = self.client_key_for(request)
+        try:
+            limited = await rate_limits.check(LOGIN_MFA, client_key=client_key, identifier=account_id)
+        except Exception:  # noqa: BLE001 - application-supplied guard failures fail closed
+            return VerificationUnavailable()
+        if limited is not None:
+            return limited
+        try:
+            account = await self.accounts.get_by_id(account_id)
+        except Exception:  # noqa: BLE001 - do not disclose account-port failures
+            return VerificationUnavailable()
+        if account is None or not account.active:
+            return InvalidCredentials()
+        try:
+            consumed = await mfa_login.consume(
+                challenge, account_id=account_id, security_epoch=account.security_epoch, client_key=client_key
+            )
+        except Exception:  # noqa: BLE001 - an unavailable challenge port must not leak through the route
+            return VerificationUnavailable()
+        if not isinstance(consumed, MFALoginChallenge):
+            return consumed
+        try:
+            factor = await mfa_login.verify(consumed, method=method, method_id=method_id, code=code)
+        except Exception:  # noqa: BLE001 - an unavailable factor port must not leak through the route
+            return VerificationUnavailable()
+        if not isinstance(factor, AuthenticationEvidence):
+            return factor
+        evidence = AuthenticationEvidence(
+            mechanism="password",
+            slot="local",
+            authenticated_at=factor.authenticated_at,
+            methods=frozenset({"password"}) | factor.methods,
+            traits=factor.traits,
+            amr=("pwd", "otp"),
+        )
+        return await self.verified_login(
+            request,
+            account.account_id,
+            transport=transport,
+            evidence=evidence,
+            expected_security_epoch=consumed.security_epoch,
+        )
 
     async def change_session_password(  # noqa: PLR0911 - preserve explicit sanitized outcomes
         self, request: Request[Any, Any, Any], account_id: str, data: LocalPasswordChangeRequest

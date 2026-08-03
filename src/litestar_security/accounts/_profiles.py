@@ -450,6 +450,7 @@ class LocalAuthConfig(Generic[UserT]):
                 registration=registration,
                 session_auth=self.session_auth,
                 refresh_tokens=refresh_tokens,
+                rate_limits=self.rate_limits,
                 client_key=self.client_key,
             ),
         )

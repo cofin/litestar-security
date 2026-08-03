@@ -184,13 +184,12 @@ async def test_mfa_login_issue_derives_a_domain_separated_digest_and_consumes_on
     assert len(store.challenges) == 1
     expected_digest = hmac.digest(secrets.mfa_login_pepper, issued.challenge.encode("ascii"), "sha256")
     assert tuple(store.challenges) == (expected_digest,)
-    record = await service.consume(
-        issued.challenge, account_id="account-1", security_epoch=0, client_key="127.0.0.1"
-    )
+    record = await service.consume(issued.challenge, account_id="account-1", security_epoch=0, client_key="127.0.0.1")
     assert isinstance(record, accounts_module.MFALoginChallenge)
-    assert await service.consume(
-        issued.challenge, account_id="account-1", security_epoch=0, client_key="127.0.0.1"
-    ) == InvalidCredentials()
+    assert (
+        await service.consume(issued.challenge, account_id="account-1", security_epoch=0, client_key="127.0.0.1")
+        == InvalidCredentials()
+    )
 
 
 @pytest.mark.anyio
@@ -213,25 +212,32 @@ async def test_mfa_login_rejects_malformed_challenges_and_burns_client_key_misma
         verified=True,
         security_epoch=0,
     )
-    assert await service.consume(
-        "not-ascii-\u00e9", account_id="account-1", security_epoch=0, client_key="client"
-    ) == InvalidCredentials()
+    assert (
+        await service.consume("not-ascii-\u00e9", account_id="account-1", security_epoch=0, client_key="client")
+        == InvalidCredentials()
+    )
     issued = await service.issue(account, client_key="client")
     assert isinstance(issued, MFARequired)
-    assert await service.consume(
-        issued.challenge, account_id="account-1", security_epoch=0, client_key="other-client"
-    ) == InvalidCredentials()
-    assert await service.consume(
-        issued.challenge, account_id="account-1", security_epoch=0, client_key="client"
-    ) == InvalidCredentials()
+    assert (
+        await service.consume(issued.challenge, account_id="account-1", security_epoch=0, client_key="other-client")
+        == InvalidCredentials()
+    )
+    assert (
+        await service.consume(issued.challenge, account_id="account-1", security_epoch=0, client_key="client")
+        == InvalidCredentials()
+    )
     unicode_issued = await service.issue(account, client_key="client")
     assert isinstance(unicode_issued, MFARequired)
-    assert await service.consume(
-        unicode_issued.challenge, account_id="account-1", security_epoch=0, client_key="bad-\ud800"
-    ) == InvalidCredentials()
-    assert await service.consume(
-        unicode_issued.challenge, account_id="account-1", security_epoch=0, client_key="client"
-    ) == InvalidCredentials()
+    assert (
+        await service.consume(
+            unicode_issued.challenge, account_id="account-1", security_epoch=0, client_key="bad-\ud800"
+        )
+        == InvalidCredentials()
+    )
+    assert (
+        await service.consume(unicode_issued.challenge, account_id="account-1", security_epoch=0, client_key="client")
+        == InvalidCredentials()
+    )
 
 
 class _MFALoginVerificationService(accounts_module.MFAService):
@@ -259,10 +265,7 @@ class _MFALoginVerificationService(accounts_module.MFAService):
         if self.fail:
             raise OSError
         return AuthenticationEvidence(
-            mechanism="recovery-code",
-            slot="mfa",
-            authenticated_at=_JWT_NOW,
-            methods=frozenset({"recovery-code"}),
+            mechanism="recovery-code", slot="mfa", authenticated_at=_JWT_NOW, methods=frozenset({"recovery-code"})
         )
 
 
@@ -302,9 +305,225 @@ async def test_mfa_login_verifies_only_the_selected_factor(
         mfa=_MFALoginVerificationService(fail=True),
         pepper=b"p" * 32,
     )
-    assert await unavailable.verify(
-        record, method=method, method_id=method_id, code="123456"
-    ) == VerificationUnavailable()
+    assert (
+        await unavailable.verify(record, method=method, method_id=method_id, code="123456") == VerificationUnavailable()
+    )
+
+
+@pytest.mark.anyio
+async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_key() -> None:
+    """MFA login burns before factor verification and delegates with merged evidence."""
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=2,
+        user={"id": "account-1"},
+    )
+    challenge = accounts_module.MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id=account.account_id,
+        security_epoch=account.security_epoch,
+        client_key="client-complete",
+        issued_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+    )
+    calls: list[str] = []
+
+    class PasswordLogin:
+        async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccount[dict[str, str]]:
+            assert _kwargs["client_key"] in {"client-session", "client-token"}
+            calls.append("password")
+            return account
+
+    class Accounts:
+        async def get_by_id(self, account_id: str) -> accounts_module.LocalAccount[dict[str, str]]:
+            assert account_id == account.account_id
+            calls.append("account")
+            return account
+
+    class Guard:
+        async def check(self, operation: str, *, client_key: str | None, identifier: str | None) -> None:
+            assert operation == LOGIN_MFA
+            assert client_key == "client-complete"
+            assert identifier == account.account_id
+            calls.append("limit")
+
+    class MFA:
+        async def issue(self, issued: object, *, client_key: str | None) -> MFARequired:
+            assert issued is account
+            assert client_key in {"client-session", "client-token"}
+            calls.append("issue-challenge")
+            return MFARequired("challenge", _JWT_NOW + timedelta(minutes=5), frozenset({"totp"}))
+
+        async def consume(self, value: str, **kwargs: object) -> accounts_module.MFALoginChallenge:
+            assert value == "challenge"
+            assert kwargs == {
+                "account_id": account.account_id,
+                "security_epoch": account.security_epoch,
+                "client_key": "client-complete",
+            }
+            calls.append("consume")
+            return challenge
+
+        async def verify(self, consumed: object, **kwargs: object) -> AuthenticationEvidence:
+            assert consumed is challenge
+            assert kwargs == {"method": "totp", "method_id": "method-1", "code": "123456"}
+            calls.append("verify")
+            return AuthenticationEvidence(
+                mechanism="totp", slot="mfa", authenticated_at=_JWT_NOW, methods=frozenset({"totp"})
+            )
+
+    class Sessions:
+        async def establish(
+            self, _request: object, established: object, *, evidence: AuthenticationEvidence
+        ) -> accounts_module.SessionAuthentication:
+            assert established is account
+            assert evidence.methods == frozenset({"password", "totp"})
+            assert evidence.amr == ("pwd", "otp")
+            calls.append("establish")
+            return accounts_module.SessionAuthentication(
+                session_id="c3Nzc2lvbi0xMjM0NTY3ODkwMTIzNA",
+                binding_id="sb_YmluZGluZy0xMjM0NTY3ODkwMTIzNA",
+                account_id=account.account_id,
+                security_epoch=account.security_epoch,
+                authenticated_at=_JWT_NOW,
+                expires_at=_JWT_NOW + timedelta(hours=1),
+            )
+
+    class Tokens:
+        async def issue(self, *_args: object, **_kwargs: object) -> object:
+            calls.append("token-issue")
+            return object()
+
+    # Each initial login and completion may derive its key once. Reusing a key
+    # within either request is required because extractors can be stateful.
+    client_keys = iter(("client-session", "client-token", "client-complete", "wrong-if-read-twice"))
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", Accounts()),
+        password_login=cast("Any", PasswordLogin()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        session_auth=cast("Any", Sessions()),
+        refresh_tokens=cast("Any", Tokens()),
+        rate_limits=cast("Any", Guard()),
+        mfa_login=cast("Any", MFA()),
+        client_key=lambda _request: next(client_keys),
+    )
+    request = cast("Any", object())
+    credentials = accounts_module.LocalCredentials(identifier="person@example.com", password="password")  # noqa: S106
+
+    assert isinstance(await service.session_login(request, credentials), MFARequired)
+    assert calls == ["password", "issue-challenge"]
+    assert isinstance(await service.token_login(request, credentials), MFARequired)
+    assert calls == ["password", "issue-challenge", "password", "issue-challenge"]
+    assert isinstance(
+        await service.complete_mfa_login(
+            request,
+            "challenge",
+            account_id=account.account_id,
+            method="totp",
+            method_id="method-1",
+            code="123456",
+            transport="session",
+        ),
+        accounts_module.LocalAccountResponse,
+    )
+    assert calls == [
+        "password",
+        "issue-challenge",
+        "password",
+        "issue-challenge",
+        "limit",
+        "account",
+        "consume",
+        "verify",
+        "account",
+        "establish",
+    ]
+    assert isinstance(
+        await replace(service, rate_limits=None).complete_mfa_login(
+            request, "challenge", account_id=account.account_id, method="totp", code="123456"
+        ),
+        VerificationUnavailable,
+    )
+    assert calls[-1] == "establish"
+
+
+@pytest.mark.anyio
+async def test_local_auth_mfa_completion_rejects_an_epoch_advance_before_issuance() -> None:
+    """A reset racing completion invalidates the final authoritative account read."""
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=2,
+    )
+    challenge = accounts_module.MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id=account.account_id,
+        security_epoch=account.security_epoch,
+        client_key=None,
+        issued_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+    )
+
+    class Accounts:
+        reads = 0
+
+        async def get_by_id(self, _account_id: str) -> accounts_module.LocalAccount[object]:
+            self.reads += 1
+            return account if self.reads == 1 else replace(account, security_epoch=account.security_epoch + 1)
+
+    class Guard:
+        async def check(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class MFA:
+        async def consume(self, *_args: object, **_kwargs: object) -> accounts_module.MFALoginChallenge:
+            return challenge
+
+        async def verify(self, *_args: object, **_kwargs: object) -> AuthenticationEvidence:
+            return AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=_JWT_NOW)
+
+    class Sessions:
+        issued = False
+
+        async def establish(self, *_args: object, **_kwargs: object) -> object:
+            self.issued = True
+            return object()
+
+    sessions = Sessions()
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", Accounts()),
+        password_login=cast("Any", object()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        session_auth=cast("Any", sessions),
+        rate_limits=cast("Any", Guard()),
+        mfa_login=cast("Any", MFA()),
+    )
+
+    assert isinstance(
+        await service.complete_mfa_login(
+            cast("Any", object()),
+            "challenge",
+            account_id=account.account_id,
+            method="totp",
+            code="123456",
+            transport="session",
+        ),
+        InvalidCredentials,
+    )
+    assert not sessions.issued
 
 
 async def _assert_http_exception(
