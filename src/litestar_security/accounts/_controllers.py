@@ -1,6 +1,6 @@
 """Native Litestar controllers for the built-in local-auth routes."""
 
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from litestar import Controller, Request, Response, Router, delete, get, post
 from litestar.connection import ASGIConnection
@@ -20,7 +20,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
-from litestar_security.accounts._profiles import LocalAuthConfig, LocalAuthService
+from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._rate_limits import RateLimited
 from litestar_security.accounts._records import (
     ConsumeResult,
@@ -50,6 +50,9 @@ from litestar_security.accounts._schemas import (
 )
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import Principal, SecurityContext
+
+if TYPE_CHECKING:
+    from litestar_security.accounts._profiles import LocalAuthConfig
 
 __all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "requires_local_bearer")
 
@@ -135,7 +138,7 @@ def requires_local_bearer(connection: ASGIConnection[Any, Any, Any, Any], _: Bas
         raise NotAuthorizedException(detail="Authentication required")
 
 
-def build_local_auth_routes(config: LocalAuthConfig[Any]) -> Router:
+def build_local_auth_routes(config: "LocalAuthConfig[Any]") -> Router:
     """Build one native Litestar route tree for an explicit local-auth profile.
 
     Which controllers are mounted follows the profile: session routes for a

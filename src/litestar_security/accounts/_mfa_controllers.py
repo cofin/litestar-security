@@ -22,6 +22,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
+from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa import MFAService, RecoveryCodes, StepUpGrant, StepUpService
 from litestar_security.accounts._mfa_schemas import (
     PasskeyAuthenticationOptionsRequest,
@@ -49,7 +50,6 @@ from litestar_security.accounts._operations import (
     PASSWORD_VERIFY,
 )
 from litestar_security.accounts._passkeys import PasskeyService, PasskeySummary, WebAuthnOptions
-from litestar_security.accounts._profiles import LocalAuthService
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
     PasswordReauthenticationProof,

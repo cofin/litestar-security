@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from importlib import import_module
 from importlib.metadata import requires
+from pathlib import Path
 from subprocess import run
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1173,6 +1174,30 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "requires_local_bearer",
         "trusted_client_key",
     )
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "litestar_security.accounts._profiles",
+        "litestar_security.accounts._controllers",
+        "litestar_security.accounts._mfa_controllers",
+        "litestar_security.accounts._auth_service",
+    ],
+)
+def test_accounts_layering_carries_no_cycle_break_suppressions(module_name: str) -> None:
+    source = Path(cast("str", import_module(module_name).__file__)).read_text(encoding="utf-8")
+
+    assert "PLC0415" not in source
+
+
+def test_profiles_reaches_the_generated_controllers_at_module_scope() -> None:
+    profiles = import_module("litestar_security.accounts._profiles")
+
+    assert "litestar_security.accounts._controllers" in sys.modules
+    assert profiles.build_local_auth_routes is import_module(
+        "litestar_security.accounts._controllers"
+    ).build_local_auth_routes
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,7 @@ from litestar_security.accounts._access_tokens import (
     LocalAccessTokenIssuer,
     LocalBearerIdentityResolver,
 )
+from litestar_security.accounts._auth_service import LocalAuthService, trusted_client_key
 from litestar_security.accounts._controllers import LOCAL_AUTH_TAGS, build_local_auth_routes, requires_local_bearer
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._mfa import (
@@ -65,13 +66,7 @@ from litestar_security.accounts._passwords import (
     PasswordPolicyResult,
     PasswordVerificationResult,
 )
-from litestar_security.accounts._profiles import (
-    LocalAuth,
-    LocalAuthConfig,
-    LocalAuthSecrets,
-    LocalAuthService,
-    trusted_client_key,
-)
+from litestar_security.accounts._profiles import LocalAuth, LocalAuthConfig, LocalAuthSecrets
 from litestar_security.accounts._purpose_tokens import (
     NotificationCommand,
     PendingTokenIssue,
