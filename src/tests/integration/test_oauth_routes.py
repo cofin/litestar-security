@@ -918,6 +918,30 @@ async def test_frontchannel_logout_fails_closed_when_the_limiter_is_unavailable(
     assert response.status_code == 503
 
 
+@pytest.mark.anyio
+async def test_frontchannel_logout_degrades_to_subject_limiting_when_client_key_extraction_fails() -> None:
+    guard = RateLimitGuard(
+        limiter=StoreRateLimiter(
+            policies={"oidc.logout.frontchannel": RateLimitPolicy(limit=2, window=timedelta(minutes=5))},
+            store=MemoryStore(),
+            clock=lambda: NOW,
+        ),
+        pepper=b"p" * 32,
+    )
+    oidc_logout = OIDCLogoutLifecycleService(
+        provider_issuers={"example": "https://issuer.example"},
+        consumer=LogoutConsumer(),
+        sessions=LogoutSessions(),
+        rate_limits=guard,
+        client_key=lambda _request: 1 / 0,
+        clock=lambda: NOW,
+    )
+    request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {"cookies": {}})())
+
+    with pytest.raises(NotAuthorizedException, match="request"):
+        await oidc_logout.frontchannel("example", "https://issuer.example", "sid-front", request=request)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

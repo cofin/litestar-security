@@ -8944,6 +8944,12 @@ async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
         ),
         accounts_module.RateLimited,
     )
+    assert isinstance(
+        await mfa_controllers_module._StepUpController._verify_factor(  # noqa: SLF001
+            "account-1", cast("Any", SimpleNamespace(method="unsupported", credential={})), request, services
+        ),
+        InvalidCredentials,
+    )
     for response_factory in (mfa_controllers_module._options_response, mfa_controllers_module._removal_response):  # noqa: SLF001
         with pytest.raises(ServiceUnavailableException) as exc_info:
             response_factory(VerificationUnavailable())
