@@ -1022,11 +1022,7 @@ def test_generated_mfa_handlers_apply_shared_rate_limit_before_factor_work() -> 
 
 @pytest.mark.parametrize(
     ("outcome_name", "status", "retry_after"),
-    [
-        ("unavailable", 503, None),
-        ("rate_limited", 429, "7"),
-        ("invalid", 400, None),
-    ],
+    [("unavailable", 503, None), ("rate_limited", 429, "7"), ("invalid", 400, None)],
 )
 def test_generated_local_route_errors_raise_interceptable_classified_exceptions(
     outcome_name: str, status: int, retry_after: str | None
@@ -1112,9 +1108,7 @@ def test_generated_credential_bearing_route_errors_raise_unauthorized() -> None:
         # An authenticated caller whose service graph cannot resolve sessions is
         # a credential-path denial, not a malformed request.
         revoked = client.request(
-            "DELETE",
-            "/identity/sessions/sid",
-            headers={"x-auth-session": "valid", "x-csrftoken": csrf_token},
+            "DELETE", "/identity/sessions/sid", headers={"x-auth-session": "valid", "x-csrftoken": csrf_token}
         )
 
     assert revoked.status_code == 401, revoked.text

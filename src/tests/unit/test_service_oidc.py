@@ -193,13 +193,9 @@ async def test_service_jwt_multi_algorithm_config_uses_only_the_verified_header_
         jwks=jwks,
         jwks_uri=_JWKS_URI,
     ).build(clock=lambda: _NOW)
-    token = jwt.encode(
-        _service_claims(), private, algorithm="RS256", headers={"kid": "service-key", "typ": "at+jwt"}
-    )
+    token = jwt.encode(_service_claims(), private, algorithm="RS256", headers={"kid": "service-key", "typ": "at+jwt"})
 
-    outcome = await mechanism.authenticator.authenticate(
-        token, type("Connection", (), {"scope": {"headers": []}})()
-    )
+    outcome = await mechanism.authenticator.authenticate(token, type("Connection", (), {"scope": {"headers": []}})())
 
     assert isinstance(outcome, Authenticated)
 
