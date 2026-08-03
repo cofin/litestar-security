@@ -18,7 +18,7 @@ from litestar_security.accounts._records import (
     PasswordVerificationStatus,
     normalize_identifier,
 )
-from litestar_security.config import WorkerLimits
+from litestar_security.workers import WorkerLimits
 
 if TYPE_CHECKING:
     from collections.abc import Callable

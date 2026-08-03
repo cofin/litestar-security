@@ -26,7 +26,6 @@ from litestar_security.authentication import (
     InvalidCredentials,
     VerificationUnavailable,
 )
-from litestar_security.config import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 from litestar_security.context import AuthenticationEvidence
 from litestar_security.providers._internal import JSONValue, raise_config
 from litestar_security.providers.jwt._claims import (
@@ -44,6 +43,7 @@ from litestar_security.providers.jwt._internal import (
 )
 from litestar_security.providers.jwt._keys import prepare_key
 from litestar_security.providers.jwt._workers import metric_sink, run_worker, validate_limiter
+from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 
 __all__ = ("JWTVerifier", "SyncJWTVerifier", "normalize_verifier")
 

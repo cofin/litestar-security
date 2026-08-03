@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException
 
-import litestar_security.config as config_module
+import litestar_security.workers as workers_module
 from litestar_security.authentication import (
     Authenticated,
     InvalidCredentials,
@@ -648,13 +648,13 @@ async def test_blocking_api_key_store_is_normalized_once_per_runtime(monkeypatch
     resolver = _Resolver()
     current_thread = get_ident()
     submissions: list[object] = []
-    run_sync = config_module.to_thread.run_sync
+    run_sync = workers_module.to_thread.run_sync
 
     async def count_submission(function: object, **kwargs: object) -> object:
         submissions.append(function)
         return await run_sync(function, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(config_module.to_thread, "run_sync", count_submission)
+    monkeypatch.setattr(workers_module.to_thread, "run_sync", count_submission)
 
     _, first_mechanism, first_service = config.build(resolver, clock=lambda: _NOW)
     second_service = config.build(resolver, clock=lambda: _NOW)[2]
@@ -679,13 +679,13 @@ async def test_direct_async_api_key_store_never_submits_worker(monkeypatch: pyte
     config = APIKeyConfig(store=store, pepper=_PEPPER)
     service = config.build(_Resolver(), clock=lambda: _NOW)[2]
     submissions: list[object] = []
-    run_sync = config_module.to_thread.run_sync
+    run_sync = workers_module.to_thread.run_sync
 
     async def count_submission(function: object, **kwargs: object) -> object:
         submissions.append(function)
         return await run_sync(function, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(config_module.to_thread, "run_sync", count_submission)
+    monkeypatch.setattr(workers_module.to_thread, "run_sync", count_submission)
 
     issued = await service.issue(subject_id="subject-1")
     await service.revoke(issued.key_id)

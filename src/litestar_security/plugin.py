@@ -644,7 +644,7 @@ def _owner_name(layer: object) -> str:
 
 
 def _validate_local_auth(value: object) -> None:
-    from litestar_security.accounts._profiles import LocalAuthConfig  # noqa: PLC0415 - breaks an import cycle
+    from litestar_security.accounts import LocalAuthConfig  # noqa: PLC0415 - account services load only when configured
 
     if not isinstance(value, LocalAuthConfig):
         message = "Security local authentication must be a LocalAuthConfig"

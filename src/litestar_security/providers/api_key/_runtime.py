@@ -20,10 +20,10 @@ from litestar_security.authentication import (
     PresentedCredential,
     VerificationUnavailable,
 )
-from litestar_security.config import NoOpSecurityMetrics, SecurityMetrics
 from litestar_security.context import AuthenticationEvidence, CredentialRestrictions
 from litestar_security.providers._internal import safe_increment
 from litestar_security.providers.api_key._api_key import APIKeyCodec, APIKeyConfig, APIKeyStore, IssuedAPIKey
+from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics
 
 __all__ = ("APIKeyClaims", "APIKeyService", "BufferedAPIKeyUsage")
 

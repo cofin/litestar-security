@@ -16,6 +16,7 @@ from anyio import CancelScope, CapacityLimiter, Event, create_task_group, from_t
 from anyio.lowlevel import checkpoint
 
 import litestar_security.config as config_module
+import litestar_security.workers as workers_module
 from litestar_security.accounts import (
     LoginMethodStore,
     MFAStore,
@@ -144,7 +145,7 @@ def test_normalized_runtime_has_no_per_call_awaitability_branch() -> None:
 
 @pytest.mark.anyio
 async def test_blocking_call_runner_enforces_its_capacity_limit() -> None:
-    runner = config_module.BlockingCallRunner(limiter=CapacityLimiter(1))
+    runner = workers_module.BlockingCallRunner(limiter=CapacityLimiter(1))
     first_started = Event()
     release = ThreadEvent()
     state_lock = Lock()
@@ -180,7 +181,7 @@ async def test_blocking_call_runner_enforces_its_capacity_limit() -> None:
 
 @pytest.mark.anyio
 async def test_blocking_call_runner_finishes_in_flight_mutation_before_cancellation() -> None:
-    runner = config_module.BlockingCallRunner(limiter=CapacityLimiter(1))
+    runner = workers_module.BlockingCallRunner(limiter=CapacityLimiter(1))
     started = Event()
     caller_finished = Event()
     release = ThreadEvent()

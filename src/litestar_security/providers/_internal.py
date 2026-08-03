@@ -12,7 +12,7 @@ from typing import NoReturn, TypeAlias
 
 from litestar.exceptions import ImproperlyConfiguredException
 
-from litestar_security.config import SecurityMetrics
+from litestar_security.workers import SecurityMetrics
 
 __all__ = ("JSONValue",)
 

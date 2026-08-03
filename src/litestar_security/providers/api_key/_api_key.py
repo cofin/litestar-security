@@ -18,10 +18,10 @@ from litestar_security.context import CredentialRestrictions
 
 if TYPE_CHECKING:
     from litestar_security.authentication import AuthenticationMechanism, CredentialSlot, IdentityResolver
-    from litestar_security.config import SecurityMetrics
     from litestar_security.providers.api_key._runtime import APIKeyClaims, APIKeyService
+    from litestar_security.workers import SecurityMetrics
 
-from litestar_security.config import BlockingCallRunner, BlockingIntegration, NoOpSecurityMetrics
+from litestar_security.workers import BlockingCallRunner, BlockingIntegration, NoOpSecurityMetrics
 
 UserT = TypeVar("UserT")
 

@@ -11,8 +11,8 @@ from typing import TypeVar
 
 from anyio import CapacityLimiter, fail_after, to_thread
 
-from litestar_security.config import NoOpSecurityMetrics, SecurityMetrics
 from litestar_security.providers._internal import raise_config, safe_increment, safe_observe
+from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics
 
 __all__ = ("metric_sink", "run_worker", "validate_limiter")
 

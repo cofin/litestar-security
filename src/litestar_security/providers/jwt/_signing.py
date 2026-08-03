@@ -11,9 +11,9 @@ from functools import partial
 from inspect import iscoroutinefunction
 from typing import Protocol, cast, runtime_checkable
 
-from litestar_security.config import SecurityMetrics, WorkerLimits
 from litestar_security.providers._internal import JSONValue, raise_config
 from litestar_security.providers.jwt._workers import metric_sink, run_worker
+from litestar_security.workers import SecurityMetrics, WorkerLimits
 
 __all__ = ("SyncTokenSigner", "TokenSigner", "normalize_signer")
 

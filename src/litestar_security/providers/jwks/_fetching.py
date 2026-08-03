@@ -14,9 +14,9 @@ from typing import Protocol, cast, runtime_checkable
 
 from anyio import CapacityLimiter, fail_after, to_thread
 
-from litestar_security.config import NoOpSecurityMetrics, SecurityMetrics
 from litestar_security.providers._internal import raise_config, safe_increment, safe_observe
 from litestar_security.providers.jwks._internal import empty_headers
+from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics
 
 __all__ = ("AsyncJWKSFetcher", "JWKSFetchRequest", "JWKSFetchResponse", "SyncJWKSFetcher", "normalize_fetcher")
 

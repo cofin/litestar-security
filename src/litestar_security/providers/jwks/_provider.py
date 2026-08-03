@@ -19,7 +19,6 @@ from anyio import Lock
 from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
-from litestar_security.config import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 from litestar_security.providers._internal import raise_config, safe_increment, safe_observe
 from litestar_security.providers.jwks._cache import JWKSCacheEntry, JWKSCachePolicy, freshness
 from litestar_security.providers.jwks._documents import parse_document
@@ -32,6 +31,7 @@ from litestar_security.providers.jwks._fetching import (
 )
 from litestar_security.providers.jwks._internal import aware_utc, etag, negative_cache, valid_selection_value
 from litestar_security.providers.jwt import VerificationKey
+from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 
 __all__ = ("CachedJWKSProvider", "JWKSProvider")
 

@@ -24,7 +24,6 @@ from litestar.response import Response
 from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
 from litestar_security.authentication import AuthenticationOutcome, InvalidCredentials, public
-from litestar_security.config import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 from litestar_security.providers._internal import JSONValue, raise_config
 from litestar_security.providers.jwt._claims import JWTClaims, JWTValidationConfig, validate_local_access_claims
 from litestar_security.providers.jwt._internal import aware_utc, strict_identifier
@@ -32,6 +31,7 @@ from litestar_security.providers.jwt._keys import LocalJWKSDocument, SigningKey,
 from litestar_security.providers.jwt._signing import TokenSigner
 from litestar_security.providers.jwt._verification import JWTVerifier, PyJWTVerifier, parse_unverified_jwt_route
 from litestar_security.providers.jwt._workers import metric_sink, run_worker, validate_limiter
+from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 
 __all__ = ("LocalJWKSConfig", "LocalKeyRing", "VerificationKeySet", "build_local_jwks_handler")
 
