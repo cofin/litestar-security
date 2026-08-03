@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from litestar import Controller, Litestar, Router, get
 from litestar.di import NamedDependency  # noqa: TC002 - Litestar resolves handler annotations at runtime
 from typing_extensions import assert_type
 
 from litestar_security import (
+    AuthenticationPolicy,
     AuthorizationPredicate,
     CurrentUser,
     LitestarSessionHandle,
     NullSessionHandle,
     Principal,
+    PublicController,
+    SecureController,
     SecurityContext,
     all_of,
     any_of,
@@ -66,7 +69,7 @@ async def secured_handler() -> None:
     """Type-check policy metadata and guards at handler ownership."""
 
 
-class SecureController(Controller):
+class OwnedOptController(Controller):
     """Type-check controller ownership."""
 
     path = "/controller"
@@ -78,6 +81,19 @@ class SecureController(Controller):
         """Type-check an owned handler override."""
 
 
+class SecureAccounts(SecureController):
+    """Type-check the typed auth attribute."""
+
+    path = "/secure-accounts"
+    auth: ClassVar[AuthenticationPolicy] = required("session")
+
+
+class OpenStatus(PublicController):
+    """Type-check the public default."""
+
+    path = "/status"
+
+
 secure_router = Router(
     path="/router",
     route_handlers=[secured_handler],
@@ -85,7 +101,7 @@ secure_router = Router(
     guards=[requires_authenticated()],
 )
 typed_app = Litestar(
-    route_handlers=[secure_router, SecureController],
+    route_handlers=[secure_router, OwnedOptController, SecureAccounts, OpenStatus],
     opt={"auth": required()},
     guards=[requires_authenticated()],
     openapi_config=None,
