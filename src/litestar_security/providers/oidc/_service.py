@@ -16,6 +16,7 @@ from litestar_security.authentication import (
     InvalidCredentials,
     VerificationUnavailable,
 )
+from litestar_security.config import WorkerLimits
 from litestar_security.context import AuthenticationEvidence, CredentialRestrictions, Principal
 from litestar_security.providers.jwks import JWKSProvider
 from litestar_security.providers.jwt import (
@@ -48,6 +49,7 @@ class ServiceTokenConfig:
     scopes_claim: str = "scope"
     actor_id_claim: str = "sub"
     clock_skew: timedelta = timedelta(seconds=30)
+    worker_limits: WorkerLimits = field(default_factory=WorkerLimits, repr=False, compare=False)
     _validation: JWTValidationConfig = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -55,6 +57,7 @@ class ServiceTokenConfig:
         jwks = cast("object", self.jwks)
         if (
             not isinstance(jwks, JWKSProvider)
+            or not isinstance(cast("object", self.worker_limits), WorkerLimits)
             or not self.jwks_uri.startswith("https://")
             or not _claim_name(self.scopes_claim)
             or not _claim_name(self.actor_id_claim)
@@ -97,6 +100,9 @@ class ServiceTokenConfig:
 class _ServiceJWTVerifier:
     owner: ServiceTokenConfig
     config: JWTValidationConfig
+    _verifiers: dict[tuple[str, str], PyJWTVerifier] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     async def verify(  # noqa: PLR0911 - preserve structured trust outcomes at every verifier boundary
         self, token: str, *, now: datetime
@@ -118,14 +124,20 @@ class _ServiceJWTVerifier:
             return selection
         if not isinstance(selection, VerificationKey):
             return VerificationUnavailable()
-        key_config = replace(self.config, algorithms=frozenset({algorithm}))
-        outcome = await PyJWTVerifier(
-            config=key_config,
-            key=selection.key,
-            mechanism_name="service-jwt",
-            slot_name="authorization.bearer",
-            maximum_token_bytes=_MAXIMUM_TOKEN_BYTES,
-        ).verify(token, now=now)
+        cache_key = (key_id, algorithm)
+        verifier = self._verifiers.get(cache_key)
+        if verifier is None:
+            verifier = PyJWTVerifier(
+                config=replace(self.config, algorithms=frozenset({algorithm})),
+                key=selection.key,
+                mechanism_name="service-jwt",
+                slot_name="authorization.bearer",
+                maximum_token_bytes=_MAXIMUM_TOKEN_BYTES,
+                limiter=self.owner.worker_limits.crypto_limiter,
+                worker_timeout=self.owner.worker_limits.timeout,
+            )
+            self._verifiers[cache_key] = verifier
+        outcome = await verifier.verify(token, now=now)
         if not isinstance(outcome, Authenticated):
             return outcome
         claims = outcome.claims
