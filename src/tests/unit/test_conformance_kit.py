@@ -1167,9 +1167,7 @@ async def test_rate_limiter_conformance_accepts_the_reference_limiter() -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("limiter", [_NonAtomicLimiter, _UnderAdmittingLimiter])
-async def test_rate_limiter_conformance_names_exact_admission_invariant(
-    limiter: Callable[[int], RateLimiter],
-) -> None:
+async def test_rate_limiter_conformance_names_exact_admission_invariant(limiter: Callable[[int], RateLimiter]) -> None:
     with pytest.raises(AssertionError, match=r"RateLimiter\.acquire atomicity invariant: .*admit exactly k"):
         await assert_rate_limiter_conformance(limiter)
 
