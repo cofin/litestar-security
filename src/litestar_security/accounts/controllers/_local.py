@@ -1,12 +1,17 @@
 """Native Litestar controllers for the built-in local-auth routes."""
 
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 
 from litestar import Controller, Request, Response, Router, delete, get, post
 from litestar.connection import ASGIConnection
 from litestar.datastructures import CacheControlHeader
 from litestar.di import NamedDependency, Provide
-from litestar.exceptions import NotAuthorizedException
+from litestar.exceptions import (
+    ClientException,
+    NotAuthorizedException,
+    ServiceUnavailableException,
+    TooManyRequestsException,
+)
 from litestar.handlers import BaseRouteHandler
 from litestar.openapi.datastructures import ResponseSpec
 from litestar.openapi.spec import Tag
@@ -182,23 +187,15 @@ def _route_response(content: RouteStatusResponse, *, status_code: int) -> Respon
     return Response(content=content, status_code=status_code)
 
 
-def _route_error(outcome: object, *, credentials: bool = False) -> Response[Any]:
+def _route_error(outcome: object, *, credentials: bool = False) -> NoReturn:
     if isinstance(outcome, RateLimited):
-        response = _route_response(
-            RouteStatusResponse(detail="Too many requests."), status_code=HTTP_429_TOO_MANY_REQUESTS
-        )
-        if outcome.retry_after is not None:
-            response.headers["Retry-After"] = str(outcome.retry_after)
-        return response
+        headers = {"Retry-After": str(outcome.retry_after)} if outcome.retry_after is not None else None
+        raise TooManyRequestsException(detail="Too many requests.", headers=headers)
     if isinstance(outcome, VerificationUnavailable):
-        return _route_response(
-            RouteStatusResponse(detail="Authentication service is unavailable."),
-            status_code=HTTP_503_SERVICE_UNAVAILABLE,
-        )
-    return _route_response(
-        RouteStatusResponse(detail="Authentication required." if credentials else "The request is invalid."),
-        status_code=HTTP_401_UNAUTHORIZED if credentials else HTTP_400_BAD_REQUEST,
-    )
+        raise ServiceUnavailableException(detail="Authentication service is unavailable.")
+    if credentials:
+        raise NotAuthorizedException(detail="Authentication required.")
+    raise ClientException(detail="The request is invalid.")
 
 
 def _principal_account_id(principal: Principal[Any]) -> str | None:
@@ -233,7 +230,7 @@ class _LocalSessionController(Controller):
         """Authenticate a password and establish one native session."""
         result = await local_auth_service.session_login(request, data)
         if not isinstance(result, LocalAccountResponse):
-            return _route_error(result)
+            _route_error(result)
         return Response(content=result, status_code=HTTP_200_OK)
 
     @post(
@@ -255,10 +252,10 @@ class _LocalSessionController(Controller):
         """Revoke the caller's current session and clear browser authentication."""
         session_auth = local_auth_service.session_auth
         if session_auth is None:
-            return _route_error(VerificationUnavailable())
+            _route_error(VerificationUnavailable())
         result = await session_auth.logout(request)
         if isinstance(result, VerificationUnavailable):
-            return _route_error(result)
+            _route_error(result)
         return _route_response(RouteStatusResponse(detail="Logged out."), status_code=HTTP_200_OK)
 
     @get(
@@ -284,14 +281,14 @@ class _LocalSessionController(Controller):
         account_id = _principal_account_id(principal)
         session_auth = local_auth_service.session_auth
         if account_id is None or session_auth is None:
-            return _route_error(InvalidCredentials(), credentials=True)
+            _route_error(InvalidCredentials(), credentials=True)
         current = session_auth.current_authentication(request)
         try:
             sessions = await session_auth.list_sessions(
                 account_id, current_session_id=current.session_id if current is not None else None
             )
         except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
-            return _route_error(VerificationUnavailable())
+            _route_error(VerificationUnavailable())
         return Response(
             content=LocalSessionListResponse(
                 sessions=tuple(
@@ -334,10 +331,10 @@ class _LocalSessionController(Controller):
         account_id = _principal_account_id(principal)
         session_auth = local_auth_service.session_auth
         if account_id is None or session_auth is None:
-            return _route_error(InvalidCredentials(), credentials=True)
+            _route_error(InvalidCredentials(), credentials=True)
         result = await session_auth.revoke_session(request, account_id, session_id)
         if isinstance(result, VerificationUnavailable):
-            return _route_error(result)
+            _route_error(result)
         return _route_response(RouteStatusResponse(detail="Session revoked."), status_code=HTTP_200_OK)
 
 
@@ -368,7 +365,7 @@ class _LocalTokenController(Controller):
         """Authenticate a password and issue a local access/refresh pair."""
         result = await local_auth_service.token_login(request, data)
         if not isinstance(result, RefreshTokenResponse):
-            return _route_error(result)
+            _route_error(result)
         return Response(content=result, status_code=HTTP_200_OK)
 
     @post(
@@ -396,12 +393,12 @@ class _LocalTokenController(Controller):
         """Strictly rotate one opaque refresh token."""
         refresh_tokens = local_auth_service.refresh_tokens
         if refresh_tokens is None:
-            return _route_error(VerificationUnavailable())
+            _route_error(VerificationUnavailable())
         result = await refresh_tokens.rotate(
             data.token, idempotency_key=idempotency_key, client_key=local_auth_service.client_key_for(request)
         )
         if not isinstance(result, RefreshTokenResponse):
-            return _route_error(result)
+            _route_error(result)
         return Response(content=result, status_code=HTTP_200_OK)
 
     @post(
@@ -429,10 +426,10 @@ class _LocalTokenController(Controller):
         account_id = _principal_account_id(principal)
         refresh_tokens = local_auth_service.refresh_tokens
         if account_id is None or refresh_tokens is None:
-            return _route_error(InvalidCredentials(), credentials=True)
+            _route_error(InvalidCredentials(), credentials=True)
         result = await refresh_tokens.revoke_for_account(account_id, data.token)
         if isinstance(result, VerificationUnavailable):
-            return _route_error(result)
+            _route_error(result)
         return _route_response(RouteStatusResponse(detail="Token revoked."), status_code=HTTP_200_OK)
 
 
@@ -468,7 +465,7 @@ class _LocalLifecycleController(Controller):
             data.identifier, client_key=local_auth_service.client_key_for(request)
         )
         if not isinstance(result, LifecycleAccepted):
-            return _route_error(result)
+            _route_error(result)
         return Response(content=result, status_code=HTTP_202_ACCEPTED)
 
     @post(
@@ -498,7 +495,7 @@ class _LocalLifecycleController(Controller):
         )
         if isinstance(result, PasswordResetResult) and result.status is PasswordResetStatus.RESET:
             return _route_response(RouteStatusResponse(detail="Password reset complete."), status_code=HTTP_200_OK)
-        return _route_error(result)
+        _route_error(result)
 
     @post(
         "/verification",
@@ -526,7 +523,7 @@ class _LocalLifecycleController(Controller):
             data.identifier, client_key=local_auth_service.client_key_for(request)
         )
         if not isinstance(result, LifecycleAccepted):
-            return _route_error(result)
+            _route_error(result)
         return Response(content=result, status_code=HTTP_202_ACCEPTED)
 
     @post(
@@ -553,7 +550,7 @@ class _LocalLifecycleController(Controller):
         )
         if isinstance(result, ConsumeResult) and result.status is ConsumeStatus.CONSUMED:
             return _route_response(RouteStatusResponse(detail="Account verified."), status_code=HTTP_200_OK)
-        return _route_error(result)
+        _route_error(result)
 
 
 class _LocalRegistrationController(Controller):
@@ -583,7 +580,7 @@ class _LocalRegistrationController(Controller):
         """Apply the configured public registration policy."""
         registration = local_auth_service.registration
         if registration is None:
-            return _route_error(InvalidLifecycleRequest())
+            _route_error(InvalidLifecycleRequest())
         result = await registration.register(
             data.identifier,
             data.password,
@@ -593,7 +590,7 @@ class _LocalRegistrationController(Controller):
         )
         if isinstance(result, LifecycleAccepted):
             return Response(content=result, status_code=HTTP_202_ACCEPTED)
-        return _route_error(result)
+        _route_error(result)
 
 
 class _LocalInvitationRegistrationController(Controller):
@@ -623,7 +620,7 @@ class _LocalInvitationRegistrationController(Controller):
         """Apply the configured invite-only registration policy."""
         registration = local_auth_service.registration
         if registration is None:
-            return _route_error(InvalidLifecycleRequest())
+            _route_error(InvalidLifecycleRequest())
         result = await registration.register(
             data.identifier,
             data.password,
@@ -633,7 +630,7 @@ class _LocalInvitationRegistrationController(Controller):
         )
         if isinstance(result, LifecycleAccepted):
             return Response(content=result, status_code=HTTP_202_ACCEPTED)
-        return _route_error(result)
+        _route_error(result)
 
 
 class _LocalSessionPasswordController(Controller):
@@ -664,7 +661,7 @@ class _LocalSessionPasswordController(Controller):
         """Change the session caller's password and rebind its session."""
         account_id = _principal_account_id(principal)
         if account_id is None:
-            return _route_error(InvalidCredentials(), credentials=True)
+            _route_error(InvalidCredentials(), credentials=True)
         result = await local_auth_service.change_session_password(request, account_id, data)
         return _password_change_response(result)
 
@@ -697,7 +694,7 @@ class _LocalTokenPasswordController(Controller):
         """Change the local bearer caller's password."""
         account_id = _principal_account_id(principal)
         if account_id is None:
-            return _route_error(InvalidCredentials(), credentials=True)
+            _route_error(InvalidCredentials(), credentials=True)
         result = await local_auth_service.change_token_password(account_id, data)
         return _password_change_response(result)
 
@@ -732,7 +729,7 @@ class _LocalTokenOnlyPasswordController(Controller):
         """Change the local bearer caller's password."""
         account_id = _principal_account_id(principal)
         if account_id is None:
-            return _route_error(InvalidCredentials(), credentials=True)
+            _route_error(InvalidCredentials(), credentials=True)
         result = await local_auth_service.change_token_password(account_id, data)
         return _password_change_response(result)
 
@@ -741,5 +738,5 @@ def _password_change_response(result: object) -> Response[RouteStatusResponse]:
     if isinstance(result, PasswordChangeResult) and result.status is PasswordChangeStatus.CHANGED:
         return _route_response(RouteStatusResponse(detail="Password changed."), status_code=HTTP_200_OK)
     if isinstance(result, InvalidCredentials):
-        return _route_error(result)
-    return _route_error(result)
+        _route_error(result)
+    _route_error(result)

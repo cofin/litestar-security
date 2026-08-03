@@ -14,13 +14,20 @@ import anyio.lowlevel
 import click
 import pytest
 from click.testing import CliRunner
-from litestar import Controller, Litestar, Router, WebSocket, asgi, get, post, route, websocket
+from litestar import Controller, Litestar, Response, Router, WebSocket, asgi, get, post, route, websocket
 from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
 from litestar.di import Provide
 from litestar.enums import HttpMethod, ScopeType
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar.exceptions import (
+    ClientException,
+    HTTPException,
+    ImproperlyConfiguredException,
+    ServiceUnavailableException,
+    TooManyRequestsException,
+)
 from litestar.middleware import DefineMiddleware
+from litestar.middleware.csrf import generate_csrf_token
 from litestar.middleware.session.base import SessionMiddleware
 from litestar.middleware.session.client_side import CookieBackendConfig
 from litestar.middleware.session.server_side import ServerSideSessionConfig
@@ -1011,6 +1018,106 @@ def test_generated_mfa_handlers_apply_shared_rate_limit_before_factor_work() -> 
             response = client.request(method, path, headers=request_headers, json=payload)
             assert response.status_code == 429
             assert response.headers["retry-after"] == "2"
+
+
+@pytest.mark.parametrize(
+    ("outcome_name", "status", "retry_after"),
+    [
+        ("unavailable", 503, None),
+        ("rate_limited", 429, "7"),
+        ("invalid", 400, None),
+    ],
+)
+def test_generated_local_route_errors_raise_interceptable_classified_exceptions(
+    outcome_name: str, status: int, retry_after: str | None
+) -> None:
+    outcome: object = {
+        "unavailable": VerificationUnavailable(),
+        "rate_limited": accounts_module.RateLimited(retry_after=7),
+        "invalid": InvalidCredentials(),
+    }[outcome_name]
+
+    class Service:
+        session_auth = None
+        refresh_tokens = None
+        registration = None
+
+        async def session_login(self, request: object, data: object) -> object:
+            del request, data
+            return outcome
+
+    config = SimpleNamespace(
+        local_auth_service=Service(),
+        mode=accounts_module.LocalAuthMode.SESSION,
+        registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
+        route_prefix="/identity",
+    )
+    intercepted: list[int] = []
+
+    def record(request: Any, exc: HTTPException) -> Response[Any]:
+        del request
+        intercepted.append(exc.status_code)
+        return Response(content={"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
+
+    csrf_secret = token_hex()
+    app = Litestar(
+        route_handlers=[accounts_module.build_local_auth_routes(cast("Any", config))],
+        csrf_config=CSRFConfig(secret=csrf_secret),
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+        exception_handlers={
+            ServiceUnavailableException: record,
+            TooManyRequestsException: record,
+            ClientException: record,
+        },
+    )
+
+    with TestClient(app) as client:
+        csrf_token = generate_csrf_token(csrf_secret)
+        client.cookies.set("csrftoken", csrf_token)
+        response = client.post(
+            "/identity/login",
+            json={"identifier": "user@example.com", "password": "secret"},
+            headers={"x-csrftoken": csrf_token},
+        )
+
+    assert response.status_code == status, response.text
+    assert response.headers.get("retry-after") == retry_after
+    assert intercepted == [status]
+
+
+def test_generated_credential_bearing_route_errors_raise_unauthorized() -> None:
+    class Service:
+        session_auth = None
+        refresh_tokens = None
+        registration = None
+
+    config = SimpleNamespace(
+        local_auth_service=Service(),
+        mode=accounts_module.LocalAuthMode.SESSION,
+        registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
+        route_prefix="/identity",
+    )
+    csrf_secret = token_hex()
+    app = Litestar(
+        route_handlers=[accounts_module.build_local_auth_routes(cast("Any", config))],
+        csrf_config=CSRFConfig(secret=csrf_secret),
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+    )
+
+    with TestClient(app) as client:
+        csrf_token = generate_csrf_token(csrf_secret)
+        client.cookies.set("csrftoken", csrf_token)
+        # An authenticated caller whose service graph cannot resolve sessions is
+        # a credential-path denial, not a malformed request.
+        revoked = client.request(
+            "DELETE",
+            "/identity/sessions/sid",
+            headers={"x-auth-session": "valid", "x-csrftoken": csrf_token},
+        )
+
+    assert revoked.status_code == 401, revoked.text
 
 
 def _feature_test_ports() -> tuple[object, object, object, object]:

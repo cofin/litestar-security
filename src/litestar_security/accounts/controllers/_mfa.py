@@ -4,12 +4,13 @@ from base64 import urlsafe_b64decode
 from collections.abc import Callable
 from dataclasses import dataclass
 from secrets import token_urlsafe
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 
 from litestar import Controller, Request, Response, Router, get, post
 from litestar.connection import ASGIConnection
 from litestar.datastructures import CacheControlHeader
 from litestar.di import NamedDependency, Provide
+from litestar.exceptions import NotAuthorizedException, ServiceUnavailableException, TooManyRequestsException
 from litestar.openapi.datastructures import ResponseSpec
 from litestar.params import FromPath, JSONBody, SkipValidation
 from litestar.status_codes import (
@@ -162,17 +163,13 @@ def _response(content: ContentT, status_code: int = HTTP_200_OK) -> Response[Con
     return Response(content=content, status_code=status_code)
 
 
-def _error(outcome: object) -> Response[Any]:
+def _error(outcome: object) -> NoReturn:
     if isinstance(outcome, RateLimited):
-        response = _response(RouteStatusResponse(detail="Too many requests."), HTTP_429_TOO_MANY_REQUESTS)
-        if outcome.retry_after is not None:
-            response.headers["Retry-After"] = str(outcome.retry_after)
-        return response
+        headers = {"Retry-After": str(outcome.retry_after)} if outcome.retry_after is not None else None
+        raise TooManyRequestsException(detail="Too many requests.", headers=headers)
     if isinstance(outcome, VerificationUnavailable):
-        return _response(
-            RouteStatusResponse(detail="Authentication service is unavailable."), HTTP_503_SERVICE_UNAVAILABLE
-        )
-    return _response(RouteStatusResponse(detail="Authentication required."), HTTP_401_UNAUTHORIZED)
+        raise ServiceUnavailableException(detail="Authentication service is unavailable.")
+    raise NotAuthorizedException(detail="Authentication required.")
 
 
 def _principal_id(principal: Principal[Any]) -> str | None:
@@ -254,7 +251,7 @@ class _StepUpController(Controller):
         responses=_MFA_BAD_REQUEST_RESPONSES,
         auth=required(),
     )
-    async def issue(  # noqa: PLR0911 - each authentication boundary has one explicit safe outcome
+    async def issue(
         self,
         purpose: FromPath[str],
         data: JSONBody[StepUpRequest],
@@ -265,20 +262,20 @@ class _StepUpController(Controller):
         """Verify one factor and issue a purpose-bound grant."""
         account_id = _principal_id(principal)
         if account_id is None:  # pragma: no cover - required authentication rejects anonymous requests first
-            return _error(InvalidCredentials())
+            _error(InvalidCredentials())
         allowed_methods = _PURPOSE_METHODS.get(purpose)
         if allowed_methods is None or data.method not in allowed_methods:
-            return _error(InvalidCredentials())
+            _error(InvalidCredentials())
         operation = PASSWORD_VERIFY if data.method == "password" else PASSKEY_ASSERT
         limited = await _check_rate_limit(mfa_service, request, operation, account_id)
         if limited is not None:
-            return _error(limited)
+            _error(limited)
         evidence = await self._verify_factor(account_id, data, request, mfa_service)
         if not isinstance(evidence, AuthenticationEvidence):
-            return _error(evidence)
+            _error(evidence)
         epoch = await _current_epoch(mfa_service, account_id)
         if isinstance(epoch, VerificationUnavailable):
-            return _error(epoch)
+            _error(epoch)
         grant = await mfa_service.step_up.issue(
             principal_id=account_id,
             security_epoch=epoch,
@@ -287,7 +284,7 @@ class _StepUpController(Controller):
             evidence=evidence,
         )
         if not isinstance(grant, StepUpGrant):
-            return _error(grant)
+            _error(grant)
         return _response(StepUpResponse(grant=grant.token, purpose=grant.purpose, expires_at=grant.expires_at))
 
     @staticmethod
@@ -343,10 +340,10 @@ class _MFAController(Controller):
         if (
             account_id is None or totp_service is None
         ):  # pragma: no cover - controller registration and auth guarantee both
-            return _error(InvalidCredentials())
+            _error(InvalidCredentials())
         limited = await _check_rate_limit(mfa_service, request, MFA_TOTP_ENROLL, account_id)
         if limited is not None:
-            return _error(limited)
+            _error(limited)
         assurance = await _consume_step_up(
             mfa_service=mfa_service,
             request=request,
@@ -355,10 +352,10 @@ class _MFAController(Controller):
             grant=data.step_up_grant,
         )
         if not isinstance(assurance, AuthenticationEvidence):
-            return _error(assurance)
+            _error(assurance)
         result = await totp_service.begin_totp_enrollment(account_id, label=data.label)
         if isinstance(result, VerificationUnavailable):
-            return _error(result)
+            _error(result)
         return _response(
             TOTPEnrollmentResponse(
                 enrollment_id=result.enrollment_id,
@@ -396,13 +393,13 @@ class _MFAController(Controller):
         if (
             account_id is None or totp_service is None
         ):  # pragma: no cover - controller registration and auth guarantee both
-            return _error(InvalidCredentials())
+            _error(InvalidCredentials())
         limited = await _check_rate_limit(mfa_service, request, MFA_TOTP_VERIFY, account_id)
         if limited is not None:
-            return _error(limited)
+            _error(limited)
         recovery = await totp_service.activate_totp_with_recovery_codes(account_id, data.enrollment_id, data.code)
         if not isinstance(recovery, RecoveryCodes):
-            return _error(recovery)
+            _error(recovery)
         return _response(RecoveryCodesResponse(codes=recovery.codes))
 
     @post(
@@ -433,10 +430,10 @@ class _MFAController(Controller):
         if (
             account_id is None or totp_service is None
         ):  # pragma: no cover - controller registration and auth guarantee both
-            return _error(InvalidCredentials())
+            _error(InvalidCredentials())
         limited = await _check_rate_limit(mfa_service, request, MFA_TOTP_REMOVE, account_id)
         if limited is not None:
-            return _error(limited)
+            _error(limited)
         assurance = await _consume_step_up(
             mfa_service=mfa_service,
             request=request,
@@ -445,7 +442,7 @@ class _MFAController(Controller):
             grant=data.step_up_grant,
         )
         if not isinstance(assurance, AuthenticationEvidence):
-            return _error(assurance)
+            _error(assurance)
         result = await totp_service.remove_totp_method(account_id, method_id)
         return _removal_response(result)
 
@@ -476,10 +473,10 @@ class _MFAController(Controller):
         if (
             account_id is None or totp_service is None
         ):  # pragma: no cover - controller registration and auth guarantee both
-            return _error(InvalidCredentials())
+            _error(InvalidCredentials())
         limited = await _check_rate_limit(mfa_service, request, MFA_RECOVERY_REPLACE, account_id)
         if limited is not None:
-            return _error(limited)
+            _error(limited)
         assurance = await _consume_step_up(
             mfa_service=mfa_service,
             request=request,
@@ -488,10 +485,10 @@ class _MFAController(Controller):
             grant=data.step_up_grant,
         )
         if not isinstance(assurance, AuthenticationEvidence):
-            return _error(assurance)
+            _error(assurance)
         result = await totp_service.generate_recovery_codes(account_id)
         if not isinstance(result, RecoveryCodes):
-            return _error(result)
+            _error(result)
         return _response(RecoveryCodesResponse(codes=result.codes))
 
 
@@ -525,10 +522,10 @@ class _PasskeyController(Controller):
         if (
             account_id is None or passkey_service is None
         ):  # pragma: no cover - controller registration and auth guarantee both
-            return _error(InvalidCredentials())
+            _error(InvalidCredentials())
         limited = await _check_rate_limit(mfa_service, request, PASSKEY_REGISTER_OPTIONS, account_id)
         if limited is not None:
-            return _error(limited)
+            _error(limited)
         assurance = await _consume_step_up(
             mfa_service=mfa_service,
             request=request,
@@ -537,7 +534,7 @@ class _PasskeyController(Controller):
             grant=data.step_up_grant,
         )
         if not isinstance(assurance, AuthenticationEvidence):
-            return _error(assurance)
+            _error(assurance)
         result = await passkey_service.begin_registration(
             account_id, user_name=data.user_name, binding=_transport_binding(request)
         )
@@ -565,15 +562,15 @@ class _PasskeyController(Controller):
         account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys
         if account_id is None or passkey_service is None or data.account_id != account_id:
-            return _error(InvalidCredentials())
+            _error(InvalidCredentials())
         limited = await _check_rate_limit(mfa_service, request, PASSKEY_REGISTER_VERIFY, account_id)
         if limited is not None:
-            return _error(limited)
+            _error(limited)
         result = await passkey_service.verify_registration(
             account_id, binding=_transport_binding(request), response=data.response
         )
         if not hasattr(result, "credential_id"):
-            return _error(result)
+            _error(result)
         return _response(RouteStatusResponse(detail="Passkey registered."), HTTP_201_CREATED)
 
     @post(
@@ -599,10 +596,10 @@ class _PasskeyController(Controller):
         """Create public account-bound assertion options."""
         passkey_service = mfa_service.passkeys
         if passkey_service is None:  # pragma: no cover - this controller is registered only with a passkey service
-            return _error(VerificationUnavailable())
+            _error(VerificationUnavailable())
         limited = await _check_rate_limit(mfa_service, request, PASSKEY_AUTH_OPTIONS, data.account_id)
         if limited is not None:
-            return _error(limited)
+            _error(limited)
         binding = token_urlsafe(32)
         result = await passkey_service.begin_authentication(data.account_id, binding=binding.encode("ascii"))
         return _options_response(result, binding=binding)
@@ -629,10 +626,10 @@ class _PasskeyController(Controller):
         if (
             account_id is None or passkey_service is None
         ):  # pragma: no cover - controller registration and auth guarantee both
-            return _error(InvalidCredentials())
+            _error(InvalidCredentials())
         result = await passkey_service.list_credentials(account_id)
         if isinstance(result, VerificationUnavailable):
-            return _error(result)
+            _error(result)
         return _response(tuple(_summary_response(summary) for summary in result))
 
     @post(
@@ -663,10 +660,10 @@ class _PasskeyController(Controller):
         if (
             account_id is None or passkey_service is None
         ):  # pragma: no cover - controller registration and auth guarantee both
-            return _error(InvalidCredentials())
+            _error(InvalidCredentials())
         limited = await _check_rate_limit(mfa_service, request, PASSKEY_REMOVE, account_id)
         if limited is not None:
-            return _error(limited)
+            _error(limited)
         assurance = await _consume_step_up(
             mfa_service=mfa_service,
             request=request,
@@ -675,7 +672,7 @@ class _PasskeyController(Controller):
             grant=data.step_up_grant,
         )
         if not isinstance(assurance, AuthenticationEvidence):
-            return _error(assurance)
+            _error(assurance)
         try:
             raw_id = urlsafe_b64decode(credential_id + "=" * (-len(credential_id) % 4))
         except (ValueError, TypeError):
@@ -812,23 +809,23 @@ async def _verify_passkey_authentication(
     if (
         passkey_service is None or local_auth_service is None
     ):  # pragma: no cover - plugin validates both before route registration
-        return _error(VerificationUnavailable())
+        _error(VerificationUnavailable())
     limited = await _check_rate_limit(mfa_service, request, PASSKEY_ASSERT, data.account_id)
     if limited is not None:
-        return _error(limited)
+        _error(limited)
     if data.binding is None:
-        return _error(InvalidCredentials())
+        _error(InvalidCredentials())
     evidence = await passkey_service.verify_authentication(
         data.account_id, binding=data.binding.encode("utf-8"), response=data.response
     )
     if not isinstance(evidence, AuthenticationEvidence):
-        return _error(evidence)
+        _error(evidence)
     selected_transport = transport if transport is not None else data.transport
     result = await local_auth_service.passkey_login(
         request, data.account_id, transport=selected_transport, evidence=evidence
     )
     if isinstance(result, (InvalidCredentials, VerificationUnavailable)):
-        return _error(result)
+        _error(result)
     return _response(result)
 
 
@@ -836,7 +833,7 @@ def _options_response(
     result: WebAuthnOptions | VerificationUnavailable, *, binding: str | None = None
 ) -> Response[Any]:
     if isinstance(result, VerificationUnavailable):
-        return _error(result)
+        _error(result)
     return _response(PasskeyOptionsResponse(options=result.json, expires_at=result.expires_at, binding=binding))
 
 
@@ -854,7 +851,7 @@ def _summary_response(summary: PasskeySummary) -> PasskeySummaryResponse:
 
 def _removal_response(result: RevokeLoginMethodResult | VerificationUnavailable) -> Response[RouteStatusResponse]:
     if isinstance(result, VerificationUnavailable):
-        return _error(result)
+        _error(result)
     if result.status is RevokeLoginMethodStatus.REVOKED:
         return _response(RouteStatusResponse(detail="Login method removed."))
     if result.status is RevokeLoginMethodStatus.FINAL_METHOD:
