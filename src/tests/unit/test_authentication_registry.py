@@ -11168,6 +11168,15 @@ async def test_store_rate_limiter_denies_after_the_window_budget_and_recovers_ne
 
 
 @pytest.mark.anyio
+async def test_store_rate_limiter_budgets_password_verify_by_default() -> None:
+    limiter = _memory_limiter()
+    request = accounts_module.RateLimitRequest(operation="local.password.verify", client_key="1.1.1.1")
+    decisions = [await limiter.acquire(request) for _ in range(11)]
+
+    assert [decision.allowed for decision in decisions] == [True] * 10 + [False]
+
+
+@pytest.mark.anyio
 async def test_store_rate_limiter_fails_closed_on_an_unreadable_counter() -> None:
     store = MemoryStore()
     limiter = accounts_module.StoreRateLimiter(store=store)

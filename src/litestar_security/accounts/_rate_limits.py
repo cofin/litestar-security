@@ -42,16 +42,21 @@ from litestar_security.accounts._operations import (
     MFA_RECOVERY_CONSUME,
     MFA_RECOVERY_REPLACE,
     MFA_TOTP_ENROLL,
+    MFA_TOTP_REMOVE,
     MFA_TOTP_VERIFY,
     OUTCOME_RATE_LIMITED,
     PASSKEY_ASSERT,
     PASSKEY_AUTH_OPTIONS,
     PASSKEY_REGISTER_OPTIONS,
     PASSKEY_REGISTER_VERIFY,
+    PASSKEY_REMOVE,
     PASSWORD_RESET,
+    PASSWORD_VERIFY,
+    RATE_LIMITED_OPERATIONS,
     RECOVERY,
     REFRESH_ROTATE,
     REGISTRATION,
+    VERIFICATION_CONSUME,
     VERIFICATION_RESEND,
 )
 from litestar_security.accounts._records import (
@@ -125,17 +130,27 @@ DEFAULT_RATE_LIMIT_POLICIES: "Mapping[str, RateLimitPolicy]" = MappingProxyType(
     MFA_RECOVERY_CONSUME: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     MFA_RECOVERY_REPLACE: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     MFA_TOTP_ENROLL: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
+    MFA_TOTP_REMOVE: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     MFA_TOTP_VERIFY: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     PASSKEY_ASSERT: RateLimitPolicy(limit=20, window=timedelta(minutes=5)),
     PASSKEY_AUTH_OPTIONS: RateLimitPolicy(limit=20, window=timedelta(minutes=5)),
     PASSKEY_REGISTER_OPTIONS: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     PASSKEY_REGISTER_VERIFY: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
+    PASSKEY_REMOVE: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     REGISTRATION: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     RECOVERY: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     PASSWORD_RESET: RateLimitPolicy(limit=10, window=timedelta(hours=1)),
+    # Second-factor re-verifications of an already-authenticated principal share
+    # MFA_TOTP_VERIFY's cadence; VERIFICATION_CONSUME mirrors it for the same reason.
+    PASSWORD_VERIFY: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     VERIFICATION_RESEND: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
+    VERIFICATION_CONSUME: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     REFRESH_ROTATE: RateLimitPolicy(limit=60, window=timedelta(minutes=5)),
 })
+
+assert DEFAULT_RATE_LIMIT_POLICIES.keys() == RATE_LIMITED_OPERATIONS, (  # noqa: S101 - import-time coverage guard
+    "DEFAULT_RATE_LIMIT_POLICIES must map exactly RATE_LIMITED_OPERATIONS"
+)
 
 
 @dataclass(frozen=True, slots=True)

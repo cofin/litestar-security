@@ -1176,6 +1176,19 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
     )
 
 
+def test_default_rate_limit_policies_map_exactly_the_rate_limited_operations() -> None:
+    operations = import_module("litestar_security.accounts._operations")
+
+    assert "RATE_LIMITED_OPERATIONS" in operations.__all__
+    assert accounts_module.DEFAULT_RATE_LIMIT_POLICIES.keys() == operations.RATE_LIMITED_OPERATIONS
+    assert {
+        operations.MFA_TOTP_REMOVE,
+        operations.PASSKEY_REMOVE,
+        operations.PASSWORD_VERIFY,
+        operations.VERIFICATION_CONSUME,
+    } <= operations.RATE_LIMITED_OPERATIONS
+
+
 @pytest.mark.parametrize(
     "module_name",
     [

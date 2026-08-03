@@ -41,6 +41,7 @@ __all__ = (
     "PASSWORD_SESSION_REBIND",
     "PASSWORD_SESSION_REVOKE_OTHERS",
     "PASSWORD_VERIFY",
+    "RATE_LIMITED_OPERATIONS",
     "RECOVERY",
     "RECOVERY_CONSUME",
     "RECOVERY_ISSUE",
@@ -105,6 +106,31 @@ PASSKEY_REGISTER_VERIFY = "local.passkey.registration.verify"
 PASSKEY_REMOVE = "local.passkey.remove"
 PASSWORD_RESET = "local.password.reset"
 VERIFICATION_RESEND = "local.verification.resend"
+
+# The exact set of operations the library's own routes/services hand to a
+# RateLimiter. DEFAULT_RATE_LIMIT_POLICIES MUST map every one of these: an
+# operation limited by a route but absent from the default map is silently
+# unlimited (StoreRateLimiter.acquire admits unmapped operations).
+RATE_LIMITED_OPERATIONS = frozenset({
+    LOGIN,
+    REGISTRATION,
+    RECOVERY,
+    PASSWORD_RESET,
+    PASSWORD_VERIFY,
+    VERIFICATION_RESEND,
+    VERIFICATION_CONSUME,
+    REFRESH_ROTATE,
+    MFA_TOTP_ENROLL,
+    MFA_TOTP_VERIFY,
+    MFA_TOTP_REMOVE,
+    MFA_RECOVERY_CONSUME,
+    MFA_RECOVERY_REPLACE,
+    PASSKEY_REGISTER_OPTIONS,
+    PASSKEY_REGISTER_VERIFY,
+    PASSKEY_AUTH_OPTIONS,
+    PASSKEY_ASSERT,
+    PASSKEY_REMOVE,
+})
 
 OUTCOME_ATTEMPTED = "attempted"
 OUTCOME_CHANGED = "changed"
