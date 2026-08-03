@@ -4,6 +4,7 @@ import asyncio
 import base64
 import gzip
 import hmac
+import importlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from collections.abc import Set as AbstractSet
@@ -2151,6 +2152,56 @@ def test_access_token_claim_builder_is_deterministic_minimal_and_validated() -> 
     )
     assert random_one["jti"] != random_two["jti"]
     assert "scope" not in random_one
+
+
+def test_capability_claims_reject_reserved_claim_names() -> None:
+    capabilities = importlib.import_module("litestar_security.providers.jwt._capabilities")
+
+    with pytest.raises(ValueError, match="reserved"):
+        capabilities.build_capability_claims(
+            issuer=_JWT_ISSUER,
+            purpose="download",
+            subject="user-1",
+            audience="files",
+            lifetime=timedelta(minutes=5),
+            claims={"aud": "hijack"},
+            now=_JWT_NOW,
+        )
+
+
+def test_capability_claim_builder_returns_detached_json_payload() -> None:
+    capabilities = importlib.import_module("litestar_security.providers.jwt._capabilities")
+    application_claims = {"resource": {"parts": ["one"]}}
+
+    payload = capabilities.build_capability_claims(
+        issuer=_JWT_ISSUER,
+        purpose="download",
+        subject="user-1",
+        audience="files",
+        lifetime=timedelta(minutes=5),
+        claims=application_claims,
+        now=_JWT_NOW,
+    )
+    application_claims["resource"]["parts"].append("two")
+
+    assert isinstance(payload, dict)
+    assert payload["resource"] == {"parts": ["one"]}
+    assert json.loads(json.dumps(payload))["resource"] == {"parts": ["one"]}
+
+
+def test_capability_claim_builder_rejects_non_json_application_values() -> None:
+    capabilities = importlib.import_module("litestar_security.providers.jwt._capabilities")
+
+    with pytest.raises(ValueError, match="JSON"):
+        capabilities.build_capability_claims(
+            issuer=_JWT_ISSUER,
+            purpose="download",
+            subject="user-1",
+            audience="files",
+            lifetime=timedelta(minutes=5),
+            claims={"created_at": _JWT_NOW},
+            now=_JWT_NOW,
+        )
 
 
 @pytest.mark.parametrize(
