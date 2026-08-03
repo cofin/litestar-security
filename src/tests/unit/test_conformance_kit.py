@@ -2,11 +2,13 @@
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 import pytest
 from anyio import Event, Lock, fail_after
+from anyio.lowlevel import checkpoint
+from litestar.stores.memory import MemoryStore
 
 import litestar_security.testing as testing_module
 from litestar_security.accounts import (
@@ -27,6 +29,10 @@ from litestar_security.accounts import (
     PasswordResetStatus,
     PrepareRefreshResult,
     PurposeTokenDelivery,
+    RateLimitDecision,
+    RateLimiter,
+    RateLimitPolicy,
+    RateLimitRequest,
     RefreshFamilyContext,
     RefreshReceiptReplay,
     RefreshRotationStatus,
@@ -43,6 +49,7 @@ from litestar_security.accounts import (
     SecurityEvent,
     SessionRecord,
     SessionRegistry,
+    StoreRateLimiter,
     TokenIssue,
     WebAuthnChallenge,
 )
@@ -66,6 +73,7 @@ from litestar_security.testing import (
     assert_oauth_account_store_conformance,
     assert_oauth_transaction_store_conformance,
     assert_passkey_store_conformance,
+    assert_rate_limiter_conformance,
     assert_refresh_family_store_conformance,
     assert_security_backend_conformance,
     assert_session_registry_conformance,
@@ -186,6 +194,40 @@ class _BrokenWebSocketConnectTokenStore(InMemoryWebSocketConnectTokenStore):
             return record
         self._records.pop(connect_token_id, None)  # pyright: ignore[reportPrivateUsage] - deliberately violates port contract
         return None
+
+
+@dataclass
+class _NonAtomicLimiter:
+    """Deliberately yield between reading and incrementing one shared bucket."""
+
+    limit: int
+    count: int = 0
+
+    async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
+        """Race concurrent callers while producing an otherwise valid decision."""
+        del request
+        current = self.count
+        await checkpoint()
+        allowed = current < self.limit
+        if allowed:
+            self.count = current + 1
+        return RateLimitDecision(allowed=allowed)
+
+
+@dataclass
+class _UnderAdmittingLimiter:
+    """Deliberately deny one permitted attempt."""
+
+    limit: int
+    count: int = 0
+
+    async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
+        """Return a valid decision while failing to spend the whole budget."""
+        del request
+        if self.count < self.limit - 1:
+            self.count += 1
+            return RateLimitDecision(allowed=True)
+        return RateLimitDecision(allowed=False)
 
 
 class _BrokenPasskeyStore(testing_module.InMemoryPasskeyStore):
@@ -1104,12 +1146,46 @@ def test_testing_surface_is_explicit_and_stable() -> None:
         "assert_oauth_account_store_conformance",
         "assert_oauth_transaction_store_conformance",
         "assert_passkey_store_conformance",
+        "assert_rate_limiter_conformance",
         "assert_refresh_family_store_conformance",
         "assert_security_backend_conformance",
         "assert_session_registry_conformance",
         "assert_webauthn_challenge_store_conformance",
         "assert_websocket_connect_token_store_conformance",
     )
+
+
+@pytest.mark.anyio
+async def test_rate_limiter_conformance_accepts_the_reference_limiter() -> None:
+    await assert_rate_limiter_conformance(
+        lambda limit: StoreRateLimiter(
+            policies={"conformance.rate_limit": RateLimitPolicy(limit=limit, window=timedelta(minutes=5))},
+            store=MemoryStore(),
+        )
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("limiter", [_NonAtomicLimiter, _UnderAdmittingLimiter])
+async def test_rate_limiter_conformance_names_exact_admission_invariant(
+    limiter: Callable[[int], RateLimiter],
+) -> None:
+    with pytest.raises(AssertionError, match=r"RateLimiter\.acquire atomicity invariant: .*admit exactly k"):
+        await assert_rate_limiter_conformance(limiter)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("limit", "concurrency"), [(0, 20), (5, 0), (5, 4), (True, 20), (5, True)])
+async def test_rate_limiter_conformance_rejects_invalid_scenario_bounds(limit: object, concurrency: object) -> None:
+    with pytest.raises(ValueError, match="conformance"):
+        await assert_rate_limiter_conformance(
+            lambda valid_limit: StoreRateLimiter(
+                policies={"conformance.rate_limit": RateLimitPolicy(limit=valid_limit, window=timedelta(minutes=5))},
+                store=MemoryStore(),
+            ),
+            limit=limit,  # type: ignore[arg-type]  # parametrization proves runtime validation rejects non-integers
+            concurrency=concurrency,  # type: ignore[arg-type]  # parametrization proves runtime validation rejects non-integers
+        )
 
 
 @pytest.mark.anyio

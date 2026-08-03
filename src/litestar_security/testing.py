@@ -41,6 +41,8 @@ from litestar_security.accounts import (
     ProtectedSecret,
     PurposeTokenCodec,
     PurposeTokenDelivery,
+    RateLimiter,
+    RateLimitRequest,
     RecoveryCodeDigest,
     RefreshFamilyContext,
     RefreshReceiptReplay,
@@ -118,6 +120,7 @@ __all__ = (
     "assert_oauth_account_store_conformance",
     "assert_oauth_transaction_store_conformance",
     "assert_passkey_store_conformance",
+    "assert_rate_limiter_conformance",
     "assert_refresh_family_store_conformance",
     "assert_security_backend_conformance",
     "assert_session_registry_conformance",
@@ -2551,6 +2554,51 @@ async def assert_oauth_account_store_conformance(factory: Callable[[], OAuthAcco
         raise AssertionError(
             "OAuthAccountStore.unlink_identity atomicity invariant: contenders must return UNLINKED and NOT_FOUND"
         )
+
+
+async def assert_rate_limiter_conformance(
+    factory: Callable[[int], RateLimiter], *, limit: int = 5, concurrency: int = 20
+) -> None:
+    """Assert exact atomic admission for concurrent acquires against one bucket.
+
+    Args:
+        factory: Factory receiving the budget that the returned limiter must enforce.
+        limit: Positive number of attempts that the limiter must admit.
+        concurrency: Number of concurrent attempts; it must be at least ``limit``.
+
+    Returns:
+        None when the limiter admits exactly ``limit`` concurrent attempts.
+
+    Raises:
+        ValueError: If ``limit`` or ``concurrency`` is not a valid conformance scenario.
+        AssertionError: If concurrent acquires over-admit or under-admit the configured budget.
+    """
+    limit_value: object = limit
+    concurrency_value: object = concurrency
+    if limit_value.__class__ is not int or limit < 1:
+        message = "Rate limiter conformance limit must be a positive integer"
+        raise ValueError(message)
+    if concurrency_value.__class__ is not int or concurrency < limit:
+        message = "Rate limiter conformance concurrency must be an integer at least as large as limit"
+        raise ValueError(message)
+    limiter = factory(limit)
+    request = RateLimitRequest(operation="conformance.rate_limit", client_key="conformance-bucket")
+    outcomes: list[bool] = []
+
+    async def attempt() -> None:
+        outcomes.append((await limiter.acquire(request)).allowed)
+
+    async with create_task_group() as task_group:
+        for _ in range(concurrency):
+            task_group.start_soon(attempt)
+
+    admitted = outcomes.count(True)
+    if admitted != limit:
+        message = (
+            "RateLimiter.acquire atomicity invariant: N concurrent acquires against limit k must admit exactly k "
+            f"(limit={limit}, concurrency={concurrency}, observed={admitted})"
+        )
+        raise AssertionError(message)
 
 
 async def assert_security_backend_conformance(  # noqa: C901 - explicit public capability dispatch preserves field order
