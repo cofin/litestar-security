@@ -1048,6 +1048,7 @@ def test_generated_local_route_errors_raise_interceptable_classified_exceptions(
 
     config = SimpleNamespace(
         local_auth_service=Service(),
+        mfa_login=None,
         mode=accounts_module.LocalAuthMode.SESSION,
         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
         route_prefix="/identity",
@@ -1094,6 +1095,7 @@ def test_generated_credential_bearing_route_errors_raise_unauthorized() -> None:
 
     config = SimpleNamespace(
         local_auth_service=Service(),
+        mfa_login=None,
         mode=accounts_module.LocalAuthMode.SESSION,
         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
         route_prefix="/identity",
@@ -1227,6 +1229,8 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
         )
 
     assert required.status_code == 403
+    assert required.headers["cache-control"] == "no-store"
+    assert required.headers["pragma"] == "no-cache"
     assert required.json() == {
         "challenge": "challenge-secret",
         "account_id": "account-1",
@@ -1253,6 +1257,150 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
             "transport": "tokens",
         },
     ]
+
+
+@pytest.mark.parametrize("mode", ["session", "tokens", "hybrid"])
+def test_generated_mfa_completion_routes_follow_local_auth_transport_and_csrf_mode(mode: str) -> None:
+    """MFA completion exposes each enabled issuer path and only sessions require native CSRF."""
+
+    class Service:
+        session_auth = object() if mode in {"session", "hybrid"} else None
+        refresh_tokens = object() if mode in {"tokens", "hybrid"} else None
+        registration = None
+
+        def __init__(self) -> None:
+            self.transports: list[str] = []
+
+        async def session_login(self, _request: object, _data: object) -> MFARequired:
+            return MFARequired(
+                challenge="challenge-secret",
+                account_id="account-1",
+                expires_at=datetime(2026, 7, 26, 12, 5, tzinfo=timezone.utc),
+                methods=frozenset({"totp"}),
+            )
+
+        async def token_login(self, request: object, data: object) -> MFARequired:
+            return await self.session_login(request, data)
+
+        async def complete_mfa_login(self, _request: object, _challenge: str, **kwargs: object) -> object:
+            transport = cast("str", kwargs["transport"])
+            self.transports.append(transport)
+            if transport == "session":
+                return LocalAccountResponse(account_id="account-1")
+            return accounts_module.RefreshTokenResponse(
+                access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
+                refresh_token="rt_aWlpaWlpaWlpaWlpaWlpaQ.c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",  # noqa: S106
+                expires_in=60,
+            )
+
+    service = Service()
+    csrf_secret = token_hex()
+    session_enabled = mode in {"session", "hybrid"}
+    mechanism_names = (
+        ("session", "bearer") if mode == "hybrid" else (("session",) if session_enabled else ("bearer",))
+    )
+    app = Litestar(
+        route_handlers=[
+            accounts_module.build_local_auth_routes(
+                cast(
+                    "Any",
+                    SimpleNamespace(
+                        local_auth_service=service,
+                        mfa_login=object(),
+                        mode=accounts_module.LocalAuthMode(mode),
+                        registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
+                        route_prefix="/identity",
+                    ),
+                )
+            )
+        ],
+        csrf_config=CSRFConfig(secret=csrf_secret) if session_enabled else None,
+        openapi_config=None,
+        plugins=[
+            SecurityPlugin(
+                _compiler_config(
+                    names=mechanism_names,
+                    session_names=frozenset({"session"}) if session_enabled else frozenset(),
+                )
+            )
+        ],
+    )
+    expected = {
+        "/identity/login/mfa" if session_enabled else "/identity/token/mfa",
+    }
+    if mode == "hybrid":
+        expected.add("/identity/token/mfa")
+    completion_paths = {
+        route_value.path
+        for route_value in app.routes
+        if isinstance(route_value, HTTPRoute) and route_value.path.endswith("/mfa")
+    }
+    assert completion_paths == expected
+
+    with TestClient(app) as client:
+        if session_enabled:
+            blocked = client.post(
+                "/identity/login/mfa",
+                json={"challenge": "challenge-secret", "account_id": "account-1", "method": "totp", "code": "123456"},
+            )
+            assert blocked.status_code == 403
+            csrf_token = generate_csrf_token(csrf_secret)
+            client.cookies.set("csrftoken", csrf_token)
+            session_response = client.post(
+                "/identity/login/mfa",
+                json={"challenge": "challenge-secret", "account_id": "account-1", "method": "totp", "code": "123456"},
+                headers={"x-csrftoken": csrf_token},
+            )
+            assert session_response.status_code == 200
+        if mode in {"tokens", "hybrid"}:
+            token_response = client.post(
+                "/identity/token/mfa",
+                json={"challenge": "challenge-secret", "account_id": "account-1", "method": "totp", "code": "123456"},
+            )
+            assert token_response.status_code == 200
+
+    expected_transports = ([] if not session_enabled else ["session"]) + ([] if mode == "session" else ["tokens"])
+    assert service.transports == expected_transports
+
+
+def test_generated_token_mfa_completion_surfaces_controlled_login_mfa_rate_limit() -> None:
+    """The public token completion route preserves the shared LOGIN_MFA retry signal."""
+
+    class Service:
+        session_auth = None
+        refresh_tokens = object()
+        registration = None
+
+        async def complete_mfa_login(self, *_args: object, **_kwargs: object) -> accounts_module.RateLimited:
+            return accounts_module.RateLimited(retry_after=7)
+
+    app = Litestar(
+        route_handlers=[
+            accounts_module.build_local_auth_routes(
+                cast(
+                    "Any",
+                    SimpleNamespace(
+                        local_auth_service=Service(),
+                        mfa_login=object(),
+                        mode=accounts_module.LocalAuthMode.TOKENS,
+                        registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
+                        route_prefix="/identity",
+                    ),
+                )
+            )
+        ],
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config(names=("bearer",), session_names=frozenset()))],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/identity/token/mfa",
+            json={"challenge": "challenge-secret", "account_id": "account-1", "method": "totp", "code": "123456"},
+        )
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "7"
 
 
 def _feature_test_ports() -> tuple[object, object, object, object]:
@@ -2365,14 +2513,14 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
         token_operation = app.openapi_schema.paths["/identity/token"].post
         revoke_operation = app.openapi_schema.paths["/identity/token/revoke"].post
         assert token_operation.security == [{}]
-        assert set(token_operation.responses) == {"200", "400", "429", "503"}
+        assert set(token_operation.responses) == {"200", "400", "403", "429", "503"}
         assert revoke_operation.security == [{"bearer": []}]
         assert set(revoke_operation.responses) == {"200", "400", "401", "503"}
     if mode in {"session", "hybrid"}:
         login_operation = app.openapi_schema.paths["/identity/login"].post
         logout_operation = app.openapi_schema.paths["/identity/logout"].post
         assert login_operation.security == [{}]
-        assert set(login_operation.responses) == {"200", "400", "429", "503"}
+        assert set(login_operation.responses) == {"200", "400", "403", "429", "503"}
         assert logout_operation.security == [{"LocalSession": []}]
         assert set(logout_operation.responses) == {"200", "401", "503"}
 

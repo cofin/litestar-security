@@ -32,7 +32,7 @@ from litestar.status_codes import HTTP_400_BAD_REQUEST, HTTP_401_UNAUTHORIZED, H
 from litestar.stores.memory import MemoryStore
 from litestar.testing import AsyncTestClient, TestClient
 
-from litestar_security import SecurityConfig, SecurityPlugin, authentication
+from litestar_security import MFAConfig, SecurityConfig, SecurityPlugin, authentication
 from litestar_security.accounts import (
     ConsumeResult,
     ConsumeStatus,
@@ -41,6 +41,7 @@ from litestar_security.accounts import (
     LocalAccount,
     LocalAuth,
     LocalAuthSecrets,
+    LoginMethod,
     NotificationCommand,
     PasswordChangeResult,
     PasswordChangeStatus,
@@ -49,7 +50,10 @@ from litestar_security.accounts import (
     PasswordResetStatus,
     PasswordVerificationResult,
     PasswordVerificationStatus,
+    ProtectedSecret,
     PurposeTokenCodec,
+    RecoveryCodePepper,
+    RecoveryCodes,
     RefreshFamilyContext,
     RefreshReceiptKey,
     RefreshReceiptSealer,
@@ -59,8 +63,11 @@ from litestar_security.accounts import (
     RegistrationPolicy,
     RegistrationResult,
     RegistrationStatus,
+    RevokeLoginMethodResult,
+    RevokeLoginMethodStatus,
     RotateRefreshCommand,
     RotateRefreshResult,
+    SecurityEvent,
     SessionBindingConfig,
     SessionRecord,
     TokenIssue,
@@ -104,6 +111,7 @@ from litestar_security.providers.jwt import (
     PyJWTVerifier,
     SigningKey,
 )
+from litestar_security.testing import InMemoryMFALoginChallengeStore, InMemoryMFAStore
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,
     WebSocketConnectTokenRecord,
@@ -828,6 +836,36 @@ class _RoutePasswordHasher:
 
 
 @dataclass(slots=True)
+class _RouteMFASecretProtector:
+    """Minimal reversible protector for generated-route MFA integration journeys."""
+
+    active_key_version: str = "test-mfa"
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedSecret:
+        return ProtectedSecret(ciphertext=associated_data + secret, key_version=self.active_key_version)
+
+    async def unprotect(self, protected: ProtectedSecret, *, associated_data: bytes) -> bytes:
+        assert protected.ciphertext.startswith(associated_data)
+        return protected.ciphertext.removeprefix(associated_data)
+
+
+class _RouteMFAStore(InMemoryMFAStore):
+    """Add the login-method port to the reusable in-memory MFA store for route setup."""
+
+    __slots__ = ()
+
+    async def register_login_method(self, _account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
+        self.login_methods[method.method_id] = method
+        self.events.append(event)
+
+    async def revoke_login_method(
+        self, _account_id: str, _method_id: str, *, require_remaining: bool = True, event: SecurityEvent
+    ) -> RevokeLoginMethodResult:
+        del require_remaining, event
+        return RevokeLoginMethodResult(RevokeLoginMethodStatus.NOT_FOUND)
+
+
+@dataclass(slots=True)
 class _RouteRefreshState:
     token_id: str
     token_digest: bytes
@@ -1075,6 +1113,36 @@ class _GeneratedRouteAccounts:
         for state in matches:
             state.revoked = True
         return len(matches)
+
+
+def _mfa_at_login_config(*, required: bool = True) -> MFAConfig:
+    """Build the minimal MFA capability graph needed by local-login route tests."""
+    store = _RouteMFAStore()
+    return MFAConfig(
+        store=store,
+        secret_protector=_RouteMFASecretProtector(),
+        recovery_peppers=(RecoveryCodePepper("test-mfa", b"m" * 32),),
+        login_methods=store,
+        login_challenge_store=InMemoryMFALoginChallengeStore(),
+        require_at_login=required,
+        register_routes=False,
+    )
+
+
+def _verified_route_accounts(password: str) -> _GeneratedRouteAccounts:
+    """Return a direct, verified account suitable for password-login journeys."""
+    return _GeneratedRouteAccounts(
+        account=LocalAccount(
+            account_id="account-1",
+            normalized_identifier="user@example.com",
+            display_name="User",
+            active=True,
+            verified=True,
+            security_epoch=1,
+            user=object(),
+        ),
+        password_hash=f"test-hash:{password}",
+    )
 
 
 @pytest.mark.anyio
@@ -1415,6 +1483,192 @@ def test_generated_token_routes_register_verify_login_refresh_and_revoke(
     assert revoke.status_code == 200
     assert revoke.json() == {"detail": "Token revoked."}
     assert any(state.revoked for state in accounts.refresh_tokens.values())
+
+
+@pytest.mark.anyio
+async def test_generated_session_login_requires_and_completes_mfa() -> None:
+    password = "initial password 123"  # noqa: S105 - test-only credential
+    accounts = _verified_route_accounts(password)
+    mfa = _mfa_at_login_config()
+    recovery_codes = await cast("Any", mfa.mfa_service).generate_recovery_codes("account-1")
+    assert isinstance(recovery_codes, RecoveryCodes)
+    csrf = CSRFConfig(secret="s" * 32)
+    local_auth: Any = LocalAuth.session(
+        accounts=cast("Any", accounts),
+        secrets=_local_auth_secrets(),
+        binding=SessionBindingConfig(
+            pepper=b"b" * 32, cookie_name="binding", secure=False, allow_insecure=True, max_age=600
+        ),
+        password_hasher=_RoutePasswordHasher(),
+    )
+    session_config = CookieBackendConfig(
+        secret=bytes(range(16)),
+        key="native-session",
+        max_age=600,
+        scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+        secure=False,
+    )
+
+    @get("/csrf", auth=public(), csrf_required=True)
+    async def csrf_seed() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[csrf_seed],
+        csrf_config=csrf,
+        middleware=[session_config.middleware],
+        openapi_config=None,
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa))],
+    )
+    async with AsyncTestClient(app=app) as client:
+        assert (await client.get("/csrf")).status_code == 200
+        csrf_headers = {csrf.header_name: cast("str", client.cookies.get(csrf.cookie_name))}
+        pending = await client.post(
+            "/auth/login", json={"identifier": "user@example.com", "password": password}, headers=csrf_headers
+        )
+        challenge = pending.json()
+        before_completion = await client.get("/auth/sessions")
+        completed = await client.post(
+            "/auth/login/mfa",
+            json={
+                "account_id": challenge["account_id"],
+                "challenge": challenge["challenge"],
+                "method": "recovery-code",
+                "code": recovery_codes.codes[0],
+            },
+            headers=csrf_headers,
+        )
+        sessions = await client.get("/auth/sessions")
+
+    assert pending.status_code == 403
+    assert challenge["code"] == "mfa_required"
+    assert challenge["methods"] == ["recovery-code", "totp"]
+    assert before_completion.status_code == HTTP_401_UNAUTHORIZED
+    assert completed.status_code == 200
+    assert completed.json() == {"account_id": "account-1", "display_name": "User"}
+    assert sessions.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_generated_token_login_requires_and_completes_mfa(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    password = "initial password 123"  # noqa: S105 - test-only credential
+    accounts = _verified_route_accounts(password)
+    mfa = _mfa_at_login_config()
+    recovery_codes = await cast("Any", mfa.mfa_service).generate_recovery_codes("account-1")
+    assert isinstance(recovery_codes, RecoveryCodes)
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth: Any = LocalAuth.tokens(
+        accounts=cast("Any", accounts),
+        secrets=_local_auth_secrets(refresh=True),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-api",  # noqa: S106 - public JWT audience
+        password_hasher=_RoutePasswordHasher(),
+    )
+    app = Litestar(
+        route_handlers=[], openapi_config=None, plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa))]
+    )
+    async with AsyncTestClient(app=app) as client:
+        pending = await client.post("/auth/token", json={"identifier": "user@example.com", "password": password})
+        challenge = pending.json()
+        issued_before_completion = dict(accounts.refresh_tokens)
+        completed = await client.post(
+            "/auth/token/mfa",
+            json={
+                "account_id": challenge["account_id"],
+                "challenge": challenge["challenge"],
+                "method": "recovery-code",
+                "code": recovery_codes.codes[0],
+            },
+        )
+
+    assert pending.status_code == 403
+    assert challenge["code"] == "mfa_required"
+    assert issued_before_completion == {}
+    assert completed.status_code == 200
+    assert {"access_token", "refresh_token"} <= completed.json().keys()
+
+
+@pytest.mark.anyio
+async def test_require_at_login_false_preserves_unchallenged_token_login(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    password = "initial password 123"  # noqa: S105 - test-only credential
+    accounts = _verified_route_accounts(password)
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth: Any = LocalAuth.tokens(
+        accounts=cast("Any", accounts),
+        secrets=_local_auth_secrets(refresh=True),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-api",  # noqa: S106 - public JWT audience
+        password_hasher=_RoutePasswordHasher(),
+    )
+    app = Litestar(
+        route_handlers=[],
+        openapi_config=None,
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=_mfa_at_login_config(required=False)))],
+    )
+    async with AsyncTestClient(app=app) as client:
+        login = await client.post("/auth/token", json={"identifier": "user@example.com", "password": password})
+        completion = await client.post("/auth/token/mfa", json={})
+
+    assert login.status_code == 200
+    assert {"access_token", "refresh_token"} <= login.json().keys()
+    assert completion.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_require_at_login_false_preserves_unchallenged_session_login() -> None:
+    password = "initial password 123"  # noqa: S105 - test-only credential
+    accounts = _verified_route_accounts(password)
+    csrf = CSRFConfig(secret="s" * 32)
+    local_auth: Any = LocalAuth.session(
+        accounts=cast("Any", accounts),
+        secrets=_local_auth_secrets(),
+        binding=SessionBindingConfig(
+            pepper=b"b" * 32, cookie_name="binding", secure=False, allow_insecure=True, max_age=600
+        ),
+        password_hasher=_RoutePasswordHasher(),
+    )
+    session_config = CookieBackendConfig(
+        secret=bytes(range(16)),
+        key="native-session",
+        max_age=600,
+        scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+        secure=False,
+    )
+
+    @get("/csrf", auth=public(), csrf_required=True)
+    async def csrf_seed() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[csrf_seed],
+        csrf_config=csrf,
+        middleware=[session_config.middleware],
+        openapi_config=None,
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=_mfa_at_login_config(required=False)))],
+    )
+    async with AsyncTestClient(app=app) as client:
+        assert (await client.get("/csrf")).status_code == 200
+        csrf_headers = {csrf.header_name: cast("str", client.cookies.get(csrf.cookie_name))}
+        login = await client.post(
+            "/auth/login", json={"identifier": "user@example.com", "password": password}, headers=csrf_headers
+        )
+        sessions = await client.get("/auth/sessions")
+        completion = await client.post("/auth/login/mfa", json={}, headers=csrf_headers)
+
+    assert login.status_code == 200
+    assert login.json() == {"account_id": "account-1", "display_name": "User"}
+    assert sessions.status_code == 200
+    assert completion.status_code == 404
 
 
 def test_generated_token_routes_reject_unknown_and_camel_case_body_members(

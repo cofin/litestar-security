@@ -154,6 +154,35 @@ def test_mfa_login_outcome_is_secret_safe_and_rate_limited() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("lifetime", "valid"),
+    [
+        (timedelta(microseconds=1), True),
+        (timedelta(minutes=10), True),
+        (timedelta(), False),
+        (timedelta(minutes=10, microseconds=1), False),
+    ],
+)
+def test_mfa_login_challenge_enforces_exact_positive_ten_minute_lifetime(
+    lifetime: timedelta, *, valid: bool
+) -> None:
+    """The persisted challenge contract accepts only positive lifetimes up to ten minutes."""
+    values = {
+        "challenge_digest": b"d" * 32,
+        "account_id": "account-1",
+        "security_epoch": 0,
+        "client_key": "client",
+        "issued_at": _JWT_NOW,
+        "expires_at": _JWT_NOW + lifetime,
+    }
+
+    if valid:
+        assert accounts_module.MFALoginChallenge(**values).expires_at == _JWT_NOW + lifetime
+    else:
+        with pytest.raises(ValueError, match="lifetime bindings"):
+            accounts_module.MFALoginChallenge(**values)
+
+
 @pytest.mark.anyio
 async def test_mfa_login_issue_derives_a_domain_separated_digest_and_consumes_once() -> None:
     """Login-MFA challenges are HMAC-bound opaque, reveal-once credentials."""
@@ -193,6 +222,25 @@ async def test_mfa_login_issue_derives_a_domain_separated_digest_and_consumes_on
         await service.consume(issued.challenge, account_id="account-1", security_epoch=0, client_key="127.0.0.1")
         == InvalidCredentials()
     )
+
+
+@pytest.mark.anyio
+async def test_mfa_login_store_burns_expired_and_missing_challenges() -> None:
+    """The atomic store returns no record for expired or absent digest proofs and retains neither."""
+    store = testing_module.InMemoryMFALoginChallengeStore()
+    expired = accounts_module.MFALoginChallenge(
+        challenge_digest=b"e" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key=None,
+        issued_at=_JWT_NOW - timedelta(minutes=1),
+        expires_at=_JWT_NOW,
+    )
+    await store.put(expired)
+
+    assert await store.consume(b"e" * 32, account_id="account-1", security_epoch=0, now=_JWT_NOW) is None
+    assert await store.consume(b"m" * 32, account_id="account-1", security_epoch=0, now=_JWT_NOW) is None
+    assert store.challenges == {}
 
 
 @pytest.mark.anyio
@@ -527,6 +575,89 @@ async def test_local_auth_mfa_completion_rejects_an_epoch_advance_before_issuanc
         InvalidCredentials,
     )
     assert not sessions.issued
+
+
+@pytest.mark.anyio
+async def test_local_auth_mfa_completion_burns_a_wrong_factor_before_a_retry() -> None:
+    """A failed factor consumes the opaque login challenge, so a later correct code cannot replay it."""
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=0,
+    )
+
+    class Accounts:
+        async def get_by_id(self, _account_id: str) -> accounts_module.LocalAccount[object]:
+            return account
+
+    class Guard:
+        async def check(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class MFA(accounts_module.MFAService):
+        def __init__(self) -> None:
+            super().__init__(store=_MFAStore(), secret_protector=_MFAProtector())
+            self.codes: list[str] = []
+
+        async def verify_totp(
+            self, _account_id: str, _method_id: str, code: str
+        ) -> AuthenticationEvidence | InvalidCredentials:
+            self.codes.append(code)
+            if code != "correct":
+                return InvalidCredentials()
+            return AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=_JWT_NOW)
+
+    class Sessions:
+        async def establish(self, *_args: object, **_kwargs: object) -> accounts_module.SessionAuthentication:
+            return accounts_module.SessionAuthentication(
+                session_id="c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",
+                binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+                account_id=account.account_id,
+                security_epoch=account.security_epoch,
+                authenticated_at=_JWT_NOW,
+                expires_at=_JWT_NOW + timedelta(hours=1),
+            )
+
+    factors = MFA()
+    mfa_login = mfa_login_module.MFALoginService(
+        store=testing_module.InMemoryMFALoginChallengeStore(),
+        mfa=factors,
+        pepper=b"p" * 32,
+        clock=lambda: _JWT_NOW,
+        entropy=lambda _size: b"x" * 32,
+    )
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", Accounts()),
+        password_login=cast("Any", object()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        session_auth=cast("Any", Sessions()),
+        rate_limits=cast("Any", Guard()),
+        mfa_login=mfa_login,
+        client_key=lambda _request: "client",
+    )
+    issued = await mfa_login.issue(account, client_key="client")
+    assert isinstance(issued, MFARequired)
+
+    for code in ("wrong", "correct"):
+        assert isinstance(
+            await service.complete_mfa_login(
+                cast("Any", object()),
+                issued.challenge,
+                account_id=account.account_id,
+                method="totp",
+                method_id="method-1",
+                code=code,
+                transport="session",
+            ),
+            InvalidCredentials,
+        )
+    assert factors.codes == ["wrong"]
 
 
 async def _assert_http_exception(
