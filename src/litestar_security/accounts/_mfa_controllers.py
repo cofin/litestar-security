@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from secrets import token_urlsafe
 from typing import Any, TypeVar
 
-from litestar import Controller, Request, Response, Router, delete, get, post
+from litestar import Controller, Request, Response, Router, get, post
 from litestar.connection import ASGIConnection
 from litestar.datastructures import CacheControlHeader
 from litestar.di import NamedDependency, Provide
@@ -24,7 +24,6 @@ from litestar.status_codes import (
 
 from litestar_security.accounts._mfa import MFAService, RecoveryCodes, StepUpGrant, StepUpService
 from litestar_security.accounts._mfa_schemas import (
-    MFAStatusResponse,
     PasskeyAuthenticationOptionsRequest,
     PasskeyOptionsResponse,
     PasskeyRegistrationOptionsRequest,
@@ -57,6 +56,7 @@ from litestar_security.accounts._records import (
     RevokeLoginMethodResult,
     RevokeLoginMethodStatus,
 )
+from litestar_security.accounts._schemas import RouteStatusResponse
 from litestar_security.accounts._stores import SecurityEpochStore
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, optional, public, required
 from litestar_security.context import AuthenticationEvidence, Principal
@@ -155,15 +155,15 @@ def _response(content: ContentT, status_code: int = HTTP_200_OK) -> Response[Con
 
 def _error(outcome: object) -> Response[Any]:
     if isinstance(outcome, RateLimited):
-        response = _response(MFAStatusResponse(detail="Too many requests."), HTTP_429_TOO_MANY_REQUESTS)
+        response = _response(RouteStatusResponse(detail="Too many requests."), HTTP_429_TOO_MANY_REQUESTS)
         if outcome.retry_after is not None:
             response.headers["Retry-After"] = str(outcome.retry_after)
         return response
     if isinstance(outcome, VerificationUnavailable):
         return _response(
-            MFAStatusResponse(detail="Authentication service is unavailable."), HTTP_503_SERVICE_UNAVAILABLE
+            RouteStatusResponse(detail="Authentication service is unavailable."), HTTP_503_SERVICE_UNAVAILABLE
         )
-    return _response(MFAStatusResponse(detail="Authentication required."), HTTP_401_UNAUTHORIZED)
+    return _response(RouteStatusResponse(detail="Authentication required."), HTTP_401_UNAUTHORIZED)
 
 
 def _principal_id(principal: Principal[Any]) -> str | None:
@@ -214,16 +214,16 @@ async def _consume_step_up(
 
 
 _MFA_BAD_REQUEST_RESPONSES = {
-    HTTP_400_BAD_REQUEST: ResponseSpec(MFAStatusResponse, description="The request is invalid."),
-    HTTP_401_UNAUTHORIZED: ResponseSpec(MFAStatusResponse, description="Authentication or step-up is required."),
-    HTTP_429_TOO_MANY_REQUESTS: ResponseSpec(MFAStatusResponse, description="The operation exceeded its rate limit."),
-    HTTP_503_SERVICE_UNAVAILABLE: ResponseSpec(MFAStatusResponse, description="The factor service is unavailable."),
+    HTTP_400_BAD_REQUEST: ResponseSpec(RouteStatusResponse, description="The request is invalid."),
+    HTTP_401_UNAUTHORIZED: ResponseSpec(RouteStatusResponse, description="Authentication or step-up is required."),
+    HTTP_429_TOO_MANY_REQUESTS: ResponseSpec(RouteStatusResponse, description="The operation exceeded its rate limit."),
+    HTTP_503_SERVICE_UNAVAILABLE: ResponseSpec(RouteStatusResponse, description="The factor service is unavailable."),
 }
 
 
 _MFA_CONFLICT_RESPONSES = {
     **_MFA_BAD_REQUEST_RESPONSES,
-    HTTP_409_CONFLICT: ResponseSpec(MFAStatusResponse, description="The change would remove the final login method."),
+    HTTP_409_CONFLICT: ResponseSpec(RouteStatusResponse, description="The change would remove the final login method."),
 }
 
 
@@ -252,7 +252,7 @@ class _StepUpController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[StepUpResponse | MFAStatusResponse]:
+    ) -> Response[StepUpResponse | RouteStatusResponse]:
         """Verify one factor and issue a purpose-bound grant."""
         account_id = _principal_id(principal)
         if account_id is None:  # pragma: no cover - required authentication rejects anonymous requests first
@@ -336,7 +336,7 @@ class _MFAController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[TOTPEnrollmentResponse | MFAStatusResponse]:
+    ) -> Response[TOTPEnrollmentResponse | RouteStatusResponse]:
         """Begin TOTP enrollment after consuming exact step-up."""
         account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
@@ -389,7 +389,7 @@ class _MFAController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[RecoveryCodesResponse | MFAStatusResponse]:
+    ) -> Response[RecoveryCodesResponse | RouteStatusResponse]:
         """Activate TOTP and return a recovery-code set once."""
         account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
@@ -405,8 +405,8 @@ class _MFAController(Controller):
             return _error(recovery)
         return _response(RecoveryCodesResponse(codes=recovery.codes))
 
-    @delete(
-        "/mfa/totp/{method_id:str}",
+    @post(
+        "/mfa/totp/{method_id:str}/remove",
         name="mfa.totp.remove",
         operation_id="MFARemoveTOTP",
         summary="Remove a TOTP factor",
@@ -426,7 +426,7 @@ class _MFAController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[MFAStatusResponse]:
+    ) -> Response[RouteStatusResponse]:
         """Remove TOTP through exact step-up and final-method protection."""
         account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
@@ -466,7 +466,7 @@ class _MFAController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[RecoveryCodesResponse | MFAStatusResponse]:
+    ) -> Response[RecoveryCodesResponse | RouteStatusResponse]:
         """Replace recovery codes after exact step-up."""
         account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
@@ -515,7 +515,7 @@ class _PasskeyController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[PasskeyOptionsResponse | MFAStatusResponse]:
+    ) -> Response[PasskeyOptionsResponse | RouteStatusResponse]:
         """Create registration options after exact step-up."""
         account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys
@@ -557,7 +557,7 @@ class _PasskeyController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[MFAStatusResponse]:
+    ) -> Response[RouteStatusResponse]:
         """Verify and store one passkey registration."""
         account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys
@@ -571,7 +571,7 @@ class _PasskeyController(Controller):
         )
         if not hasattr(result, "credential_id"):
             return _error(result)
-        return _response(MFAStatusResponse(detail="Passkey registered."), HTTP_201_CREATED)
+        return _response(RouteStatusResponse(detail="Passkey registered."), HTTP_201_CREATED)
 
     @post(
         "/passkeys/authentication/options",
@@ -592,7 +592,7 @@ class _PasskeyController(Controller):
         data: JSONBody[PasskeyAuthenticationOptionsRequest],
         request: Request[Any, Any, Any],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[PasskeyOptionsResponse | MFAStatusResponse]:
+    ) -> Response[PasskeyOptionsResponse | RouteStatusResponse]:
         """Create public account-bound assertion options."""
         passkey_service = mfa_service.passkeys
         if passkey_service is None:  # pragma: no cover - this controller is registered only with a passkey service
@@ -619,7 +619,7 @@ class _PasskeyController(Controller):
         self,
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[tuple[PasskeySummaryResponse, ...] | MFAStatusResponse]:
+    ) -> Response[tuple[PasskeySummaryResponse, ...] | RouteStatusResponse]:
         """List only caller-owned safe credential metadata."""
         account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys
@@ -632,8 +632,8 @@ class _PasskeyController(Controller):
             return _error(result)
         return _response(tuple(_summary_response(summary) for summary in result))
 
-    @delete(
-        "/passkeys/{credential_id:str}",
+    @post(
+        "/passkeys/{credential_id:str}/remove",
         name="passkey.remove",
         operation_id="PasskeyRemove",
         summary="Remove a passkey",
@@ -653,7 +653,7 @@ class _PasskeyController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[MFAStatusResponse]:
+    ) -> Response[RouteStatusResponse]:
         """Remove a passkey through exact step-up and final-method protection."""
         account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys
@@ -673,7 +673,7 @@ class _PasskeyController(Controller):
         try:
             raw_id = urlsafe_b64decode(credential_id + "=" * (-len(credential_id) % 4))
         except (ValueError, TypeError):
-            return _response(MFAStatusResponse(detail="The request is invalid."), HTTP_400_BAD_REQUEST)
+            return _response(RouteStatusResponse(detail="The request is invalid."), HTTP_400_BAD_REQUEST)
         result = await passkey_service.remove_credential(account_id, raw_id)
         return _removal_response(result)
 
@@ -846,11 +846,11 @@ def _summary_response(summary: PasskeySummary) -> PasskeySummaryResponse:
     )
 
 
-def _removal_response(result: RevokeLoginMethodResult | VerificationUnavailable) -> Response[MFAStatusResponse]:
+def _removal_response(result: RevokeLoginMethodResult | VerificationUnavailable) -> Response[RouteStatusResponse]:
     if isinstance(result, VerificationUnavailable):
         return _error(result)
     if result.status is RevokeLoginMethodStatus.REVOKED:
-        return _response(MFAStatusResponse(detail="Login method removed."))
+        return _response(RouteStatusResponse(detail="Login method removed."))
     if result.status is RevokeLoginMethodStatus.FINAL_METHOD:
-        return _response(MFAStatusResponse(detail="At least one viable login method is required."), HTTP_409_CONFLICT)
-    return _response(MFAStatusResponse(detail="The request is invalid."), HTTP_400_BAD_REQUEST)
+        return _response(RouteStatusResponse(detail="At least one viable login method is required."), HTTP_409_CONFLICT)
+    return _response(RouteStatusResponse(detail="The request is invalid."), HTTP_400_BAD_REQUEST)

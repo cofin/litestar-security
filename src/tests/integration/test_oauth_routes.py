@@ -970,9 +970,7 @@ async def test_authenticated_routes_delegate_to_shared_service() -> None:
             },
             follow_redirects=False,
         )
-        unlink = await client.request(
-            "DELETE", "/auth/oauth/example/links/provider-account", json={"step_up_grant": "grant"}
-        )
+        unlink = await client.post("/auth/oauth/example/links/provider-account/unlink", json={"step_up_grant": "grant"})
         revoke = await client.post("/auth/oauth/example/revoke", json={"step_up_grant": "grant"})
         logout = await client.post("/auth/oauth/example/logout")
         service.logout_redirect = True

@@ -7,7 +7,7 @@ from typing import Annotated, Any, Protocol, cast, runtime_checkable
 from urllib.parse import urlencode
 
 import msgspec
-from litestar import Controller, Request, Response, Router, delete, get, post
+from litestar import Controller, Request, Response, Router, get, post
 from litestar.datastructures import CacheControlHeader, Cookie
 from litestar.di import NamedDependency, Provide
 from litestar.enums import RequestEncodingType
@@ -813,8 +813,8 @@ class _OAuthController(Controller):
         )
         return _authorization_response(result)
 
-    @delete(
-        "/links/{provider_account_id:str}",
+    @post(
+        "/links/{provider_account_id:str}/unlink",
         name="oauth.unlink",
         operation_id="OAuthUnlink",
         summary="Unlink a provider account",

@@ -26,7 +26,6 @@ from litestar_security.accounts._mfa import (
 )
 from litestar_security.accounts._mfa_controllers import build_mfa_routes
 from litestar_security.accounts._mfa_schemas import (
-    MFAStatusResponse,
     PasskeyAuthenticationOptionsRequest,
     PasskeyOptionsResponse,
     PasskeyRegistrationOptionsRequest,
@@ -156,10 +155,10 @@ from litestar_security.accounts._schemas import (
     LocalPasswordChangeRequest,
     LocalPasswordResetRequest,
     LocalRegistrationRequest,
-    LocalRouteResponse,
     LocalSessionListResponse,
     LocalSessionResponse,
     LocalTokenRequest,
+    RouteStatusResponse,
 )
 from litestar_security.accounts._sessions import (
     CreateSessionCommand,
@@ -225,14 +224,12 @@ __all__ = (
     "LocalPasswordChangeRequest",
     "LocalPasswordResetRequest",
     "LocalRegistrationRequest",
-    "LocalRouteResponse",
     "LocalSessionListResponse",
     "LocalSessionResponse",
     "LocalTokenRequest",
     "LoginMethod",
     "LoginMethodStore",
     "MFAService",
-    "MFAStatusResponse",
     "MFAStore",
     "NativeSessionAuth",
     "NativeSessionStore",
@@ -309,6 +306,7 @@ __all__ = (
     "RevokeLoginMethodStatus",
     "RotateRefreshCommand",
     "RotateRefreshResult",
+    "RouteStatusResponse",
     "SecretProtector",
     "SecurityEpochStore",
     "SecurityEpochValidator",

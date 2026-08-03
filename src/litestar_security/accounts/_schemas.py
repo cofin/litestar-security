@@ -15,10 +15,10 @@ __all__ = (
     "LocalPasswordChangeRequest",
     "LocalPasswordResetRequest",
     "LocalRegistrationRequest",
-    "LocalRouteResponse",
     "LocalSessionListResponse",
     "LocalSessionResponse",
     "LocalTokenRequest",
+    "RouteStatusResponse",
 )
 
 _IDENTIFIER = msgspec.Meta(description="The account identifier, normally an email address.")
@@ -124,8 +124,8 @@ class LocalAccountResponse(WireStruct, frozen=True):
     display_name: Annotated[str | None, _DISPLAY_NAME] = None
 
 
-class LocalRouteResponse(WireStruct, frozen=True):
-    """Stable generated-route status body."""
+class RouteStatusResponse(WireStruct, frozen=True):
+    """Stable generated-route status body, shared by every route in the tree."""
 
     detail: Annotated[str, msgspec.Meta(description="A human-readable outcome that never names an account.")]
 

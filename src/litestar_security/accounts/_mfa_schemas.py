@@ -5,7 +5,6 @@ from datetime import datetime
 from litestar_security.schema import WireStruct
 
 __all__ = (
-    "MFAStatusResponse",
     "PasskeyAuthenticationOptionsRequest",
     "PasskeyOptionsResponse",
     "PasskeyRegistrationOptionsRequest",
@@ -77,12 +76,6 @@ class RecoveryCodesResponse(WireStruct, frozen=True):
     def __repr__(self) -> str:
         """Redact the reveal-once recovery-code set."""
         return f"{type(self).__name__}(codes=<redacted>)"
-
-
-class MFAStatusResponse(WireStruct, frozen=True):
-    """Return one redacted generated-route outcome."""
-
-    detail: str
 
 
 class StepUpRequest(WireStruct, frozen=True):

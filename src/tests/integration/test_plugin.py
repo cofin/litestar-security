@@ -399,13 +399,13 @@ def test_generated_mfa_route_bundle_has_exact_paths_policies_and_secret_free_ope
         "/auth/mfa/recovery-codes",
         "/auth/mfa/totp/enroll",
         "/auth/mfa/totp/verify",
-        "/auth/mfa/totp/{method_id:str}",
+        "/auth/mfa/totp/{method_id:str}/remove",
         "/auth/passkeys",
         "/auth/passkeys/authentication/options",
         "/auth/passkeys/authentication/verify",
         "/auth/passkeys/registration/options",
         "/auth/passkeys/registration/verify",
-        "/auth/passkeys/{credential_id:str}",
+        "/auth/passkeys/{credential_id:str}/remove",
         "/auth/step-up/{purpose:str}",
     }
     assert router.cache_control is not None
@@ -736,8 +736,8 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
             == HTTP_200_OK
         )
         assert (
-            client.request(
-                "DELETE", "/auth/mfa/totp/method-1", headers=authenticated, json={"step_up_grant": "grant"}
+            client.post(
+                "/auth/mfa/totp/method-1/remove", headers=authenticated, json={"step_up_grant": "grant"}
             ).status_code
             == HTTP_200_OK
         )
@@ -786,8 +786,8 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
         assert inventory.status_code == HTTP_200_OK
         assert "public_key" not in inventory.text
         assert (
-            client.request(
-                "DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", headers=authenticated, json={"step_up_grant": "grant"}
+            client.post(
+                "/auth/passkeys/Y3JlZGVudGlhbA/remove", headers=authenticated, json={"step_up_grant": "grant"}
             ).status_code
             == HTTP_200_OK
         )
@@ -878,8 +878,7 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         )
         mfa.failure = "remove"
         assert (
-            client.request("DELETE", "/auth/mfa/totp/m1", headers=headers, json={"step_up_grant": "grant"}).status_code
-            == 503
+            client.post("/auth/mfa/totp/m1/remove", headers=headers, json={"step_up_grant": "grant"}).status_code == 503
         )
         mfa.failure = None
         passkeys.failure = "options"
@@ -927,22 +926,21 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         passkeys.failure = "list"
         assert client.get("/auth/passkeys", headers=headers).status_code == 503
         assert (
-            client.request("DELETE", "/auth/passkeys/a", headers=headers, json={"step_up_grant": "grant"}).status_code
-            == 400
+            client.post("/auth/passkeys/a/remove", headers=headers, json={"step_up_grant": "grant"}).status_code == 400
         )
         passkeys.failure = "remove"
         assert (
-            client.request(
-                "DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", headers=headers, json={"step_up_grant": "grant"}
+            client.post(
+                "/auth/passkeys/Y3JlZGVudGlhbA/remove", headers=headers, json={"step_up_grant": "grant"}
             ).status_code
             == 503
         )
         step_up.failure = "consume"
         for method, path, payload in (
-            ("DELETE", "/auth/mfa/totp/m1", {"step_up_grant": "bad"}),
+            ("POST", "/auth/mfa/totp/m1/remove", {"step_up_grant": "bad"}),
             ("POST", "/auth/mfa/recovery-codes", {"step_up_grant": "bad"}),
             ("POST", "/auth/passkeys/registration/options", {"user_name": "User", "step_up_grant": "bad"}),
-            ("DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", {"step_up_grant": "bad"}),
+            ("POST", "/auth/passkeys/Y3JlZGVudGlhbA/remove", {"step_up_grant": "bad"}),
         ):
             assert client.request(method, path, headers=headers, json=payload).status_code == 401
 
@@ -1984,7 +1982,7 @@ def test_generated_local_routes_are_grouped_documented_and_uniquely_identified(
 
     schemas = app.openapi_schema.components.schemas if app.openapi_schema.components is not None else None
     assert schemas is not None
-    documented = ("LocalCredentials", "LocalPasswordChangeRequest", "LocalSessionResponse", "LocalRouteResponse")
+    documented = ("LocalCredentials", "LocalPasswordChangeRequest", "LocalSessionResponse", "RouteStatusResponse")
     # LocalSessionResponse is only named when the nested annotation resolves, which a
     # quoted reference does not do on Python 3.10.
     assert set(documented) <= set(schemas)
