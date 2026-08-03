@@ -8584,6 +8584,91 @@ async def test_local_access_token_preserves_passkey_assurance(local_key_ring: Lo
     )
 
 
+@pytest.mark.anyio
+async def test_legacy_local_access_assurance_falls_back_to_issued_at(local_key_ring: LocalKeyRing) -> None:
+    """Legacy access tokens without auth_time retain their frozen issuance time."""
+    validation = JWTValidationConfig(
+        issuer=local_key_ring.issuer,
+        audiences=frozenset({_JWT_AUDIENCE}),
+        algorithms=frozenset(key.algorithm for key in local_key_ring.all_verification_keys),
+        required_claims=frozenset({"se"}),
+        maximum_lifetime=timedelta(minutes=10),
+    )
+    issued_at = _JWT_NOW
+    verified_at = issued_at + timedelta(minutes=5)
+    claims = build_access_token_claims(
+        issuer=local_key_ring.issuer,
+        audience=_JWT_AUDIENCE,
+        subject="account-1",
+        client_id="local",
+        security_epoch=3,
+        now=issued_at,
+        lifetime=timedelta(minutes=10),
+        methods=frozenset({"password"}),
+    )
+    token = await local_key_ring.build_signer().sign(claims, now=issued_at)
+    verifier = access_tokens_module.LocalAccessVerifier(
+        config=validation,
+        verifier=local_key_ring.build_verifier(validation, mechanism_name="bearer", slot_name="local"),
+    )
+
+    outcome = await verifier.verify(token, now=verified_at)
+
+    assert isinstance(outcome, Authenticated)
+    assert outcome.evidence.authenticated_at == issued_at
+
+
+@pytest.mark.anyio
+async def test_token_login_preserves_password_assurance_at_refresh_issuance() -> None:
+    """Password token login carries its original assurance into the refresh family."""
+    account = _local_access_account()
+    issued_at = _JWT_NOW + timedelta(minutes=1)
+    response = accounts_module.RefreshTokenResponse(
+        access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
+        refresh_token=(
+            accounts_module.RefreshTokenCodec(pepper=b"p" * 32, entropy=_RefreshEntropy()).issue().refresh_token
+        ),
+        expires_in=600,
+    )
+
+    class PasswordLogin:
+        async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccount[object]:
+            return account
+
+    class RefreshTokens:
+        clock = staticmethod(lambda: issued_at)
+        evidence: AuthenticationEvidence | None = None
+
+        async def issue(
+            self, issued_for: object, *, evidence: AuthenticationEvidence | None = None, now: datetime | None = None
+        ) -> accounts_module.RefreshTokenResponse:
+            assert issued_for is account
+            assert now == issued_at
+            self.evidence = evidence
+            return response
+
+    refresh_tokens = RefreshTokens()
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", object()),
+        password_login=cast("Any", PasswordLogin()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        refresh_tokens=cast("Any", refresh_tokens),
+    )
+
+    credentials = accounts_module.LocalCredentials(identifier="person@example.com", password="password")  # noqa: S106
+    assert await service.token_login(cast("Any", object()), credentials) == response
+    assert refresh_tokens.evidence == AuthenticationEvidence(
+        mechanism="bearer",
+        slot="local",
+        authenticated_at=issued_at,
+        methods=frozenset({"password"}),
+        amr=("pwd",),
+    )
+
+
 @pytest.mark.parametrize(
     ("account", "fail_lookup", "fail_epoch", "epoch", "expected_type"),
     [
@@ -12538,7 +12623,9 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
         verification=cast("Any", object()),
         recovery=cast("Any", object()),
         session_auth=cast("Any", session_auth),
-        refresh_tokens=cast("Any", SimpleNamespace(issue=AsyncOutcome(refresh_response))),
+        refresh_tokens=cast(
+            "Any", SimpleNamespace(clock=lambda: _JWT_NOW, issue=AsyncOutcome(refresh_response))
+        ),
     )
     credentials = accounts_module.LocalCredentials(
         identifier="user@example.com",

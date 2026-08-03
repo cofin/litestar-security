@@ -180,7 +180,7 @@ class LocalAccessVerifier:
         methods = _claim_set(outcome.claims.raw.get("amr"))
         traits = _claim_set(outcome.claims.raw.get("security_traits"))
         authenticated_at = _claim_authentication_time(
-            outcome.claims.raw.get("auth_time"), fallback=outcome.evidence.authenticated_at
+            outcome.claims.raw.get("auth_time"), fallback=outcome.claims.issued_at
         )
         if methods is None or traits is None or authenticated_at is None:
             return InvalidCredentials()

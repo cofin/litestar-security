@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 from litestar import Request
 from litestar.exceptions import ImproperlyConfiguredException
 
+from litestar_security.accounts._internal import aware_utc_time
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._mfa_login import MFALoginChallenge, MFALoginService, MFARequired
 from litestar_security.accounts._operations import LOGIN_MFA
@@ -265,7 +266,18 @@ class LocalAuthService(Generic[UserT]):
         refresh_tokens = self.refresh_tokens
         if refresh_tokens is None:
             return VerificationUnavailable()
-        return await refresh_tokens.issue(account)
+        try:
+            issued_at = aware_utc_time(refresh_tokens.clock())
+        except Exception:  # noqa: BLE001 - an unavailable issuance clock must fail closed
+            return VerificationUnavailable()
+        evidence = AuthenticationEvidence(
+            mechanism="bearer",
+            slot="local",
+            authenticated_at=issued_at,
+            methods=frozenset({"password"}),
+            amr=("pwd",),
+        )
+        return await refresh_tokens.issue(account, evidence=evidence, now=issued_at)
 
     async def passkey_login(
         self,
