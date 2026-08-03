@@ -920,6 +920,8 @@ async def test_frontchannel_logout_fails_closed_when_the_limiter_is_unavailable(
         {"provider_issuers": {"example": "http://issuer.example"}},
         {"consumer": object()},
         {"sessions": object()},
+        {"rate_limits": object()},
+        {"client_key": object()},
         {"clock": None},
     ],
 )

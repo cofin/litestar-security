@@ -3,7 +3,8 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Annotated, Any, Protocol, cast, runtime_checkable
+from logging import getLogger
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast, runtime_checkable
 from urllib.parse import urlencode
 
 import msgspec
@@ -11,7 +12,12 @@ from litestar import Controller, Request, Response, Router, get, post
 from litestar.datastructures import CacheControlHeader, Cookie
 from litestar.di import NamedDependency, Provide
 from litestar.enums import RequestEncodingType
-from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
+from litestar.exceptions import (
+    ImproperlyConfiguredException,
+    NotAuthorizedException,
+    ServiceUnavailableException,
+    TooManyRequestsException,
+)
 from litestar.openapi.datastructures import ResponseSpec
 from litestar.params import Body, FromPath, FromQuery, JSONBody, QueryParameter, SkipValidation
 from litestar.status_codes import (
@@ -19,6 +25,7 @@ from litestar.status_codes import (
     HTTP_302_FOUND,
     HTTP_400_BAD_REQUEST,
     HTTP_401_UNAUTHORIZED,
+    HTTP_429_TOO_MANY_REQUESTS,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
@@ -40,7 +47,11 @@ from litestar_security.providers.oauth._transactions import (
 )
 from litestar_security.schema import WireStruct
 
+if TYPE_CHECKING:
+    from litestar_security.accounts import RateLimitGuard
+
 __all__ = (
+    "OIDC_FRONTCHANNEL_LOGOUT",
     "OAuthAuthorization",
     "OAuthConfig",
     "OAuthLifecycleService",
@@ -61,6 +72,11 @@ __all__ = (
     "OIDCSessionLogoutStore",
     "build_oauth_routes",
 )
+
+OIDC_FRONTCHANNEL_LOGOUT = "oidc.logout.frontchannel"
+"""Rate-limit operation name consumed by each front-channel logout attempt."""
+
+_LOGGER = getLogger(__name__)
 
 
 class OAuthRouteResponse(WireStruct, frozen=True, kw_only=True, omit_defaults=True):
@@ -154,6 +170,12 @@ _OAUTH_PUBLIC_RESPONSES = {
 _OAUTH_AUTHENTICATED_RESPONSES = {
     **_OAUTH_PUBLIC_RESPONSES,
     HTTP_401_UNAUTHORIZED: ResponseSpec(OAuthRouteResponse, description="Authentication or step-up is required."),
+}
+
+
+_OIDC_FRONTCHANNEL_RESPONSES = {
+    **_OAUTH_PUBLIC_RESPONSES,
+    HTTP_429_TOO_MANY_REQUESTS: ResponseSpec(OAuthRouteResponse, description="The request exceeded its rate limit."),
 }
 
 
@@ -556,17 +578,35 @@ class OAuthLifecycleService:
 class OIDCLogoutLifecycleService:
     """Concrete verified OIDC front- and back-channel local logout workflow."""
 
-    __slots__ = ("clock", "consumer", "provider_issuers", "sessions")
+    __slots__ = ("client_key", "clock", "consumer", "provider_issuers", "rate_limits", "sessions")
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - logout dependencies remain explicit and independently replaceable
         self,
         *,
         provider_issuers: Mapping[str, str],
         consumer: OIDCLogoutTokenConsumer,
         sessions: OIDCSessionLogoutStore,
+        rate_limits: "RateLimitGuard | None" = None,
+        client_key: Callable[[Request[Any, Any, Any]], str | None] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
-        """Build one fixed-issuer logout service."""
+        """Build one fixed-issuer logout service.
+
+        Args:
+            provider_issuers: Exact configured issuer per provider.
+            consumer: Logout-token verification and jti consumption.
+            sessions: Atomic session revocation store.
+            rate_limits: Optional budget consumed by each front-channel attempt.
+            client_key: Trusted client identity extractor for the rate-limit
+                client bucket, defaulting to the peer address without trusting
+                any forwarding header.
+            clock: Source of the current aware time.
+        """
+        from litestar_security.accounts import (  # noqa: PLC0415 - a module import would cycle back through providers
+            RateLimitGuard,
+            trusted_client_key,
+        )
+
         if (
             not provider_issuers
             or any(
@@ -575,6 +615,8 @@ class OIDCLogoutLifecycleService:
             )
             or not isinstance(cast("object", consumer), OIDCLogoutTokenConsumer)
             or not isinstance(cast("object", sessions), OIDCSessionLogoutStore)
+            or (rate_limits is not None and rate_limits.__class__ is not RateLimitGuard)
+            or (client_key is not None and not callable(client_key))
             or not callable(clock)
         ):
             message = "OIDC logout service configuration is invalid"
@@ -582,6 +624,8 @@ class OIDCLogoutLifecycleService:
         self.provider_issuers = dict(provider_issuers)
         self.consumer = consumer
         self.sessions = sessions
+        self.rate_limits = rate_limits
+        self.client_key = trusted_client_key if client_key is None else client_key
         self.clock = clock
 
     @property
@@ -618,8 +662,27 @@ class OIDCLogoutLifecycleService:
         Raises:
             NotAuthorizedException: If the issuer, session id, binding, ownership,
                 or replay marker is rejected. Every refusal shares one shape.
-            ServiceUnavailableException: If the session store is unavailable.
+            TooManyRequestsException: If the attempt exhausted its budget. The
+                budget is consumed before any validation, so a rejected sid pays
+                exactly as much as a revoking one.
+            ServiceUnavailableException: If the session store or the limiter is
+                unavailable. An outage never removes the limit or the binding.
         """
+        if self.rate_limits is not None:
+            from litestar_security.accounts import (  # noqa: PLC0415 - a module import would cycle back through providers
+                RateLimited,
+            )
+
+            limited = await self.rate_limits.check(
+                OIDC_FRONTCHANNEL_LOGOUT,
+                client_key=self._client_key_for(request),
+                identifier=session_id.strip() or None,
+            )
+            if isinstance(limited, RateLimited):
+                headers = {"Retry-After": str(limited.retry_after)} if limited.retry_after is not None else None
+                raise TooManyRequestsException(detail="Too many requests", headers=headers)
+            if limited is not None:
+                raise ServiceUnavailableException(detail="OIDC logout is unavailable")
         configured_issuer = self._issuer(provider)
         binding = request.cookies.get(OAUTH_BINDING_COOKIE_NAME)
         if issuer != configured_issuer or not session_id.strip() or binding is None or not binding.strip():
@@ -638,6 +701,15 @@ class OIDCLogoutLifecycleService:
         if issuer is None:
             raise NotAuthorizedException(detail="OIDC logout provider is not configured")
         return issuer
+
+    def _client_key_for(self, request: Request[Any, Any, Any]) -> str | None:
+        # A failing extractor degrades to sid-only limiting rather than failing
+        # the request, because the subject bucket still bounds the attempt.
+        try:
+            return self.client_key(request)
+        except Exception:  # noqa: BLE001 - application-supplied code may raise anything; degrade, do not fail
+            _LOGGER.error("OIDC logout client key extractor failed")  # noqa: TRY400 - omit untrusted details
+            return None
 
     def _now(self) -> datetime:
         value = self.clock()
@@ -998,10 +1070,10 @@ class _OIDCLogoutController(Controller):
         ),
         response_description="How many local sessions were revoked.",
         status_code=HTTP_200_OK,
-        responses=_OAUTH_PUBLIC_RESPONSES,
+        responses=_OIDC_FRONTCHANNEL_RESPONSES,
         auth=public(),
     )
-    async def frontchannel_logout(  # noqa: PLR0913 - Litestar injects each route binding explicitly
+    async def frontchannel_logout(
         self,
         provider: FromPath[str],
         issuer: Annotated[str, QueryParameter(name="iss")],

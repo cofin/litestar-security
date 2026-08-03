@@ -34,6 +34,7 @@ from litestar_security.providers.oauth._provider import (
     ProviderTokenSet,
 )
 from litestar_security.providers.oauth._routes import (
+    OIDC_FRONTCHANNEL_LOGOUT,
     OAuthAuthorization,
     OAuthConfig,
     OAuthLifecycleService,
@@ -77,6 +78,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "OAUTH_BINDING_COOKIE_NAME",
+    "OIDC_FRONTCHANNEL_LOGOUT",
     "AccountLinkError",
     "GitHubOAuthProvider",
     "InvalidOAuthCallback",
