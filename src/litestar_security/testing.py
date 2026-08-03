@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import compare_digest
 from types import MappingProxyType
-from typing import cast
+from typing import Protocol, cast
 from urllib.parse import parse_qsl
 
 import httpx
@@ -20,6 +20,7 @@ from litestar_security.accounts import (
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
     LocalAccount,
+    LocalAccountCapabilities,
     LoginMethod,
     MFALoginChallenge,
     NotificationCommand,
@@ -31,6 +32,7 @@ from litestar_security.accounts import (
     PasswordResetStatus,
     PendingTOTPEnrollment,
     PrepareRefreshResult,
+    PurposeTokenCodec,
     PurposeTokenDelivery,
     RecoveryCodeDigest,
     RefreshFamilyContext,
@@ -40,6 +42,7 @@ from litestar_security.accounts import (
     RegistrationCommand,
     RegistrationResult,
     RegistrationStatus,
+    RegistrationStore,
     RevokeLoginMethodResult,
     RevokeLoginMethodStatus,
     RotateRefreshCommand,
@@ -87,6 +90,7 @@ __all__ = (
     "OAuthHTTPRequest",
     "StoreConformanceFactories",
     "assert_api_key_store_conformance",
+    "assert_local_account_store_conformance",
     "assert_security_backend_conformance",
 )
 
@@ -1112,6 +1116,447 @@ async def assert_api_key_store_conformance(factory: Callable[[], APIKeyStore]) -
         raise AssertionError(message)
 
 
+class _ConformanceLocalAccountStore(LocalAccountCapabilities[object], RegistrationStore[object], Protocol):
+    """Combined local-account protocol exercised by the conformance scenarios."""
+
+
+async def assert_local_account_store_conformance(factory: Callable[[], _ConformanceLocalAccountStore]) -> None:
+    """Assert local-account isolation and atomic security transitions.
+
+    Args:
+        factory: Isolated zero-argument local-account store factory.
+
+    Returns:
+        None when every local-account capability invariant holds.
+
+    Raises:
+        AssertionError: If a local-account capability violates an atomicity, replay, or final-method invariant.
+    """
+    store = factory()
+    await _assert_local_account_factory_isolation(factory, store)
+    account = await _conformance_register_account(store, "conformance@example.com")
+    verification, verification_account = await _assert_registration_scenarios(store)
+    await _assert_password_cas(store, account)
+    await _assert_password_epoch_bump(store, account)
+    await _assert_verification_scenarios(store, verification, verification_account)
+    await _assert_recovery_epoch(store, account)
+    await _assert_recovery_expiry(store, account)
+    await _assert_recovery_attempt_exhaustion(store, account)
+    await _assert_final_login_method(store, account)
+
+
+async def _assert_local_account_factory_isolation(
+    factory: Callable[[], _ConformanceLocalAccountStore], store: _ConformanceLocalAccountStore
+) -> None:
+    isolated = factory()
+    if store is isolated:
+        message = "LocalAccountCapabilities factory invariant: each call must return isolated state"
+        raise AssertionError(message)
+    account = await _conformance_register_account(store, "factory-isolation@example.com")
+    if await isolated.get_by_id(account.account_id) is not None:
+        message = "LocalAccountCapabilities factory isolation invariant: state must not cross factory calls"
+        raise AssertionError(message)
+
+
+async def _assert_registration_scenarios(
+    store: _ConformanceLocalAccountStore,
+) -> tuple[PurposeTokenDelivery, LocalAccount[object]]:
+    command = _conformance_registration_command("atomic-registration@example.com")
+    outcomes: list[RegistrationResult[object]] = []
+
+    async def register() -> None:
+        outcomes.append(
+            await store.register(
+                command,
+                "conformance-password-hash",
+                invitation_digest=None,
+                verification=None,
+                now=_DEFAULT_NOW,
+                event=_conformance_event("register"),
+            )
+        )
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(register)
+        task_group.start_soon(register)
+    statuses = tuple(result.status for result in outcomes)
+    if statuses.count(RegistrationStatus.CREATED) != 1 or statuses.count(RegistrationStatus.DUPLICATE) != 1:
+        message = (
+            "RegistrationStore.register atomicity invariant: two contenders must return exactly CREATED and DUPLICATE"
+        )
+        raise AssertionError(message)
+
+    invitation_delivery = _conformance_token_delivery(TokenPurpose.INVITATION, marker=1)
+    invitation, notification = invitation_delivery.bind("conformance-invitation")
+    await store.issue(invitation, notification, event=_conformance_event("issue-invitation"))
+    duplicate_verification = _conformance_verification_delivery(_DEFAULT_NOW, marker=2)
+    duplicate = await store.register(
+        _conformance_registration_command("conformance@example.com"),
+        "conformance-password-hash",
+        invitation_digest=invitation.digest,
+        verification=duplicate_verification,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("duplicate-registration"),
+    )
+    duplicate_probe = await store.consume_and_verify(
+        duplicate_verification.issue.token_id,
+        duplicate_verification.issue.digest,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("probe-duplicate-verification"),
+    )
+    verification = _conformance_verification_delivery(_DEFAULT_NOW, marker=3)
+    try:
+        after_duplicate = await store.register(
+            _conformance_registration_command("partial-write@example.com"),
+            "conformance-password-hash",
+            invitation_digest=invitation.digest,
+            verification=verification,
+            now=_DEFAULT_NOW,
+            event=_conformance_event("partial-write-registration"),
+        )
+    except Exception as exc:
+        message = (
+            "RegistrationStore.register partial-write invariant: duplicate outcomes must not consume invitation "
+            "or issue verification"
+        )
+        raise AssertionError(message) from exc
+    if (
+        duplicate.status is not RegistrationStatus.DUPLICATE
+        or duplicate_probe.status is not ConsumeStatus.INVALID
+        or after_duplicate.status is not RegistrationStatus.CREATED
+        or after_duplicate.account is None
+    ):
+        message = (
+            "RegistrationStore.register partial-write invariant: duplicate outcomes must not consume invitation "
+            "or issue verification"
+        )
+        raise AssertionError(message)
+    return verification, after_duplicate.account
+
+
+async def _assert_password_cas(store: _ConformanceLocalAccountStore, account: LocalAccount[object]) -> None:
+    account_before = await store.get_by_id(account.account_id)
+    password_state = await store.get_password_state(account.account_id)
+    if account_before is None or password_state is None:  # pragma: no cover - account was just registered
+        message = (
+            "PasswordCredentialStore.get_password_state invariant: registered accounts must retain their password state"
+        )
+        raise AssertionError(message)
+    replacement_hashes = ("conformance-password-a", "conformance-password-b")
+
+    async def replace_password(replacement_hash: str) -> bool:
+        return await store.compare_and_replace_password(
+            account.account_id,
+            password_state.password_hash,
+            replacement_hash,
+            event=_conformance_event("compare-and-replace-password"),
+        )
+
+    outcomes: list[bool] = []
+
+    async def record(replacement_hash: str) -> None:
+        outcomes.append(await replace_password(replacement_hash))
+
+    async with create_task_group() as task_group:
+        for replacement_hash in replacement_hashes:
+            task_group.start_soon(record, replacement_hash)
+    if outcomes.count(True) != 1 or outcomes.count(False) != 1:
+        message = (
+            "PasswordCredentialStore.compare_and_replace_password atomicity invariant: two contenders must "
+            "return exactly True and False"
+        )
+        raise AssertionError(message)
+    password_after = await store.get_password_state(account.account_id)
+    account_after = await store.get_by_id(account.account_id)
+    if password_after is None or password_after.password_hash not in replacement_hashes:
+        message = (
+            "PasswordCredentialStore.compare_and_replace_password state invariant: stored password must be "
+            "exactly one winner"
+        )
+        raise AssertionError(message)
+    before_non_password = (password_state.security_epoch, password_state.active, password_state.verified)
+    after_non_password = (password_after.security_epoch, password_after.active, password_after.verified)
+    if account_after != account_before or after_non_password != before_non_password:
+        message = (
+            "PasswordCredentialStore.compare_and_replace_password state invariant: non-password account state "
+            "must remain unchanged"
+        )
+        raise AssertionError(message)
+
+
+async def _assert_password_epoch_bump(store: _ConformanceLocalAccountStore, account: LocalAccount[object]) -> None:
+    password_state = await store.get_password_state(account.account_id)
+    if password_state is None:  # pragma: no cover - preceding CAS guarantees it
+        message = "PasswordCredentialStore.get_password_state invariant: password state must remain readable"
+        raise AssertionError(message)
+    replacement_hashes = ("conformance-epoch-a", "conformance-epoch-b")
+
+    outcomes: list[PasswordChangeResult] = []
+
+    async def bump_epoch(replacement_hash: str) -> None:
+        outcomes.append(
+            await store.replace_password_and_bump_epoch(
+                account.account_id,
+                replacement_hash,
+                expected_epoch=password_state.security_epoch,
+                event=_conformance_event("replace-password-and-bump-epoch"),
+            )
+        )
+
+    async with create_task_group() as task_group:
+        for replacement_hash in replacement_hashes:
+            task_group.start_soon(bump_epoch, replacement_hash)
+    statuses = tuple(result.status for result in outcomes)
+    if statuses.count(PasswordChangeStatus.CHANGED) != 1 or statuses.count(PasswordChangeStatus.CONFLICT) != 1:
+        message = (
+            "PasswordCredentialStore.replace_password_and_bump_epoch epoch invariant: two contenders must "
+            "return exactly CHANGED and CONFLICT"
+        )
+        raise AssertionError(message)
+    current_epoch = await store.current_epoch(account.account_id)
+    persisted = await store.get_password_state(account.account_id)
+    if current_epoch != password_state.security_epoch + 1:
+        message = (
+            "PasswordCredentialStore.replace_password_and_bump_epoch epoch invariant: current epoch must "
+            "advance by exactly one"
+        )
+        raise AssertionError(message)
+    if (
+        persisted is None
+        or persisted.password_hash not in replacement_hashes
+        or persisted.security_epoch != current_epoch
+    ):
+        message = (
+            "PasswordCredentialStore.replace_password_and_bump_epoch state invariant: persisted password and "
+            "password-state epoch must match the winning transition"
+        )
+        raise AssertionError(message)
+
+
+async def _assert_verification_scenarios(
+    store: _ConformanceLocalAccountStore, verification: PurposeTokenDelivery, account: LocalAccount[object]
+) -> None:
+    consumed = await store.consume_and_verify(
+        verification.issue.token_id,
+        verification.issue.digest,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("consume-and-verify"),
+    )
+    replay = await store.consume_and_verify(
+        verification.issue.token_id,
+        verification.issue.digest,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("consume-and-verify-replay"),
+    )
+    stored_account = await store.get_by_id(account.account_id)
+    if (
+        consumed.status is not ConsumeStatus.CONSUMED
+        or consumed.account_id != account.account_id
+        or consumed.security_epoch != account.security_epoch
+        or stored_account is None
+        or not stored_account.verified
+        or stored_account.security_epoch != account.security_epoch
+        or replay.status is ConsumeStatus.CONSUMED
+    ):
+        message = (
+            "VerificationTokenStore.consume_and_verify replay invariant: a verification token must be consumed once"
+        )
+        raise AssertionError(message)
+    await _assert_verification_expiry(store)
+    await _assert_verification_attempt_exhaustion(store)
+
+
+async def _assert_verification_expiry(store: _ConformanceLocalAccountStore) -> None:
+    delivery = _conformance_verification_delivery(_DEFAULT_NOW, marker=4)
+    account = await _conformance_register_account(store, "expired-verification@example.com", verification=delivery)
+    result = await store.consume_and_verify(
+        delivery.issue.token_id,
+        delivery.issue.digest,
+        now=delivery.issue.expires_at,
+        event=_conformance_event("consume-expired-verification"),
+    )
+    stored = await store.get_by_id(account.account_id)
+    if result.status is not ConsumeStatus.EXPIRED or stored is None or stored.verified:
+        message = "VerificationTokenStore.consume_and_verify expiry invariant: expired tokens must not verify accounts"
+        raise AssertionError(message)
+
+
+async def _assert_verification_attempt_exhaustion(store: _ConformanceLocalAccountStore) -> None:
+    delivery = _conformance_verification_delivery(_DEFAULT_NOW, marker=5, maximum_attempts=2)
+    account = await _conformance_register_account(store, "burned-verification@example.com", verification=delivery)
+    invalid_digest = _different_digest(delivery.issue.digest)
+    invalid_results = tuple([
+        await store.consume_and_verify(
+            delivery.issue.token_id,
+            invalid_digest,
+            now=_DEFAULT_NOW,
+            event=_conformance_event("burn-verification-attempt"),
+        )
+        for _attempt in range(delivery.issue.maximum_attempts)
+    ])
+    valid_after_burn = await store.consume_and_verify(
+        delivery.issue.token_id,
+        delivery.issue.digest,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("verification-after-burn"),
+    )
+    stored = await store.get_by_id(account.account_id)
+    if (
+        any(result.status is not ConsumeStatus.INVALID for result in invalid_results)
+        or valid_after_burn.status is not ConsumeStatus.USED
+        or stored is None
+        or stored.verified
+    ):
+        message = (
+            "VerificationTokenStore.consume_and_verify attempt invariant: maximum failures must burn the token "
+            "and reject its valid proof"
+        )
+        raise AssertionError(message)
+
+
+async def _assert_recovery_epoch(store: _ConformanceLocalAccountStore, account: LocalAccount[object]) -> None:
+    delivery = _conformance_token_delivery(TokenPurpose.RECOVERY, marker=6)
+    epoch = await store.current_epoch(account.account_id)
+    if epoch is None:  # pragma: no cover - account was just registered
+        message = "SecurityEpochStore.current_epoch invariant: a registered account must have an epoch"
+        raise AssertionError(message)
+    issue, notification = delivery.bind(account.account_id, security_epoch=epoch)
+    await store.issue(issue, notification, event=_conformance_event("issue-recovery"))
+    changed = await store.replace_password_and_bump_epoch(
+        account.account_id,
+        "conformance-password-recovery-change",
+        expected_epoch=epoch,
+        event=_conformance_event("change-before-recovery"),
+    )
+    changed_state = await store.get_password_state(account.account_id)
+    reset = await store.consume_and_reset(
+        issue.token_id,
+        issue.digest,
+        "conformance-password-reset",
+        now=_DEFAULT_NOW,
+        event=_conformance_event("consume-and-reset"),
+    )
+    state_after = await store.get_password_state(account.account_id)
+    replay = await store.consume_and_reset(
+        issue.token_id,
+        issue.digest,
+        "conformance-password-reset-replay",
+        now=_DEFAULT_NOW,
+        event=_conformance_event("consume-and-reset-replay"),
+    )
+    if (
+        changed.status is not PasswordChangeStatus.CHANGED
+        or changed_state is None
+        or reset.status is not PasswordResetStatus.CONFLICT
+        or replay.status is PasswordResetStatus.RESET
+        or state_after != changed_state
+    ):
+        message = (
+            "RecoveryTokenStore.consume_and_reset epoch invariant: a token issued before an epoch bump must be rejected"
+        )
+        raise AssertionError(message)
+
+
+async def _assert_recovery_expiry(store: _ConformanceLocalAccountStore, account: LocalAccount[object]) -> None:
+    delivery = _conformance_token_delivery(TokenPurpose.RECOVERY, marker=7)
+    epoch = await store.current_epoch(account.account_id)
+    state_before = await store.get_password_state(account.account_id)
+    if epoch is None or state_before is None:  # pragma: no cover - account exists with a password
+        message = "RecoveryTokenStore.consume_and_reset setup invariant: registered accounts require password state"
+        raise AssertionError(message)
+    issue, notification = delivery.bind(account.account_id, security_epoch=epoch)
+    await store.issue(issue, notification, event=_conformance_event("issue-expired-recovery"))
+    result = await store.consume_and_reset(
+        issue.token_id,
+        issue.digest,
+        "expired-recovery-password",
+        now=issue.expires_at,
+        event=_conformance_event("consume-expired-recovery"),
+    )
+    if (
+        result.status is not PasswordResetStatus.EXPIRED
+        or await store.get_password_state(account.account_id) != state_before
+    ):
+        message = "RecoveryTokenStore.consume_and_reset expiry invariant: expired tokens must not change password state"
+        raise AssertionError(message)
+
+
+async def _assert_recovery_attempt_exhaustion(
+    store: _ConformanceLocalAccountStore, account: LocalAccount[object]
+) -> None:
+    delivery = _conformance_token_delivery(TokenPurpose.RECOVERY, marker=8, maximum_attempts=2)
+    epoch = await store.current_epoch(account.account_id)
+    state_before = await store.get_password_state(account.account_id)
+    if epoch is None or state_before is None:  # pragma: no cover - account exists with a password
+        message = "RecoveryTokenStore.consume_and_reset setup invariant: registered accounts require password state"
+        raise AssertionError(message)
+    issue, notification = delivery.bind(account.account_id, security_epoch=epoch)
+    await store.issue(issue, notification, event=_conformance_event("issue-burned-recovery"))
+    invalid_digest = _different_digest(issue.digest)
+    invalid_results: list[PasswordResetResult] = []
+    for _attempt in range(issue.maximum_attempts):
+        invalid_results.append(  # noqa: PERF401 - failed attempts must be sequential against one token
+            await store.consume_and_reset(
+                issue.token_id,
+                invalid_digest,
+                "invalid-recovery-password",
+                now=_DEFAULT_NOW,
+                event=_conformance_event("burn-recovery-attempt"),
+            )
+        )
+    valid_after_burn = await store.consume_and_reset(
+        issue.token_id,
+        issue.digest,
+        "valid-after-burn-password",
+        now=_DEFAULT_NOW,
+        event=_conformance_event("recovery-after-burn"),
+    )
+    if (
+        any(result.status is not PasswordResetStatus.INVALID for result in invalid_results)
+        or valid_after_burn.status is not PasswordResetStatus.USED
+        or await store.get_password_state(account.account_id) != state_before
+    ):
+        message = (
+            "RecoveryTokenStore.consume_and_reset attempt invariant: maximum failures must burn the token and "
+            "reject its valid proof"
+        )
+        raise AssertionError(message)
+
+
+async def _assert_final_login_method(store: _ConformanceLocalAccountStore, account: LocalAccount[object]) -> None:
+    other_account = await _conformance_register_account(store, "login-method-owner@example.com")
+    method = LoginMethod("conformance-password", "password", _DEFAULT_NOW)
+    await store.register_login_method(account.account_id, method, event=_conformance_event("register-login-method"))
+    cross_account = await store.revoke_login_method(
+        other_account.account_id,
+        method.method_id,
+        require_remaining=True,
+        event=_conformance_event("cross-account-login-method-revoke"),
+    )
+    final_method = await store.revoke_login_method(
+        account.account_id,
+        method.method_id,
+        require_remaining=True,
+        event=_conformance_event("revoke-final-login-method"),
+    )
+    absent = await store.revoke_login_method(
+        account.account_id,
+        "missing-login-method",
+        require_remaining=True,
+        event=_conformance_event("revoke-missing-login-method"),
+    )
+    if (
+        cross_account.status is not RevokeLoginMethodStatus.NOT_FOUND
+        or final_method.status is not RevokeLoginMethodStatus.FINAL_METHOD
+        or absent.status is not RevokeLoginMethodStatus.NOT_FOUND
+    ):
+        message = (
+            "LoginMethodStore.revoke_login_method final-method invariant: enforce ownership, preserve the final "
+            "method, and report absent methods"
+        )
+        raise AssertionError(message)
+
+
 async def assert_security_backend_conformance(factories: StoreConformanceFactories) -> None:
     """Run only the conformance scenarios whose factories were supplied.
 
@@ -1130,6 +1575,63 @@ async def assert_security_backend_conformance(factories: StoreConformanceFactori
 
 def _conformance_api_key_record(key_id: str) -> APIKeyRecord:
     return APIKeyRecord(key_id=key_id, subject_id="conformance-subject", digest=b"d" * 32)
+
+
+async def _conformance_register_account(
+    store: _ConformanceLocalAccountStore,
+    normalized_identifier: str,
+    *,
+    verification: PurposeTokenDelivery | None = None,
+) -> LocalAccount[object]:
+    """Register one password account required by several local-account scenarios."""
+    result = await store.register(
+        _conformance_registration_command(normalized_identifier),
+        "conformance-password-hash",
+        invitation_digest=None,
+        verification=verification,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("register-setup"),
+    )
+    if result.status is not RegistrationStatus.CREATED or result.account is None:  # pragma: no cover - result invariant
+        message = "RegistrationStore.register setup invariant: a fresh normalized identifier must create an account"
+        raise AssertionError(message)
+    return result.account
+
+
+def _conformance_event(operation: str) -> SecurityEvent:
+    return SecurityEvent(
+        event_id=f"conformance-{operation}", occurred_at=_DEFAULT_NOW, operation=operation, outcome="conformance"
+    )
+
+
+def _conformance_registration_command(normalized_identifier: str) -> RegistrationCommand:
+    return RegistrationCommand(normalized_identifier=normalized_identifier, display_name="Conformance")
+
+
+def _conformance_verification_delivery(
+    now: datetime, *, marker: int, maximum_attempts: int = 5
+) -> PurposeTokenDelivery:
+    return _conformance_token_delivery(
+        TokenPurpose.VERIFICATION, now=now, marker=marker, maximum_attempts=maximum_attempts
+    )
+
+
+def _conformance_token_delivery(
+    purpose: TokenPurpose, *, marker: int, now: datetime = _DEFAULT_NOW, maximum_attempts: int = 5
+) -> PurposeTokenDelivery:
+    marker_byte = bytes((marker,))
+    return PurposeTokenCodec(pepper=bytes(32), entropy=lambda length: marker_byte * length).issue(
+        purpose,
+        now=now,
+        lifetime=timedelta(minutes=5),
+        template=purpose.value,
+        destination=f"{purpose.value}@example.com",
+        maximum_attempts=maximum_attempts,
+    )
+
+
+def _different_digest(digest: bytes) -> bytes:
+    return bytes((digest[0] ^ 1,)) + digest[1:]
 
 
 async def _single_winner(contenders: tuple[Callable[[], Awaitable[bool]], ...]) -> int:
