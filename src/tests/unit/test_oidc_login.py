@@ -113,6 +113,7 @@ async def test_oidc_logout_token_consumer_verifies_events_and_rejects_replay() -
             algorithms=frozenset({"RS256"}),
             access_token_profile=False,
             subject_required=False,
+            token_types=frozenset({"logout+jwt"}),
         ),
         outcome=Authenticated(
             claims=logout_claims,
@@ -152,6 +153,7 @@ async def test_oidc_logout_token_consumer_rejects_invalid_event() -> None:
             algorithms=frozenset({"RS256"}),
             access_token_profile=False,
             subject_required=False,
+            token_types=frozenset({"logout+jwt"}),
         ),
         outcome=Authenticated(
             claims=invalid,
@@ -187,6 +189,7 @@ async def test_oidc_logout_consumer_rejects_missing_provider_and_failed_verifica
             algorithms=frozenset({"RS256"}),
             access_token_profile=False,
             subject_required=False,
+            token_types=frozenset({"logout+jwt"}),
         ),
         outcome=InvalidCredentials(),
     )
@@ -226,6 +229,7 @@ async def test_oidc_logout_consumer_rejects_invalid_claim_matrix(
             algorithms=frozenset({"RS256"}),
             access_token_profile=False,
             subject_required=False,
+            token_types=frozenset({"logout+jwt"}),
         ),
         outcome=Authenticated(
             claims=invalid,
@@ -405,6 +409,49 @@ def test_oidc_constructor_rejects_discovery_or_verifier_mismatch() -> None:
             verifier=mismatched,  # type: ignore[arg-type]
             scopes=frozenset({"openid"}),
         )
+
+
+@pytest.mark.parametrize("token_types", [None, frozenset({"logout+jwt"}), frozenset({"jwt", "logout+jwt"})])
+def test_oidc_constructor_rejects_non_id_token_types(token_types: frozenset[str] | None) -> None:
+    config_arguments: dict[str, object] = {
+        "issuer": ISSUER,
+        "audiences": frozenset({CLIENT_ID}),
+        "algorithms": frozenset({"RS256"}),
+        "access_token_profile": False,
+    }
+    if token_types is not None:
+        config_arguments["token_types"] = token_types
+    rejected = StubVerifier(  # type: ignore[arg-type]
+        config=JWTValidationConfig(**config_arguments), outcome=InvalidCredentials()
+    )
+
+    with pytest.raises(ImproperlyConfiguredException, match="OIDC provider trust configuration is inconsistent"):
+        oidc_provider(
+            name="oidc",
+            client_id=CLIENT_ID,
+            client_secret=SecretStr("secret"),
+            metadata=metadata(),
+            verifier=rejected,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("token_types", [None, frozenset({"jwt"}), frozenset({"jwt", "logout+jwt"})])
+def test_oidc_logout_consumer_rejects_non_logout_token_types(token_types: frozenset[str] | None) -> None:
+    config_arguments: dict[str, object] = {
+        "issuer": ISSUER,
+        "audiences": frozenset({CLIENT_ID}),
+        "algorithms": frozenset({"RS256"}),
+        "access_token_profile": False,
+        "subject_required": False,
+    }
+    if token_types is not None:
+        config_arguments["token_types"] = token_types
+    rejected = StubVerifier(  # type: ignore[arg-type]
+        config=JWTValidationConfig(**config_arguments), outcome=InvalidCredentials()
+    )
+
+    with pytest.raises(ImproperlyConfiguredException, match="OIDC logout token consumer configuration is invalid"):
+        OIDCJWTLogoutTokenConsumer(verifiers={"oidc": rejected})  # type: ignore[arg-type]
 
 
 def test_google_constructor_uses_pinned_profile() -> None:
