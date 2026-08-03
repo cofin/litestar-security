@@ -226,7 +226,7 @@ class _LocalSessionController(Controller):
         data: JSONBody[LocalCredentials],
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[LocalAccountResponse | RouteStatusResponse]:
+    ) -> Response[LocalAccountResponse]:
         """Authenticate a password and establish one native session."""
         result = await local_auth_service.session_login(request, data)
         if not isinstance(result, LocalAccountResponse):
@@ -276,7 +276,7 @@ class _LocalSessionController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[LocalSessionListResponse | RouteStatusResponse]:
+    ) -> Response[LocalSessionListResponse]:
         """List only the authenticated caller's safe session projections."""
         account_id = _principal_account_id(principal)
         session_auth = local_auth_service.session_auth
@@ -361,7 +361,7 @@ class _LocalTokenController(Controller):
         data: JSONBody[LocalCredentials],
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[RefreshTokenResponse | RouteStatusResponse]:
+    ) -> Response[RefreshTokenResponse]:
         """Authenticate a password and issue a local access/refresh pair."""
         result = await local_auth_service.token_login(request, data)
         if not isinstance(result, RefreshTokenResponse):
@@ -389,7 +389,7 @@ class _LocalTokenController(Controller):
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
         idempotency_key: Annotated[str | None, HeaderParameter(name="Idempotency-Key")] = None,
-    ) -> Response[RefreshTokenResponse | RouteStatusResponse]:
+    ) -> Response[RefreshTokenResponse]:
         """Strictly rotate one opaque refresh token."""
         refresh_tokens = local_auth_service.refresh_tokens
         if refresh_tokens is None:
@@ -459,7 +459,7 @@ class _LocalLifecycleController(Controller):
         data: JSONBody[LocalIdentifierRequest],
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[LifecycleAccepted | RouteStatusResponse]:
+    ) -> Response[LifecycleAccepted]:
         """Return the common recovery-request response for every identifier."""
         result = await local_auth_service.recovery.request(
             data.identifier, client_key=local_auth_service.client_key_for(request)
@@ -517,7 +517,7 @@ class _LocalLifecycleController(Controller):
         data: JSONBody[LocalIdentifierRequest],
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[LifecycleAccepted | RouteStatusResponse]:
+    ) -> Response[LifecycleAccepted]:
         """Return the common verification-request response for every identifier."""
         result = await local_auth_service.verification.resend(
             data.identifier, client_key=local_auth_service.client_key_for(request)
@@ -576,7 +576,7 @@ class _LocalRegistrationController(Controller):
         data: JSONBody[LocalRegistrationRequest],
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[LifecycleAccepted | RouteStatusResponse]:
+    ) -> Response[LifecycleAccepted]:
         """Apply the configured public registration policy."""
         registration = local_auth_service.registration
         if registration is None:
@@ -616,7 +616,7 @@ class _LocalInvitationRegistrationController(Controller):
         data: JSONBody[LocalInvitationRegistrationRequest],
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[LifecycleAccepted | RouteStatusResponse]:
+    ) -> Response[LifecycleAccepted]:
         """Apply the configured invite-only registration policy."""
         registration = local_auth_service.registration
         if registration is None:

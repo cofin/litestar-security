@@ -258,7 +258,7 @@ class _StepUpController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[StepUpResponse | RouteStatusResponse]:
+    ) -> Response[StepUpResponse]:
         """Verify one factor and issue a purpose-bound grant."""
         account_id = _principal_id(principal)
         if account_id is None:  # pragma: no cover - required authentication rejects anonymous requests first
@@ -333,7 +333,7 @@ class _MFAController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[TOTPEnrollmentResponse | RouteStatusResponse]:
+    ) -> Response[TOTPEnrollmentResponse]:
         """Begin TOTP enrollment after consuming exact step-up."""
         account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
@@ -386,7 +386,7 @@ class _MFAController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[RecoveryCodesResponse | RouteStatusResponse]:
+    ) -> Response[RecoveryCodesResponse]:
         """Activate TOTP and return a recovery-code set once."""
         account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
@@ -466,7 +466,7 @@ class _MFAController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[RecoveryCodesResponse | RouteStatusResponse]:
+    ) -> Response[RecoveryCodesResponse]:
         """Replace recovery codes after exact step-up."""
         account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
@@ -515,7 +515,7 @@ class _PasskeyController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[PasskeyOptionsResponse | RouteStatusResponse]:
+    ) -> Response[PasskeyOptionsResponse]:
         """Create registration options after exact step-up."""
         account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys
@@ -592,7 +592,7 @@ class _PasskeyController(Controller):
         data: JSONBody[PasskeyAuthenticationOptionsRequest],
         request: Request[Any, Any, Any],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[PasskeyOptionsResponse | RouteStatusResponse]:
+    ) -> Response[PasskeyOptionsResponse]:
         """Create public account-bound assertion options."""
         passkey_service = mfa_service.passkeys
         if passkey_service is None:  # pragma: no cover - this controller is registered only with a passkey service
@@ -619,7 +619,7 @@ class _PasskeyController(Controller):
         self,
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[tuple[PasskeySummaryResponse, ...] | RouteStatusResponse]:
+    ) -> Response[tuple[PasskeySummaryResponse, ...]]:
         """List only caller-owned safe credential metadata."""
         account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys

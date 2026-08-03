@@ -5,7 +5,7 @@ import base64
 import gzip
 import hmac
 import json
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
@@ -28,7 +28,14 @@ from argon2.exceptions import VerificationError
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from litestar.connection import ASGIConnection
-from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
+from litestar.exceptions import (
+    ClientException,
+    HTTPException,
+    ImproperlyConfiguredException,
+    NotAuthorizedException,
+    ServiceUnavailableException,
+    TooManyRequestsException,
+)
 from litestar.openapi.spec import SecurityScheme
 from litestar.stores.memory import MemoryStore
 
@@ -120,6 +127,16 @@ _JWKS_URI = f"{_JWT_ISSUER}/.well-known/jwks.json"
 _MFA_VECTOR_NOW = datetime.fromtimestamp(59, tz=timezone.utc)
 _MFA_ENCODED_SEED = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
 _MFA_POLICY = accounts_module.TOTPPolicy()
+
+
+async def _assert_http_exception(
+    awaitable: Awaitable[object], exception_type: type[HTTPException], *, status_code: int, detail: str
+) -> HTTPException:
+    with pytest.raises(exception_type) as exc_info:
+        await awaitable
+    assert exc_info.value.status_code == status_code
+    assert exc_info.value.detail == detail
+    return exc_info.value
 
 
 def test_jwks_worker_and_metrics_contracts_are_safe_by_default() -> None:
@@ -8846,10 +8863,21 @@ async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
         session_capable=True,
         token_capable=True,
     )
-    assert mfa_controllers_module._error(accounts_module.RateLimited(retry_after=3)).status_code == 429  # noqa: SLF001
-    assert mfa_controllers_module._error(accounts_module.RateLimited()).status_code == 429  # noqa: SLF001
-    assert mfa_controllers_module._error(VerificationUnavailable()).status_code == 503  # noqa: SLF001
-    assert mfa_controllers_module._error(InvalidCredentials()).status_code == 401  # noqa: SLF001
+    error_cases = (
+        (accounts_module.RateLimited(retry_after=3), TooManyRequestsException, 429, "Too many requests.", "3"),
+        (accounts_module.RateLimited(), TooManyRequestsException, 429, "Too many requests.", None),
+        (VerificationUnavailable(), ServiceUnavailableException, 503, "Authentication service is unavailable.", None),
+        (InvalidCredentials(), NotAuthorizedException, 401, "Authentication required.", None),
+    )
+    for outcome, exception_type, status_code, detail, retry_after in error_cases:
+        with pytest.raises(exception_type) as exc_info:
+            mfa_controllers_module._error(outcome)  # noqa: SLF001
+        assert exc_info.value.status_code == status_code
+        assert exc_info.value.detail == detail
+        if retry_after is None:
+            assert not exc_info.value.headers or "Retry-After" not in exc_info.value.headers
+        else:
+            assert exc_info.value.headers["Retry-After"] == retry_after
     assert mfa_controllers_module._principal_id(Principal.anonymous()) is None  # noqa: SLF001
     assert (
         mfa_controllers_module._transport_binding(  # noqa: SLF001
@@ -8916,8 +8944,11 @@ async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
         ),
         accounts_module.RateLimited,
     )
-    assert mfa_controllers_module._options_response(VerificationUnavailable()).status_code == 503  # noqa: SLF001
-    assert mfa_controllers_module._removal_response(VerificationUnavailable()).status_code == 503  # noqa: SLF001
+    for response_factory in (mfa_controllers_module._options_response, mfa_controllers_module._removal_response):  # noqa: SLF001
+        with pytest.raises(ServiceUnavailableException) as exc_info:
+            response_factory(VerificationUnavailable())
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == "Authentication service is unavailable."
     assert (
         mfa_controllers_module._removal_response(  # noqa: SLF001 - exercises the private HTTP projection matrix
             accounts_module.RevokeLoginMethodResult(accounts_module.RevokeLoginMethodStatus.FINAL_METHOD)
@@ -10790,38 +10821,98 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
 
     session_login = cast("Any", controllers_module._LocalSessionController.login.fn)  # noqa: SLF001
     assert (await session_login(None, credentials, request, services)).status_code == 200
-    assert (await session_login(None, credentials, request, services)).status_code == 400
+    await _assert_http_exception(
+        session_login(None, credentials, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     session_logout = cast("Any", controllers_module._LocalSessionController.logout.fn)  # noqa: SLF001
     assert (await session_logout(None, request, services)).status_code == 200
-    assert (await session_logout(None, request, services)).status_code == 503
+    await _assert_http_exception(
+        session_logout(None, request, services),
+        ServiceUnavailableException,
+        status_code=503,
+        detail="Authentication service is unavailable.",
+    )
     services.session_auth = None
-    assert (await session_logout(None, request, services)).status_code == 503
+    await _assert_http_exception(
+        session_logout(None, request, services),
+        ServiceUnavailableException,
+        status_code=503,
+        detail="Authentication service is unavailable.",
+    )
     services.session_auth = session_routes
     list_sessions = cast("Any", controllers_module._LocalSessionController.list_sessions.fn)  # noqa: SLF001
     assert (await list_sessions(None, request, principal, services)).status_code == 200
-    assert (await list_sessions(None, request, principal, services)).status_code == 503
-    assert (await list_sessions(None, request, anonymous, services)).status_code == 401
+    await _assert_http_exception(
+        list_sessions(None, request, principal, services),
+        ServiceUnavailableException,
+        status_code=503,
+        detail="Authentication service is unavailable.",
+    )
+    await _assert_http_exception(
+        list_sessions(None, request, anonymous, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
+    )
     revoke_session = cast("Any", controllers_module._LocalSessionController.revoke_session.fn)  # noqa: SLF001
     assert (await revoke_session(None, "session", request, principal, services)).status_code == 200
-    assert (await revoke_session(None, "session", request, principal, services)).status_code == 503
+    await _assert_http_exception(
+        revoke_session(None, "session", request, principal, services),
+        ServiceUnavailableException,
+        status_code=503,
+        detail="Authentication service is unavailable.",
+    )
     services.session_auth = None
-    assert (await revoke_session(None, "session", request, principal, services)).status_code == 401
+    await _assert_http_exception(
+        revoke_session(None, "session", request, principal, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
+    )
     services.session_auth = session_routes
 
     token_login = cast("Any", controllers_module._LocalTokenController.login.fn)  # noqa: SLF001
     assert (await token_login(None, credentials, request, services)).status_code == 200
-    assert (await token_login(None, credentials, request, services)).status_code == 400
+    await _assert_http_exception(
+        token_login(None, credentials, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     refresh = cast("Any", controllers_module._LocalTokenController.refresh.fn)  # noqa: SLF001
     assert (await refresh(None, token_request, request, services, "AAAAAAAAAAAAAAAAAAAAAA")).status_code == 200
-    assert (await refresh(None, token_request, request, services, None)).status_code == 400
+    await _assert_http_exception(
+        refresh(None, token_request, request, services, None),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     refresh_tokens = services.refresh_tokens
     services.refresh_tokens = None
-    assert (await refresh(None, token_request, request, services, None)).status_code == 503
+    await _assert_http_exception(
+        refresh(None, token_request, request, services, None),
+        ServiceUnavailableException,
+        status_code=503,
+        detail="Authentication service is unavailable.",
+    )
     services.refresh_tokens = refresh_tokens
     revoke = cast("Any", controllers_module._LocalTokenController.revoke.fn)  # noqa: SLF001
     assert (await revoke(None, token_request, principal, services)).status_code == 200
-    assert (await revoke(None, token_request, principal, services)).status_code == 503
-    assert (await revoke(None, token_request, anonymous, services)).status_code == 401
+    await _assert_http_exception(
+        revoke(None, token_request, principal, services),
+        ServiceUnavailableException,
+        status_code=503,
+        detail="Authentication service is unavailable.",
+    )
+    await _assert_http_exception(
+        revoke(None, token_request, anonymous, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
+    )
 
     lifecycle = controllers_module._LocalLifecycleController  # noqa: SLF001
     identifier = accounts_module.LocalIdentifierRequest(identifier="user@example.com")
@@ -10832,11 +10923,21 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         password="new-password",  # noqa: S106 - request DTO fixture
     )
     assert (await reset(None, reset_request, request, services)).status_code == 200
-    assert (await reset(None, reset_request, request, services)).status_code == 400
+    await _assert_http_exception(
+        reset(None, reset_request, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     assert (await cast("Any", lifecycle.verification.fn)(None, identifier, request, services)).status_code == 202
     confirm = cast("Any", lifecycle.confirm_verification.fn)
     assert (await confirm(None, token_request, request, services)).status_code == 200
-    assert (await confirm(None, token_request, request, services)).status_code == 400
+    await _assert_http_exception(
+        confirm(None, token_request, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
 
     register = cast("Any", controllers_module._LocalRegistrationController.register.fn)  # noqa: SLF001
     registration = accounts_module.LocalRegistrationRequest(
@@ -10844,9 +10945,19 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         password="password",  # noqa: S106 - request DTO fixture
     )
     assert (await register(None, registration, request, services)).status_code == 202
-    assert (await register(None, registration, request, services)).status_code == 400
+    await _assert_http_exception(
+        register(None, registration, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     services.registration = None
-    assert (await register(None, registration, request, services)).status_code == 400
+    await _assert_http_exception(
+        register(None, registration, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     services.registration = SimpleNamespace(
         register=AsyncOutcome(accounts_module.LifecycleAccepted(), accounts_module.InvalidInvitation())
     )
@@ -10860,20 +10971,55 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         invitation_token="invite-secret",  # noqa: S106 - request DTO fixture
     )
     assert (await invite_register(None, invitation, request, services)).status_code == 202
-    assert (await invite_register(None, invitation, request, services)).status_code == 400
+    await _assert_http_exception(
+        invite_register(None, invitation, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     services.registration = None
-    assert (await invite_register(None, invitation, request, services)).status_code == 400
+    await _assert_http_exception(
+        invite_register(None, invitation, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
 
     session_change = cast("Any", controllers_module._LocalSessionPasswordController.change.fn)  # noqa: SLF001
     assert (await session_change(None, password_request, request, principal, services)).status_code == 200
-    assert (await session_change(None, password_request, request, principal, services)).status_code == 400
-    assert (await session_change(None, password_request, request, anonymous, services)).status_code == 401
+    await _assert_http_exception(
+        session_change(None, password_request, request, principal, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
+    await _assert_http_exception(
+        session_change(None, password_request, request, anonymous, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
+    )
     token_change = cast("Any", controllers_module._LocalTokenPasswordController.change.fn)  # noqa: SLF001
     assert (await token_change(None, password_request, principal, services)).status_code == 200
-    assert (await token_change(None, password_request, anonymous, services)).status_code == 401
+    await _assert_http_exception(
+        token_change(None, password_request, anonymous, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
+    )
     token_only_change = cast("Any", controllers_module._LocalTokenOnlyPasswordController.change.fn)  # noqa: SLF001
-    assert (await token_only_change(None, password_request, principal, services)).status_code == 400
-    assert (await token_only_change(None, password_request, anonymous, services)).status_code == 401
+    await _assert_http_exception(
+        token_only_change(None, password_request, principal, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
+    await _assert_http_exception(
+        token_only_change(None, password_request, anonymous, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
+    )
 
     bearer_context = SecurityContext(
         session=NullSessionHandle(), evidence=(AuthenticationEvidence("bearer", "local", _JWT_NOW),)
@@ -11509,15 +11655,19 @@ async def test_generated_verification_confirm_reports_denials_with_the_client_bu
     )
     handler = cast("Any", controllers_module._LocalLifecycleController.confirm_verification.fn)  # noqa: SLF001
 
-    response = await handler(
-        None,
-        accounts_module.LocalTokenRequest(token="vt_token.secret"),  # noqa: S106 - deterministic fixture token
-        cast("Any", SimpleNamespace()),
-        services,
+    error = await _assert_http_exception(
+        handler(
+            None,
+            accounts_module.LocalTokenRequest(token="vt_token.secret"),  # noqa: S106 - deterministic fixture token
+            cast("Any", SimpleNamespace()),
+            services,
+        ),
+        TooManyRequestsException,
+        status_code=429,
+        detail="Too many requests.",
     )
 
-    assert response.status_code == 429
-    assert response.headers["Retry-After"] == "7"
+    assert error.headers["Retry-After"] == "7"
     assert captured["client_key"] == "1.1.1.1"
 
 
@@ -11601,13 +11751,17 @@ async def test_refresh_rotation_is_limited_by_client_only() -> None:
 
 
 def test_route_errors_map_denials_to_429_with_a_retry_hint() -> None:
-    limited = controllers_module._route_error(accounts_module.RateLimited(retry_after=42))  # noqa: SLF001
-    unhinted = controllers_module._route_error(accounts_module.RateLimited())  # noqa: SLF001
+    with pytest.raises(TooManyRequestsException) as limited_info:
+        controllers_module._route_error(accounts_module.RateLimited(retry_after=42))  # noqa: SLF001
+    with pytest.raises(TooManyRequestsException) as unhinted_info:
+        controllers_module._route_error(accounts_module.RateLimited())  # noqa: SLF001
 
-    assert limited.status_code == 429
-    assert limited.headers["Retry-After"] == "42"
-    assert unhinted.status_code == 429
-    assert "Retry-After" not in unhinted.headers
+    assert limited_info.value.status_code == 429
+    assert limited_info.value.detail == "Too many requests."
+    assert limited_info.value.headers["Retry-After"] == "42"
+    assert unhinted_info.value.status_code == 429
+    assert unhinted_info.value.detail == "Too many requests."
+    assert not unhinted_info.value.headers or "Retry-After" not in unhinted_info.value.headers
 
 
 @pytest.mark.anyio
@@ -11631,7 +11785,11 @@ async def test_generated_lifecycle_handlers_report_denials_instead_of_the_shared
     handler = cast("Any", getattr(controllers_module._LocalLifecycleController, handler_name).fn)  # noqa: SLF001
     identifier = accounts_module.LocalIdentifierRequest(identifier="user@example.com")
 
-    response = await handler(None, identifier, cast("Any", SimpleNamespace()), services)
+    error = await _assert_http_exception(
+        handler(None, identifier, cast("Any", SimpleNamespace()), services),
+        TooManyRequestsException,
+        status_code=429,
+        detail="Too many requests.",
+    )
 
-    assert response.status_code == 429
-    assert response.headers["Retry-After"] == "7"
+    assert error.headers["Retry-After"] == "7"
