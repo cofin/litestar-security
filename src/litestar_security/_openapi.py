@@ -581,7 +581,7 @@ class RouteCompiler(Generic[UserT]):
         # stale resolution, so drop it and let the next resolve_security() flow
         # through Litestar's own layer merge; the competing-declaration check
         # above guarantees no other ownership layer contributes to that merge.
-        route_handler._resolved_security = Empty  # noqa: SLF001 - Litestar exposes no resolution-invalidation API
+        route_handler._resolved_security = Empty  # noqa: SLF001 # pyright: ignore[reportPrivateUsage] - Litestar exposes no resolution-invalidation API
         route_handler.opt[_OPENAPI_SECURITY_OPT_KEY] = canonical
 
     @staticmethod
