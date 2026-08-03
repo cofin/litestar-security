@@ -15,6 +15,7 @@ from litestar.exceptions import (
 )
 
 import litestar_security.websocket as websocket_module
+import litestar_security.websocket._connect_tokens as connect_tokens_module
 from litestar_security.context import CredentialRestrictions, NullSessionHandle, Principal, SecurityContext
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,
@@ -543,9 +544,9 @@ def test_issued_connect_token_rejects_noncanonical_proofs(value: object) -> None
 
 def test_private_connect_token_encoding_defenses_reject_invalid_values() -> None:
     with pytest.raises(ValueError, match="entropy"):
-        websocket_module._encode_connect_token_segment(bytearray(16))  # type: ignore[attr-defined,arg-type]  # noqa: SLF001
+        connect_tokens_module._encode_connect_token_segment(bytearray(16))  # type: ignore[attr-defined,arg-type]  # noqa: SLF001
     assert (
-        websocket_module._decode_connect_token_segment(  # type: ignore[attr-defined]  # noqa: SLF001
+        connect_tokens_module._decode_connect_token_segment(  # type: ignore[attr-defined]  # noqa: SLF001
             "a" * 21, expected_bytes=16, expected_characters=22
         )
         is None
