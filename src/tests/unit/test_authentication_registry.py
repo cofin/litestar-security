@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from math import inf, nan
 from threading import Event as ThreadEvent
 from threading import Lock as ThreadLock
+from threading import Thread
 from time import perf_counter, perf_counter_ns, sleep
 from types import SimpleNamespace
 from typing import Any, cast
@@ -22,6 +23,7 @@ import jwt
 import pyotp
 import pytest
 from anyio import CancelScope, CapacityLimiter, Event, create_task_group, fail_after, get_cancelled_exc_class, to_thread
+from anyio import run as anyio_run
 from anyio.lowlevel import checkpoint
 from argon2 import PasswordHasher as Argon2Engine
 from argon2 import extract_parameters as extract_argon2_parameters
@@ -38,6 +40,7 @@ from litestar.exceptions import (
     TooManyRequestsException,
 )
 from litestar.openapi.spec import SecurityScheme
+from litestar.stores.base import Store
 from litestar.stores.memory import MemoryStore
 
 import litestar_security.accounts as accounts_module
@@ -12673,6 +12676,16 @@ def _memory_limiter(**kwargs: Any) -> Any:
     return accounts_module.StoreRateLimiter(store=MemoryStore(), **kwargs)
 
 
+class _InterleavingStore(MemoryStore):
+    """Yield after each rate-limit read to expose read-modify-write races."""
+
+    async def get(self, key: str, renew_for: int | timedelta | None = None) -> bytes | None:
+        """Read one counter, then let a competing acquire run before its write."""
+        value = await super().get(key, renew_for)
+        await checkpoint()
+        return value
+
+
 @pytest.mark.parametrize(
     ("limit", "window"),
     [
@@ -12852,6 +12865,168 @@ async def test_store_rate_limiter_denies_after_the_window_budget_and_recovers_ne
 
     moment[0] = moment[0] + timedelta(minutes=5)
     assert (await limiter.acquire(request)).allowed
+
+
+@pytest.mark.anyio
+async def test_store_rate_limiter_serializes_concurrent_single_bucket_acquires() -> None:
+    limiter = accounts_module.StoreRateLimiter(
+        policies={"concurrent": accounts_module.RateLimitPolicy(limit=5, window=timedelta(minutes=1))},
+        store=_InterleavingStore(),
+    )
+    request = accounts_module.RateLimitRequest(operation="concurrent", client_key="shared")
+    decisions: list[accounts_module.RateLimitDecision] = []
+
+    async def acquire() -> None:
+        decisions.append(await limiter.acquire(request))
+
+    async with create_task_group() as task_group:
+        for _ in range(20):
+            task_group.start_soon(acquire)
+
+    assert sum(decision.allowed for decision in decisions) == 5
+
+
+@pytest.mark.anyio
+async def test_store_rate_limiter_serializes_concurrent_shared_store_acquires() -> None:
+    store = _InterleavingStore()
+    policies = {"concurrent": accounts_module.RateLimitPolicy(limit=5, window=timedelta(minutes=1))}
+    first_limiter = accounts_module.StoreRateLimiter(policies=policies, store=store)
+    second_limiter = accounts_module.StoreRateLimiter(policies=policies, store=store)
+    request = accounts_module.RateLimitRequest(operation="concurrent", client_key="shared")
+    decisions: list[accounts_module.RateLimitDecision] = []
+
+    async def acquire(limiter: accounts_module.StoreRateLimiter) -> None:
+        decisions.append(await limiter.acquire(request))
+
+    async with create_task_group() as task_group:
+        for index in range(20):
+            task_group.start_soon(acquire, first_limiter if index % 2 else second_limiter)
+
+    assert sum(decision.allowed for decision in decisions) == 5
+
+
+@pytest.mark.anyio
+async def test_process_rate_limit_lock_releases_after_cancellation() -> None:
+    lock = ThreadLock()
+    entered = Event()
+    blocked = Event()
+
+    async def hold() -> None:
+        async with rate_limits_module._hold_process_rate_limit_lock(lock):  # noqa: SLF001 - verify cleanup
+            entered.set()
+            await blocked.wait()
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(hold)
+        await entered.wait()
+        task_group.cancel_scope.cancel()
+
+    assert lock.acquire(blocking=False)
+    lock.release()
+
+
+@pytest.mark.anyio
+async def test_process_rate_limit_lock_cancels_promptly_while_waiting() -> None:
+    lock = ThreadLock()
+    assert lock.acquire(blocking=False)
+    started = Event()
+    entered = Event()
+
+    async def wait_for_lock() -> None:
+        started.set()
+        async with rate_limits_module._hold_process_rate_limit_lock(lock):  # noqa: SLF001 - cancellation regression
+            entered.set()
+
+    with fail_after(1):
+        async with create_task_group() as task_group:
+            task_group.start_soon(wait_for_lock)
+            await started.wait()
+            task_group.cancel_scope.cancel()
+
+    assert not entered.is_set()
+    assert not lock.acquire(blocking=False)
+    lock.release()
+
+
+def test_process_rate_limit_lock_supports_separate_event_loop_threads() -> None:
+    lock = ThreadLock()
+    first_entered = ThreadEvent()
+    second_started = ThreadEvent()
+    second_entered = ThreadEvent()
+    release_first = ThreadEvent()
+    failures: list[BaseException] = []
+
+    async def first() -> None:
+        async with rate_limits_module._hold_process_rate_limit_lock(lock):  # noqa: SLF001 - cross-loop regression
+            first_entered.set()
+            await to_thread.run_sync(release_first.wait)
+
+    async def second() -> None:
+        second_started.set()
+        async with rate_limits_module._hold_process_rate_limit_lock(lock):  # noqa: SLF001 - cross-loop regression
+            second_entered.set()
+
+    def run(target: Callable[[], Awaitable[None]]) -> None:
+        try:
+            anyio_run(target)
+        except BaseException as error:  # noqa: BLE001 - propagate thread failures through the parent test
+            failures.append(error)
+
+    first_thread = Thread(target=run, args=(first,), daemon=True)
+    second_thread = Thread(target=run, args=(second,), daemon=True)
+    try:
+        first_thread.start()
+        assert first_entered.wait(timeout=2)
+        second_thread.start()
+        assert second_started.wait(timeout=2)
+        assert not second_entered.is_set()
+    finally:
+        release_first.set()
+        first_thread.join(timeout=2)
+        second_thread.join(timeout=2)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert not failures
+    assert second_entered.is_set()
+
+
+@pytest.mark.anyio
+async def test_store_rate_limiter_serializes_each_multi_bucket_acquire() -> None:
+    class ObservingLimiter(accounts_module.StoreRateLimiter):
+        async def _consume(  # noqa: PLR0913 - observe each fully named rate-limit bucket argument
+            self,
+            store: Store,
+            request: accounts_module.RateLimitRequest,
+            policy: accounts_module.RateLimitPolicy,
+            *,
+            kind: str,
+            value: str,
+            now: datetime,
+        ) -> int | None:
+            consumed.append(value)
+            return await super()._consume(store, request, policy, kind=kind, value=value, now=now)
+
+    consumed: list[str] = []
+    limiter = ObservingLimiter(
+        policies={"concurrent": accounts_module.RateLimitPolicy(limit=5, window=timedelta(minutes=1))},
+        store=_InterleavingStore(),
+    )
+    first = accounts_module.RateLimitRequest(
+        operation="concurrent", client_key="client-a", subject_digest="subject-a"
+    )
+    second = accounts_module.RateLimitRequest(
+        operation="concurrent", client_key="client-b", subject_digest="subject-b"
+    )
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(limiter.acquire, first)
+        task_group.start_soon(limiter.acquire, second)
+
+    assert consumed in (
+        ["client-a", "subject-a", "client-b", "subject-b"],
+        ["client-b", "subject-b", "client-a", "subject-a"],
+    )
 
 
 @pytest.mark.anyio

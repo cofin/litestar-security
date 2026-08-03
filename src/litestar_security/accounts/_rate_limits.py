@@ -14,19 +14,24 @@ bucket ever receives a raw identifier, password, or token.
 
 :class:`RateLimiter` is a port. :class:`StoreRateLimiter` is the bundled
 implementation over a native Litestar :class:`~litestar.stores.base.Store`,
-resolved by name from the application store registry, so pointing that name at a
-shared backend makes limiting correct across worker processes.
+resolved by name from the application store registry. A shared backend shares
+bucket values, but the native store contract has no compare-and-increment, so
+the bundled read-modify-write implementation is exact only within one process.
 """
 
+from _thread import LockType
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha256
 from hmac import digest as hmac_digest
 from logging import getLogger
 from math import ceil
+from threading import Lock
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from anyio import sleep
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.stores.base import Store
 
@@ -69,7 +74,7 @@ from litestar_security.accounts._records import (
 from litestar_security.authentication import VerificationUnavailable
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import AsyncGenerator, Callable, Mapping
 
 
 __all__ = (
@@ -95,6 +100,18 @@ _MAXIMUM_WINDOW = timedelta(days=1)
 _MAXIMUM_LIMIT = 1_000_000
 _MAXIMUM_COST = 1_000
 _MAXIMUM_KEY_TEXT = 512
+_PROCESS_LOCK_POLL_INTERVAL = 0.001
+_PROCESS_RATE_LIMIT_LOCK: LockType = Lock()
+
+
+@asynccontextmanager
+async def _hold_process_rate_limit_lock(lock: LockType) -> "AsyncGenerator[None, None]":
+    while not lock.acquire(blocking=False):  # noqa: ASYNC110 - a threading lock has no async notification
+        await sleep(_PROCESS_LOCK_POLL_INTERVAL)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,9 +251,11 @@ class RateLimited:
 class RateLimiter(Protocol):
     """Application-owned budget for one abuse-prone operation.
 
-    Implementations should consume atomically where their backend allows it. A
-    limiter that raises is treated as unavailable and fails closed, so raising is
-    the correct response to a backend outage.
+    Implementations MUST consume atomically: ``N`` concurrent
+    :meth:`acquire` calls against the same bucket under a policy limit of ``k``
+    must admit exactly ``k``, never more or fewer. A limiter that raises is
+    treated as unavailable and fails closed, so raising is the correct response
+    to a backend outage.
     """
 
     async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
@@ -277,14 +296,13 @@ class StoreRateLimiter:
     """Fixed-window limiter over a native Litestar store.
 
     The store is resolved by name from the application registry during startup,
-    so an unconfigured name yields Litestar's in-memory default and registering a
-    shared backend under the same name makes counting correct across worker
-    processes.
-
-    Counting is read-modify-write rather than atomic, because the native store
-    contract exposes no compare-and-increment. Concurrent attempts can therefore
-    undercount slightly; supply a limiter backed by an atomic primitive through
-    :class:`RateLimiter` where exactness matters.
+    so an unconfigured name yields Litestar's in-memory default. A process-wide
+    lock serializes every bundled limiter instance's read-modify-write operation,
+    making counting exact within one process. Native stores expose no
+    compare-and-increment, however, so a shared backend is not atomic across
+    worker processes or machines. Multi-process deployments must supply a
+    :class:`RateLimiter` backed by an atomic primitive and verify it with
+    :func:`litestar_security.testing.assert_rate_limiter_conformance`.
 
     Args:
         policies: Budget per operation. Operations absent from the mapping are
@@ -298,6 +316,9 @@ class StoreRateLimiter:
     store_name: str = RATE_LIMIT_STORE_NAME
     store: Store | None = field(default=None, repr=False)
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
+    _lock: LockType = field(
+        default_factory=lambda: _PROCESS_RATE_LIMIT_LOCK, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         """Validate the store name, policies, and clock, then freeze the mapping."""
@@ -322,8 +343,9 @@ class StoreRateLimiter:
         """Attach the store resolved from the application registry at startup.
 
         Args:
-            store: The store to count in. Point its registered name at a shared
-                backend to make counting correct across worker processes.
+            store: The store to count in. A shared backend shares bucket values,
+                but cannot make this read-modify-write implementation atomic
+                across worker processes.
 
         Raises:
             ImproperlyConfiguredException: If the value is not a Litestar store.
@@ -337,9 +359,11 @@ class StoreRateLimiter:
     async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
         """Consume one attempt from every configured bucket for the operation.
 
-        Counting is a read-modify-write cycle, because the native store contract
-        exposes no compare-and-increment, so concurrent attempts can undercount
-        slightly.
+        A process-wide lock makes the complete multi-bucket accounting operation
+        exact across bundled limiter instances in this process. The underlying
+        store has no compare-and-increment, so deployments spanning multiple
+        processes or machines must provide an atomic :class:`RateLimiter` and
+        verify it with :func:`litestar_security.testing.assert_rate_limiter_conformance`.
 
         Args:
             request: The operation, buckets, and cost to charge.
@@ -359,17 +383,18 @@ class StoreRateLimiter:
         if store is None:
             msg = "Rate limit store has not been resolved"
             raise RuntimeError(msg)
-        now = self.clock()
-        retry_after = 0
-        for kind, value in (("c", request.client_key), ("s", request.subject_digest)):
-            if value is None:
-                continue
-            exhausted = await self._consume(store, request, policy, kind=kind, value=value, now=now)
-            if exhausted is not None:
-                retry_after = max(retry_after, exhausted)
-        if retry_after:
-            return RateLimitDecision(allowed=False, retry_after=retry_after)
-        return RateLimitDecision(allowed=True)
+        async with _hold_process_rate_limit_lock(self._lock):
+            now = self.clock()
+            retry_after = 0
+            for kind, value in (("c", request.client_key), ("s", request.subject_digest)):
+                if value is None:
+                    continue
+                exhausted = await self._consume(store, request, policy, kind=kind, value=value, now=now)
+                if exhausted is not None:
+                    retry_after = max(retry_after, exhausted)
+            if retry_after:
+                return RateLimitDecision(allowed=False, retry_after=retry_after)
+            return RateLimitDecision(allowed=True)
 
     async def _consume(  # noqa: PLR0913 - one bucket read/write; every input is named
         self, store: Store, request: RateLimitRequest, policy: RateLimitPolicy, *, kind: str, value: str, now: datetime
