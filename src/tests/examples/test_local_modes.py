@@ -27,8 +27,6 @@ from litestar_security.accounts import (
 from litestar_security.testing import InMemoryMFALoginChallengeStore, InMemoryMFAStore
 
 if TYPE_CHECKING:
-    from examples.support import ExampleAccountStore
-
     from litestar_security import SecurityPlugin
 
 
@@ -154,7 +152,6 @@ def test_local_session_example_completes_registration_login_and_logout(monkeypat
     plugin = cast("SecurityPlugin[object]", app.plugins.init[0])
     local_auth = plugin.config.local_auth
     assert local_auth is not None
-    store = cast("ExampleAccountStore", local_auth.accounts)
     csrf = app.csrf_config
     assert csrf is not None
     password = "example password 123"  # noqa: S105 - local example credential
@@ -166,8 +163,6 @@ def test_local_session_example_completes_registration_login_and_logout(monkeypat
             "/auth/register", json={"identifier": "user@example.com", "password": password, "display_name": "User"}
         )
         assert registration.status_code == 202
-        assert store.verification_token is not None
-        assert client.post("/auth/verification/confirm", json={"token": store.verification_token}).status_code == 200
         assert (
             client.post(
                 "/auth/login", json={"identifier": "user@example.com", "password": password}, headers=csrf_headers
@@ -185,7 +180,6 @@ def test_local_token_example_rotates_and_revokes_refresh_token(monkeypatch: pyte
     plugin = cast("SecurityPlugin[object]", app.plugins.init[0])
     local_auth = plugin.config.local_auth
     assert local_auth is not None
-    store = cast("ExampleAccountStore", local_auth.accounts)
     password = "example password 123"  # noqa: S105 - local example credential
 
     with TestClient(app) as client:
@@ -193,8 +187,6 @@ def test_local_token_example_rotates_and_revokes_refresh_token(monkeypatch: pyte
             client.post("/auth/register", json={"identifier": "user@example.com", "password": password}).status_code
             == 202
         )
-        assert store.verification_token is not None
-        assert client.post("/auth/verification/confirm", json={"token": store.verification_token}).status_code == 200
         login = client.post("/auth/token", json={"identifier": "user@example.com", "password": password})
         assert login.status_code == 200
         first = login.json()
@@ -205,6 +197,11 @@ def test_local_token_example_rotates_and_revokes_refresh_token(monkeypatch: pyte
         )
         assert rotated.status_code == 200
         second = rotated.json()
+        replayed = client.post(
+            "/auth/token/refresh",
+            json={"token": first["refresh_token"]},
+            headers={"Idempotency-Key": "bWlpaWlpaWlpaWlpaWlpaQ"},
+        )
         revoked = client.post(
             "/auth/token/revoke",
             json={"token": second["refresh_token"]},
@@ -212,4 +209,4 @@ def test_local_token_example_rotates_and_revokes_refresh_token(monkeypatch: pyte
         )
 
     assert revoked.status_code == 200
-    assert any(state.revoked for state in store.refresh_tokens.values())
+    assert replayed.status_code == 400

@@ -11,8 +11,6 @@ from litestar.exceptions import WebSocketDisconnect
 from litestar.testing import TestClient
 
 if TYPE_CHECKING:
-    from examples.support import ExampleAccountStore
-
     from litestar_security import SecurityPlugin
 
 
@@ -22,7 +20,6 @@ def test_websocket_mode_accepts_exact_origin_session_and_rejects_url_bearer(monk
     plugin = cast("SecurityPlugin[object]", app.plugins.init[0])
     local_auth = plugin.config.local_auth
     assert local_auth is not None
-    store = cast("ExampleAccountStore", local_auth.accounts)
     csrf = app.csrf_config
     assert csrf is not None
     assert isinstance(csrf, CSRFConfig)
@@ -35,8 +32,6 @@ def test_websocket_mode_accepts_exact_origin_session_and_rejects_url_bearer(monk
             client.post("/auth/register", json={"identifier": "user@example.com", "password": password}).status_code
             == 202
         )
-        assert store.verification_token is not None
-        assert client.post("/auth/verification/confirm", json={"token": store.verification_token}).status_code == 200
         assert (
             client.post(
                 "/auth/login", json={"identifier": "user@example.com", "password": password}, headers=csrf_headers
@@ -44,7 +39,7 @@ def test_websocket_mode_accepts_exact_origin_session_and_rejects_url_bearer(monk
             == 200
         )
         with client.websocket_connect("/ws", headers={"Origin": "http://testserver.local"}) as socket:
-            assert socket.receive_json() == {"id": "account-1"}
+            assert socket.receive_json() == {"id": "account-0001"}
 
     anonymous_app = create_app()
     with (
