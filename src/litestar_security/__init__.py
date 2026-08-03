@@ -43,6 +43,7 @@ from litestar_security.context import (
     SessionUnavailableError,
     resolve_authorization,
 )
+from litestar_security.controllers import PublicController, SecureController
 from litestar_security.guards import (
     AssuranceRequirement,
     AssuranceTrait,
@@ -130,8 +131,10 @@ __all__ = (
     "PasskeyConfig",
     "PresentedCredential",
     "Principal",
+    "PublicController",
     "RequestAuthenticator",
     "ResourcePermission",
+    "SecureController",
     "SecurityConfig",
     "SecurityContext",
     "SecurityHeadersConfig",

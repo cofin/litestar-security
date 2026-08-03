@@ -10,11 +10,12 @@ from importlib.metadata import requires
 from pathlib import Path
 from subprocess import run
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import msgspec
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from litestar import Controller
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, PermissionDeniedException
 from litestar.stores.memory import MemoryStore
 from litestar.stores.registry import StoreRegistry
@@ -25,7 +26,9 @@ import litestar_security.accounts as accounts_module
 import litestar_security.accounts._purpose_tokens as purpose_tokens_module
 import litestar_security.accounts._receipts as receipts_module
 import litestar_security.authentication as authentication_module
+from litestar_security import PublicController, SecureController
 from litestar_security.accounts import AssuranceRequirement, AssuranceTrait
+from litestar_security.authentication import public, required
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -151,8 +154,10 @@ _PUBLIC_API = (
     "PasskeyConfig",
     "PresentedCredential",
     "Principal",
+    "PublicController",
     "RequestAuthenticator",
     "ResourcePermission",
+    "SecureController",
     "SecurityConfig",
     "SecurityContext",
     "SecurityHeadersConfig",
@@ -872,6 +877,56 @@ def test_package_root_exports_only_foundational_contract() -> None:
         "SecurityRuntimePlan",
     }.intersection(authentication_module.__all__)
     assert openapi_module.__all__ == ()
+
+
+def test_typed_controllers_compile_auth_at_class_definition_time() -> None:
+    """Typed controllers preserve native opt layering without constructing an app."""
+
+    class Basic(SecureController):
+        pass
+
+    class WithExtraOpt(SecureController):
+        opt: ClassVar = {"csrf_required": True}  # type: ignore[misc]
+
+    class Grandchild(SecureController):
+        auth: ClassVar = required("bearer")
+
+    class Inherited(Grandchild):
+        pass
+
+    class Redeclared(Grandchild):
+        auth: ClassVar = required("session")
+
+    assert Basic.opt == {"auth": SecureController.auth}
+    assert WithExtraOpt.opt == {"csrf_required": True, "auth": SecureController.auth}
+    assert Inherited.opt == {"auth": required("bearer")}
+    assert Redeclared.opt == {"auth": required("session")}
+    assert PublicController.opt == {"auth": public()}
+
+
+def test_typed_controllers_reject_own_explicit_opt_auth() -> None:
+    """An own ``opt['auth']`` is ambiguous with the typed class attribute."""
+
+    with pytest.raises(ImproperlyConfiguredException, match="declares both"):
+
+        class WithExplicitOpt(SecureController):
+            opt: ClassVar = {"auth": required("bearer")}  # type: ignore[misc]
+
+    with pytest.raises(ImproperlyConfiguredException, match="declares both"):
+
+        class WithBoth(SecureController):
+            auth: ClassVar = required("session")
+            opt: ClassVar = {"auth": required("bearer")}  # type: ignore[misc]
+
+
+def test_plain_controller_auth_attribute_remains_inert() -> None:
+    """The helper must not alter ordinary Litestar controller class behavior."""
+
+    class Plain(Controller):
+        auth: ClassVar = authentication_module.required("bearer")
+
+    assert "opt" not in Plain.__dict__
+    assert Plain.auth == authentication_module.required("bearer")
 
 
 def test_provider_package_declares_crypto_dependency_without_duplicates() -> None:
