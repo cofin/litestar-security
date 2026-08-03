@@ -177,15 +177,22 @@ class LoginMethod:
 
 @dataclass(frozen=True, slots=True)
 class PasswordCredentialState:
-    """Atomic password hash and epoch snapshot used for reauthentication."""
+    """Atomic password hash, account-state, and epoch snapshot for reauthentication."""
 
     password_hash: str = field(repr=False)
     security_epoch: int
+    active: bool
+    verified: bool
 
     def __post_init__(self) -> None:
-        """Require one encoded hash bound to a strict current epoch."""
-        if not strict_text(self.password_hash) or not valid_security_epoch(self.security_epoch):
-            msg = "Password credential state requires a hash and valid security epoch"
+        """Require one encoded hash bound to an eligible account and strict current epoch."""
+        if (
+            not strict_text(self.password_hash)
+            or not valid_security_epoch(self.security_epoch)
+            or self.active.__class__ is not bool
+            or self.verified.__class__ is not bool
+        ):
+            msg = "Password credential state requires a hash, valid security epoch, and boolean account state"
             raise ValueError(msg)
 
 

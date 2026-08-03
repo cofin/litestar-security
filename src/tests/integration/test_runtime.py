@@ -865,7 +865,12 @@ class _GeneratedRouteAccounts:
         account = await self.get_by_id(account_id)
         if account is None or self.password_hash is None:
             return None
-        return PasswordCredentialState(password_hash=self.password_hash, security_epoch=account.security_epoch)
+        return PasswordCredentialState(
+            password_hash=self.password_hash,
+            security_epoch=account.security_epoch,
+            active=account.active,
+            verified=account.verified,
+        )
 
     async def compare_and_replace_password(
         self, account_id: str, expected_hash: str, password_hash: str, **_kwargs: object

@@ -123,16 +123,18 @@ class PasswordCredentialStore(Protocol):
     """Store password credentials through atomic security operations."""
 
     async def get_password_state(self, account_id: str) -> PasswordCredentialState | None:
-        """Load one atomic encoded-password and security-epoch snapshot.
+        """Load one atomic password hash, account-state, and security-epoch snapshot.
 
-        Read both values in one operation. A hash paired with an epoch read
-        separately can describe a state that never existed.
+        Read the hash, active/verified projection, and epoch in one operation.
+        Values read separately can describe a state that never existed during
+        a concurrent deactivation or verification-state change.
 
         Args:
             account_id: The account whose credential state to read.
 
         Returns:
-            The paired hash and epoch, or ``None`` when the account has no password.
+            The paired hash, account-state projection, and epoch, or ``None``
+            when the account has no password.
         """
         ...  # pragma: no cover
 

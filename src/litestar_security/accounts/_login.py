@@ -124,6 +124,8 @@ class PasswordReauthenticationService:
             if result.status is PasswordVerificationStatus.MALFORMED:
                 await self._emit_malformed(normalized_account_id, authenticated_at)
             return InvalidCredentials()
+        if not state.active or not state.verified:
+            return InvalidCredentials()
         if result.replacement_hash is not None and not await self._rehash(
             normalized_account_id, encoded_hash, result.replacement_hash, authenticated_at
         ):

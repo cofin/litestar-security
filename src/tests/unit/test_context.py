@@ -1291,7 +1291,7 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
             expires_at=now + timedelta(hours=1),
         ),
         accounts_module.RegistrationCommand(normalized_identifier="user@example.com"),
-        accounts_module.PasswordCredentialState("encoded-secret-hash", 1),
+        accounts_module.PasswordCredentialState("encoded-secret-hash", 1, active=True, verified=True),
         accounts_module.PasswordReauthenticationProof(
             account_id=account.account_id, security_epoch=1, authenticated_at=now, expires_at=now + timedelta(minutes=5)
         ),
@@ -1839,7 +1839,7 @@ def test_account_password_session_and_refresh_contracts_share_one_strict_epoch_d
             verified=True,
             security_epoch=epoch,
         ),
-        lambda: accounts_module.PasswordCredentialState("encoded-hash", epoch),
+        lambda: accounts_module.PasswordCredentialState("encoded-hash", epoch, active=True, verified=True),
         lambda: accounts_module.PasswordReauthenticationProof("account-1", epoch, now, now + timedelta(minutes=5)),
         lambda: accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, epoch),
         lambda: accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.RESET, "account-1", epoch),
@@ -1890,6 +1890,15 @@ def test_local_account_requires_exact_boolean_state(field_name: str, value: obje
 
     with pytest.raises(ValueError, match="Local account"):
         accounts_module.LocalAccount(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(("field_name", "value"), [("active", 1), ("verified", "false")])
+def test_password_credential_state_requires_exact_boolean_account_state(field_name: str, value: object) -> None:
+    values = {"password_hash": "encoded-hash", "security_epoch": 1, "active": True, "verified": True}
+    values[field_name] = value
+
+    with pytest.raises(ValueError, match="boolean account state"):
+        accounts_module.PasswordCredentialState(**values)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

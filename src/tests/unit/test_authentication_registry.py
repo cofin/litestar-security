@@ -4812,6 +4812,8 @@ class _PasswordStore:
         fail_bump: bool = False,
         replace_result: object = True,
         security_epoch: int = 1,
+        active: bool = True,
+        verified: bool = True,
         bump_result: accounts_module.PasswordChangeResult | None = None,
     ) -> None:
         self.encoded_hash = encoded_hash
@@ -4820,6 +4822,8 @@ class _PasswordStore:
         self.fail_bump = fail_bump
         self.replace_result = replace_result
         self.security_epoch = security_epoch
+        self.active = active
+        self.verified = verified
         self.bump_result = bump_result
         self.replacements: list[tuple[str, str, str, accounts_module.SecurityEvent]] = []
         self.bump_calls: list[tuple[str, str, int, accounts_module.SecurityEvent]] = []
@@ -4829,7 +4833,9 @@ class _PasswordStore:
         if self.fail_read:
             raise OSError
         return (
-            accounts_module.PasswordCredentialState(self.encoded_hash, self.security_epoch)
+            accounts_module.PasswordCredentialState(
+                self.encoded_hash, self.security_epoch, active=self.active, verified=self.verified
+            )
             if self.encoded_hash is not None
             else None
         )
@@ -4937,6 +4943,33 @@ async def test_password_reauthentication_collapses_credential_failures_without_r
     outcome = await service.verify("account-1", "presented secret", now=_JWT_NOW)
 
     assert isinstance(outcome, InvalidCredentials)
+    assert store.replacements == []
+
+
+@pytest.mark.parametrize(
+    ("active", "verified", "outcome_type"),
+    [
+        (False, True, InvalidCredentials),
+        (True, False, InvalidCredentials),
+        (True, True, accounts_module.PasswordReauthenticationProof),
+    ],
+)
+@pytest.mark.anyio
+async def test_password_reauthentication_rejects_inactive_or_unverified_accounts_after_hash_verification(
+    active: bool,  # noqa: FBT001 - parametrized account-state matrix
+    verified: bool,  # noqa: FBT001 - parametrized account-state matrix
+    outcome_type: type[object],
+) -> None:
+    store = _PasswordStore(active=active, verified=verified)
+    hasher = _PasswordHasher(
+        accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.VERIFIED)
+    )
+    service = accounts_module.PasswordReauthenticationService(accounts=store, hasher=hasher)
+
+    outcome = await service.verify("account-1", "presented secret", now=_JWT_NOW)
+
+    assert isinstance(outcome, outcome_type)
+    assert hasher.calls == [("current-hash", "presented secret")]
     assert store.replacements == []
 
 
