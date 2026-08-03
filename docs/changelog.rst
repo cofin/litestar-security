@@ -7,6 +7,8 @@ Unreleased
 Added
 ~~~~~
 
+* Typed ``SecureController`` / ``PublicController`` base classes compile their
+  ``auth`` ``ClassVar`` into native ``opt``.
 * ``LocalKeyRing`` can mint and verify bounded, purpose-specific capability
   JWTs for application-owned flows such as signed download URLs.
 * ``MFAConfig.require_at_login`` adds password-login MFA completion routes:
