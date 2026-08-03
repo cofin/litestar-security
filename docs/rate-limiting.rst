@@ -112,15 +112,16 @@ closed** with ``503`` — an outage must not silently remove the limit.
 
 Both statuses appear in the generated OpenAPI document.
 
-Making it correct across processes
-==================================
+Choosing a limiter for your deployment
+=======================================
 
 The bundled limiter holds a store *name*, not a store, and resolves it from the
 application store registry at startup. An unregistered name yields Litestar's
 in-memory default, which is correct for a single process and multiplies by your
 worker count if you do not change it.
 
-Point the name at a shared backend and counting becomes correct everywhere:
+Point the name at a shared backend when every process must see the same bucket
+values:
 
 .. code-block:: python
 
@@ -134,10 +135,13 @@ Point the name at a shared backend and counting becomes correct everywhere:
        stores={RATE_LIMIT_STORE_NAME: RedisStore.with_client("redis://localhost:6379")},
    )
 
-The bundled limiter counts with a read-modify-write cycle, because the native
-store contract exposes no compare-and-increment. Concurrent attempts can
-therefore undercount slightly. Where exactness matters, supply a limiter backed
-by an atomic primitive.
+``StoreRateLimiter`` is exact across its instances and event loops *within one
+process*: it serializes its complete read-modify-write operation with a
+process-wide lock. A shared store makes bucket values visible to other
+processes, but it cannot make that cycle atomic between processes or machines.
+For a multi-process deployment, provide an application limiter backed by an
+atomic backend primitive, then validate it with
+:func:`~litestar_security.testing.assert_rate_limiter_conformance`.
 
 Trusting the right client key
 =============================
@@ -147,27 +151,39 @@ honour ``X-Forwarded-For``. Those headers are attacker-controlled unless a proxy
 you operate rewrote them, so trusting them by default would let anyone mint
 unlimited buckets by varying one header.
 
-Behind a proxy, supply an extractor that knows which hops you trust:
+Behind a proxy, use :func:`~litestar_security.accounts.forwarded_client_key`
+and configure the exact CIDR ranges and number of forwarding hops that you
+operate:
 
 .. code-block:: python
 
-   from litestar_security.accounts import LocalAuth
-
-
-   def client_key(connection):
-       forwarded = connection.headers.get("X-Forwarded-For")
-       return forwarded.split(",")[0].strip() if forwarded else None
+   from litestar_security.accounts import LocalAuth, forwarded_client_key
 
 
    local_auth = LocalAuth.session(
        accounts=accounts,
        secrets=secrets,
        binding=binding,
-       client_key=client_key,
+       client_key=forwarded_client_key(
+           trusted_proxies={"198.51.100.0/28", "2001:db8:1234:5::/64"},
+           max_hops=2,
+       ),
    )
 
-Only do this when a proxy you control overwrites the header. Returning ``None``
-disables the client bucket and leaves the identifier bucket in force.
+Only do this when a proxy you control overwrites the header. The extractor
+accepts forwarding data only from a directly connected address in those CIDRs,
+then walks no more than ``max_hops`` entries from right to left and returns the
+first address outside the trusted proxy ranges. An untrusted direct peer, a
+missing or malformed header, or a chain whose inspected hops are all trusted
+falls back to the direct peer.
+
+Do not configure a broad network or too many hops merely to make a deployment
+work. A shared-NAT proxy or an over-broad forwarding trust boundary can collapse
+many unrelated clients into one client bucket, causing collateral ``429``
+responses. Conversely, when ``client_key`` is absent or returns ``None`` there
+is no client bucket at all; client-only operations lose their client limit and
+combined operations retain only their identifier/account bucket. Do not replace
+an unavailable client key with a shared sentinel value.
 
 Supplying your own limiter
 ==========================

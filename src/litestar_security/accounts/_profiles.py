@@ -554,6 +554,8 @@ class LocalAuth:
             events: The sink offered every observational security event.
             client_key: Derive the rate-limit client bucket from a connection. The
                 default trusts only the peer address, never a forwarding header.
+                A misconfigured proxy-aware extractor can collapse unrelated
+                clients into one bucket or return ``None`` and remove the bucket.
 
         Returns:
             A configuration that generates session routes only.
@@ -613,6 +615,8 @@ class LocalAuth:
             events: The sink offered every observational security event.
             client_key: Derive the rate-limit client bucket from a connection. The
                 default trusts only the peer address, never a forwarding header.
+                A misconfigured proxy-aware extractor can collapse unrelated
+                clients into one bucket or return ``None`` and remove the bucket.
 
         Returns:
             A configuration that generates token routes only.
@@ -682,6 +686,8 @@ class LocalAuth:
             events: The sink offered every observational security event.
             client_key: Derive the rate-limit client bucket from a connection. The
                 default trusts only the peer address, never a forwarding header.
+                A misconfigured proxy-aware extractor can collapse unrelated
+                clients into one bucket or return ``None`` and remove the bucket.
 
         Returns:
             A configuration that generates both session and token routes. Password
