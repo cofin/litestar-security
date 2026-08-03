@@ -53,21 +53,48 @@ What is limited
    * - ``local.verification.resend``
      - 5 / hour
      - client + identifier
+   * - ``local.verification.consume``
+     - 10 / 5 min
+     - client
    * - ``local.password.reset``
      - 10 / hour
      - client
+   * - ``local.password.verify``
+     - 10 / 5 min
+     - client + account
    * - ``local.refresh.rotate``
      - 60 / 5 min
      - client
+   * - ``local.mfa.totp.remove``
+     - 5 / hour
+     - client + account
+   * - ``local.passkey.remove``
+     - 5 / hour
+     - client + account
 
 Session and token login share one ``local.login`` budget on purpose. They
 present the same credential to the same account store, so separate budgets would
 let an attacker double their allowance by alternating between ``/auth/login``
 and ``/auth/token``.
 
-Password reset and refresh rotation are keyed on the client only. The value they
-present is a token, not an identifier, and digesting it into a bucket key would
-let the limiter backend become a record of which tokens were attempted.
+Password reset, verification confirmation, and refresh rotation are keyed on
+the client only. The value they present is a token, not an identifier, and
+digesting it into a bucket key would let the limiter backend become a record of
+which tokens were attempted.
+
+``local.password.verify`` is the step-up password factor: re-verifying the
+password of an already-authenticated principal. It shares the TOTP verification
+cadence because both are second-factor checks, and it is keyed on the account so
+a stolen session cannot brute-force the password from many addresses. Factor
+and credential removal consume a budget before the step-up grant is even
+examined, so guessing at removals is bounded the same way as guessing at
+credentials.
+
+The MFA and passkey ceremonies — enrollment, verification, recovery-code
+consumption and replacement, and the registration and authentication options —
+carry budgets of their own under ``local.mfa.*`` and ``local.passkey.*``. Every
+operation the generated routes limit appears in
+:data:`~litestar_security.accounts.DEFAULT_RATE_LIMIT_POLICIES`.
 
 Responses
 =========
@@ -180,7 +207,15 @@ Tuning the budgets
        }
    )
 
-An operation absent from the mapping is not limited by that limiter.
+An operation absent from the mapping is not limited by that limiter. That is
+why the shipped default map is provably exhaustive: an import-time assertion
+requires :data:`~litestar_security.accounts.DEFAULT_RATE_LIMIT_POLICIES` to map
+exactly ``RATE_LIMITED_OPERATIONS``, the canonical set of operations the
+library's own routes hand to a limiter. A new library operation without a
+default budget fails immediately rather than shipping unlimited. When you
+replace the mapping wholesale, keep every operation you did not mean to
+unlimit — starting from ``DEFAULT_RATE_LIMIT_POLICIES`` as above preserves the
+guarantee.
 
 Audit events
 ============

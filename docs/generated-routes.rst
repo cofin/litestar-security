@@ -142,6 +142,17 @@ and registration answer ``202`` with the same body for every identifier, so a
 client cannot tell an existing account from an absent one by reading the
 response.
 
+The same guarantee extends to timing, and part of it is a store obligation.
+On recovery request and verification resend, an eligible account commits
+through :meth:`~litestar_security.accounts.RecoveryTokenStore.issue` while any
+other identifier performs one equivalent durable round trip through
+:meth:`~litestar_security.accounts.RecoveryTokenStore.issue_absent`, which must
+cost the same and commit nothing — a store that answers quickly for unknown
+accounts makes a present account measurably slower to probe. Registration
+carries the matching obligation on
+:meth:`~litestar_security.accounts.RegistrationStore.register`: a taken and a
+new identifier must cost the same.
+
 Turning them off
 ================
 
@@ -178,6 +189,13 @@ Step-up grants are short-lived, single-use values returned in JSON. The stored
 record contains only a digest and is bound to the authenticated principal,
 current security epoch, exact purpose, and current session or token transport.
 A grant for one operation cannot authorize another operation.
+
+The ``{purpose}`` path segment is deny-by-default. Every purpose a generated
+route consumes maps to an explicit allowlist of factors strong enough to
+authorize it — password or passkey re-verification, never a second submission
+of the factor being managed — and a purpose outside that map, or a factor the
+purpose does not allow, receives the same sanitized ``401`` as a wrong
+credential. An unrecognized purpose never mints a grant.
 
 All secret- and challenge-bearing responses set ``Cache-Control: no-store`` and
 ``Pragma: no-cache``. Generated schemas describe the typed JSON models without
