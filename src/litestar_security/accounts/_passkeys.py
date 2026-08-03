@@ -604,7 +604,7 @@ class PyWebAuthnVerifier:
                 expected_rp_id=cast("str", kwargs["rp_id"]),
                 expected_origin=list(cast("Sequence[str]", kwargs["origins"])),
                 credential_public_key=cast("bytes", kwargs["public_key"]),
-                credential_current_sign_count=0,
+                credential_current_sign_count=cast("int", kwargs["current_sign_count"]),
                 require_user_verification=cast("bool", kwargs["require_user_verification"]),
             )
         except Exception as exc:
@@ -834,6 +834,7 @@ class PasskeyService:
                     rp_id=record.rp_id,
                     origins=record.origins,
                     public_key=credential.public_key,
+                    current_sign_count=credential.sign_count,
                     require_user_verification=record.user_verification is UserVerification.REQUIRED,
                 )
             )
@@ -843,13 +844,11 @@ class PasskeyService:
                 or (not verified.backup_eligible and verified.backup_state)
             ):
                 return InvalidCredentials()
-            clone_risk = (
-                credential.sign_count > 0 and verified.sign_count > 0 and verified.sign_count <= credential.sign_count
-            )
+            clone_risk = credential.sign_count > 0 and verified.sign_count <= credential.sign_count
             result = await self.store.record_assertion(
                 credential.credential_id,
                 expected_version=credential.version,
-                sign_count=verified.sign_count,
+                sign_count=max(credential.sign_count, verified.sign_count),
                 backup_eligible=verified.backup_eligible,
                 backup_state=verified.backup_state,
                 clone_risk=clone_risk,

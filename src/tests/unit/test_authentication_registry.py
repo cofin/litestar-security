@@ -9489,6 +9489,7 @@ class _WebAuthnVerifier:
         self.sign_count = sign_count
         self.backup_eligible = backup_eligible
         self.backup_state = backup_state
+        self.current_sign_counts: list[object] = []
 
     def registration_options(self, **kwargs: object) -> str:
         assert kwargs["challenge"] == self.challenge
@@ -9527,7 +9528,7 @@ class _WebAuthnVerifier:
         )
 
     def verify_authentication(self, **kwargs: object) -> accounts_module.AuthenticationVerification:
-        del kwargs
+        self.current_sign_counts.append(kwargs.get("current_sign_count"))
         if self.failure is not None:
             raise accounts_module.InvalidWebAuthnResponseError
         return accounts_module.AuthenticationVerification(
@@ -9704,6 +9705,7 @@ def _stored_passkey(
         (1, 2, accounts_module.CloneRiskPolicy.REJECT, AuthenticationEvidence, False),
         (1, 1, accounts_module.CloneRiskPolicy.REJECT, InvalidCredentials, True),
         (2, 1, accounts_module.CloneRiskPolicy.REJECT, InvalidCredentials, True),
+        (100, 0, accounts_module.CloneRiskPolicy.REJECT, InvalidCredentials, True),
         (2, 1, accounts_module.CloneRiskPolicy.AUDIT_ONLY, AuthenticationEvidence, True),
     ],
 )
@@ -9717,7 +9719,8 @@ async def test_passkey_counter_policy_persists_clone_risk_before_assurance(
 ) -> None:
     store = _PasskeyStore()
     store.credentials[b"credential-1"] = _stored_passkey(sign_count=stored_count)
-    service = _passkey_service(store=store, verifier=_WebAuthnVerifier(sign_count=new_count))
+    verifier = _WebAuthnVerifier(sign_count=new_count)
+    service = _passkey_service(store=store, verifier=verifier)
     service.clone_risk_policy = policy
     binding = b"session-binding"
     assert isinstance(await service.begin_authentication("account-1", binding=binding), accounts_module.WebAuthnOptions)
@@ -9726,6 +9729,8 @@ async def test_passkey_counter_policy_persists_clone_risk_before_assurance(
 
     assert isinstance(outcome, expected_type)
     assert store.credentials[b"credential-1"].suspect is suspect
+    assert store.credentials[b"credential-1"].sign_count == max(stored_count, new_count)
+    assert verifier.current_sign_counts == [stored_count]
 
 
 @pytest.mark.parametrize(
