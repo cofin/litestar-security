@@ -42,6 +42,7 @@ from litestar.stores.memory import MemoryStore
 
 import litestar_security.accounts as accounts_module
 import litestar_security.accounts._access_tokens as access_tokens_module
+import litestar_security.accounts._mfa_login as mfa_login_module
 import litestar_security.accounts._passkeys as passkeys_module
 import litestar_security.accounts._rate_limits as rate_limits_module
 import litestar_security.accounts._sessions as sessions_module
@@ -149,6 +150,161 @@ def test_mfa_login_outcome_is_secret_safe_and_rate_limited() -> None:
     assert rate_limits_module.DEFAULT_RATE_LIMIT_POLICIES[LOGIN_MFA] == rate_limits_module.RateLimitPolicy(
         limit=10, window=timedelta(minutes=5)
     )
+
+
+@pytest.mark.anyio
+async def test_mfa_login_issue_derives_a_domain_separated_digest_and_consumes_once() -> None:
+    """Login-MFA challenges are HMAC-bound opaque, reveal-once credentials."""
+    now = _JWT_NOW
+    secrets = accounts_module.LocalAuthSecrets.session(purpose_token_pepper=b"p" * 32)
+    store = testing_module.InMemoryMFALoginChallengeStore()
+    service = mfa_login_module.MFALoginService(
+        store=store,
+        mfa=_mfa_service(_MFAStore(), _MFAProtector(), now=now),
+        pepper=secrets.mfa_login_pepper,
+        clock=lambda: now,
+        entropy=lambda size: b"x" * size,
+    )
+
+    issued = await service.issue(
+        accounts_module.LocalAccount(
+            account_id="account-1",
+            normalized_identifier="person@example.com",
+            display_name="Person",
+            active=True,
+            verified=True,
+            security_epoch=0,
+            user={"id": "account-1"},
+        ),
+        client_key="127.0.0.1",
+    )
+
+    assert isinstance(issued, MFARequired)
+    assert issued.challenge == "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg"
+    assert len(store.challenges) == 1
+    expected_digest = hmac.digest(secrets.mfa_login_pepper, issued.challenge.encode("ascii"), "sha256")
+    assert tuple(store.challenges) == (expected_digest,)
+    record = await service.consume(
+        issued.challenge, account_id="account-1", security_epoch=0, client_key="127.0.0.1"
+    )
+    assert isinstance(record, accounts_module.MFALoginChallenge)
+    assert await service.consume(
+        issued.challenge, account_id="account-1", security_epoch=0, client_key="127.0.0.1"
+    ) == InvalidCredentials()
+
+
+@pytest.mark.anyio
+async def test_mfa_login_rejects_malformed_challenges_and_burns_client_key_mismatches() -> None:
+    """Malformed input does not reach the store, while a binding mismatch burns it."""
+    now = _JWT_NOW
+    store = testing_module.InMemoryMFALoginChallengeStore()
+    service = mfa_login_module.MFALoginService(
+        store=store,
+        mfa=_mfa_service(_MFAStore(), _MFAProtector(), now=now),
+        pepper=b"p" * 32,
+        clock=lambda: now,
+        entropy=lambda size: b"x" * size,
+    )
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=0,
+    )
+    assert await service.consume(
+        "not-ascii-\u00e9", account_id="account-1", security_epoch=0, client_key="client"
+    ) == InvalidCredentials()
+    issued = await service.issue(account, client_key="client")
+    assert isinstance(issued, MFARequired)
+    assert await service.consume(
+        issued.challenge, account_id="account-1", security_epoch=0, client_key="other-client"
+    ) == InvalidCredentials()
+    assert await service.consume(
+        issued.challenge, account_id="account-1", security_epoch=0, client_key="client"
+    ) == InvalidCredentials()
+    unicode_issued = await service.issue(account, client_key="client")
+    assert isinstance(unicode_issued, MFARequired)
+    assert await service.consume(
+        unicode_issued.challenge, account_id="account-1", security_epoch=0, client_key="bad-\ud800"
+    ) == InvalidCredentials()
+    assert await service.consume(
+        unicode_issued.challenge, account_id="account-1", security_epoch=0, client_key="client"
+    ) == InvalidCredentials()
+
+
+class _MFALoginVerificationService(accounts_module.MFAService):
+    """MFA port double recording exact MFA-login factor dispatch."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        super().__init__(store=_MFAStore(), secret_protector=_MFAProtector())
+        self.calls: list[tuple[str, str, str | None, str]] = []
+        self.fail = fail
+
+    async def verify_totp(
+        self, account_id: str, method_id: str, code: str
+    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        self.calls.append(("totp", account_id, method_id, code))
+        if self.fail:
+            raise OSError
+        return AuthenticationEvidence(
+            mechanism="totp", slot="mfa", authenticated_at=_JWT_NOW, methods=frozenset({"totp"})
+        )
+
+    async def consume_recovery_code(
+        self, account_id: str, code: str
+    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        self.calls.append(("recovery-code", account_id, None, code))
+        if self.fail:
+            raise OSError
+        return AuthenticationEvidence(
+            mechanism="recovery-code",
+            slot="mfa",
+            authenticated_at=_JWT_NOW,
+            methods=frozenset({"recovery-code"}),
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("method", "method_id", "expected_call"),
+    [
+        ("totp", "method-1", ("totp", "account-1", "method-1", "123456")),
+        ("recovery-code", None, ("recovery-code", "account-1", None, "123456")),
+    ],
+)
+async def test_mfa_login_verifies_only_the_selected_factor(
+    method: str, method_id: str | None, expected_call: tuple[str, str, str | None, str]
+) -> None:
+    """TOTP and recovery code dispatch retain their exact account and method binding."""
+    mfa = _MFALoginVerificationService()
+    service = mfa_login_module.MFALoginService(
+        store=testing_module.InMemoryMFALoginChallengeStore(), mfa=mfa, pepper=b"p" * 32
+    )
+    record = accounts_module.MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key=None,
+        issued_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+    )
+
+    assert isinstance(
+        await service.verify(record, method=method, method_id=method_id, code="123456"), AuthenticationEvidence
+    )
+    assert mfa.calls == [expected_call]
+    assert await service.verify(record, method="unknown", method_id=None, code="123456") == InvalidCredentials()
+
+    unavailable = mfa_login_module.MFALoginService(
+        store=testing_module.InMemoryMFALoginChallengeStore(),
+        mfa=_MFALoginVerificationService(fail=True),
+        pepper=b"p" * 32,
+    )
+    assert await unavailable.verify(
+        record, method=method, method_id=method_id, code="123456"
+    ) == VerificationUnavailable()
 
 
 async def _assert_http_exception(

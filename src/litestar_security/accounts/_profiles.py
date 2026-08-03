@@ -66,6 +66,7 @@ _DEFAULT_ACCESS_TOKEN_LIFETIME = timedelta(minutes=10)
 _DEFAULT_LOCAL_CLIENT_ID = "local"
 _DISABLED_REGISTRATION = RegistrationPolicy.disabled()
 _RATE_LIMIT_PEPPER_LABEL = b"litestar-security/rate-limit/pepper"
+_MFA_LOGIN_PEPPER_LABEL = b"litestar-security/mfa-login-challenge/pepper"
 _LOGGER = getLogger(__name__)
 
 
@@ -77,6 +78,7 @@ class LocalAuthSecrets:
     refresh_codec: RefreshTokenCodec | None = field(default=None, repr=False)
     refresh_receipts: RefreshReceiptSealer | None = field(default=None, repr=False)
     rate_limit_pepper: bytes = field(init=False, repr=False, compare=False)
+    mfa_login_pepper: bytes = field(init=False, repr=False, compare=False)
 
     @classmethod
     def session(cls, *, purpose_token_pepper: bytes) -> "LocalAuthSecrets":
@@ -145,6 +147,9 @@ class LocalAuthSecrets:
         # it safer. Domain separation keeps this value unusable as a purpose-token key.
         object.__setattr__(
             self, "rate_limit_pepper", hmac_digest(self.purpose_tokens.pepper, _RATE_LIMIT_PEPPER_LABEL, sha256)
+        )
+        object.__setattr__(
+            self, "mfa_login_pepper", hmac_digest(self.purpose_tokens.pepper, _MFA_LOGIN_PEPPER_LABEL, sha256)
         )
 
 
