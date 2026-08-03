@@ -8809,6 +8809,19 @@ async def test_local_auth_passkey_login_selects_only_configured_transport() -> N
     )
 
 
+def test_step_up_purpose_allowlist_covers_every_consumed_purpose_with_strong_factors() -> None:
+    purpose_methods = mfa_controllers_module._PURPOSE_METHODS  # noqa: SLF001 - assert the deny-by-default contract
+
+    assert set(purpose_methods) == {
+        "totp-enroll",
+        "totp-remove",
+        "recovery-codes",
+        "passkey-register",
+        "passkey-remove",
+    }
+    assert all(methods == frozenset({"password", "passkey"}) for methods in purpose_methods.values())
+
+
 @pytest.mark.anyio
 async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
     request = cast("Any", SimpleNamespace(headers={"authorization": "Bearer transport"}))

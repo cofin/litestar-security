@@ -25,7 +25,6 @@ from litestar.status_codes import (
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa import MFAService, RecoveryCodes, StepUpGrant, StepUpService
 from litestar_security.accounts._operations import (
-    MFA_RECOVERY_CONSUME,
     MFA_RECOVERY_REPLACE,
     MFA_TOTP_ENROLL,
     MFA_TOTP_VERIFY,
@@ -66,9 +65,17 @@ __all__ = ("build_mfa_routes",)
 _MFA_TAG = "Multi-factor authentication"
 _PASSKEY_TAG = "Passkeys"
 _STEP_UP_TAG = "Step-up authentication"
+# Every step-up purpose the controller consumes, mapped to the factors that may
+# satisfy it. Deny-by-default: a purpose absent here is rejected (see issue()),
+# never treated as "any factor allowed". Only password and passkey prove
+# possession of a strong factor, so totp and recovery-code stay excluded. Keep
+# in sync with the purpose literals passed to _consume_step_up.
 _PURPOSE_METHODS = {
     "totp-enroll": frozenset({"password", "passkey"}),
+    "totp-remove": frozenset({"password", "passkey"}),
     "recovery-codes": frozenset({"password", "passkey"}),
+    "passkey-register": frozenset({"password", "passkey"}),
+    "passkey-remove": frozenset({"password", "passkey"}),
 }
 ContentT = TypeVar("ContentT")
 
@@ -258,14 +265,9 @@ class _StepUpController(Controller):
         if account_id is None:  # pragma: no cover - required authentication rejects anonymous requests first
             return _error(InvalidCredentials())
         allowed_methods = _PURPOSE_METHODS.get(purpose)
-        if allowed_methods is not None and data.method not in allowed_methods:
+        if allowed_methods is None or data.method not in allowed_methods:
             return _error(InvalidCredentials())
-        operation = {
-            "password": PASSWORD_VERIFY,
-            "totp": MFA_TOTP_VERIFY,
-            "recovery-code": MFA_RECOVERY_CONSUME,
-            "passkey": PASSKEY_ASSERT,
-        }.get(data.method, MFA_TOTP_VERIFY)
+        operation = PASSWORD_VERIFY if data.method == "password" else PASSKEY_ASSERT
         limited = await _check_rate_limit(mfa_service, request, operation, account_id)
         if limited is not None:
             return _error(limited)
@@ -302,10 +304,6 @@ class _StepUpController(Controller):
                 methods=frozenset({"password"}),
                 amr=("pwd",),
             )
-        if data.method == "totp" and data.method_id is not None and mfa_service.mfa is not None:
-            return await mfa_service.mfa.verify_totp(account_id, data.method_id, data.credential)
-        if data.method == "recovery-code" and mfa_service.mfa is not None:
-            return await mfa_service.mfa.consume_recovery_code(account_id, data.credential)
         if data.method == "passkey" and mfa_service.passkeys is not None:
             return await mfa_service.passkeys.verify_authentication(
                 account_id, binding=_transport_binding(request), response=data.credential
