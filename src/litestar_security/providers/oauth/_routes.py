@@ -11,7 +11,7 @@ from litestar import Controller, Request, Response, Router, get, post
 from litestar.datastructures import CacheControlHeader, Cookie
 from litestar.di import NamedDependency, Provide
 from litestar.enums import RequestEncodingType
-from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
+from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
 from litestar.openapi.datastructures import ResponseSpec
 from litestar.params import Body, FromPath, FromQuery, JSONBody, QueryParameter, SkipValidation
 from litestar.status_codes import (
@@ -224,8 +224,28 @@ class OIDCSessionLogoutStore(Protocol):
         """Consume jti and revoke sessions atomically, returning none on replay."""
         ...  # pragma: no cover
 
-    async def revoke_frontchannel(self, provider: str, issuer: str, session_id: str, *, now: datetime) -> int:
-        """Revoke sessions for one exact issuer and provider session id."""
+    async def revoke_frontchannel(
+        self, provider: str, issuer: str, session_id: str, *, binding: str, now: datetime
+    ) -> int | None:
+        """Atomically consume the one-shot front-channel marker and revoke owned sessions.
+
+        An implementation must revoke only the sessions that the presented
+        browser binding owns for the exact ``(provider, issuer, session_id)``
+        tuple, and must consume the replay marker in the same operation, so a
+        repeated or unowned request observes ``None`` instead of a second
+        revocation.
+
+        Args:
+            provider: Configured provider name.
+            issuer: The already-validated configured issuer.
+            session_id: The provider session identifier being revoked.
+            binding: The browser-binding value presented by the caller.
+            now: The aware revocation time.
+
+        Returns:
+            The revoked-session count, or ``None`` for a replayed or unowned
+            request.
+        """
         ...  # pragma: no cover
 
 
@@ -581,11 +601,36 @@ class OIDCLogoutLifecycleService:
             raise NotAuthorizedException(detail="OIDC logout token is invalid")
         return OAuthRouteResponse(detail="OIDC sessions revoked.", revoked_sessions=revoked)
 
-    async def frontchannel(self, provider: str, issuer: str, session_id: str) -> OAuthRouteResponse:
-        """Validate fixed issuer and revoke one exact provider-session mapping."""
-        if issuer != self._issuer(provider) or not session_id.strip():
+    async def frontchannel(
+        self, provider: str, issuer: str, session_id: str, *, request: Request[Any, Any, Any]
+    ) -> OAuthRouteResponse:
+        """Revoke one exact provider-session mapping the caller's binding owns.
+
+        Args:
+            provider: Configured provider route segment.
+            issuer: The ``iss`` query value, which must equal the configured issuer.
+            session_id: The ``sid`` query value naming the provider session.
+            request: The request whose browser-binding cookie proves ownership.
+
+        Returns:
+            The revoked-session count response.
+
+        Raises:
+            NotAuthorizedException: If the issuer, session id, binding, ownership,
+                or replay marker is rejected. Every refusal shares one shape.
+            ServiceUnavailableException: If the session store is unavailable.
+        """
+        configured_issuer = self._issuer(provider)
+        binding = request.cookies.get(OAUTH_BINDING_COOKIE_NAME)
+        if issuer != configured_issuer or not session_id.strip() or binding is None or not binding.strip():
             raise NotAuthorizedException(detail="OIDC logout request is invalid")
-        revoked = await self.sessions.revoke_frontchannel(provider, issuer, session_id, now=self._now())
+        now = self._now()
+        try:
+            revoked = await self.sessions.revoke_frontchannel(provider, issuer, session_id, binding=binding, now=now)
+        except Exception:  # noqa: BLE001 - an unavailable store must answer 503 without leaking store internals
+            raise ServiceUnavailableException(detail="OIDC logout is unavailable") from None
+        if revoked is None:
+            raise NotAuthorizedException(detail="OIDC logout request is invalid")
         return OAuthRouteResponse(detail="OIDC sessions revoked.", revoked_sessions=revoked)
 
     def _issuer(self, provider: str) -> str:
@@ -946,21 +991,26 @@ class _OIDCLogoutController(Controller):
         name="oidc.logout.frontchannel",
         operation_id="OIDCFrontchannelLogout",
         summary="Front-channel logout",
-        description="Revoke the local sessions mapped to one exact issuer and provider session identifier.",
+        description=(
+            "Revoke the local sessions that the caller's browser binding owns for one exact issuer and "
+            "provider session identifier. The revocation consumes a one-shot marker, so a repeated request "
+            "is rejected."
+        ),
         response_description="How many local sessions were revoked.",
         status_code=HTTP_200_OK,
         responses=_OAUTH_PUBLIC_RESPONSES,
         auth=public(),
     )
-    async def frontchannel_logout(
+    async def frontchannel_logout(  # noqa: PLR0913 - Litestar injects each route binding explicitly
         self,
         provider: FromPath[str],
         issuer: Annotated[str, QueryParameter(name="iss")],
         session_id: Annotated[str, QueryParameter(name="sid")],
+        request: Request[Any, Any, Any],
         oidc_service: NamedDependency[SkipValidation[OIDCLogoutLifecycleService]],
     ) -> OAuthRouteResponse:
-        """Revoke local sessions mapped to one exact issuer and provider sid."""
-        return await oidc_service.frontchannel(provider, issuer, session_id)
+        """Revoke local sessions the caller's binding owns for one exact issuer and sid."""
+        return await oidc_service.frontchannel(provider, issuer, session_id, request=request)
 
     @post(
         "/backchannel-logout",

@@ -8,10 +8,17 @@ from litestar.config.app import AppConfig
 from litestar.datastructures import Cookie
 from litestar.di import Provide
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
+from litestar.stores.memory import MemoryStore
 from litestar.testing import AsyncTestClient
 
 from litestar_security import SecurityConfig, SecurityPlugin
-from litestar_security.accounts import LocalAccountResponse, RefreshTokenResponse
+from litestar_security.accounts import (
+    LocalAccountResponse,
+    RateLimitGuard,
+    RateLimitPolicy,
+    RefreshTokenResponse,
+    StoreRateLimiter,
+)
 from litestar_security.authentication import VerificationUnavailable
 from litestar_security.context import Principal
 from litestar_security.providers.oauth import (
@@ -228,6 +235,8 @@ class LogoutSessions:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.consumed: set[str] = set()
+        self.frontchannel_owners: dict[tuple[str, str, str], str] = {}
+        self.frontchannel_consumed: set[tuple[str, str, str]] = set()
 
     async def consume_backchannel(self, identity: OIDCLogoutIdentity, *, now: datetime) -> int | None:
         del now
@@ -237,8 +246,14 @@ class LogoutSessions:
         self.calls.append(cast("str", identity.session_id))
         return 1
 
-    async def revoke_frontchannel(self, provider: str, issuer: str, session_id: str, *, now: datetime) -> int:
-        del provider, issuer, now
+    async def revoke_frontchannel(
+        self, provider: str, issuer: str, session_id: str, *, binding: str, now: datetime
+    ) -> int | None:
+        del now
+        key = (provider, issuer, session_id)
+        if key in self.frontchannel_consumed or self.frontchannel_owners.get(key) != binding:
+            return None
+        self.frontchannel_consumed.add(key)
         self.calls.append(session_id)
         return 1
 
@@ -768,6 +783,7 @@ async def test_local_transport_logout_reports_each_unavailable_transport() -> No
 async def test_oidc_front_and_backchannel_logout_routes_delegate_verified_lifecycle() -> None:
     consumer = LogoutConsumer()
     sessions = LogoutSessions()
+    sessions.frontchannel_owners[("example", "https://issuer.example", "sid-front")] = "front-binding"
     oidc_logout = OIDCLogoutLifecycleService(
         provider_issuers={"example": "https://issuer.example"}, consumer=consumer, sessions=sessions, clock=lambda: NOW
     )
@@ -781,6 +797,7 @@ async def test_oidc_front_and_backchannel_logout_routes_delegate_verified_lifecy
     )
 
     async with AsyncTestClient(app=app) as client:
+        client.cookies.set("__Host-litestar-security-oauth", "front-binding")
         front = await client.get(
             "/auth/oidc/example/frontchannel-logout", params={"iss": "https://issuer.example", "sid": "sid-front"}
         )
@@ -792,6 +809,108 @@ async def test_oidc_front_and_backchannel_logout_routes_delegate_verified_lifecy
     assert replay.status_code == 401
     assert consumer.tokens == ["signed-token", "signed-token"]
     assert sessions.calls == ["sid-front", "sid-1"]
+
+
+@pytest.mark.anyio
+async def test_frontchannel_logout_requires_ownership_binding_and_consumes_replay_marker() -> None:
+    sessions = LogoutSessions()
+    sessions.frontchannel_owners[("example", "https://issuer.example", "sid-front")] = "front-binding"
+    oidc_logout = OIDCLogoutLifecycleService(
+        provider_issuers={"example": "https://issuer.example"},
+        consumer=LogoutConsumer(),
+        sessions=sessions,
+        clock=lambda: NOW,
+    )
+    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    app = Litestar(
+        route_handlers=[build_oauth_routes(config)],
+        dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
+        openapi_config=None,
+    )
+    params = {"iss": "https://issuer.example", "sid": "sid-front"}
+
+    async with AsyncTestClient(app=app) as client:
+        unbound = await client.get("/auth/oidc/example/frontchannel-logout", params=params)
+        client.cookies.set("__Host-litestar-security-oauth", "foreign-binding")
+        foreign = await client.get("/auth/oidc/example/frontchannel-logout", params=params)
+        client.cookies.set("__Host-litestar-security-oauth", "front-binding")
+        owned = await client.get("/auth/oidc/example/frontchannel-logout", params=params)
+        replayed = await client.get("/auth/oidc/example/frontchannel-logout", params=params)
+
+    # A bare cross-site GET carries no binding cookie, so a guessed sid revokes nothing.
+    assert unbound.status_code == 401
+    assert foreign.status_code == 401
+    assert owned.status_code == 200
+    assert owned.json() == {"detail": "OIDC sessions revoked.", "revoked_sessions": 1}
+    assert replayed.status_code == 401
+    assert sessions.calls == ["sid-front"]
+
+
+@pytest.mark.anyio
+async def test_frontchannel_logout_consumes_budget_and_rejects_bursts_with_retry_after() -> None:
+    guard = RateLimitGuard(
+        limiter=StoreRateLimiter(
+            policies={"oidc.logout.frontchannel": RateLimitPolicy(limit=2, window=timedelta(minutes=5))},
+            store=MemoryStore(),
+            clock=lambda: NOW,
+        ),
+        pepper=b"p" * 32,
+    )
+    oidc_logout = OIDCLogoutLifecycleService(
+        provider_issuers={"example": "https://issuer.example"},
+        consumer=LogoutConsumer(),
+        sessions=LogoutSessions(),
+        rate_limits=guard,
+        clock=lambda: NOW,
+    )
+    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    app = Litestar(
+        route_handlers=[build_oauth_routes(config)],
+        dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
+        openapi_config=None,
+    )
+    params = {"iss": "https://issuer.example", "sid": "sid-front"}
+
+    async with AsyncTestClient(app=app) as client:
+        statuses = [
+            (await client.get("/auth/oidc/example/frontchannel-logout", params=params)).status_code for _ in range(3)
+        ]
+        limited = await client.get("/auth/oidc/example/frontchannel-logout", params=params)
+
+    # A rejected attempt still consumes budget, so unauthenticated sid probing is bounded.
+    assert statuses == [401, 401, 429]
+    assert limited.status_code == 429
+    assert int(limited.headers["retry-after"]) >= 1
+
+
+@pytest.mark.anyio
+async def test_frontchannel_logout_fails_closed_when_the_limiter_is_unavailable() -> None:
+    class BrokenLimiter:
+        async def acquire(self, request: object) -> object:
+            del request
+            raise RuntimeError
+
+    oidc_logout = OIDCLogoutLifecycleService(
+        provider_issuers={"example": "https://issuer.example"},
+        consumer=LogoutConsumer(),
+        sessions=LogoutSessions(),
+        rate_limits=RateLimitGuard(limiter=BrokenLimiter(), pepper=b"p" * 32),
+        clock=lambda: NOW,
+    )
+    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    app = Litestar(
+        route_handlers=[build_oauth_routes(config)],
+        dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
+        openapi_config=None,
+    )
+
+    async with AsyncTestClient(app=app) as client:
+        client.cookies.set("__Host-litestar-security-oauth", "front-binding")
+        response = await client.get(
+            "/auth/oidc/example/frontchannel-logout", params={"iss": "https://issuer.example", "sid": "sid-front"}
+        )
+
+    assert response.status_code == 503
 
 
 @pytest.mark.parametrize(
@@ -819,6 +938,11 @@ def test_oidc_logout_lifecycle_rejects_invalid_configuration(kwargs: dict[str, o
 @pytest.mark.anyio
 async def test_oidc_logout_lifecycle_rejects_mismatches_unknown_provider_and_naive_clock() -> None:
     sessions = LogoutSessions()
+    request = cast(
+        "Request[Any, Any, Any]",
+        type("BrowserRequest", (), {"cookies": {"__Host-litestar-security-oauth": "front-binding"}})(),
+    )
+    unbound_request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {"cookies": {}})())
 
     class MismatchedConsumer(LogoutConsumer):
         async def consume(self, provider: str, logout_token: str, *, now: datetime) -> OIDCLogoutIdentity:
@@ -834,9 +958,32 @@ async def test_oidc_logout_lifecycle_rejects_mismatches_unknown_provider_and_nai
     with pytest.raises(NotAuthorizedException, match="token"):
         await service.backchannel("example", "signed")
     with pytest.raises(NotAuthorizedException, match="request"):
-        await service.frontchannel("example", "https://wrong.example", "sid")
+        await service.frontchannel("example", "https://wrong.example", "sid", request=request)
     with pytest.raises(NotAuthorizedException, match="provider"):
-        await service.frontchannel("missing", "https://issuer.example", "sid")
+        await service.frontchannel("missing", "https://issuer.example", "sid", request=request)
+    with pytest.raises(NotAuthorizedException, match="request"):
+        await service.frontchannel("example", "https://issuer.example", " ", request=request)
+    with pytest.raises(NotAuthorizedException, match="request"):
+        await service.frontchannel("example", "https://issuer.example", "sid", request=unbound_request)
+    # An unowned binding is rejected in the same shape as every other refusal.
+    with pytest.raises(NotAuthorizedException, match="request"):
+        await service.frontchannel("example", "https://issuer.example", "sid", request=request)
+
+    class BrokenSessions(LogoutSessions):
+        async def revoke_frontchannel(
+            self, provider: str, issuer: str, session_id: str, *, binding: str, now: datetime
+        ) -> int | None:
+            del provider, issuer, session_id, binding, now
+            raise RuntimeError
+
+    unavailable = OIDCLogoutLifecycleService(
+        provider_issuers={"example": "https://issuer.example"},
+        consumer=LogoutConsumer(),
+        sessions=BrokenSessions(),
+        clock=lambda: NOW,
+    )
+    with pytest.raises(ServiceUnavailableException, match="unavailable"):
+        await unavailable.frontchannel("example", "https://issuer.example", "sid", request=request)
 
     naive = OIDCLogoutLifecycleService(
         provider_issuers={"example": "https://issuer.example"},
@@ -845,7 +992,7 @@ async def test_oidc_logout_lifecycle_rejects_mismatches_unknown_provider_and_nai
         clock=lambda: NOW.replace(tzinfo=None),
     )
     with pytest.raises(ImproperlyConfiguredException, match="clock"):
-        await naive.frontchannel("example", "https://issuer.example", "sid")
+        await naive.frontchannel("example", "https://issuer.example", "sid", request=request)
 
 
 @pytest.mark.anyio
