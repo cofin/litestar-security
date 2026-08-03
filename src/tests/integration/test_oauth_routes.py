@@ -22,6 +22,9 @@ from litestar_security.accounts import (
 from litestar_security.authentication import VerificationUnavailable
 from litestar_security.context import Principal
 from litestar_security.providers.oauth import (
+    AccountLinkError,
+    InvalidOAuthCallback,
+    InvalidProviderGrantError,
     LinkedProviderAccount,
     MemoryOAuthAccountStore,
     MemoryOAuthTransactionStore,
@@ -35,6 +38,7 @@ from litestar_security.providers.oauth import (
     OAuthLocalAuthTransport,
     OAuthLogoutResult,
     OAuthOperation,
+    OAuthProviderError,
     OAuthProviderRegistration,
     OAuthRedirectPolicy,
     OAuthRouteResponse,
@@ -42,6 +46,7 @@ from litestar_security.providers.oauth import (
     OAuthStepUpAuthorization,
     OAuthStepUpRequest,
     OAuthTransactionService,
+    OAuthTransactionUnavailable,
     OIDCBackchannelLogoutRequest,
     OIDCLogoutIdentity,
     OIDCLogoutLifecycleService,
@@ -1216,6 +1221,77 @@ async def test_route_service_rejects_anonymous_principal() -> None:
         )
 
     assert response.status_code == 401
+
+
+class RaisingRouteService(RouteService):
+    def __init__(self, exception: Exception) -> None:
+        super().__init__()
+        self.exception = exception
+
+    async def callback(
+        self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
+    ) -> OAuthRouteResponse:
+        del provider, code, state, request
+        raise self.exception
+
+
+def raising_oauth_app(exception: Exception) -> Litestar:
+    config = OAuthConfig(oauth_service=RaisingRouteService(exception), providers=(Provider(),))
+    return Litestar(
+        route_handlers=[build_oauth_routes(config)],
+        dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
+        openapi_config=None,
+        debug=True,
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("exception", "status", "retry_after"),
+    [
+        (InvalidOAuthCallback(), 401, None),
+        (OAuthTransactionUnavailable(), 503, None),
+        (OAuthProviderError(), 503, None),
+        (OAuthProviderError(retry_after=30), 503, "30"),
+        (InvalidProviderGrantError(), 503, None),
+        (AccountLinkError(), 409, None),
+        (OAuthAccountError(), 400, None),
+    ],
+)
+async def test_oauth_routes_classify_domain_exceptions_without_tracebacks(
+    exception: Exception, status: int, retry_after: str | None
+) -> None:
+    app = raising_oauth_app(exception)
+
+    async with AsyncTestClient(app=app) as client:
+        response = await client.get("/auth/oauth/example/callback", params={"code": "code", "state": "state"})
+
+    assert response.status_code == status, response.text
+    assert response.headers.get("retry-after") == retry_after
+    assert "Traceback" not in response.text
+    assert type(exception).__name__ not in response.text
+
+
+@pytest.mark.anyio
+async def test_replayed_callback_state_classifies_as_unauthorized() -> None:
+    provider = oauth_fake_provider()
+    service = lifecycle_service(provider=provider)
+    app = Litestar(
+        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service, providers=(provider,)))],
+        dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
+        openapi_config=None,
+        debug=True,
+    )
+
+    async with AsyncTestClient(app=app, base_url="https://app.example") as client:
+        login = await client.get("/auth/oauth/example/login", follow_redirects=False)
+        state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
+        first = await client.get("/auth/oauth/example/callback", params={"code": "code", "state": state})
+        replayed = await client.get("/auth/oauth/example/callback", params={"code": "code", "state": state})
+
+    assert first.status_code == 200
+    assert replayed.status_code == 401, replayed.text
+    assert "Traceback" not in replayed.text
 
 
 def test_openapi_never_contains_provider_secrets_or_protocol_credentials() -> None:

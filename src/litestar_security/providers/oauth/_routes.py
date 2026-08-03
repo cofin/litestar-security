@@ -13,10 +13,15 @@ from litestar.datastructures import CacheControlHeader, Cookie
 from litestar.di import NamedDependency, Provide
 from litestar.enums import RequestEncodingType
 from litestar.exceptions import (
+    ClientException,
+    HTTPException,
     ImproperlyConfiguredException,
     NotAuthorizedException,
     ServiceUnavailableException,
     TooManyRequestsException,
+)
+from litestar.exceptions.responses import (
+    create_exception_response,  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized Response
 )
 from litestar.openapi.datastructures import ResponseSpec
 from litestar.params import Body, FromPath, FromQuery, JSONBody, QueryParameter, SkipValidation
@@ -26,6 +31,7 @@ from litestar.status_codes import (
     HTTP_302_FOUND,
     HTTP_400_BAD_REQUEST,
     HTTP_401_UNAUTHORIZED,
+    HTTP_409_CONFLICT,
     HTTP_429_TOO_MANY_REQUESTS,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
@@ -33,16 +39,24 @@ from litestar.status_codes import (
 from litestar_security.authentication import public, required
 from litestar_security.context import Principal
 from litestar_security.providers.oauth._accounts import (
+    AccountLinkError,
     OAuthAccountError,
     OAuthAccountService,
     OAuthLinkProof,
     UnlinkStatus,
 )
-from litestar_security.providers.oauth._provider import OAuthProvider, ProviderGrant, ProviderIdentity
+from litestar_security.providers.oauth._provider import (
+    OAuthProvider,
+    OAuthProviderError,
+    ProviderGrant,
+    ProviderIdentity,
+)
 from litestar_security.providers.oauth._transactions import (
     OAUTH_BINDING_COOKIE_NAME,
+    InvalidOAuthCallback,
     OAuthOperation,
     OAuthTransactionService,
+    OAuthTransactionUnavailable,
     SecretStr,
     oauth_binding_cookie,
 )
@@ -817,11 +831,47 @@ def build_oauth_routes(config: OAuthConfig) -> Router:
         route_handlers=[_OAuthController, *([_OIDCLogoutController] if config.oidc_service is not None else [])],
         cache_control=CacheControlHeader(no_store=True),
         response_headers={"Pragma": "no-cache"},
+        exception_handlers=_oauth_exception_handlers(),
         dependencies={
             "oauth_service": Provide(provide_oauth_service, sync_to_thread=False, use_cache=False),
             **oidc_dependencies,
         },
     )
+
+
+def _oauth_exception_handlers() -> (
+    "dict[int | type[Exception], Callable[[Request[Any, Any, Any], Any], Response[Any]]]"
+):
+    def _classified(request: Request[Any, Any, Any], mapped: HTTPException) -> Response[Any]:
+        # The cast is redundant to mypy yet required by pyright, which sees the
+        # native helper return an unparameterized Response.
+        return cast("Response[Any]", create_exception_response(request=request, exc=mapped))  # type: ignore[redundant-cast]
+
+    def _invalid_callback(request: Request[Any, Any, Any], exc: InvalidOAuthCallback) -> Response[Any]:
+        return _classified(request, NotAuthorizedException(detail=str(exc)))
+
+    def _provider_unavailable(request: Request[Any, Any, Any], exc: OAuthProviderError) -> Response[Any]:
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after is not None else None
+        mapped = ServiceUnavailableException(detail="OAuth provider is unavailable", headers=headers)
+        return _classified(request, mapped)
+
+    def _store_unavailable(request: Request[Any, Any, Any], exc: OAuthTransactionUnavailable) -> Response[Any]:
+        return _classified(request, ServiceUnavailableException(detail=str(exc)))
+
+    def _link_conflict(request: Request[Any, Any, Any], exc: AccountLinkError) -> Response[Any]:
+        return _classified(request, HTTPException(detail=str(exc), status_code=HTTP_409_CONFLICT))
+
+    def _account_denied(request: Request[Any, Any, Any], exc: OAuthAccountError) -> Response[Any]:
+        return _classified(request, ClientException(detail=str(exc)))
+
+    # Subclasses precede their bases so the intended MRO resolution stays legible.
+    return {
+        InvalidOAuthCallback: _invalid_callback,  # 401
+        OAuthProviderError: _provider_unavailable,  # 503, InvalidProviderGrantError included via MRO
+        OAuthTransactionUnavailable: _store_unavailable,  # 503
+        AccountLinkError: _link_conflict,  # 409
+        OAuthAccountError: _account_denied,  # 400
+    }
 
 
 def _account_id(principal: Principal[Any]) -> str:
