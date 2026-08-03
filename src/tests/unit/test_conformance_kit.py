@@ -10,6 +10,7 @@ from anyio import Event, Lock, fail_after
 
 import litestar_security.testing as testing_module
 from litestar_security.accounts import (
+    AssertionRecordResult,
     ConsumeResult,
     ConsumeStatus,
     CreateRefreshFamilyCommand,
@@ -17,6 +18,7 @@ from litestar_security.accounts import (
     LocalAccount,
     LocalAccountCapabilities,
     LoginMethod,
+    MFALoginChallenge,
     NotificationCommand,
     PasswordChangeResult,
     PasswordChangeStatus,
@@ -42,21 +44,194 @@ from litestar_security.accounts import (
     SessionRecord,
     SessionRegistry,
     TokenIssue,
+    WebAuthnChallenge,
 )
 from litestar_security.providers.api_key import APIKeyRecord, APIKeyStore
+from litestar_security.providers.oauth import (
+    MemoryOAuthAccountStore,
+    MemoryOAuthTransactionStore,
+    OAuthTransaction,
+    ProtectedOAuthSecret,
+    UnlinkResult,
+    UnlinkStatus,
+)
 from litestar_security.testing import (
     InMemorySecurityBackend,
     StoreConformanceFactories,
     _single_winner,  # pyright: ignore[reportPrivateUsage] - T1 verifies the private contender harness directly
     assert_api_key_store_conformance,
     assert_local_account_store_conformance,
+    assert_mfa_login_challenge_store_conformance,
+    assert_mfa_store_conformance,
+    assert_oauth_account_store_conformance,
+    assert_oauth_transaction_store_conformance,
+    assert_passkey_store_conformance,
     assert_refresh_family_store_conformance,
     assert_security_backend_conformance,
     assert_session_registry_conformance,
+    assert_webauthn_challenge_store_conformance,
+    assert_websocket_connect_token_store_conformance,
 )
+from litestar_security.websocket import InMemoryWebSocketConnectTokenStore, WebSocketConnectTokenRecord
 
 _NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
 _CONFORMANCE_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+@dataclass(frozen=True, slots=True)
+class _ConformanceTransactionProtector:
+    """Reversible test-only OAuth transaction protector."""
+
+    active_key_version: str = "test-v1"
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedOAuthSecret:
+        del associated_data
+        return ProtectedOAuthSecret(ciphertext=secret, key_version=self.active_key_version)
+
+    async def unprotect(self, protected: ProtectedOAuthSecret, *, associated_data: bytes) -> bytes:
+        del associated_data
+        return protected.ciphertext
+
+
+@dataclass
+class _YieldingConnectTokenStore:
+    """Deliberately non-atomic consume implementation for the conformance self-test."""
+
+    records: dict[str, WebSocketConnectTokenRecord] = field(default_factory=dict[str, WebSocketConnectTokenRecord])
+    release: Event = field(default_factory=Event)
+    starters: int = 0
+    first_record_id: str | None = None
+
+    async def create(self, record: WebSocketConnectTokenRecord) -> None:
+        if self.first_record_id is None:
+            self.first_record_id = record.connect_token_id
+        self.records[record.connect_token_id] = record
+
+    async def consume(
+        self, *, connect_token_id: str, digest: bytes, now: datetime
+    ) -> WebSocketConnectTokenRecord | None:
+        record = self.records.get(connect_token_id)
+        if record is None or record.digest != digest or record.expires_at <= now:
+            return None
+        if connect_token_id == self.first_record_id:
+            return self.records.pop(connect_token_id)
+        self.starters += 1
+        if self.starters == 2:
+            self.release.set()
+        await self.release.wait()
+        self.records.pop(connect_token_id, None)
+        return record
+
+
+class _BrokenMFAStore(testing_module.InMemoryMFAStore):
+    """Accept a non-increasing TOTP counter."""
+
+    async def advance_totp_counter(self, method_id: str, *, accepted_counter: int, now: datetime) -> bool:
+        if accepted_counter <= 1:
+            return True
+        return await super().advance_totp_counter(method_id, accepted_counter=accepted_counter, now=now)
+
+
+class _BrokenMFALoginChallengeStore(testing_module.InMemoryMFALoginChallengeStore):
+    """Leave a rejected account binding available for a later retry."""
+
+    async def consume(
+        self, challenge_digest: bytes, *, account_id: str, security_epoch: int, now: datetime
+    ) -> MFALoginChallenge | None:
+        challenge = self.challenges.get(challenge_digest)
+        if challenge is not None and (challenge.account_id != account_id or challenge.security_epoch != security_epoch):
+            return None
+        return await super().consume(challenge_digest, account_id=account_id, security_epoch=security_epoch, now=now)
+
+
+class _BrokenWebAuthnChallengeStore(testing_module.InMemoryWebAuthnChallengeStore):
+    """Leave rejected WebAuthn bindings available for a later retry."""
+
+    async def consume(
+        self, challenge_digest: bytes, *, binding_digest: bytes, purpose: str, now: datetime
+    ) -> WebAuthnChallenge | None:
+        challenge = self.challenges.get(challenge_digest)
+        if challenge is not None and (challenge.binding_digest != binding_digest or challenge.purpose != purpose):
+            return None
+        return await super().consume(challenge_digest, binding_digest=binding_digest, purpose=purpose, now=now)
+
+
+@dataclass
+class _BrokenOAuthTransactionStore:
+    """Ignore callback provider when consuming transaction state."""
+
+    records: dict[bytes, OAuthTransaction] = field(default_factory=dict[bytes, OAuthTransaction])
+
+    async def create(self, transaction: OAuthTransaction) -> None:
+        self.records[transaction.state_digest] = transaction
+
+    async def consume(
+        self, *, state_digest: bytes, binding_digest: bytes, provider: str, now: datetime
+    ) -> OAuthTransaction | None:
+        del provider
+        transaction = self.records.get(state_digest)
+        if transaction is None or transaction.binding_digest != binding_digest or transaction.expires_at <= now:
+            return None
+        return self.records.pop(state_digest)
+
+
+class _BrokenWebSocketConnectTokenStore(InMemoryWebSocketConnectTokenStore):
+    """Burn a connect token before validating the presented digest."""
+
+    async def consume(
+        self, *, connect_token_id: str, digest: bytes, now: datetime
+    ) -> WebSocketConnectTokenRecord | None:
+        record = await super().consume(connect_token_id=connect_token_id, digest=digest, now=now)
+        if record is not None:
+            return record
+        self._records.pop(connect_token_id, None)  # pyright: ignore[reportPrivateUsage] - deliberately violates port contract
+        return None
+
+
+class _BrokenPasskeyStore(testing_module.InMemoryPasskeyStore):
+    """Report a recorded assertion without preserving its durable version update."""
+
+    calls: int = 0
+
+    async def record_assertion(  # noqa: PLR0913 - mirrors the explicit atomic public protocol
+        self,
+        credential_id: bytes,
+        *,
+        expected_version: int,
+        sign_count: int,
+        backup_eligible: bool,
+        backup_state: bool,
+        clone_risk: bool,
+        now: datetime,
+    ) -> AssertionRecordResult:
+        result = await super().record_assertion(
+            credential_id,
+            expected_version=expected_version,
+            sign_count=sign_count,
+            backup_eligible=backup_eligible,
+            backup_state=backup_state,
+            clone_risk=clone_risk,
+            now=now,
+        )
+        self.calls += 1
+        if self.calls == 2:
+            credential = self.credentials[credential_id]
+            self.credentials[credential_id] = replace(credential, version=expected_version)
+        return result
+
+
+class _BrokenOAuthAccountStore(MemoryOAuthAccountStore):
+    """Report the final identity as removable without changing the underlying link."""
+
+    async def unlink_identity(
+        self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
+    ) -> UnlinkResult:
+        result = await super().unlink_identity(
+            account_id, provider_account_id, require_remaining=require_remaining, now=now
+        )
+        if result.status is UnlinkStatus.FINAL_METHOD:
+            return UnlinkResult(UnlinkStatus.UNLINKED, provider_account_id)
+        return result
 
 
 @dataclass
@@ -766,6 +941,48 @@ async def test_refresh_family_store_conformance_names_each_broken_invariant(togg
 
 
 @pytest.mark.anyio
+async def test_mfa_store_conformance_rejects_a_non_monotonic_store() -> None:
+    with pytest.raises(AssertionError, match="monotonicity invariant"):
+        await assert_mfa_store_conformance(_BrokenMFAStore)
+
+
+@pytest.mark.anyio
+async def test_mfa_login_challenge_conformance_rejects_an_unburned_binding() -> None:
+    with pytest.raises(AssertionError, match="account-binding burn invariant"):
+        await assert_mfa_login_challenge_store_conformance(_BrokenMFALoginChallengeStore)
+
+
+@pytest.mark.anyio
+async def test_webauthn_challenge_conformance_rejects_an_unburned_binding() -> None:
+    with pytest.raises(AssertionError, match="binding burn invariant"):
+        await assert_webauthn_challenge_store_conformance(_BrokenWebAuthnChallengeStore)
+
+
+@pytest.mark.anyio
+async def test_oauth_transaction_conformance_rejects_a_provider_blind_store() -> None:
+    with pytest.raises(AssertionError, match="provider invariant"):
+        await assert_oauth_transaction_store_conformance(_BrokenOAuthTransactionStore)
+
+
+@pytest.mark.anyio
+async def test_websocket_connect_token_conformance_rejects_digest_burn() -> None:
+    with pytest.raises(AssertionError, match="digest preservation invariant"):
+        await assert_websocket_connect_token_store_conformance(_BrokenWebSocketConnectTokenStore)
+
+
+@pytest.mark.anyio
+async def test_passkey_conformance_rejects_unpersisted_assertion_state() -> None:
+    with pytest.raises(AssertionError, match="state invariant"):
+        await assert_passkey_store_conformance(_BrokenPasskeyStore)
+
+
+@pytest.mark.anyio
+async def test_oauth_account_conformance_rejects_final_identity_removal() -> None:
+    with pytest.raises(AssertionError, match="final-method invariant"):
+        await assert_oauth_account_store_conformance(_BrokenOAuthAccountStore)
+
+
+@pytest.mark.anyio
 async def test_aggregate_conformance_runs_only_supplied_feature_factories() -> None:
     calls: list[str] = []
 
@@ -808,10 +1025,36 @@ def test_testing_surface_is_explicit_and_stable() -> None:
         "StoreConformanceFactories",
         "assert_api_key_store_conformance",
         "assert_local_account_store_conformance",
+        "assert_mfa_login_challenge_store_conformance",
+        "assert_mfa_store_conformance",
+        "assert_oauth_account_store_conformance",
+        "assert_oauth_transaction_store_conformance",
+        "assert_passkey_store_conformance",
         "assert_refresh_family_store_conformance",
         "assert_security_backend_conformance",
         "assert_session_registry_conformance",
+        "assert_webauthn_challenge_store_conformance",
+        "assert_websocket_connect_token_store_conformance",
     )
+
+
+@pytest.mark.anyio
+async def test_remaining_reference_store_conformance() -> None:
+    await assert_mfa_store_conformance(testing_module.InMemoryMFAStore)
+    await assert_mfa_login_challenge_store_conformance(testing_module.InMemoryMFALoginChallengeStore)
+    await assert_webauthn_challenge_store_conformance(testing_module.InMemoryWebAuthnChallengeStore)
+    await assert_passkey_store_conformance(testing_module.InMemoryPasskeyStore)
+    await assert_websocket_connect_token_store_conformance(InMemoryWebSocketConnectTokenStore)
+    await assert_oauth_account_store_conformance(MemoryOAuthAccountStore)
+    await assert_oauth_transaction_store_conformance(
+        lambda: MemoryOAuthTransactionStore(protector=_ConformanceTransactionProtector())
+    )
+
+
+@pytest.mark.anyio
+async def test_websocket_connect_token_conformance_detects_yielding_double_consume() -> None:
+    with pytest.raises(AssertionError, match="atomicity invariant"):
+        await assert_websocket_connect_token_store_conformance(_YieldingConnectTokenStore)
 
 
 @pytest.mark.anyio

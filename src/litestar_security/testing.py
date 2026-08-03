@@ -1,5 +1,7 @@
 """Deterministic conformance helpers for security integration test suites."""
 
+# ruff: noqa: EM101, TRY003  # conformance failures intentionally name their exact violated invariant
+
 from base64 import urlsafe_b64encode
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
@@ -8,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import compare_digest
 from types import MappingProxyType
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 from urllib.parse import parse_qsl
 
 import httpx
@@ -24,8 +26,11 @@ from litestar_security.accounts import (
     LocalAccountCapabilities,
     LoginMethod,
     MFALoginChallenge,
+    MFALoginChallengeStore,
+    MFAStore,
     NotificationCommand,
     PasskeyCredential,
+    PasskeyStore,
     PasswordChangeResult,
     PasswordChangeStatus,
     PasswordCredentialState,
@@ -33,6 +38,7 @@ from litestar_security.accounts import (
     PasswordResetStatus,
     PendingTOTPEnrollment,
     PrepareRefreshResult,
+    ProtectedSecret,
     PurposeTokenCodec,
     PurposeTokenDelivery,
     RecoveryCodeDigest,
@@ -56,22 +62,35 @@ from litestar_security.accounts import (
     TokenIssue,
     TokenPurpose,
     TOTPMethod,
+    TOTPPolicy,
+    UserVerification,
     WebAuthnChallenge,
+    WebAuthnChallengeStore,
 )
+from litestar_security.context import CredentialRestrictions
 from litestar_security.providers.api_key import APIKeyRecord, APIKeyStore
 from litestar_security.providers.oauth import (
     MemoryOAuthAccountStore,
     MemoryOAuthTransactionStore,
     MemoryTokenVault,
+    OAuthAccountStore,
+    OAuthOperation,
     OAuthTransaction,
     OAuthTransactionProtector,
     OAuthTransactionStart,
+    OAuthTransactionStore,
     ProtectedOAuthSecret,
+    ProviderGrant,
     ProviderIdentity,
     ProviderTokenSet,
     SecretStr,
+    UnlinkStatus,
 )
-from litestar_security.websocket import InMemoryWebSocketConnectTokenStore
+from litestar_security.websocket import (
+    InMemoryWebSocketConnectTokenStore,
+    WebSocketConnectTokenRecord,
+    WebSocketConnectTokenStore,
+)
 
 __all__ = (
     "BackendBarrier",
@@ -94,13 +113,21 @@ __all__ = (
     "StoreConformanceFactories",
     "assert_api_key_store_conformance",
     "assert_local_account_store_conformance",
+    "assert_mfa_login_challenge_store_conformance",
+    "assert_mfa_store_conformance",
+    "assert_oauth_account_store_conformance",
+    "assert_oauth_transaction_store_conformance",
+    "assert_passkey_store_conformance",
     "assert_refresh_family_store_conformance",
     "assert_security_backend_conformance",
     "assert_session_registry_conformance",
+    "assert_webauthn_challenge_store_conformance",
+    "assert_websocket_connect_token_store_conformance",
 )
 
 _DEFAULT_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _DEFAULT_CREDENTIAL_HASH = "$litestar-security$deterministic-test-hash"
+ResultT = TypeVar("ResultT")
 
 
 def _default_identifier(namespace: str, sequence: int) -> str:
@@ -2055,6 +2082,467 @@ async def _assert_refresh_ownership(store: _ConformanceRefreshFamilyStore, accou
         raise AssertionError(message)  # noqa: TRY004 - conformance failures are intentionally AssertionError
 
 
+async def assert_mfa_store_conformance(factory: Callable[[], MFAStore]) -> None:
+    """Assert atomic TOTP counter and recovery-code consumption.
+
+    Args:
+        factory: Isolated zero-argument MFA-store factory.
+
+    Returns:
+        None when every MFA-store invariant holds.
+
+    Raises:
+        AssertionError: If a counter update is non-atomic or a recovery code can be reused.
+    """
+    store = factory()
+    enrollment = PendingTOTPEnrollment(
+        enrollment_id="conformance-enrollment",
+        method_id="conformance-totp",
+        account_id="conformance-account",
+        protected_secret=ProtectedSecret(ciphertext=b"secret", key_version="v1"),
+        policy=TOTPPolicy(),
+        created_at=_DEFAULT_NOW,
+        expires_at=_DEFAULT_NOW + timedelta(minutes=5),
+    )
+    await store.create_totp_enrollment(enrollment)
+    activated = await store.activate_totp(
+        enrollment.account_id,
+        enrollment.enrollment_id,
+        accepted_counter=1,
+        login_method=LoginMethod("conformance-totp", "totp", _DEFAULT_NOW),
+        event=_conformance_event("activate-totp"),
+        now=_DEFAULT_NOW,
+    )
+    if activated is None:
+        raise AssertionError("MFAStore setup invariant: a fresh enrollment must activate")
+
+    async def advance() -> bool:
+        return await store.advance_totp_counter(activated.method_id, accepted_counter=2, now=_DEFAULT_NOW)
+
+    if await _single_winner((advance, advance)) != 1:
+        raise AssertionError("MFAStore.advance_totp_counter atomicity invariant: two contenders must have one winner")
+    if await store.advance_totp_counter(activated.method_id, accepted_counter=2, now=_DEFAULT_NOW):
+        raise AssertionError("MFAStore.advance_totp_counter monotonicity invariant: equal counters must be refused")
+    if await store.advance_totp_counter(activated.method_id, accepted_counter=1, now=_DEFAULT_NOW):
+        raise AssertionError("MFAStore.advance_totp_counter monotonicity invariant: lower counters must be refused")
+    digest = b"r" * 32
+    await store.replace_recovery_codes(
+        enrollment.account_id, (RecoveryCodeDigest(enrollment.account_id, "v1", digest),), now=_DEFAULT_NOW
+    )
+
+    async def consume() -> bool:
+        return await store.consume_recovery_code(enrollment.account_id, digest, now=_DEFAULT_NOW)
+
+    if await _single_winner((consume, consume)) != 1:
+        raise AssertionError("MFAStore.consume_recovery_code atomicity invariant: two contenders must have one winner")
+
+
+async def assert_mfa_login_challenge_store_conformance(factory: Callable[[], MFALoginChallengeStore]) -> None:
+    """Assert MFA-login challenges are bound, one-shot, and expiry-safe.
+
+    Args:
+        factory: Isolated zero-argument MFA login challenge-store factory.
+
+    Returns:
+        None when every MFA login challenge invariant holds.
+
+    Raises:
+        AssertionError: If a challenge can be replayed or survives a rejected binding or expiry.
+    """
+    store = factory()
+    wrong_account = _conformance_mfa_login_challenge(b"m" * 32)
+    await store.put(wrong_account)
+    if (
+        await store.consume(
+            wrong_account.challenge_digest,
+            account_id="other",
+            security_epoch=wrong_account.security_epoch,
+            now=_DEFAULT_NOW,
+        )
+        is not None
+    ):
+        raise AssertionError("MFALoginChallengeStore binding invariant: wrong account must not consume successfully")
+    if (
+        await store.consume(
+            wrong_account.challenge_digest,
+            account_id=wrong_account.account_id,
+            security_epoch=wrong_account.security_epoch,
+            now=_DEFAULT_NOW,
+        )
+        is not None
+    ):
+        raise AssertionError("MFALoginChallengeStore account-binding burn invariant: a rejected binding must burn")
+    wrong_epoch = _conformance_mfa_login_challenge(b"n" * 32)
+    await store.put(wrong_epoch)
+    if (
+        await store.consume(
+            wrong_epoch.challenge_digest,
+            account_id=wrong_epoch.account_id,
+            security_epoch=wrong_epoch.security_epoch + 1,
+            now=_DEFAULT_NOW,
+        )
+        is not None
+    ):
+        raise AssertionError("MFALoginChallengeStore epoch invariant: wrong epoch must not consume successfully")
+    if (
+        await store.consume(
+            wrong_epoch.challenge_digest,
+            account_id=wrong_epoch.account_id,
+            security_epoch=wrong_epoch.security_epoch,
+            now=_DEFAULT_NOW,
+        )
+        is not None
+    ):
+        raise AssertionError("MFALoginChallengeStore epoch-binding burn invariant: a rejected binding must burn")
+    winner = _conformance_mfa_login_challenge(b"w" * 32)
+    await store.put(winner)
+
+    async def consume() -> MFALoginChallenge | None:
+        return await store.consume(
+            winner.challenge_digest,
+            account_id=winner.account_id,
+            security_epoch=winner.security_epoch,
+            now=_DEFAULT_NOW,
+        )
+
+    if await _single_winner((lambda: _presence(consume()), lambda: _presence(consume()))) != 1:
+        raise AssertionError("MFALoginChallengeStore atomicity invariant: two contenders must have one winner")
+    expired = _conformance_mfa_login_challenge(b"x" * 32, expires_at=_DEFAULT_NOW + timedelta(seconds=1))
+    await store.put(expired)
+    if (
+        await store.consume(
+            expired.challenge_digest, account_id=expired.account_id, security_epoch=0, now=expired.expires_at
+        )
+        is not None
+    ):
+        raise AssertionError("MFALoginChallengeStore expiry invariant: expired challenges must be rejected")
+    if (
+        await store.consume(expired.challenge_digest, account_id=expired.account_id, security_epoch=0, now=_DEFAULT_NOW)
+        is not None
+    ):
+        raise AssertionError("MFALoginChallengeStore expiry burn invariant: expired challenges must be removed")
+
+
+async def assert_webauthn_challenge_store_conformance(factory: Callable[[], WebAuthnChallengeStore]) -> None:
+    """Assert WebAuthn challenges burn once and enforce every binding.
+
+    Args:
+        factory: Isolated zero-argument WebAuthn challenge-store factory.
+
+    Returns:
+        None when every WebAuthn challenge invariant holds.
+
+    Raises:
+        AssertionError: If consume-once, binding, purpose, or expiry behavior is violated.
+    """
+    store = factory()
+    wrong_binding = _conformance_webauthn_challenge(b"b" * 32)
+    await store.put(wrong_binding)
+    if (
+        await store.consume(
+            wrong_binding.challenge_digest, binding_digest=b"z" * 32, purpose=wrong_binding.purpose, now=_DEFAULT_NOW
+        )
+        is not None
+    ):
+        raise AssertionError("WebAuthnChallengeStore binding invariant: wrong binding must return None")
+    if (
+        await store.consume(
+            wrong_binding.challenge_digest,
+            binding_digest=wrong_binding.binding_digest,
+            purpose=wrong_binding.purpose,
+            now=_DEFAULT_NOW,
+        )
+        is not None
+    ):
+        raise AssertionError("WebAuthnChallengeStore binding burn invariant: mismatched challenge must be removed")
+    wrong_purpose = _conformance_webauthn_challenge(b"p" * 32)
+    await store.put(wrong_purpose)
+    if (
+        await store.consume(
+            wrong_purpose.challenge_digest,
+            binding_digest=wrong_purpose.binding_digest,
+            purpose="other",
+            now=_DEFAULT_NOW,
+        )
+        is not None
+    ):
+        raise AssertionError("WebAuthnChallengeStore purpose invariant: wrong purpose must return None")
+    if (
+        await store.consume(
+            wrong_purpose.challenge_digest,
+            binding_digest=wrong_purpose.binding_digest,
+            purpose=wrong_purpose.purpose,
+            now=_DEFAULT_NOW,
+        )
+        is not None
+    ):
+        raise AssertionError("WebAuthnChallengeStore purpose burn invariant: mismatched challenge must be removed")
+    winner = _conformance_webauthn_challenge(b"w" * 32)
+    await store.put(winner)
+
+    async def consume() -> WebAuthnChallenge | None:
+        return await store.consume(
+            winner.challenge_digest, binding_digest=winner.binding_digest, purpose=winner.purpose, now=_DEFAULT_NOW
+        )
+
+    if await _single_winner((lambda: _presence(consume()), lambda: _presence(consume()))) != 1:
+        raise AssertionError("WebAuthnChallengeStore atomicity invariant: two contenders must have one winner")
+    expired = _conformance_webauthn_challenge(b"x" * 32, expires_at=_DEFAULT_NOW + timedelta(seconds=1))
+    await store.put(expired)
+    if (
+        await store.consume(
+            expired.challenge_digest,
+            binding_digest=expired.binding_digest,
+            purpose=expired.purpose,
+            now=expired.expires_at,
+        )
+        is not None
+    ):
+        raise AssertionError("WebAuthnChallengeStore expiry invariant: expired challenges must be rejected")
+
+
+async def assert_oauth_transaction_store_conformance(factory: Callable[[], OAuthTransactionStore]) -> None:
+    """Assert OAuth transactions preserve matching, expiry, and one-shot consumption.
+
+    Args:
+        factory: Isolated zero-argument OAuth transaction-store factory.
+
+    Returns:
+        None when every OAuth transaction invariant holds.
+
+    Raises:
+        AssertionError: If callback state can be replayed or a mismatched callback is accepted.
+    """
+    store = factory()
+    transaction = _conformance_oauth_transaction(b"s" * 32)
+    await store.create(transaction)
+    if (
+        await store.consume(
+            state_digest=transaction.state_digest,
+            binding_digest=b"z" * 32,
+            provider=transaction.provider,
+            now=_DEFAULT_NOW,
+        )
+        is not None
+    ):
+        raise AssertionError("OAuthTransactionStore binding invariant: wrong binding must return None")
+    if (
+        await store.consume(
+            state_digest=transaction.state_digest,
+            binding_digest=transaction.binding_digest,
+            provider="other-provider",
+            now=_DEFAULT_NOW,
+        )
+        is not None
+    ):
+        raise AssertionError("OAuthTransactionStore provider invariant: wrong provider must return None")
+    winner = await store.consume(
+        state_digest=transaction.state_digest,
+        binding_digest=transaction.binding_digest,
+        provider=transaction.provider,
+        now=_DEFAULT_NOW,
+    )
+    if winner != transaction:
+        raise AssertionError("OAuthTransactionStore matching invariant: an exact callback must return its transaction")
+    replay = await store.consume(
+        state_digest=transaction.state_digest,
+        binding_digest=transaction.binding_digest,
+        provider=transaction.provider,
+        now=_DEFAULT_NOW,
+    )
+    if replay is not None:
+        raise AssertionError("OAuthTransactionStore consume-once invariant: a consumed transaction must not replay")
+    concurrent = _conformance_oauth_transaction(b"c" * 32)
+    await store.create(concurrent)
+
+    async def consume() -> OAuthTransaction | None:
+        return await store.consume(
+            state_digest=concurrent.state_digest,
+            binding_digest=concurrent.binding_digest,
+            provider=concurrent.provider,
+            now=_DEFAULT_NOW,
+        )
+
+    if await _single_winner((lambda: _presence(consume()), lambda: _presence(consume()))) != 1:
+        raise AssertionError("OAuthTransactionStore atomicity invariant: two contenders must have one winner")
+    expired = _conformance_oauth_transaction(b"e" * 32, expires_at=_DEFAULT_NOW + timedelta(seconds=1))
+    await store.create(expired)
+    if (
+        await store.consume(
+            state_digest=expired.state_digest,
+            binding_digest=expired.binding_digest,
+            provider=expired.provider,
+            now=expired.expires_at,
+        )
+        is not None
+    ):
+        raise AssertionError("OAuthTransactionStore expiry invariant: expired transactions must be rejected")
+
+
+async def assert_websocket_connect_token_store_conformance(factory: Callable[[], WebSocketConnectTokenStore]) -> None:
+    """Assert WebSocket connect tokens are exact, one-shot, and expiry-safe.
+
+    Args:
+        factory: Isolated zero-argument WebSocket connect-token store factory.
+
+    Returns:
+        None when every WebSocket connect-token invariant holds.
+
+    Raises:
+        AssertionError: If a wrong digest burns a token, or a token can be reused or outlive expiry.
+    """
+    store = factory()
+    record = _conformance_connect_token_record("aWlpaWlpaWlpaWlpaWlpaQ", b"d" * 32)
+    await store.create(record)
+    if await store.consume(connect_token_id=record.connect_token_id, digest=b"z" * 32, now=_DEFAULT_NOW) is not None:
+        raise AssertionError("WebSocketConnectTokenStore digest invariant: wrong digest must return None")
+    if await store.consume(connect_token_id=record.connect_token_id, digest=record.digest, now=_DEFAULT_NOW) != record:
+        raise AssertionError(
+            "WebSocketConnectTokenStore digest preservation invariant: wrong digest must not consume the record"
+        )
+    winner = _conformance_connect_token_record("ampqampqampqampqampqag", b"w" * 32)
+    await store.create(winner)
+
+    async def consume() -> WebSocketConnectTokenRecord | None:
+        return await store.consume(connect_token_id=winner.connect_token_id, digest=winner.digest, now=_DEFAULT_NOW)
+
+    if await _single_winner((lambda: _presence(consume()), lambda: _presence(consume()))) != 1:
+        raise AssertionError("WebSocketConnectTokenStore atomicity invariant: two contenders must have one winner")
+    expired = _conformance_connect_token_record(
+        "eXh4eXh4eXh4eXh4eXh4eA", b"e" * 32, expires_at=_DEFAULT_NOW + timedelta(seconds=1)
+    )
+    await store.create(expired)
+    if (
+        await store.consume(connect_token_id=expired.connect_token_id, digest=expired.digest, now=expired.expires_at)
+        is not None
+    ):
+        raise AssertionError("WebSocketConnectTokenStore expiry invariant: expired records must be rejected")
+    if (
+        await store.consume(connect_token_id=expired.connect_token_id, digest=expired.digest, now=_DEFAULT_NOW)
+        is not None
+    ):
+        raise AssertionError("WebSocketConnectTokenStore expiry deletion invariant: expired records must be removed")
+
+
+async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) -> None:
+    """Assert optimistic assertion recording and clone-risk results.
+
+    Args:
+        factory: Isolated zero-argument passkey-store factory.
+
+    Returns:
+        None when every passkey-store invariant holds.
+
+    Raises:
+        AssertionError: If only one optimistic writer is not recorded or clone risk is lost.
+    """
+    store = factory()
+    credential = _conformance_passkey_credential(b"credential")
+    if not await store.add_credential(
+        credential,
+        login_method=LoginMethod("passkey-method", "passkey", _DEFAULT_NOW),
+        event=_conformance_event("add-passkey"),
+    ):
+        raise AssertionError("PasskeyStore setup invariant: a fresh credential must be added")
+
+    async def record() -> AssertionRecordResult:
+        return await store.record_assertion(
+            credential.credential_id,
+            expected_version=0,
+            sign_count=2,
+            backup_eligible=False,
+            backup_state=False,
+            clone_risk=False,
+            now=_DEFAULT_NOW,
+        )
+
+    outcomes: list[AssertionRecordResult] = []
+    async with create_task_group() as group:
+        group.start_soon(_append_result, record, outcomes)
+        group.start_soon(_append_result, record, outcomes)
+    if outcomes.count(AssertionRecordResult.RECORDED) != 1 or outcomes.count(AssertionRecordResult.CONFLICT) != 1:
+        raise AssertionError(
+            "PasskeyStore.record_assertion atomicity invariant: contenders must return RECORDED and CONFLICT"
+        )
+    recorded = await store.get_credential(credential.credential_id)
+    expected_sign_count = 2
+    if recorded is None or recorded.version != 1 or recorded.sign_count != expected_sign_count or recorded.suspect:
+        raise AssertionError(
+            "PasskeyStore.record_assertion state invariant: winning assertion must persist exact state"
+        )
+    clone = _conformance_passkey_credential(b"clone")
+    await store.add_credential(
+        clone, login_method=LoginMethod("clone-method", "passkey", _DEFAULT_NOW), event=_conformance_event("add-clone")
+    )
+    if (
+        await store.record_assertion(
+            clone.credential_id,
+            expected_version=0,
+            sign_count=0,
+            backup_eligible=False,
+            backup_state=False,
+            clone_risk=True,
+            now=_DEFAULT_NOW,
+        )
+        is not AssertionRecordResult.CLONE_RISK
+    ):
+        raise AssertionError(
+            "PasskeyStore.record_assertion clone-risk invariant: a clone-risk assertion must return CLONE_RISK"
+        )
+    cloned = await store.get_credential(clone.credential_id)
+    if cloned is None or cloned.version != 1 or not cloned.suspect:
+        raise AssertionError("PasskeyStore.record_assertion clone-state invariant: clone risk must persist suspicion")
+
+
+async def assert_oauth_account_store_conformance(factory: Callable[[], OAuthAccountStore]) -> None:
+    """Assert final-method protection and atomic OAuth identity unlinking.
+
+    Args:
+        factory: Isolated zero-argument OAuth account-store factory.
+
+    Returns:
+        None when every OAuth account-store invariant holds.
+
+    Raises:
+        AssertionError: If a final method can be removed or concurrent unlinking has two winners.
+    """
+    store = factory()
+    identity = _conformance_provider_identity("first")
+    first = await store.link_identity("conformance-account", identity, _conformance_provider_grant(), now=_DEFAULT_NOW)
+    wrong_owner = await store.unlink_identity(
+        "other-account", first.provider_account_id, require_remaining=True, now=_DEFAULT_NOW
+    )
+    if wrong_owner.status is not UnlinkStatus.NOT_FOUND:
+        raise AssertionError("OAuthAccountStore ownership invariant: another account must receive NOT_FOUND")
+    final = await store.unlink_identity(
+        "conformance-account", first.provider_account_id, require_remaining=True, now=_DEFAULT_NOW
+    )
+    if final.status is not UnlinkStatus.FINAL_METHOD:
+        raise AssertionError("OAuthAccountStore final-method invariant: the last identity must return FINAL_METHOD")
+    preserved = await store.resolve_provider_account("conformance-account", first.provider)
+    if preserved != first:
+        raise AssertionError("OAuthAccountStore ownership preservation invariant: rejected unlink must not mutate")
+    second = await store.link_identity(
+        "conformance-account", _conformance_provider_identity("second"), _conformance_provider_grant(), now=_DEFAULT_NOW
+    )
+
+    async def unlink() -> UnlinkStatus:
+        return (
+            await store.unlink_identity(
+                "conformance-account", second.provider_account_id, require_remaining=True, now=_DEFAULT_NOW
+            )
+        ).status
+
+    statuses: list[UnlinkStatus] = []
+    async with create_task_group() as group:
+        group.start_soon(_append_result, unlink, statuses)
+        group.start_soon(_append_result, unlink, statuses)
+    if statuses.count(UnlinkStatus.UNLINKED) != 1 or statuses.count(UnlinkStatus.NOT_FOUND) != 1:
+        raise AssertionError(
+            "OAuthAccountStore.unlink_identity atomicity invariant: contenders must return UNLINKED and NOT_FOUND"
+        )
+
+
 async def assert_security_backend_conformance(factories: StoreConformanceFactories) -> None:
     """Run only the conformance scenarios whose factories were supplied.
 
@@ -2243,6 +2731,110 @@ def _conformance_token_delivery(
 
 def _different_digest(digest: bytes) -> bytes:
     return bytes((digest[0] ^ 1,)) + digest[1:]
+
+
+def _conformance_mfa_login_challenge(digest: bytes, *, expires_at: datetime | None = None) -> MFALoginChallenge:
+    """Build a fixed valid MFA-login challenge."""
+    return MFALoginChallenge(
+        challenge_digest=digest,
+        account_id="conformance-account",
+        security_epoch=0,
+        client_key="conformance-client",
+        issued_at=_DEFAULT_NOW,
+        expires_at=expires_at if expires_at is not None else _DEFAULT_NOW + timedelta(minutes=5),
+    )
+
+
+def _conformance_webauthn_challenge(digest: bytes, *, expires_at: datetime | None = None) -> WebAuthnChallenge:
+    """Build a fixed valid WebAuthn challenge."""
+    return WebAuthnChallenge(
+        challenge_digest=digest,
+        binding_digest=b"b" * 32,
+        purpose="authentication",
+        account_id="conformance-account",
+        rp_id="example.test",
+        origins=("https://app.example",),
+        user_verification=UserVerification.REQUIRED,
+        algorithms=(-7,),
+        expires_at=expires_at if expires_at is not None else _DEFAULT_NOW + timedelta(minutes=5),
+    )
+
+
+def _conformance_oauth_transaction(digest: bytes, *, expires_at: datetime | None = None) -> OAuthTransaction:
+    """Build one fixed OAuth login transaction."""
+    return OAuthTransaction(
+        state_digest=digest,
+        binding_digest=b"b" * 32,
+        operation=OAuthOperation.LOGIN,
+        provider="conformance-provider",
+        expected_issuer="https://issuer.example",
+        redirect_uri="https://app.example/callback",
+        return_to="/",
+        requested_scopes=frozenset({"profile"}),
+        pkce_verifier=SecretStr("v" * 43),
+        expires_at=expires_at if expires_at is not None else _DEFAULT_NOW + timedelta(minutes=5),
+    )
+
+
+def _conformance_connect_token_record(
+    connect_token_id: str, digest: bytes, *, expires_at: datetime | None = None
+) -> WebSocketConnectTokenRecord:
+    """Build one fixed valid WebSocket connect-token record."""
+    return WebSocketConnectTokenRecord(
+        connect_token_id=connect_token_id,
+        digest=digest,
+        subject_id="conformance-subject",
+        route_name="conformance-route",
+        origin="https://app.example",
+        restrictions=CredentialRestrictions(),
+        policy_fingerprint="f" * 64,
+        issued_at=_DEFAULT_NOW,
+        expires_at=expires_at if expires_at is not None else _DEFAULT_NOW + timedelta(seconds=30),
+    )
+
+
+def _conformance_passkey_credential(credential_id: bytes) -> PasskeyCredential:
+    """Build one fixed verified passkey credential."""
+    return PasskeyCredential(
+        credential_id=credential_id,
+        account_id="conformance-account",
+        public_key=b"public-key",
+        sign_count=1,
+        backup_eligible=False,
+        backup_state=False,
+        user_verified=True,
+        aaguid="aaguid",
+        attestation_format="none",
+        created_at=_DEFAULT_NOW,
+    )
+
+
+def _conformance_provider_identity(subject: str) -> ProviderIdentity:
+    """Build one distinct OAuth provider identity."""
+    return ProviderIdentity(
+        provider="conformance-provider",
+        issuer="https://issuer.example",
+        subject=subject,
+        display_name="Conformance",
+        email=f"{subject}@example.com",
+        email_verified=True,
+        raw_claims={"sub": subject},
+    )
+
+
+def _conformance_provider_grant() -> ProviderGrant:
+    """Build one fixed OAuth provider grant."""
+    return ProviderGrant(scopes=frozenset({"profile"}), expires_at=_DEFAULT_NOW + timedelta(hours=1))
+
+
+async def _presence(operation: Awaitable[object | None]) -> bool:
+    """Project an optional async result to the shared winner boolean shape."""
+    return _won_by_presence(await operation)
+
+
+async def _append_result(operation: Callable[[], Awaitable[ResultT]], results: list[ResultT]) -> None:
+    """Run one contender and retain its exact status result."""
+    results.append(await operation())
 
 
 async def _single_winner(contenders: tuple[Callable[[], Awaitable[bool]], ...]) -> int:
