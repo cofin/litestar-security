@@ -42,6 +42,7 @@ from litestar_security.accounts._operations import (
     SESSION_REBIND,
     SESSION_REVOKE,
 )
+from litestar_security.accounts._records import SecurityEvent
 from litestar_security.authentication import (
     Authenticated,
     InvalidCredentials,
@@ -55,7 +56,7 @@ from litestar_security.context import AuthenticationEvidence, Principal
 if TYPE_CHECKING:
     from litestar.types import Scope
 
-    from litestar_security.accounts._records import LocalAccount, SecurityEvent
+    from litestar_security.accounts._records import LocalAccount
 
 __all__ = (
     "CreateSessionCommand",
@@ -1075,7 +1076,6 @@ class NativeSessionAuth(Generic[UserT]):
         return self.entropy(length)
 
     def _event(self, occurred_at: datetime, *, operation: str, outcome: str, account_id: str) -> "SecurityEvent":
-        from litestar_security.accounts._records import SecurityEvent  # noqa: PLC0415 - breaks an import cycle
 
         event_id = self.event_ids()
         if not strict_text(event_id):

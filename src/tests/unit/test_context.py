@@ -1183,6 +1183,8 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "litestar_security.accounts._controllers",
         "litestar_security.accounts._mfa_controllers",
         "litestar_security.accounts._auth_service",
+        "litestar_security.accounts._refresh",
+        "litestar_security.accounts._sessions",
     ],
 )
 def test_accounts_layering_carries_no_cycle_break_suppressions(module_name: str) -> None:
