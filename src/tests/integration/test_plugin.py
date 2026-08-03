@@ -2244,8 +2244,12 @@ def test_exclude_policy_and_native_handler_alias_compile_without_authentication(
         if isinstance(route_value, ASGIRoute) and route_value.path == "/native-mount"
     )
 
-    assert typed_plan == native_plan == SecurityRuntimePlan(
-        authenticate=False, bypass_authentication=True, csrf_required=True, csrf_enforcement="native"
+    assert (
+        typed_plan
+        == native_plan
+        == SecurityRuntimePlan(
+            authenticate=False, bypass_authentication=True, csrf_required=True, csrf_enforcement="native"
+        )
     )
     assert _operation_security(app, "/typed") == _operation_security(app, "/native") == [{}]
     assert socket_route.route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(
@@ -2264,10 +2268,7 @@ def test_exclude_policy_and_native_handler_alias_compile_without_authentication(
 
 @pytest.mark.parametrize(
     ("path", "auth", "opt"),
-    [
-        ("/typed", exclude(), None),
-        ("/native", None, {"exclude_from_auth": True}),
-    ],
+    [("/typed", exclude(), None), ("/native", None, {"exclude_from_auth": True})],
     ids=["typed-policy", "native-alias"],
 )
 def test_exclude_preserves_native_csrf_enforcement_for_unsafe_http(
@@ -2282,9 +2283,7 @@ def test_exclude_preserves_native_csrf_enforcement_for_unsafe_http(
     async def unsafe_handler() -> dict[str, bool]:
         return {"ok": True}
 
-    unsafe_handler = (
-        post(path, auth=auth)(unsafe_handler) if auth is not None else post(path, opt=opt)(unsafe_handler)
-    )
+    unsafe_handler = post(path, auth=auth)(unsafe_handler) if auth is not None else post(path, opt=opt)(unsafe_handler)
 
     app = Litestar(
         route_handlers=[csrf_seed, unsafe_handler],

@@ -109,9 +109,7 @@ class PolicyCompiler(Generic[UserT]):
         if isinstance(policy, PublicPolicy):
             return SecurityRuntimePlan(authenticate=False, csrf_required=csrf_required)
         if isinstance(policy, ExcludePolicy):
-            return SecurityRuntimePlan(
-                authenticate=False, bypass_authentication=True, csrf_required=csrf_required
-            )
+            return SecurityRuntimePlan(authenticate=False, bypass_authentication=True, csrf_required=csrf_required)
         if isinstance(policy, OptionalPolicy):
             allow_anonymous = True
             expression = policy.policy
