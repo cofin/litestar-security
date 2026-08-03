@@ -17,17 +17,17 @@ from litestar.exceptions import (
 import litestar_security.websocket as websocket_module
 from litestar_security.context import CredentialRestrictions, NullSessionHandle, Principal, SecurityContext
 from litestar_security.websocket import (
-    InMemoryWebSocketTicketStore,
-    IssuedWebSocketTicket,
+    InMemoryWebSocketConnectTokenStore,
+    IssuedWebSocketConnectToken,
     WebSocketBinding,
     WebSocketCloseCodes,
     WebSocketCloseCoordinator,
+    WebSocketConnectTokenRecord,
+    WebSocketConnectTokenService,
     WebSocketHandshake,
     WebSocketSecurityConfig,
-    WebSocketTicketRecord,
-    WebSocketTicketService,
     extract_websocket_handshake,
-    issue_websocket_ticket,
+    issue_websocket_connect_token,
     supervise_websocket_lifetime,
 )
 
@@ -92,20 +92,20 @@ def test_websocket_config_rejects_malformed_origin_collections(allowed_origins: 
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
-        ({"ticket_ttl": 30}, "ticket TTL"),
-        ({"ticket_ttl": timedelta(0)}, "ticket TTL"),
-        ({"ticket_ttl": timedelta(minutes=3)}, "ticket TTL"),
-        ({"maximum_ticket_ttl": timedelta(0)}, "maximum ticket TTL"),
-        ({"maximum_ticket_ttl": timedelta(minutes=2, microseconds=1)}, "maximum ticket TTL"),
-        ({"ticket_query_parameter": ""}, "query parameter"),
-        ({"ticket_query_parameter": object()}, "query parameter"),
-        ({"ticket_query_parameter": " token "}, "query parameter"),
-        ({"ticket_query_parameter": "tick&et"}, "query parameter"),
-        ({"ticket_query_parameter": "access_token"}, "reserved"),
-        ({"ticket_query_parameter": "ToKeN"}, "reserved"),
+        ({"connect_token_ttl": 30}, "connect token TTL"),
+        ({"connect_token_ttl": timedelta(0)}, "connect token TTL"),
+        ({"connect_token_ttl": timedelta(minutes=3)}, "connect token TTL"),
+        ({"maximum_connect_token_ttl": timedelta(0)}, "maximum connect token TTL"),
+        ({"maximum_connect_token_ttl": timedelta(minutes=2, microseconds=1)}, "maximum connect token TTL"),
+        ({"connect_token_query_parameter": ""}, "query parameter"),
+        ({"connect_token_query_parameter": object()}, "query parameter"),
+        ({"connect_token_query_parameter": " token "}, "query parameter"),
+        ({"connect_token_query_parameter": "tick&et"}, "query parameter"),
+        ({"connect_token_query_parameter": "access_token"}, "reserved"),
+        ({"connect_token_query_parameter": "ToKeN"}, "reserved"),
         ({"refresh_interval": timedelta(0)}, "refresh interval"),
         ({"refresh_interval": timedelta(seconds=1)}, "snapshot refresher"),
-        ({"ticket_store": object()}, "ticket store"),
+        ({"connect_token_store": object()}, "connect token store"),
         ({"snapshot_refresher": object()}, "snapshot refresher"),
         ({"revocation_source": object()}, "revocation source"),
     ],
@@ -155,11 +155,11 @@ def test_websocket_refresh_interval_accepts_an_explicit_refresher() -> None:
 def test_websocket_configuration_values_are_frozen_and_slotted() -> None:
     config = WebSocketSecurityConfig()
     handshake = WebSocketHandshake(
-        origin=None, uses_cookie_credentials=False, uses_authorization_header=False, ticket=None
+        origin=None, uses_cookie_credentials=False, uses_authorization_header=False, connect_token=None
     )
 
     with pytest.raises(FrozenInstanceError):
-        config.ticket_query_parameter = "other"  # type: ignore[misc]
+        config.connect_token_query_parameter = "other"  # type: ignore[misc]  # noqa: S105 - a parameter name
     with pytest.raises(FrozenInstanceError):
         handshake.origin = "https://trusted.example"  # type: ignore[misc]
     with pytest.raises((AttributeError, TypeError)):
@@ -183,7 +183,7 @@ def test_exact_allowed_origin_is_preserved_for_cookie_and_header_transports(
         origin="https://trusted.example",
         uses_cookie_credentials=uses_cookie_credentials,
         uses_authorization_header=not uses_cookie_credentials,
-        ticket=None,
+        connect_token=None,
     )
 
 
@@ -267,20 +267,27 @@ def test_reusable_bearer_query_parameters_are_rejected_without_exposing_values(p
     assert sensitive_value not in repr(captured.value)
 
 
-def test_ticket_is_the_only_credential_like_query_value_and_is_redacted() -> None:
-    sensitive_value = "one-time-ticket-secret"
+def test_connect_token_is_the_only_credential_like_query_value_and_is_redacted() -> None:
+    sensitive_value = "one-time-connect token-secret"
     handshake = extract_websocket_handshake(
-        _connection(query_string=f"filter=active&ticket={sensitive_value}".encode()),
+        _connection(query_string=f"filter=active&connect_token={sensitive_value}".encode()),
         config=WebSocketSecurityConfig(),
         uses_cookie_credentials=False,
     )
 
-    assert handshake.ticket == sensitive_value
+    assert handshake.connect_token == sensitive_value
     assert sensitive_value not in repr(handshake)
 
 
 @pytest.mark.parametrize(
-    "query_string", [b"ticket=first&ticket=second", b"ticket=", b"ticket=%FF", b"ticket=%ZZ", b"%74oken=secret"]
+    "query_string",
+    [
+        b"connect_token=first&connect_token=second",
+        b"connect_token=",
+        b"connect_token=%FF",
+        b"connect_token=%ZZ",
+        b"%74oken=secret",
+    ],
 )
 def test_malformed_duplicate_or_encoded_bearer_query_values_are_rejected(query_string: bytes) -> None:
     with pytest.raises(WebSocketException) as captured:
@@ -308,7 +315,7 @@ def test_handshake_parses_raw_headers_and_query_once() -> None:
 
         def __init__(self) -> None:
             self.header_values = OneIterationHeaders()
-            super().__init__(headers=self.header_values, query_string=b"ticket=secret")
+            super().__init__(headers=self.header_values, query_string=b"connect_token=secret")
             self.reads = {"headers": 0, "query_string": 0}
 
         def __getitem__(self, key: str) -> object:
@@ -324,7 +331,7 @@ def test_handshake_parses_raw_headers_and_query_once() -> None:
         uses_cookie_credentials=True,
     )
 
-    assert handshake.ticket == "secret"
+    assert handshake.connect_token == "secret"  # noqa: S105 - the fixture value under assertion
     assert scope.reads == {"headers": 1, "query_string": 1}
     assert scope.header_values.iterations == 1
 
@@ -376,9 +383,9 @@ def test_websocket_binding_validates_and_freezes_identifiers(kwargs: dict[str, o
     assert binding.credential_ids == frozenset({"bearer:authorization"})
 
 
-def _ticket_record(**changes: object) -> WebSocketTicketRecord:
+def _connect_token_record(**changes: object) -> WebSocketConnectTokenRecord:
     values = {
-        "ticket_id": "aWlpaWlpaWlpaWlpaWlpaQ",
+        "connect_token_id": "aWlpaWlpaWlpaWlpaWlpaQ",
         "digest": b"d" * 32,
         "subject_id": "subject-1",
         "route_name": "reports.socket",
@@ -389,13 +396,13 @@ def _ticket_record(**changes: object) -> WebSocketTicketRecord:
         "expires_at": _NOW + timedelta(seconds=30),
         **changes,
     }
-    return WebSocketTicketRecord(**values)  # type: ignore[arg-type]
+    return WebSocketConnectTokenRecord(**values)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
     "changes",
     [
-        {"ticket_id": "bad"},
+        {"connect_token_id": "bad"},
         {"digest": bytearray(32)},
         {"digest": b"short"},
         {"subject_id": ""},
@@ -406,41 +413,41 @@ def _ticket_record(**changes: object) -> WebSocketTicketRecord:
         {"expires_at": _NOW + timedelta(minutes=3)},
     ],
 )
-def test_websocket_ticket_record_rejects_invalid_storage_values(changes: dict[str, object]) -> None:
+def test_websocket_connect_token_record_rejects_invalid_storage_values(changes: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="record is invalid"):
-        _ticket_record(**changes)
+        _connect_token_record(**changes)
 
 
-def test_issued_websocket_ticket_rejects_invalid_value_and_naive_expiry() -> None:
-    with pytest.raises(ValueError, match="Issued WebSocket ticket"):
-        IssuedWebSocketTicket(value="invalid", expires_at=_NOW)
+def test_issued_websocket_connect_token_rejects_invalid_value_and_naive_expiry() -> None:
+    with pytest.raises(ValueError, match="Issued WebSocket connect token"):
+        IssuedWebSocketConnectToken(value="invalid", expires_at=_NOW)
     with pytest.raises(ValueError, match="timezone-aware"):
-        _ticket_record(issued_at=_NOW.replace(tzinfo=None))
+        _connect_token_record(issued_at=_NOW.replace(tzinfo=None))
 
 
 @pytest.mark.anyio
-async def test_websocket_ticket_store_rejects_duplicate_and_digest_mismatch() -> None:
-    store = InMemoryWebSocketTicketStore()
-    record = _ticket_record()
+async def test_websocket_connect_token_store_rejects_duplicate_and_digest_mismatch() -> None:
+    store = InMemoryWebSocketConnectTokenStore()
+    record = _connect_token_record()
     await store.create(record)
     with pytest.raises(ValueError, match="already exists"):
         await store.create(record)
-    assert await store.consume(ticket_id=record.ticket_id, digest=b"x" * 32, now=_NOW) is None
+    assert await store.consume(connect_token_id=record.connect_token_id, digest=b"x" * 32, now=_NOW) is None
     assert store.records == (record,)
 
 
 @pytest.mark.parametrize(
     "kwargs", [{"store": object()}, {"ttl": 30}, {"ttl": timedelta(0)}, {"clock": None}, {"entropy": None}]
 )
-def test_websocket_ticket_service_rejects_invalid_configuration(kwargs: dict[str, object]) -> None:
-    values = {"store": InMemoryWebSocketTicketStore(), **kwargs}
+def test_websocket_connect_token_service_rejects_invalid_configuration(kwargs: dict[str, object]) -> None:
+    values = {"store": InMemoryWebSocketConnectTokenStore(), **kwargs}
     with pytest.raises(ImproperlyConfiguredException, match="service configuration"):
-        WebSocketTicketService(**values)  # type: ignore[arg-type]
+        WebSocketConnectTokenService(**values)  # type: ignore[arg-type]
 
 
 @pytest.mark.anyio
-async def test_websocket_ticket_service_rejects_anonymous_invalid_and_unavailable_inputs() -> None:
-    service = WebSocketTicketService(store=InMemoryWebSocketTicketStore(), clock=lambda: _NOW)
+async def test_websocket_connect_token_service_rejects_anonymous_invalid_and_unavailable_inputs() -> None:
+    service = WebSocketConnectTokenService(store=InMemoryWebSocketConnectTokenStore(), clock=lambda: _NOW)
     issue_kwargs = {"route_name": "reports.socket", "origin": "https://trusted.example", "policy_fingerprint": "f" * 64}
     with pytest.raises(ValueError, match="authenticated"):
         await service.issue(
@@ -460,17 +467,17 @@ async def test_websocket_ticket_service_rejects_anonymous_invalid_and_unavailabl
     )
 
     class BrokenStore:
-        async def create(self, record: WebSocketTicketRecord) -> None:
+        async def create(self, record: WebSocketConnectTokenRecord) -> None:
             del record
 
         async def consume(self, **kwargs: object) -> None:
             del kwargs
             raise RuntimeError
 
-    broken = WebSocketTicketService(store=BrokenStore(), clock=lambda: _NOW)
-    with pytest.raises(websocket_module.WebSocketTicketUnavailableError):
+    broken = WebSocketConnectTokenService(store=BrokenStore(), clock=lambda: _NOW)
+    with pytest.raises(websocket_module.WebSocketConnectTokenUnavailableError):
         await broken.consume(
-            "wst.aWlpaWlpaWlpaWlpaWlpaQ.c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",
+            "wsct.aWlpaWlpaWlpaWlpaWlpaQ.c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",
             route_name="reports.socket",
             origin="https://trusted.example",
             policy_fingerprint="f" * 64,
@@ -479,9 +486,9 @@ async def test_websocket_ticket_service_rejects_anonymous_invalid_and_unavailabl
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("entropy", [lambda _length: b"bad", lambda _length: object()])
-async def test_websocket_ticket_service_rejects_invalid_entropy(entropy: object) -> None:
-    service = WebSocketTicketService(
-        store=InMemoryWebSocketTicketStore(),
+async def test_websocket_connect_token_service_rejects_invalid_entropy(entropy: object) -> None:
+    service = WebSocketConnectTokenService(
+        store=InMemoryWebSocketConnectTokenStore(),
         clock=lambda: _NOW,
         entropy=entropy,  # type: ignore[arg-type]
     )
@@ -496,11 +503,13 @@ async def test_websocket_ticket_service_rejects_invalid_entropy(entropy: object)
 
 
 @pytest.mark.anyio
-async def test_websocket_ticket_service_sanitizes_entropy_failure() -> None:
+async def test_websocket_connect_token_service_sanitizes_entropy_failure() -> None:
     def unavailable(_length: int) -> bytes:
         raise RuntimeError
 
-    service = WebSocketTicketService(store=InMemoryWebSocketTicketStore(), clock=lambda: _NOW, entropy=unavailable)
+    service = WebSocketConnectTokenService(
+        store=InMemoryWebSocketConnectTokenStore(), clock=lambda: _NOW, entropy=unavailable
+    )
     with pytest.raises(ValueError, match="entropy is unavailable"):
         await service.issue(
             principal=Principal(id="subject-1"),
@@ -512,31 +521,31 @@ async def test_websocket_ticket_service_sanitizes_entropy_failure() -> None:
 
 
 @pytest.mark.anyio
-async def test_issue_websocket_ticket_helper_issues_bound_ticket() -> None:
-    issued = await issue_websocket_ticket(
+async def test_issue_websocket_connect_token_helper_issues_bound_connect_token() -> None:
+    issued = await issue_websocket_connect_token(
         principal=Principal(id="subject-1"),
         context=SecurityContext(session=NullSessionHandle()),
         route_name="reports.socket",
         origin="https://trusted.example",
         policy_fingerprint="f" * 64,
         restrictions=CredentialRestrictions(),
-        store=InMemoryWebSocketTicketStore(),
+        store=InMemoryWebSocketConnectTokenStore(),
         clock=lambda: _NOW,
     )
     assert issued.expires_at == _NOW + timedelta(seconds=30)
 
 
 @pytest.mark.parametrize("value", [b"bytes", "wrong.parts", "bad." + "a" * 22 + "." + "b" * 43])
-def test_issued_ticket_rejects_noncanonical_proofs(value: object) -> None:
-    with pytest.raises(ValueError, match="Issued WebSocket ticket"):
-        IssuedWebSocketTicket(value=value, expires_at=_NOW)  # type: ignore[arg-type]
+def test_issued_connect_token_rejects_noncanonical_proofs(value: object) -> None:
+    with pytest.raises(ValueError, match="Issued WebSocket connect token"):
+        IssuedWebSocketConnectToken(value=value, expires_at=_NOW)  # type: ignore[arg-type]
 
 
-def test_private_ticket_encoding_defenses_reject_invalid_values() -> None:
+def test_private_connect_token_encoding_defenses_reject_invalid_values() -> None:
     with pytest.raises(ValueError, match="entropy"):
-        websocket_module._encode_ticket_segment(bytearray(16))  # type: ignore[attr-defined,arg-type]  # noqa: SLF001
+        websocket_module._encode_connect_token_segment(bytearray(16))  # type: ignore[attr-defined,arg-type]  # noqa: SLF001
     assert (
-        websocket_module._decode_ticket_segment(  # type: ignore[attr-defined]  # noqa: SLF001
+        websocket_module._decode_connect_token_segment(  # type: ignore[attr-defined]  # noqa: SLF001
             "a" * 21, expected_bytes=16, expected_characters=22
         )
         is None
@@ -566,9 +575,9 @@ async def test_close_websocket_sends_sanitized_event() -> None:
 
 
 @pytest.mark.anyio
-async def test_websocket_ticket_is_digest_only_one_time_and_exactly_bound() -> None:
-    store = InMemoryWebSocketTicketStore()
-    service = WebSocketTicketService(
+async def test_websocket_connect_token_is_digest_only_one_time_and_exactly_bound() -> None:
+    store = InMemoryWebSocketConnectTokenStore()
+    service = WebSocketConnectTokenService(
         store=store,
         ttl=timedelta(seconds=30),
         clock=lambda: _NOW,
@@ -585,7 +594,7 @@ async def test_websocket_ticket_is_digest_only_one_time_and_exactly_bound() -> N
         restrictions=restrictions,
     )
 
-    assert isinstance(issued, IssuedWebSocketTicket)
+    assert isinstance(issued, IssuedWebSocketConnectToken)
     assert issued.value not in repr(issued)
     assert all(issued.value.encode() not in repr(record).encode() for record in store.records)
     consumed = await service.consume(
@@ -602,9 +611,9 @@ async def test_websocket_ticket_is_digest_only_one_time_and_exactly_bound() -> N
 
 
 @pytest.mark.anyio
-async def test_websocket_ticket_is_consumed_before_later_binding_failure() -> None:
-    service = WebSocketTicketService(
-        store=InMemoryWebSocketTicketStore(),
+async def test_websocket_connect_token_is_consumed_before_later_binding_failure() -> None:
+    service = WebSocketConnectTokenService(
+        store=InMemoryWebSocketConnectTokenStore(),
         clock=lambda: _NOW,
         entropy=lambda length: b"i" * length if length == 16 else b"s" * length,
     )
@@ -628,8 +637,8 @@ async def test_websocket_ticket_is_consumed_before_later_binding_failure() -> No
 
 
 @pytest.mark.anyio
-async def test_websocket_ticket_atomic_double_consume_has_one_winner() -> None:
-    async def consume(service: WebSocketTicketService, value: str, results: list[object]) -> None:
+async def test_websocket_connect_token_atomic_double_consume_has_one_winner() -> None:
+    async def consume(service: WebSocketConnectTokenService, value: str, results: list[object]) -> None:
         results.append(
             await service.consume(
                 value, route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
@@ -637,8 +646,8 @@ async def test_websocket_ticket_atomic_double_consume_has_one_winner() -> None:
         )
 
     for _ in range(100):
-        service = WebSocketTicketService(
-            store=InMemoryWebSocketTicketStore(),
+        service = WebSocketConnectTokenService(
+            store=InMemoryWebSocketConnectTokenStore(),
             clock=lambda: _NOW,
             entropy=lambda length: b"i" * length if length == 16 else b"s" * length,
         )
@@ -659,10 +668,10 @@ async def test_websocket_ticket_atomic_double_consume_has_one_winner() -> None:
 
 
 @pytest.mark.anyio
-async def test_websocket_ticket_expiry_boundary_is_exclusive_and_deletes_record() -> None:
+async def test_websocket_connect_token_expiry_boundary_is_exclusive_and_deletes_record() -> None:
     current = [_NOW]
-    store = InMemoryWebSocketTicketStore()
-    service = WebSocketTicketService(
+    store = InMemoryWebSocketConnectTokenStore()
+    service = WebSocketConnectTokenService(
         store=store,
         ttl=timedelta(seconds=30),
         clock=lambda: current[0],

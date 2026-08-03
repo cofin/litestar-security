@@ -104,10 +104,10 @@ from litestar_security.providers.jwt import (
     SigningKey,
 )
 from litestar_security.websocket import (
-    InMemoryWebSocketTicketStore,
+    InMemoryWebSocketConnectTokenStore,
+    WebSocketConnectTokenRecord,
+    WebSocketConnectTokenService,
     WebSocketSecurityConfig,
-    WebSocketTicketRecord,
-    WebSocketTicketService,
     websocket_policy_fingerprint,
 )
 
@@ -1585,7 +1585,7 @@ def test_websocket_native_guard_denial_closes_before_handler_and_di() -> None:
             "origin_denied",
         ),
         (
-            {"headers": [(b"origin", b"https://trusted.example")], "query_string": b"ticket=not-configured"},
+            {"headers": [(b"origin", b"https://trusted.example")], "query_string": b"connect_token=not-configured"},
             WebSocketSecurityConfig(allowed_origins=frozenset({"https://trusted.example"})),
             4401,
             "authentication_required",
@@ -1732,9 +1732,9 @@ async def test_websocket_handler_authorization_exceptions_map_to_4403(error: Exc
     assert messages == [{"type": "websocket.close", "code": 4403, "reason": "authorization_denied"}]
 
 
-def _runtime_ticket_record() -> WebSocketTicketRecord:
-    return WebSocketTicketRecord(
-        ticket_id="aWlpaWlpaWlpaWlpaWlpaQ",
+def _runtime_connect_token_record() -> WebSocketConnectTokenRecord:
+    return WebSocketConnectTokenRecord(
+        connect_token_id="aWlpaWlpaWlpaWlpaWlpaQ",  # noqa: S106 - a public record identifier, not a secret
         digest=b"d" * 32,
         subject_id="subject-1",
         route_name="socket",
@@ -1747,7 +1747,7 @@ def _runtime_ticket_record() -> WebSocketTicketRecord:
 
 
 @pytest.mark.anyio
-async def test_websocket_ticket_merge_requires_the_same_authenticated_subject() -> None:
+async def test_websocket_connect_token_merge_requires_the_same_authenticated_subject() -> None:
     runtime, _, _ = _runtime()
 
     async def app(_scope: Scope, _receive: Receive, _send: Send) -> None:
@@ -1757,15 +1757,18 @@ async def test_websocket_ticket_merge_requires_the_same_authenticated_subject() 
     context = SecurityContext(
         session=NullSessionHandle(), authorization=AuthorizationSnapshot(scopes={"reports:read", "reports:write"})
     )
-    principal, merged = await middleware._merge_ticket(  # noqa: SLF001 - exercises the ticket/runtime merge boundary
-        _runtime_ticket_record(), principal=Principal(id="subject-1"), context=context, session=context.session
+    principal, merged = await middleware._merge_connect_token(  # noqa: SLF001 - exercises the connect token/runtime merge boundary
+        _runtime_connect_token_record(), principal=Principal(id="subject-1"), context=context, session=context.session
     )
 
     assert principal.id == "subject-1"
     assert merged.authorization.scopes == frozenset({"reports:read"})
     with pytest.raises(NotAuthorizedException):
-        await middleware._merge_ticket(  # noqa: SLF001 - exercises the ticket/runtime merge boundary
-            _runtime_ticket_record(), principal=Principal(id="other-subject"), context=context, session=context.session
+        await middleware._merge_connect_token(  # noqa: SLF001 - exercises the connect token/runtime merge boundary
+            _runtime_connect_token_record(),
+            principal=Principal(id="other-subject"),
+            context=context,
+            session=context.session,
         )
 
 
@@ -1778,7 +1781,7 @@ async def test_websocket_ticket_merge_requires_the_same_authenticated_subject() 
         (InvalidCredentials(), NotAuthorizedException),
     ],
 )
-async def test_anonymous_websocket_ticket_uses_authorization_resolver(
+async def test_anonymous_websocket_connect_token_uses_authorization_resolver(
     resolution: object, expected_error: type[Exception] | None
 ) -> None:
     class Resolver:
@@ -1794,13 +1797,13 @@ async def test_anonymous_websocket_ticket_uses_authorization_resolver(
     context = SecurityContext(session=NullSessionHandle())
     if expected_error is not None:
         with pytest.raises(expected_error):
-            await middleware._merge_ticket(  # noqa: SLF001 - exercises the ticket/runtime merge boundary
-                _runtime_ticket_record(), principal=Principal(id=None), context=context, session=context.session
+            await middleware._merge_connect_token(  # noqa: SLF001 - exercises the connect token/runtime merge boundary
+                _runtime_connect_token_record(), principal=Principal(id=None), context=context, session=context.session
             )
         return
 
-    principal, merged = await middleware._merge_ticket(  # noqa: SLF001 - exercises the ticket/runtime merge boundary
-        _runtime_ticket_record(), principal=Principal(id=None), context=context, session=context.session
+    principal, merged = await middleware._merge_connect_token(  # noqa: SLF001 - exercises the connect token/runtime merge boundary
+        _runtime_connect_token_record(), principal=Principal(id=None), context=context, session=context.session
     )
     assert principal.id == "subject-1"
     assert merged.authorization.scopes == frozenset({"reports:read"})
@@ -1929,8 +1932,8 @@ def test_websocket_message_loop_performs_security_work_once() -> None:
 
 
 @pytest.mark.anyio
-async def test_matching_one_time_ticket_authenticates_cross_origin_websocket_once() -> None:
-    store = InMemoryWebSocketTicketStore()
+async def test_matching_one_time_connect_token_authenticates_cross_origin_websocket_once() -> None:
+    store = InMemoryWebSocketConnectTokenStore()
     slot = _Slot(NoCredentials())
     authenticator = _Authenticator(NoCredentials())
 
@@ -1957,14 +1960,14 @@ async def test_matching_one_time_ticket_authenticates_cross_origin_websocket_onc
                         ),
                     ),
                     websocket=WebSocketSecurityConfig(
-                        allowed_origins=frozenset({"https://browser.example"}), ticket_store=store
+                        allowed_origins=frozenset({"https://browser.example"}), connect_token_store=store
                     ),
                 )
             )
         ],
     )
     now = datetime.now(timezone.utc)
-    service = WebSocketTicketService(store=store, clock=lambda: now)
+    service = WebSocketConnectTokenService(store=store, clock=lambda: now)
     compiled_handler = next(
         route.route_handler
         for route in app.routes
@@ -1981,17 +1984,17 @@ async def test_matching_one_time_ticket_authenticates_cross_origin_websocket_onc
     )
     async with AsyncTestClient(app=app) as client:
         session = await client.websocket_connect(
-            f"/ws?ticket={issued.value}", headers={"Origin": "https://browser.example"}
+            f"/ws?connect_token={issued.value}", headers={"Origin": "https://browser.example"}
         )
         with session as socket:
             message = socket.receive_json()
         replay_session = await client.websocket_connect(
-            f"/ws?ticket={issued.value}", headers={"Origin": "https://browser.example"}
+            f"/ws?connect_token={issued.value}", headers={"Origin": "https://browser.example"}
         )
         with pytest.raises(WebSocketDisconnect) as replay, replay_session:
             pass
 
-    assert message == {"subject": "subject-1", "mechanisms": ["websocket-ticket"]}
+    assert message == {"subject": "subject-1", "mechanisms": ["websocket-connect-token"]}
     assert replay.value.code == 4401
 
 

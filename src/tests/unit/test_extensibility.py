@@ -28,7 +28,7 @@ from litestar_security.accounts import (
 )
 from litestar_security.providers.api_key import APIKeyStore
 from litestar_security.providers.oauth import OAuthAccountStore, OAuthTransactionStore
-from litestar_security.websocket import WebSocketTicketStore
+from litestar_security.websocket import WebSocketConnectTokenStore
 
 _PACKAGE_ROOT = Path(__file__).parents[2] / "litestar_security"
 _FORBIDDEN_RUNTIME_ROOTS = frozenset({
@@ -57,7 +57,7 @@ _ATOMIC_METHODS = {
     OAuthTransactionStore: ("consume",),
     OAuthAccountStore: ("unlink_identity",),
     APIKeyStore: ("rotate",),
-    WebSocketTicketStore: ("consume",),
+    WebSocketConnectTokenStore: ("consume",),
 }
 
 

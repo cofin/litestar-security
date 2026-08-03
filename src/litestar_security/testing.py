@@ -37,7 +37,7 @@ from litestar_security.providers.oauth import (
     ProviderTokenSet,
     SecretStr,
 )
-from litestar_security.websocket import InMemoryWebSocketTicketStore
+from litestar_security.websocket import InMemoryWebSocketConnectTokenStore
 
 __all__ = (
     "BackendBarrier",
@@ -314,7 +314,7 @@ class InMemorySecurityBackend:
         "passkeys",
         "password_hash",
         "step_up",
-        "websocket_tickets",
+        "websocket_connect_tokens",
     )
 
     def __init__(
@@ -376,7 +376,7 @@ class InMemorySecurityBackend:
         self.oauth_transactions = MemoryOAuthTransactionStore(protector=selected_protector)
         self.oauth_tokens = MemoryTokenVault(provider="test", client_id="test-client", protector=selected_protector)
         self.api_keys = InMemoryAPIKeyStore(self._observe)
-        self.websocket_tickets = InMemoryWebSocketTicketStore()
+        self.websocket_connect_tokens = InMemoryWebSocketConnectTokenStore()
 
     @property
     def call_counts(self) -> Mapping[str, int]:

@@ -89,7 +89,7 @@ def test_websocket_handshake_parser_fails_only_with_typed_transport_error(
         )
     except WebSocketException:
         return
-    assert result.ticket is None or isinstance(result.ticket, str)
+    assert result.connect_token is None or isinstance(result.connect_token, str)
 
 
 @_PROPERTY_SETTINGS

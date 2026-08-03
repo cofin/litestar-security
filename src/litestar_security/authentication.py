@@ -37,11 +37,11 @@ from litestar_security.context import (
 from litestar_security.websocket import (
     WebSocketBinding,
     WebSocketCloseCoordinator,
+    WebSocketConnectTokenRecord,
+    WebSocketConnectTokenService,
+    WebSocketConnectTokenUnavailableError,
     WebSocketHandshake,
     WebSocketSecurityConfig,
-    WebSocketTicketRecord,
-    WebSocketTicketService,
-    WebSocketTicketUnavailableError,
     close_websocket,
     extract_websocket_handshake,
     supervise_websocket_lifetime,
@@ -680,8 +680,8 @@ class SecurityMiddleware(Generic[UserT]):
             handshake = extract_websocket_handshake(
                 connection, config=self.config.websocket, uses_cookie_credentials=uses_cookie_credentials
             )
-            if handshake.ticket is not None:
-                principal, context = await self._authenticate_ticket(
+            if handshake.connect_token is not None:
+                principal, context = await self._authenticate_connect_token(
                     scope=scope,
                     connection=connection,
                     handshake=handshake,
@@ -708,7 +708,7 @@ class SecurityMiddleware(Generic[UserT]):
                 send, code=self.config.websocket.close_codes.unauthenticated, reason="authentication_required"
             )
             return
-        except (ServiceUnavailableException, WebSocketTicketUnavailableError):
+        except (ServiceUnavailableException, WebSocketConnectTokenUnavailableError):
             await close_websocket(
                 send, code=self.config.websocket.close_codes.verification_unavailable, reason="verification_unavailable"
             )
@@ -788,7 +788,7 @@ class SecurityMiddleware(Generic[UserT]):
         except (NotAuthorizedException, PermissionDeniedException):
             await coordinator.close(code=self.config.websocket.close_codes.unauthorized, reason="authorization_denied")
 
-    async def _authenticate_ticket(  # noqa: PLR0913 - explicit routed inputs prevent reparsing and hidden state
+    async def _authenticate_connect_token(  # noqa: PLR0913 - explicit routed inputs prevent reparsing and hidden state
         self,
         *,
         scope: Scope,
@@ -798,43 +798,43 @@ class SecurityMiddleware(Generic[UserT]):
         plan: SecurityRuntimePlan,
         extracted: Sequence[tuple[str, CredentialExtraction[Any]]],
     ) -> tuple[Principal[UserT], SecurityContext]:
-        ticket_store = self.config.websocket.ticket_store
+        connect_token_store = self.config.websocket.connect_token_store
         route_handler = cast("Mapping[str, object]", scope).get("route_handler")
         route_name = cast("str | None", getattr(route_handler, "name", None)) or cast(
             "str", getattr(route_handler, "handler_name", "")
         )
-        if ticket_store is None or handshake.origin is None or not route_name or handshake.ticket is None:
+        if connect_token_store is None or handshake.origin is None or not route_name or handshake.connect_token is None:
             raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-        ticket = await WebSocketTicketService(
-            store=ticket_store, ttl=self.config.websocket.ticket_ttl, clock=self.config.websocket.clock
+        connect_token = await WebSocketConnectTokenService(
+            store=connect_token_store, ttl=self.config.websocket.connect_token_ttl, clock=self.config.websocket.clock
         ).consume(
-            handshake.ticket,
+            handshake.connect_token,
             route_name=route_name,
             origin=handshake.origin,
             policy_fingerprint=websocket_policy_fingerprint(plan),
         )
-        if ticket is None:
+        if connect_token is None:
             raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-        non_ticket_plan = replace(plan, required=False, alternatives=(), allow_anonymous=True)
+        non_connect_token_plan = replace(plan, required=False, alternatives=(), allow_anonymous=True)
         principal, context = await self.evaluator.evaluate(
-            connection, session, plan=non_ticket_plan, extracted=extracted
+            connection, session, plan=non_connect_token_plan, extracted=extracted
         )
-        return await self._merge_ticket(ticket, principal=principal, context=context, session=session)
+        return await self._merge_connect_token(connect_token, principal=principal, context=context, session=session)
 
-    async def _merge_ticket(
+    async def _merge_connect_token(
         self,
-        ticket: WebSocketTicketRecord,
+        connect_token: WebSocketConnectTokenRecord,
         *,
         principal: Principal[UserT],
         context: SecurityContext,
         session: SessionHandle,
     ) -> tuple[Principal[UserT], SecurityContext]:
         if principal.is_authenticated:
-            if principal.id != ticket.subject_id:
+            if principal.id != connect_token.subject_id:
                 raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-            authorization = resolve_authorization(context.authorization, (ticket.restrictions,))
+            authorization = resolve_authorization(context.authorization, (connect_token.restrictions,))
         else:
-            principal = Principal(id=ticket.subject_id)
+            principal = Principal(id=connect_token.subject_id)
             resolver = self.config.registry.authorization_resolver
             if resolver is None:
                 authorization = AuthorizationSnapshot()
@@ -845,19 +845,19 @@ class SecurityMiddleware(Generic[UserT]):
                 if isinstance(resolution, InvalidCredentials):
                     raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
                 authorization = resolution
-            authorization = resolve_authorization(authorization, (ticket.restrictions,))
+            authorization = resolve_authorization(authorization, (connect_token.restrictions,))
         evidence = AuthenticationEvidence(
-            mechanism="websocket-ticket",
-            slot=self.config.websocket.ticket_query_parameter,
-            authenticated_at=ticket.issued_at,
-            expires_at=ticket.expires_at,
-            methods=frozenset({"websocket-ticket"}),
+            mechanism="websocket-connect-token",
+            slot=self.config.websocket.connect_token_query_parameter,
+            authenticated_at=connect_token.issued_at,
+            expires_at=connect_token.expires_at,
+            methods=frozenset({"websocket-connect-token"}),
         )
         return principal, SecurityContext(
             session=session,
             evidence=(*context.evidence, evidence),
             authorization=authorization,
-            restrictions=(*context.restrictions, ticket.restrictions),
+            restrictions=(*context.restrictions, connect_token.restrictions),
         )
 
 

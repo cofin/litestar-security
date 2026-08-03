@@ -36,38 +36,38 @@ if TYPE_CHECKING:
 
 __all__ = (
     "AuthorizationSnapshotRefresher",
-    "InMemoryWebSocketTicketStore",
-    "IssuedWebSocketTicket",
+    "InMemoryWebSocketConnectTokenStore",
+    "IssuedWebSocketConnectToken",
     "WebSocketBinding",
     "WebSocketCloseCodes",
+    "WebSocketConnectTokenRecord",
+    "WebSocketConnectTokenService",
+    "WebSocketConnectTokenStore",
     "WebSocketHandshake",
     "WebSocketRevocationSource",
     "WebSocketSecurityConfig",
-    "WebSocketTicketRecord",
-    "WebSocketTicketService",
-    "WebSocketTicketStore",
     "extract_websocket_handshake",
-    "issue_websocket_ticket",
+    "issue_websocket_connect_token",
     "websocket_policy_fingerprint",
 )
 
 _DEFAULT_UNAUTHENTICATED_CLOSE = 4401
 _DEFAULT_UNAUTHORIZED_CLOSE = 4403
 _DEFAULT_UNAVAILABLE_CLOSE = 1013
-_MAXIMUM_TICKET_TTL = timedelta(minutes=2)
+_MAXIMUM_CONNECT_TOKEN_TTL = timedelta(minutes=2)
 _RESERVED_QUERY_PARAMETERS = frozenset({"access_token", "authorization", "bearer", "jwt", "token"})
 _HTTP_DEFAULT_PORTS = {"http": 80, "https": 443}
 _MAXIMUM_HOST_LENGTH = 253
 _MAXIMUM_HOST_LABEL_LENGTH = 63
 _PRIVATE_CLOSE_CODE_MINIMUM = 4000
 _PRIVATE_CLOSE_CODE_MAXIMUM = 4999
-_TICKET_ID_BYTES = 16
-_TICKET_SECRET_BYTES = 32
-_TICKET_ID_CHARACTERS = 22
-_TICKET_SECRET_CHARACTERS = 43
-_TICKET_PREFIX = "wst"
-_TICKET_DOMAIN = b"litestar-security/websocket-ticket/v1\x00"
-_TICKET_COMPONENTS = 3
+_CONNECT_TOKEN_ID_BYTES = 16
+_CONNECT_TOKEN_SECRET_BYTES = 32
+_CONNECT_TOKEN_ID_CHARACTERS = 22
+_CONNECT_TOKEN_SECRET_CHARACTERS = 43
+_CONNECT_TOKEN_PREFIX = "wsct"  # noqa: S105 - a credential format prefix, not a secret
+_CONNECT_TOKEN_DOMAIN = b"litestar-security/websocket-connect-token/v1\x00"
+_CONNECT_TOKEN_COMPONENTS = 3
 _BASE64URL_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 _DIGEST_BYTES = sha256().digest_size
 _ASCII_CONTROL_LIMIT = 32
@@ -88,10 +88,10 @@ class WebSocketSecurityConfig:
     """Configure WebSocket transport validation and optional lifetime hooks."""
 
     allowed_origins: frozenset[str] = frozenset()
-    ticket_store: "WebSocketTicketStore | None" = field(default=None, repr=False)
-    ticket_ttl: timedelta = timedelta(seconds=30)
-    maximum_ticket_ttl: timedelta = _MAXIMUM_TICKET_TTL
-    ticket_query_parameter: str = "ticket"
+    connect_token_store: "WebSocketConnectTokenStore | None" = field(default=None, repr=False)
+    connect_token_ttl: timedelta = timedelta(seconds=30)
+    maximum_connect_token_ttl: timedelta = _MAXIMUM_CONNECT_TOKEN_TTL
+    connect_token_query_parameter: str = "connect_token"  # noqa: S105 - a query parameter name, not a secret
     refresh_interval: timedelta | None = None
     snapshot_refresher: "AuthorizationSnapshotRefresher[Any] | None" = field(default=None, repr=False)
     revocation_source: "WebSocketRevocationSource | None" = field(default=None, repr=False)
@@ -102,7 +102,7 @@ class WebSocketSecurityConfig:
     def __post_init__(self) -> None:
         """Validate and freeze security-sensitive transport settings."""
         object.__setattr__(self, "allowed_origins", _normalize_allowed_origins(self.allowed_origins))
-        _validate_ticket_settings(self)
+        _validate_connect_token_settings(self)
         _validate_refresh_settings(self)
         _validate_close_codes(self.close_codes)
         if not callable(self.clock) or not callable(self.sleeper):
@@ -116,7 +116,7 @@ class WebSocketHandshake:
     origin: str | None
     uses_cookie_credentials: bool
     uses_authorization_header: bool
-    ticket: str | None = field(repr=False)
+    connect_token: str | None = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,10 +164,10 @@ class AuthorizationSnapshotRefresher(Protocol[UserT]):
 
 
 @dataclass(frozen=True, slots=True)
-class WebSocketTicketRecord:
-    """Storage-safe one-time ticket binding containing no recoverable value."""
+class WebSocketConnectTokenRecord:
+    """Storage-safe one-time connect token binding containing no recoverable value."""
 
-    ticket_id: str
+    connect_token_id: str
     digest: bytes = field(repr=False, metadata={"sensitive": True})
     subject_id: str
     route_name: str
@@ -178,12 +178,14 @@ class WebSocketTicketRecord:
     expires_at: datetime
 
     def __post_init__(self) -> None:
-        """Validate the immutable ticket binding and exclusive expiry."""
+        """Validate the immutable connect token binding and exclusive expiry."""
         issued_at = _utc(self.issued_at)
         expires_at = _utc(self.expires_at)
         if (
-            _decode_ticket_segment(
-                self.ticket_id, expected_bytes=_TICKET_ID_BYTES, expected_characters=_TICKET_ID_CHARACTERS
+            _decode_connect_token_segment(
+                self.connect_token_id,
+                expected_bytes=_CONNECT_TOKEN_ID_BYTES,
+                expected_characters=_CONNECT_TOKEN_ID_CHARACTERS,
             )
             is None
             or self.digest.__class__ is not bytes
@@ -194,110 +196,113 @@ class WebSocketTicketRecord:
             or self.restrictions.__class__ is not CredentialRestrictions
             or not _strict_text(self.policy_fingerprint)
             or expires_at <= issued_at
-            or expires_at - issued_at > _MAXIMUM_TICKET_TTL
+            or expires_at - issued_at > _MAXIMUM_CONNECT_TOKEN_TTL
         ):
-            message = "WebSocket ticket record is invalid"
+            message = "WebSocket connect token record is invalid"
             raise ValueError(message)
         object.__setattr__(self, "issued_at", issued_at)
         object.__setattr__(self, "expires_at", expires_at)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
-class IssuedWebSocketTicket:
-    """Reveal-once WebSocket ticket value."""
+class IssuedWebSocketConnectToken:
+    """Reveal-once WebSocket connect token value."""
 
     value: str = field(repr=False, metadata={"sensitive": True})
     expires_at: datetime
 
     def __post_init__(self) -> None:
-        """Require canonical ticket material and a timezone-aware expiry."""
-        if _ticket_proof(self.value) is None:
-            message = "Issued WebSocket ticket is invalid"
+        """Require canonical connect token material and a timezone-aware expiry."""
+        if _connect_token_proof(self.value) is None:
+            message = "Issued WebSocket connect token is invalid"
             raise ValueError(message)
         object.__setattr__(self, "expires_at", _utc(self.expires_at))
 
     def __repr__(self) -> str:
         """Return a secret-free representation."""
-        return f"IssuedWebSocketTicket(value='<redacted>', expires_at={self.expires_at!r})"
+        return f"IssuedWebSocketConnectToken(value='<redacted>', expires_at={self.expires_at!r})"
 
 
-# ai: is there a more user friendly name for tickets? this is a bit confusing but an incredibly useful thing.
 @runtime_checkable
-class WebSocketTicketStore(Protocol):
-    """Application-owned atomic persistence port for one-time tickets."""
+class WebSocketConnectTokenStore(Protocol):
+    """Application-owned atomic persistence port for one-time connect tokens."""
 
-    async def create(self, record: WebSocketTicketRecord) -> None:
+    async def create(self, record: WebSocketConnectTokenRecord) -> None:
         """Persist one new digest-only record, rejecting duplicate IDs."""
         ...  # pragma: no cover
 
-    async def consume(self, *, ticket_id: str, digest: bytes, now: datetime) -> WebSocketTicketRecord | None:
+    async def consume(
+        self, *, connect_token_id: str, digest: bytes, now: datetime
+    ) -> WebSocketConnectTokenRecord | None:
         """Atomically return and delete one matching unexpired record."""
         ...  # pragma: no cover
 
 
-class WebSocketTicketUnavailableError(RuntimeError):
-    """Raised when the application ticket store cannot verify a ticket."""
+class WebSocketConnectTokenUnavailableError(RuntimeError):
+    """Raised when the application connect token store cannot verify a connect token."""
 
 
 # ai: these files are a mess of config, services, errors, etc.  we need to
 # consider all of this when refactoring and recording.
 @dataclass(slots=True)
-class InMemoryWebSocketTicketStore:
-    """Deterministic concurrency-safe ticket store for tests and examples."""
+class InMemoryWebSocketConnectTokenStore:
+    """Deterministic concurrency-safe connect token store for tests and examples."""
 
-    _records: dict[str, WebSocketTicketRecord] = field(
-        default_factory=dict[str, WebSocketTicketRecord], init=False, repr=False
+    _records: dict[str, WebSocketConnectTokenRecord] = field(
+        default_factory=dict[str, WebSocketConnectTokenRecord], init=False, repr=False
     )
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     @property
-    def records(self) -> tuple[WebSocketTicketRecord, ...]:
+    def records(self) -> tuple[WebSocketConnectTokenRecord, ...]:
         """Return a stable snapshot of digest-only records."""
         return tuple(self._records.values())
 
-    async def create(self, record: WebSocketTicketRecord) -> None:
+    async def create(self, record: WebSocketConnectTokenRecord) -> None:
         """Persist one record while rejecting duplicate public IDs."""
         async with self._lock:
-            if record.ticket_id in self._records:
-                message = "WebSocket ticket ID already exists"
+            if record.connect_token_id in self._records:
+                message = "WebSocket connect token ID already exists"
                 raise ValueError(message)
-            self._records[record.ticket_id] = record
+            self._records[record.connect_token_id] = record
 
-    async def consume(self, *, ticket_id: str, digest: bytes, now: datetime) -> WebSocketTicketRecord | None:
+    async def consume(
+        self, *, connect_token_id: str, digest: bytes, now: datetime
+    ) -> WebSocketConnectTokenRecord | None:
         """Atomically return and delete one matching unexpired record."""
         current = _utc(now)
         async with self._lock:
-            record = self._records.get(ticket_id)
+            record = self._records.get(connect_token_id)
             if record is None:
                 return None
             if record.expires_at <= current:
-                self._records.pop(ticket_id, None)
+                self._records.pop(connect_token_id, None)
                 return None
             if not compare_digest(digest, record.digest):
                 return None
-            return self._records.pop(ticket_id)
+            return self._records.pop(connect_token_id)
 
 
 @dataclass(frozen=True, slots=True)
-class WebSocketTicketService:
-    """Issue and atomically consume exact one-handshake ticket bindings."""
+class WebSocketConnectTokenService:
+    """Issue and atomically consume exact one-handshake connect token bindings."""
 
-    store: WebSocketTicketStore
+    store: WebSocketConnectTokenStore
     ttl: timedelta = timedelta(seconds=30)
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc), repr=False, compare=False)
     entropy: Callable[[int], bytes] = field(default=token_bytes, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Validate the structural store and bounded ticket lifetime."""
+        """Validate the structural store and bounded connect token lifetime."""
         store = cast("object", self.store)
         if (
-            not isinstance(store, WebSocketTicketStore)
+            not isinstance(store, WebSocketConnectTokenStore)
             or self.ttl.__class__ is not timedelta
-            or not timedelta(0) < self.ttl <= _MAXIMUM_TICKET_TTL
+            or not timedelta(0) < self.ttl <= _MAXIMUM_CONNECT_TOKEN_TTL
             or not callable(self.clock)
             or not callable(self.entropy)
         ):
-            message = "WebSocket ticket service configuration is invalid"
+            message = "WebSocket connect token service configuration is invalid"
             raise ImproperlyConfiguredException(detail=message)
 
     async def issue(  # noqa: PLR0913 - every security binding remains an explicit keyword
@@ -309,18 +314,18 @@ class WebSocketTicketService:
         origin: str,
         policy_fingerprint: str,
         restrictions: CredentialRestrictions | None = None,
-    ) -> IssuedWebSocketTicket:
-        """Issue one digest-only, exact-route ticket for an authenticated context."""
+    ) -> IssuedWebSocketConnectToken:
+        """Issue one digest-only, exact-route connect token for an authenticated context."""
         if not principal.is_authenticated or context.__class__ is not SecurityContext:
-            message = "WebSocket tickets require an authenticated security context"
+            message = "WebSocket connect tokens require an authenticated security context"
             raise ValueError(message)
         now = _utc(self.clock())
-        ticket_id = _encode_ticket_segment(self._entropy(_TICKET_ID_BYTES))
-        secret = _encode_ticket_segment(self._entropy(_TICKET_SECRET_BYTES))
+        connect_token_id = _encode_connect_token_segment(self._entropy(_CONNECT_TOKEN_ID_BYTES))
+        secret = _encode_connect_token_segment(self._entropy(_CONNECT_TOKEN_SECRET_BYTES))
         selected_restrictions = restrictions if restrictions is not None else CredentialRestrictions()
-        record = WebSocketTicketRecord(
-            ticket_id=ticket_id,
-            digest=_ticket_digest(ticket_id, secret),
+        record = WebSocketConnectTokenRecord(
+            connect_token_id=connect_token_id,
+            digest=_connect_token_digest(connect_token_id, secret),
             subject_id=cast("str", principal.id),
             route_name=route_name,
             origin=origin,
@@ -330,20 +335,22 @@ class WebSocketTicketService:
             expires_at=now + self.ttl,
         )
         await self.store.create(record)
-        return IssuedWebSocketTicket(value=f"{_TICKET_PREFIX}.{ticket_id}.{secret}", expires_at=record.expires_at)
+        return IssuedWebSocketConnectToken(
+            value=f"{_CONNECT_TOKEN_PREFIX}.{connect_token_id}.{secret}", expires_at=record.expires_at
+        )
 
     async def consume(
         self, value: object, *, route_name: str, origin: str, policy_fingerprint: str
-    ) -> WebSocketTicketRecord | None:
-        """Atomically consume a ticket before validating later route bindings."""
-        proof = _ticket_proof(value)
+    ) -> WebSocketConnectTokenRecord | None:
+        """Atomically consume a connect token before validating later route bindings."""
+        proof = _connect_token_proof(value)
         if proof is None:
             return None
-        ticket_id, digest = proof
+        connect_token_id, digest = proof
         try:
-            record = await self.store.consume(ticket_id=ticket_id, digest=digest, now=_utc(self.clock()))
-        except Exception:  # noqa: BLE001 - application store failures fail closed at the ticket boundary
-            raise WebSocketTicketUnavailableError from None
+            record = await self.store.consume(connect_token_id=connect_token_id, digest=digest, now=_utc(self.clock()))
+        except Exception:  # noqa: BLE001 - application store failures fail closed at the connect token boundary
+            raise WebSocketConnectTokenUnavailableError from None
         if (
             record is None
             or record.route_name != route_name
@@ -357,15 +364,15 @@ class WebSocketTicketService:
         try:
             value = self.entropy(length)
         except Exception:  # noqa: BLE001 - entropy failures become one stable issuance error
-            message = "WebSocket ticket entropy is unavailable"
+            message = "WebSocket connect token entropy is unavailable"
             raise ValueError(message) from None
         if value.__class__ is not bytes or len(value) != length:
-            message = "WebSocket ticket entropy is unavailable"
+            message = "WebSocket connect token entropy is unavailable"
             raise ValueError(message)
         return value
 
 
-async def issue_websocket_ticket(  # noqa: PLR0913 - the helper makes every ticket binding explicit
+async def issue_websocket_connect_token(  # noqa: PLR0913 - the helper makes every connect token binding explicit
     *,
     principal: Principal[Any],
     context: SecurityContext,
@@ -373,32 +380,32 @@ async def issue_websocket_ticket(  # noqa: PLR0913 - the helper makes every tick
     origin: str,
     policy_fingerprint: str,
     restrictions: CredentialRestrictions,
-    store: WebSocketTicketStore,
+    store: WebSocketConnectTokenStore,
     clock: Callable[[], datetime],
     ttl: timedelta = timedelta(seconds=30),
-) -> IssuedWebSocketTicket:
-    """Issue one reveal-once WebSocket ticket through an application store.
+) -> IssuedWebSocketConnectToken:
+    """Issue one reveal-once WebSocket connect token through an application store.
 
     Args:
-        principal: The authenticated principal the ticket speaks for.
-        context: The security context the ticket is bound to.
-        route_name: The single route the ticket authorizes; it is valid nowhere else.
+        principal: The authenticated principal the connect token speaks for.
+        context: The security context the connect token is bound to.
+        route_name: The single route the connect token authorizes; it is valid nowhere else.
         origin: The exact origin the handshake must present.
         policy_fingerprint: The compiled policy binding the handshake revalidates.
         restrictions: The credential restrictions carried into the connection.
         store: The application store that persists the digest-only record.
         clock: The timezone-aware clock used for issuance and expiry.
-        ttl: How long the ticket stays valid, bounded by the two-minute maximum.
+        ttl: How long the connect token stays valid, bounded by the two-minute maximum.
 
     Returns:
-        The issued ticket, whose reveal-once value is not recoverable from the
+        The issued connect token, whose reveal-once value is not recoverable from the
         stored record.
 
     Raises:
         ValueError: If the principal is unauthenticated, the context is not a
             ``SecurityContext``, or any binding fails validation.
     """
-    return await WebSocketTicketService(store=store, ttl=ttl, clock=clock).issue(
+    return await WebSocketConnectTokenService(store=store, ttl=ttl, clock=clock).issue(
         principal=principal,
         context=context,
         route_name=route_name,
@@ -589,12 +596,12 @@ def extract_websocket_handshake(
         elif normalized_name == b"authorization":
             uses_authorization_header = True
     origin = _validated_request_origin(tuple(origin_values), config=config, required=uses_cookie_credentials)
-    ticket = _extract_ticket(query_string, config=config)
+    connect_token = _extract_connect_token(query_string, config=config)
     return WebSocketHandshake(
         origin=origin,
         uses_cookie_credentials=uses_cookie_credentials,
         uses_authorization_header=uses_authorization_header,
-        ticket=ticket,
+        connect_token=connect_token,
     )
 
 
@@ -648,7 +655,7 @@ def _validated_request_origin(
     return origin
 
 
-def _extract_ticket(query_string: bytes, *, config: WebSocketSecurityConfig) -> str | None:
+def _extract_connect_token(query_string: bytes, *, config: WebSocketSecurityConfig) -> str | None:
     if not query_string:
         return None
     try:
@@ -658,15 +665,15 @@ def _extract_ticket(query_string: bytes, *, config: WebSocketSecurityConfig) -> 
         _transport_error(config.close_codes.unauthenticated, "WebSocket query credentials are invalid")
     if not _valid_percent_encoding(encoded):
         _transport_error(config.close_codes.unauthenticated, "WebSocket query credentials are invalid")
-    tickets: list[str] = []
+    connect_tokens: list[str] = []
     for name, value in parameters:
         if name.casefold() in _RESERVED_QUERY_PARAMETERS:
             _transport_error(config.close_codes.unauthenticated, "Reusable URL credentials are forbidden")
-        if name == config.ticket_query_parameter:
-            tickets.append(value)
-    if len(tickets) > 1 or (tickets and not tickets[0]):
-        _transport_error(config.close_codes.unauthenticated, "WebSocket ticket is invalid")
-    return tickets[0] if tickets else None
+        if name == config.connect_token_query_parameter:
+            connect_tokens.append(value)
+    if len(connect_tokens) > 1 or (connect_tokens and not connect_tokens[0]):
+        _transport_error(config.close_codes.unauthenticated, "WebSocket connect token is invalid")
+    return connect_tokens[0] if connect_tokens else None
 
 
 def _valid_percent_encoding(value: str) -> bool:
@@ -702,14 +709,14 @@ def _canonical_hostname(value: str) -> str | None:
     return value
 
 
-def _encode_ticket_segment(value: bytes) -> str:
+def _encode_connect_token_segment(value: bytes) -> str:
     if value.__class__ is not bytes:
-        message = "WebSocket ticket entropy is unavailable"
+        message = "WebSocket connect token entropy is unavailable"
         raise ValueError(message)
     return urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
-def _decode_ticket_segment(value: object, *, expected_bytes: int, expected_characters: int) -> bytes | None:
+def _decode_connect_token_segment(value: object, *, expected_bytes: int, expected_characters: int) -> bytes | None:
     if (
         not isinstance(value, str)
         or value.__class__ is not str
@@ -722,31 +729,33 @@ def _decode_ticket_segment(value: object, *, expected_bytes: int, expected_chara
         decoded = urlsafe_b64decode(encoded + b"=" * (-len(encoded) % 4))
     except (BinasciiError, UnicodeError, ValueError):  # pragma: no cover - strict alphabet guards decoding
         return None
-    return decoded if len(decoded) == expected_bytes and _encode_ticket_segment(decoded) == value else None
+    return decoded if len(decoded) == expected_bytes and _encode_connect_token_segment(decoded) == value else None
 
 
-def _ticket_digest(ticket_id: str, secret: str) -> bytes:
-    return sha256(_TICKET_DOMAIN + ticket_id.encode("ascii") + b"\x00" + secret.encode("ascii")).digest()
+def _connect_token_digest(connect_token_id: str, secret: str) -> bytes:
+    return sha256(_CONNECT_TOKEN_DOMAIN + connect_token_id.encode("ascii") + b"\x00" + secret.encode("ascii")).digest()
 
 
-def _ticket_proof(value: object) -> tuple[str, bytes] | None:
+def _connect_token_proof(value: object) -> tuple[str, bytes] | None:
     if not isinstance(value, str) or value.__class__ is not str:
         return None
     parts = value.split(".")
-    if len(parts) != _TICKET_COMPONENTS:
+    if len(parts) != _CONNECT_TOKEN_COMPONENTS:
         return None
-    prefix, ticket_id, secret = parts
+    prefix, connect_token_id, secret = parts
     if (
-        prefix != _TICKET_PREFIX
-        or _decode_ticket_segment(ticket_id, expected_bytes=_TICKET_ID_BYTES, expected_characters=_TICKET_ID_CHARACTERS)
+        prefix != _CONNECT_TOKEN_PREFIX
+        or _decode_connect_token_segment(
+            connect_token_id, expected_bytes=_CONNECT_TOKEN_ID_BYTES, expected_characters=_CONNECT_TOKEN_ID_CHARACTERS
+        )
         is None
-        or _decode_ticket_segment(
-            secret, expected_bytes=_TICKET_SECRET_BYTES, expected_characters=_TICKET_SECRET_CHARACTERS
+        or _decode_connect_token_segment(
+            secret, expected_bytes=_CONNECT_TOKEN_SECRET_BYTES, expected_characters=_CONNECT_TOKEN_SECRET_CHARACTERS
         )
         is None
     ):
         return None
-    return ticket_id, _ticket_digest(ticket_id, secret)
+    return connect_token_id, _connect_token_digest(connect_token_id, secret)
 
 
 def _strict_text(value: object) -> bool:
@@ -761,7 +770,7 @@ def _strict_text(value: object) -> bool:
 
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
-        message = "WebSocket ticket timestamp must be timezone-aware"
+        message = "WebSocket connect token timestamp must be timezone-aware"
         raise ValueError(message)
     return value.astimezone(timezone.utc)
 
@@ -790,20 +799,20 @@ def _normalize_allowed_origins(value: object) -> frozenset[str]:
     return frozenset(canonical)
 
 
-def _validate_ticket_settings(config: WebSocketSecurityConfig) -> None:
-    ticket_store = cast("object | None", config.ticket_store)
-    if ticket_store is not None and not isinstance(ticket_store, WebSocketTicketStore):
-        _configuration_error("WebSocket ticket store must implement atomic create and consume")
-    maximum_ticket_ttl = _duration(config.maximum_ticket_ttl, "maximum ticket TTL")
-    if maximum_ticket_ttl > _MAXIMUM_TICKET_TTL:
-        _configuration_error("WebSocket maximum ticket TTL cannot exceed two minutes")
-    ticket_ttl = _duration(config.ticket_ttl, "ticket TTL")
-    if ticket_ttl > maximum_ticket_ttl:
-        _configuration_error("WebSocket ticket TTL cannot exceed its configured maximum")
+def _validate_connect_token_settings(config: WebSocketSecurityConfig) -> None:
+    connect_token_store = cast("object | None", config.connect_token_store)
+    if connect_token_store is not None and not isinstance(connect_token_store, WebSocketConnectTokenStore):
+        _configuration_error("WebSocket connect token store must implement atomic create and consume")
+    maximum_connect_token_ttl = _duration(config.maximum_connect_token_ttl, "maximum connect token TTL")
+    if maximum_connect_token_ttl > _MAXIMUM_CONNECT_TOKEN_TTL:
+        _configuration_error("WebSocket maximum connect token TTL cannot exceed two minutes")
+    connect_token_ttl = _duration(config.connect_token_ttl, "connect token TTL")
+    if connect_token_ttl > maximum_connect_token_ttl:
+        _configuration_error("WebSocket connect token TTL cannot exceed its configured maximum")
 
-    query_name_value = cast("object", config.ticket_query_parameter)
+    query_name_value = cast("object", config.connect_token_query_parameter)
     if not isinstance(query_name_value, str) or query_name_value.__class__ is not str:
-        _configuration_error("WebSocket ticket query parameter must be text")
+        _configuration_error("WebSocket connect token query parameter must be text")
     query_name = query_name_value
     if (
         not query_name
@@ -811,9 +820,9 @@ def _validate_ticket_settings(config: WebSocketSecurityConfig) -> None:
         or not query_name.isascii()
         or any(character in query_name for character in "&#=;")
     ):
-        _configuration_error("WebSocket ticket query parameter must be a non-empty safe name")
+        _configuration_error("WebSocket connect token query parameter must be a non-empty safe name")
     if query_name.casefold() in _RESERVED_QUERY_PARAMETERS:
-        _configuration_error("WebSocket ticket query parameter uses a reserved credential name")
+        _configuration_error("WebSocket connect token query parameter uses a reserved credential name")
 
 
 def _validate_refresh_settings(config: WebSocketSecurityConfig) -> None:
