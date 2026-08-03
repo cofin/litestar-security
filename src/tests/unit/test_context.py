@@ -26,7 +26,7 @@ import litestar_security.accounts as accounts_module
 import litestar_security.accounts._purpose_tokens as purpose_tokens_module
 import litestar_security.accounts._receipts as receipts_module
 import litestar_security.authentication as authentication_module
-from litestar_security import PublicController, SecureController
+from litestar_security import CSRF_REQUIRED_OPT_KEY, PublicController, SecureController, exclude
 from litestar_security.accounts import AssuranceRequirement, AssuranceTrait
 from litestar_security.authentication import public, required
 from litestar_security.context import (
@@ -114,6 +114,7 @@ _REFRESH_CAPABILITIES = {
     "rotate",
 }
 _PUBLIC_API = (
+    "CSRF_REQUIRED_OPT_KEY",
     "AssuranceRequirement",
     "AssuranceTrait",
     "Authenticated",
@@ -181,6 +182,7 @@ _PUBLIC_API = (
     "any_of",
     "at_least",
     "csp_nonce",
+    "exclude",
     "guard_all_of",
     "guard_any_of",
     "guard_at_least",
@@ -860,6 +862,8 @@ def test_package_root_exports_only_foundational_contract() -> None:
     assert litestar_security.__all__ == _PUBLIC_API
     assert all(hasattr(litestar_security, name) for name in _PUBLIC_API)
     assert litestar_security.__project__ == "litestar-security"
+    assert CSRF_REQUIRED_OPT_KEY == "csrf_required"
+    assert exclude() == authentication_module.exclude()
     for private_name in (
         "OwnedSessionBackend",
         "SecurityMiddleware",
@@ -876,6 +880,7 @@ def test_package_root_exports_only_foundational_contract() -> None:
         "SecurityRuntimeConfig",
         "SecurityRuntimePlan",
     }.intersection(authentication_module.__all__)
+    assert "CSRF_REQUIRED_OPT_KEY" in authentication_module.__all__
     assert openapi_module.__all__ == ()
 
 

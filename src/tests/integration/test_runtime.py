@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import anyio
 import jwt
 import pytest
-from litestar import Controller, Litestar, Request, Response, Router, WebSocket, get, post, websocket
+from litestar import Controller, Litestar, Request, Response, Router, WebSocket, asgi, get, post, websocket
 from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
 from litestar.di import NamedDependency, Provide
@@ -86,6 +86,7 @@ from litestar_security.authentication import (
     SecurityRuntimeConfig,
     SecurityRuntimePlan,
     VerificationUnavailable,
+    exclude,
     public,
     required,
 )
@@ -100,6 +101,7 @@ from litestar_security.context import (
     SessionPersistenceUnavailableError,
 )
 from litestar_security.guards import requires_scope
+from litestar_security.headers import SecurityHeadersConfig
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
     BearerTokenSlot,
@@ -2134,6 +2136,57 @@ async def test_public_websocket_and_http_install_the_same_anonymous_context_with
     assert all(
         isinstance(principal, Principal) and isinstance(context, SecurityContext) for principal, context in observed
     )
+
+
+def test_exclude_bypasses_http_websocket_and_asgi_credential_work() -> None:
+    slot = _Slot(PresentedCredential("credential"))
+    authenticator = _Authenticator(NoCredentials())
+    observed: list[tuple[Principal[object], SecurityContext]] = []
+
+    @get("/http", auth=exclude())
+    async def http_handler(request: Request) -> None:
+        observed.append((request.user, request.auth))
+
+    @websocket("/ws", auth=exclude())
+    async def websocket_handler(socket: WebSocket) -> None:
+        observed.append((socket.user, socket.auth))
+        await socket.accept()
+        await socket.close()
+
+    @asgi("/mount", auth=exclude(), copy_scope=True)
+    async def mounted_app(scope: Scope, receive: Receive, send: Send) -> None:
+        del receive
+        observed.append((cast("Principal[object]", scope["user"]), cast("SecurityContext", scope["auth"])))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    config = SecurityConfig(
+        slots=(slot,),  # type: ignore[arg-type]
+        mechanisms=(
+            AuthenticationMechanism(
+                authenticator=authenticator,  # type: ignore[arg-type]
+                resolver=_Resolver(),
+            ),
+        ),
+        headers=SecurityHeadersConfig(static={"X-Content-Type-Options": "nosniff"}),
+    )
+    app = Litestar(
+        route_handlers=[http_handler, websocket_handler, mounted_app],
+        openapi_config=None,
+        plugins=[SecurityPlugin(config)],
+    )
+
+    with TestClient(app) as client:
+        http_response = client.get("/http", headers={"Authorization": "Bearer credential"})
+        asgi_response = client.get("/mount", headers={"Authorization": "Bearer credential"})
+        with client.websocket_connect("/ws", headers={"Authorization": "Bearer credential"}):
+            pass
+
+    assert http_response.status_code == asgi_response.status_code == 200
+    assert http_response.headers["x-content-type-options"] == "nosniff"
+    assert slot.calls == authenticator.calls == 0
+    assert len(observed) == 3
+    assert all(not principal.is_authenticated and context.evidence == () for principal, context in observed)
 
 
 def test_websocket_native_session_is_read_only_and_never_persisted() -> None:

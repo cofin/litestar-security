@@ -95,6 +95,7 @@ from litestar_security.authentication import (
     all_of,
     any_of,
     at_least,
+    exclude,
     mechanism,
     optional,
     public,
@@ -2181,6 +2182,215 @@ def test_websocket_and_asgi_compile_native_auth_runtime_plans() -> None:
     )
 
     assert not anonymous_route.route_handler.opt["litestar_security_plan"].authenticate
+
+
+def test_exclude_policy_and_native_handler_alias_compile_without_authentication() -> None:
+    @get("/typed", auth=exclude())
+    async def typed_handler() -> None:
+        return None
+
+    @get("/native", opt={"exclude_from_auth": True})
+    async def native_handler() -> None:
+        return None
+
+    @websocket("/socket", auth=exclude())
+    async def socket_handler(socket: WebSocket) -> None:
+        del socket
+
+    @websocket("/native-socket", opt={"exclude_from_auth": True})
+    async def native_socket_handler(socket: WebSocket) -> None:
+        del socket
+
+    @asgi("/mount", auth=exclude(), copy_scope=True)
+    async def mounted_app(scope: Scope, receive: Receive, send: Send) -> None:
+        del scope, receive, send
+
+    @asgi("/native-mount", opt={"exclude_from_auth": True}, copy_scope=True)
+    async def native_mounted_app(scope: Scope, receive: Receive, send: Send) -> None:
+        del scope, receive, send
+
+    app = Litestar(
+        route_handlers=[
+            typed_handler,
+            native_handler,
+            socket_handler,
+            native_socket_handler,
+            mounted_app,
+            native_mounted_app,
+        ],
+        csrf_config=CSRFConfig(secret=token_hex()),
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+    )
+
+    typed_plan = _http_plan(app, "/typed")
+    native_plan = _http_plan(app, "/native")
+    socket_route = next(
+        route_value
+        for route_value in app.routes
+        if isinstance(route_value, WebSocketRoute) and route_value.path == "/socket"
+    )
+    native_socket_route = next(
+        route_value
+        for route_value in app.routes
+        if isinstance(route_value, WebSocketRoute) and route_value.path == "/native-socket"
+    )
+    asgi_route = next(
+        route_value for route_value in app.routes if isinstance(route_value, ASGIRoute) and route_value.path == "/mount"
+    )
+    native_asgi_route = next(
+        route_value
+        for route_value in app.routes
+        if isinstance(route_value, ASGIRoute) and route_value.path == "/native-mount"
+    )
+
+    assert typed_plan == native_plan == SecurityRuntimePlan(
+        authenticate=False, bypass_authentication=True, csrf_required=True, csrf_enforcement="native"
+    )
+    assert _operation_security(app, "/typed") == _operation_security(app, "/native") == [{}]
+    assert socket_route.route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(
+        authenticate=False, bypass_authentication=True
+    )
+    assert native_socket_route.route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(
+        authenticate=False, bypass_authentication=True
+    )
+    assert asgi_route.route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(
+        authenticate=False, bypass_authentication=True
+    )
+    assert native_asgi_route.route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(
+        authenticate=False, bypass_authentication=True
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "auth", "opt"),
+    [
+        ("/typed", exclude(), None),
+        ("/native", None, {"exclude_from_auth": True}),
+    ],
+    ids=["typed-policy", "native-alias"],
+)
+def test_exclude_preserves_native_csrf_enforcement_for_unsafe_http(
+    path: str, auth: AuthenticationPolicy | None, opt: dict[str, object] | None
+) -> None:
+    csrf_config = CSRFConfig(secret=token_hex())
+
+    @get("/csrf", auth=exclude())
+    async def csrf_seed() -> None:
+        return None
+
+    async def unsafe_handler() -> dict[str, bool]:
+        return {"ok": True}
+
+    unsafe_handler = (
+        post(path, auth=auth)(unsafe_handler) if auth is not None else post(path, opt=opt)(unsafe_handler)
+    )
+
+    app = Litestar(
+        route_handlers=[csrf_seed, unsafe_handler],
+        csrf_config=csrf_config,
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+    )
+
+    with TestClient(app) as client:
+        missing = client.post(path, headers={"x-auth-session": "invalid"})
+        assert client.get("/csrf").status_code == 200
+        token = client.cookies[csrf_config.cookie_name]
+        accepted = client.post(path, headers={"x-auth-session": "invalid", csrf_config.header_name: token})
+
+    assert missing.status_code == 403
+    assert accepted.status_code == 201
+    assert accepted.json() == {"ok": True}
+
+
+def test_exclude_honors_explicit_http_csrf_requirement_without_session_credentials() -> None:
+    csrf_config = CSRFConfig(secret=token_hex())
+
+    @get("/csrf", auth=exclude(), csrf_required=True)
+    async def csrf_seed() -> None:
+        return None
+
+    @post("/unsafe", auth=exclude(), csrf_required=True)
+    async def unsafe_handler() -> dict[str, bool]:
+        return {"ok": True}
+
+    app = Litestar(
+        route_handlers=[csrf_seed, unsafe_handler],
+        csrf_config=csrf_config,
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config(names=("bearer",)))],
+    )
+
+    with TestClient(app) as client:
+        missing = client.post("/unsafe", headers={"x-auth-bearer": "invalid"})
+        assert client.get("/csrf").status_code == 200
+        token = client.cookies[csrf_config.cookie_name]
+        accepted = client.post("/unsafe", headers={"x-auth-bearer": "invalid", csrf_config.header_name: token})
+
+    assert missing.status_code == 403
+    assert accepted.status_code == 201
+    assert accepted.json() == {"ok": True}
+
+
+@pytest.mark.parametrize("value", [False, None, 1, "yes"])
+def test_exclude_from_auth_alias_requires_true_on_individual_handlers(value: object) -> None:
+    @get("/invalid", opt={"exclude_from_auth": value})
+    async def invalid_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"exclude_from_auth must be exactly True.*GET /invalid"):
+        Litestar(route_handlers=[invalid_handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+
+    @get("/owned")
+    async def owned_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"only on individual route handlers.* /owned"):
+        Litestar(
+            route_handlers=[Router(path="/", route_handlers=[owned_handler], opt={"exclude_from_auth": True})],
+            openapi_config=None,
+            plugins=[SecurityPlugin(_compiler_config())],
+        )
+
+
+def test_exclude_rejects_competing_authentication_policy() -> None:
+    @get("/conflict", auth=public(), opt={"exclude_from_auth": True})
+    async def conflicting_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"both auth and exclude_from_auth.*GET /conflict"):
+        Litestar(
+            route_handlers=[conflicting_handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())]
+        )
+
+
+def test_exclude_follows_nearest_owner_precedence() -> None:
+    class Excluded(SecureController):
+        path = "/excluded"
+        auth: ClassVar[AuthenticationPolicy] = exclude()
+
+        @get("/owned")
+        async def owned(self) -> None:
+            return None
+
+        @get("/override", auth=required("b"))
+        async def overridden(self) -> None:
+            return None
+
+    app = Litestar(
+        route_handlers=[Excluded],
+        opt={"auth": required("a")},
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config())],
+    )
+
+    owned_plan = _http_plan(app, "/excluded/owned")
+    overridden_plan = _http_plan(app, "/excluded/override")
+
+    assert owned_plan == SecurityRuntimePlan(authenticate=False, bypass_authentication=True, csrf_required=False)
+    assert overridden_plan.participant_names == frozenset({"b"})
+    assert overridden_plan.authenticate is True
 
 
 def test_csrf_required_is_rejected_outside_http_routes() -> None:

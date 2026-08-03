@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from litestar_security.__metadata__ import __project__, __version__
 from litestar_security.authentication import (
+    CSRF_REQUIRED_OPT_KEY,
     Authenticated,
     AuthenticationMechanism,
     AuthenticationOutcome,
@@ -23,6 +24,7 @@ from litestar_security.authentication import (
     all_of,
     any_of,
     at_least,
+    exclude,
     mechanism,
     optional,
     public,
@@ -91,6 +93,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = (
+    "CSRF_REQUIRED_OPT_KEY",
     "AssuranceRequirement",
     "AssuranceTrait",
     "Authenticated",
@@ -158,6 +161,7 @@ __all__ = (
     "any_of",
     "at_least",
     "csp_nonce",
+    "exclude",
     "guard_all_of",
     "guard_any_of",
     "guard_at_least",

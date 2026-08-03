@@ -10,6 +10,7 @@ from litestar.di import NamedDependency  # noqa: TC002 - Litestar resolves handl
 from typing_extensions import assert_type
 
 from litestar_security import (
+    CSRF_REQUIRED_OPT_KEY,
     AuthenticationPolicy,
     AuthorizationPredicate,
     CurrentUser,
@@ -21,6 +22,7 @@ from litestar_security import (
     SecurityContext,
     all_of,
     any_of,
+    exclude,
     guard_any_of,
     mechanism,
     optional,
@@ -62,11 +64,17 @@ native_session: SecurityContext = SecurityContext(session=LitestarSessionHandle(
 
 authorization_guard: AuthorizationPredicate = guard_any_of(requires_authenticated(), requires_scope("reports:read"))
 public_metadata = {"auth": public()}
+csrf_metadata = {CSRF_REQUIRED_OPT_KEY: True}
 
 
 @get("/handler", auth=optional(required(mechanism("oidc", "reports:read"))), guards=[authorization_guard])
 async def secured_handler() -> None:
     """Type-check policy metadata and guards at handler ownership."""
+
+
+@get("/excluded", auth=exclude())
+async def excluded_handler() -> None:
+    """Type-check the authentication bypass policy export."""
 
 
 class OwnedOptController(Controller):

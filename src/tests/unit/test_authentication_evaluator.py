@@ -24,6 +24,7 @@ from litestar_security.authentication import (
     all_of,
     any_of,
     at_least,
+    exclude,
     mechanism,
     optional,
     public,
@@ -287,6 +288,20 @@ def test_policy_compiler_is_deterministic_cached_and_preserves_forced_csrf() -> 
     )
     assert not public_plan.authenticate
     assert public_plan.csrf_required is True
+    assert [slot.calls for slot in slots] == [0, 0, 0]
+
+
+@pytest.mark.anyio
+async def test_exclude_compiled_plan_skips_all_credential_work() -> None:
+    evaluator, compiler, slots = _policy_evaluator({"a", "b", "c"})
+
+    plan = compiler.compile(exclude())
+    principal, context = await evaluator.evaluate(_CONNECTION, NullSessionHandle(), plan=plan)
+
+    assert plan.authenticate is False
+    assert plan.bypass_authentication is True
+    assert not principal.is_authenticated
+    assert context.evidence == ()
     assert [slot.calls for slot in slots] == [0, 0, 0]
 
 

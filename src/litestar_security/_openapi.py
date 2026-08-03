@@ -28,11 +28,13 @@ from litestar_security.authentication import (
     RUNTIME_PLAN_OPT_KEY,
     AuthenticationPolicy,
     AuthenticationRegistry,
+    ExcludePolicy,
     MechanismPolicy,
     MechanismRequirement,
     OptionalPolicy,
     PublicPolicy,
     SecurityRuntimePlan,
+    exclude,
     is_generated_options_handler,
     mechanism,
     public,
@@ -67,6 +69,7 @@ _RESERVED_OPT_KEYS = frozenset({
     _OPENAPI_SECURITY_OPT_KEY,
     RUNTIME_PLAN_OPT_KEY,
 })
+_EXCLUDE_FROM_AUTH_OPT_KEY = "exclude_from_auth"
 _MISSING = object()
 
 
@@ -105,6 +108,10 @@ class PolicyCompiler(Generic[UserT]):
     def _compile(self, policy: AuthenticationPolicy, *, csrf_required: bool | None) -> SecurityRuntimePlan:
         if isinstance(policy, PublicPolicy):
             return SecurityRuntimePlan(authenticate=False, csrf_required=csrf_required)
+        if isinstance(policy, ExcludePolicy):
+            return SecurityRuntimePlan(
+                authenticate=False, bypass_authentication=True, csrf_required=csrf_required
+            )
         if isinstance(policy, OptionalPolicy):
             allow_anonymous = True
             expression = policy.policy
@@ -335,6 +342,7 @@ class RouteCompiler(Generic[UserT]):
     def _compile_http_handler(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> None:
         policy: AuthenticationPolicy
         csrf_override: bool | None
+        native_exclude = self._handler_excludes_auth(route, route_handler)
         if self._is_generated_options(route_handler):
             policy = public()
             csrf_override = False
@@ -343,6 +351,10 @@ class RouteCompiler(Generic[UserT]):
             csrf_override = self._http_csrf_override(route, route_handler)
         else:
             resolved_policy = self._resolved_policy(route, route_handler)
+            if native_exclude and resolved_policy is not None:
+                self._raise_route_error(route, route_handler, "Route declares both auth and exclude_from_auth")
+            if native_exclude:
+                resolved_policy = exclude()
             if resolved_policy is None:
                 policy = required() if self.registry.mechanism_names else public()
             else:
@@ -363,13 +375,18 @@ class RouteCompiler(Generic[UserT]):
         csrf_override: bool | None,
     ) -> SecurityRuntimePlan:
         base_plan = self._compile_policy(route, route_handler, policy)
-        session_names = tuple(
-            name
-            for name in self.registry.mechanism_names
-            if self.registry.get_mechanism(name).session_capable
-            and any(requirement.name == name for alternative in base_plan.alternatives for requirement in alternative)
-        )
-        derived = bool(session_names)
+        if isinstance(policy, ExcludePolicy):
+            derived = any(
+                self.registry.get_mechanism(name).session_capable for name in self.registry.default_mechanism_names
+            )
+        else:
+            derived = any(
+                self.registry.get_mechanism(name).session_capable
+                for name in self.registry.mechanism_names
+                if any(
+                    requirement.name == name for alternative in base_plan.alternatives for requirement in alternative
+                )
+            )
         effective = derived if csrf_override is None else csrf_override
         return self._compile_policy(route, route_handler, policy, csrf_required=effective)
 
@@ -436,7 +453,13 @@ class RouteCompiler(Generic[UserT]):
                 )
 
     def _effective_plan(self, route: BaseRoute, route_handler: BaseRouteHandler) -> SecurityRuntimePlan:
-        if policy := self._resolved_policy(route, route_handler):
+        native_exclude = self._handler_excludes_auth(route, route_handler)
+        policy = self._resolved_policy(route, route_handler)
+        if native_exclude and policy is not None:
+            self._raise_route_error(route, route_handler, "Route declares both auth and exclude_from_auth")
+        if native_exclude:
+            return self._compile_policy(route, route_handler, exclude())
+        if policy is not None:
             return self._compile_policy(route, route_handler, policy)
         return self._default_plan(route, route_handler)
 
@@ -523,6 +546,28 @@ class RouteCompiler(Generic[UserT]):
             return None
         if route_handler.opt[CSRF_REQUIRED_OPT_KEY] is not True:
             self._raise_route_error(route, route_handler, "csrf_required must be exactly True when present")
+        return True
+
+    def _handler_excludes_auth(self, route: BaseRoute, route_handler: BaseRouteHandler) -> bool:
+        """Validate and resolve Litestar's handler-local authentication bypass opt.
+
+        Args:
+            route: The route containing the handler.
+            route_handler: The handler whose metadata is being compiled.
+
+        Returns:
+            Whether the handler requests native authentication bypass.
+        """
+        for layer in route_handler.ownership_layers[:-1]:
+            layer_opt = getattr(layer, "opt", None)
+            if isinstance(layer_opt, Mapping) and _EXCLUDE_FROM_AUTH_OPT_KEY in layer_opt:
+                self._raise_route_error(
+                    route, route_handler, "exclude_from_auth is supported only on individual route handlers"
+                )
+        if _EXCLUDE_FROM_AUTH_OPT_KEY not in route_handler.opt:
+            return False
+        if route_handler.opt[_EXCLUDE_FROM_AUTH_OPT_KEY] is not True:
+            self._raise_route_error(route, route_handler, "exclude_from_auth must be exactly True when present")
         return True
 
     def _reject_csrf_metadata(self, route: BaseRoute, route_handler: BaseRouteHandler) -> None:

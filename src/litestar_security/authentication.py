@@ -50,6 +50,7 @@ from litestar_security.websocket import (
 )
 
 __all__ = (
+    "CSRF_REQUIRED_OPT_KEY",
     "Authenticated",
     "AuthenticationMechanism",
     "AuthenticationOutcome",
@@ -69,6 +70,7 @@ __all__ = (
     "all_of",
     "any_of",
     "at_least",
+    "exclude",
     "mechanism",
     "optional",
     "public",
@@ -173,6 +175,11 @@ class PublicPolicy(AuthenticationPolicy):
 
 
 @dataclass(frozen=True, slots=True)
+class ExcludePolicy(AuthenticationPolicy):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class OptionalPolicy(AuthenticationPolicy):
     policy: AuthenticationPolicy
 
@@ -197,6 +204,15 @@ def public() -> AuthenticationPolicy:
         A policy that authenticates nothing, leaving the anonymous principal in place.
     """
     return PublicPolicy()
+
+
+def exclude() -> AuthenticationPolicy:
+    """Bypass request authentication while preserving the default CSRF policy.
+
+    Returns:
+        A policy that skips credential extraction and authentication.
+    """
+    return ExcludePolicy()
 
 
 def required(*requirements: "str | MechanismRequirement") -> AuthenticationPolicy:
@@ -592,6 +608,7 @@ class SecurityRuntimePlan:
     """Compiled per-route authentication work for the runtime middleware."""
 
     authenticate: bool = True
+    bypass_authentication: bool = False
     required: bool = False
     participant_names: frozenset[str] | None = None
     alternatives: tuple[tuple[MechanismRequirement, ...], ...] = ()
@@ -691,6 +708,9 @@ class SecurityMiddleware(Generic[UserT]):
     async def _handle_websocket(  # noqa: C901, PLR0915 - handshake, hook, and close phases remain explicit
         self, scope: Scope, receive: Receive, send: Send, *, session: SessionHandle, plan: SecurityRuntimePlan
     ) -> None:
+        if plan.bypass_authentication:
+            await self.app(scope, receive, send)
+            return
         connection = ASGIConnection[Any, Principal[UserT], SecurityContext, Any](
             scope=scope, receive=receive, send=send
         )
@@ -932,7 +952,7 @@ def _normalize_name(value: str, label: str) -> str:
 
 
 def _validate_policy(policy: object) -> None:
-    if not isinstance(policy, (PublicPolicy, MechanismPolicy, OptionalPolicy)):
+    if not isinstance(policy, (PublicPolicy, ExcludePolicy, MechanismPolicy, OptionalPolicy)):
         message = "Authentication policy must be created by a Litestar Security policy helper"
         raise ImproperlyConfiguredException(detail=message)
 
