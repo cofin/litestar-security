@@ -2204,6 +2204,36 @@ def test_capability_claim_builder_rejects_non_json_application_values() -> None:
         )
 
 
+@pytest.mark.anyio
+async def test_mint_capability_header_is_never_accepted_by_the_access_verifier(
+    local_key_ring: LocalKeyRing,
+) -> None:
+    with pytest.raises(ValueError, match="24 hours"):
+        await local_key_ring.mint_capability(
+            purpose="download",
+            subject="user-1",
+            audience="files",
+            lifetime=timedelta(hours=25),
+        )
+
+    token = await local_key_ring.mint_capability(
+        purpose="download",
+        subject="user-1",
+        audience="files",
+        lifetime=timedelta(minutes=5),
+    )
+
+    assert jwt.get_unverified_header(token)["typ"] == "capability+jwt"
+    verifier = local_key_ring.build_verifier(
+        JWTValidationConfig(
+            issuer=local_key_ring.issuer,
+            audiences=frozenset({"files"}),
+            algorithms=frozenset(key.algorithm for key in local_key_ring.all_verification_keys),
+        )
+    )
+    assert isinstance(await verifier.verify(token, now=_JWT_NOW), InvalidCredentials)
+
+
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [

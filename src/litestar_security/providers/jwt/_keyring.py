@@ -8,7 +8,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from math import isfinite
 from types import MappingProxyType
@@ -25,6 +25,7 @@ from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
 from litestar_security.authentication import AuthenticationOutcome, InvalidCredentials, public
 from litestar_security.providers._internal import JSONValue, raise_config
+from litestar_security.providers.jwt._capabilities import CAPABILITY_TOKEN_TYPE, build_capability_claims
 from litestar_security.providers.jwt._claims import JWTClaims, JWTValidationConfig, validate_local_access_claims
 from litestar_security.providers.jwt._internal import aware_utc, strict_identifier
 from litestar_security.providers.jwt._keys import LocalJWKSDocument, SigningKey, VerificationKey
@@ -196,6 +197,60 @@ class LocalKeyRing:
             worker_limits=self.worker_limits,
             metrics=self.metrics,
         )
+
+    async def mint_capability(
+        self,
+        *,
+        purpose: str,
+        subject: str,
+        audience: str,
+        lifetime: timedelta,
+        claims: Mapping[str, JSONValue] | None = None,
+    ) -> str:
+        """Mint one bounded, single-purpose capability JWT.
+
+        Args:
+            purpose: The application-defined capability purpose.
+            subject: The principal this capability represents.
+            audience: The exact service or resource that may accept it.
+            lifetime: The positive capability lifetime, no longer than 24 hours.
+            claims: Optional JSON application claims, excluding reserved names.
+
+        Returns:
+            A compact capability JWT with a hard-pinned ``capability+jwt`` type.
+
+        Raises:
+            ValueError: If a capability input or lifetime is invalid.
+            RuntimeError: If capability signing is unavailable.
+        """
+        now = datetime.now(timezone.utc)
+        payload = build_capability_claims(
+            issuer=self.issuer,
+            purpose=purpose,
+            subject=subject,
+            audience=audience,
+            lifetime=lifetime,
+            claims={} if claims is None else claims,
+            now=now,
+        )
+        sign = partial(
+            jwt.encode,
+            dict(payload),
+            cast("Any", self.active_signing_key)._prepared_key,  # noqa: SLF001 - read the prepared key material PyJWT exposes only privately
+            algorithm=self.active_signing_key.algorithm,
+            headers={"kid": self.active_signing_key.key_id, "typ": CAPABILITY_TOKEN_TYPE},
+        )
+        try:
+            return await run_worker(
+                sign,
+                limiter=self.worker_limits.crypto_limiter,
+                worker_timeout=self.worker_limits.timeout,
+                metrics=self.metrics,
+                operation_metric="security.jwt.sign_duration",
+            )
+        except Exception:  # noqa: BLE001 - fail closed
+            message = "Capability minting unavailable"
+            raise RuntimeError(message) from None
 
 
 @dataclass(frozen=True, slots=True)

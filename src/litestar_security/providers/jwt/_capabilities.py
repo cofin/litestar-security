@@ -17,9 +17,9 @@ from litestar_security.providers.jwt._internal import (
     strict_identifier_value,
 )
 
-__all__ = ("VerifiedCapability",)
+__all__ = ("CAPABILITY_TOKEN_TYPE", "VerifiedCapability")
 
-_CAPABILITY_TOKEN_TYPE = "capability+jwt"  # noqa: S105 - JOSE typ identifier, not a credential
+CAPABILITY_TOKEN_TYPE = "capability+jwt"  # noqa: S105 - JOSE typ identifier, not a credential
 _CAPABILITY_CLOCK_SKEW = timedelta(seconds=30)
 _CAPABILITY_MAXIMUM_LIFETIME = timedelta(hours=24)
 _MAXIMUM_APPLICATION_CLAIM_DEPTH = 32
