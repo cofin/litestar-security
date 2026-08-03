@@ -983,17 +983,91 @@ async def test_oauth_account_conformance_rejects_final_identity_removal() -> Non
 
 
 @pytest.mark.anyio
-async def test_aggregate_conformance_runs_only_supplied_feature_factories() -> None:
+async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # noqa: C901 - one complete dispatch matrix
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[str] = []
 
     def api_keys() -> APIKeyStore:
-        calls.append("api-key")
         return InMemorySecurityBackend(clock=lambda: _NOW).api_keys
 
-    await assert_security_backend_conformance(StoreConformanceFactories(api_key_store=api_keys))
+    def accounts() -> testing_module.InMemoryLocalAccountStore:
+        return InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW).accounts
 
-    assert calls
-    assert set(calls) == {"api-key"}
+    def mfa_login_challenges() -> testing_module.InMemoryMFALoginChallengeStore:
+        return testing_module.InMemoryMFALoginChallengeStore()
+
+    def mfa() -> testing_module.InMemoryMFAStore:
+        return testing_module.InMemoryMFAStore()
+
+    def oauth_accounts() -> MemoryOAuthAccountStore:
+        return MemoryOAuthAccountStore()
+
+    def oauth_transactions() -> MemoryOAuthTransactionStore:
+        return MemoryOAuthTransactionStore(protector=_ConformanceTransactionProtector())
+
+    def passkeys() -> testing_module.InMemoryPasskeyStore:
+        return testing_module.InMemoryPasskeyStore()
+
+    def sessions() -> testing_module.InMemoryLocalAccountStore:
+        return InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW).accounts
+
+    def webauthn_challenges() -> testing_module.InMemoryWebAuthnChallengeStore:
+        return testing_module.InMemoryWebAuthnChallengeStore()
+
+    def websocket_connect_tokens() -> InMemoryWebSocketConnectTokenStore:
+        return InMemoryWebSocketConnectTokenStore()
+
+    def record(feature: str) -> Callable[..., Awaitable[None]]:
+        async def assert_feature(*_args: object) -> None:
+            calls.append(feature)
+
+        return assert_feature
+
+    for assertion, feature in (
+        ("assert_api_key_store_conformance", "api_key_store"),
+        ("assert_local_account_store_conformance", "local_account_store"),
+        ("assert_mfa_login_challenge_store_conformance", "mfa_login_challenge_store"),
+        ("assert_mfa_store_conformance", "mfa_store"),
+        ("assert_oauth_account_store_conformance", "oauth_account_store"),
+        ("assert_oauth_transaction_store_conformance", "oauth_transaction_store"),
+        ("assert_passkey_store_conformance", "passkey_store"),
+        ("assert_refresh_family_store_conformance", "refresh_family_store"),
+        ("assert_session_registry_conformance", "session_registry"),
+        ("assert_webauthn_challenge_store_conformance", "webauthn_challenge_store"),
+        ("assert_websocket_connect_token_store_conformance", "websocket_connect_token_store"),
+    ):
+        monkeypatch.setattr(testing_module, assertion, record(feature))
+
+    await assert_security_backend_conformance(
+        StoreConformanceFactories(
+            api_key_store=api_keys,
+            local_account_store=accounts,
+            mfa_login_challenge_store=mfa_login_challenges,
+            mfa_store=mfa,
+            oauth_account_store=oauth_accounts,
+            oauth_transaction_store=oauth_transactions,
+            passkey_store=passkeys,
+            refresh_family_store=accounts,
+            session_registry=sessions,
+            webauthn_challenge_store=webauthn_challenges,
+            websocket_connect_token_store=websocket_connect_tokens,
+        )
+    )
+
+    assert calls == [
+        "api_key_store",
+        "local_account_store",
+        "mfa_login_challenge_store",
+        "mfa_store",
+        "oauth_account_store",
+        "oauth_transaction_store",
+        "passkey_store",
+        "refresh_family_store",
+        "session_registry",
+        "webauthn_challenge_store",
+        "websocket_connect_token_store",
+    ]
 
 
 def test_conformance_factories_are_frozen_and_slotted() -> None:

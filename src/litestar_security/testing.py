@@ -1083,6 +1083,16 @@ class StoreConformanceFactories:
     """Isolated zero-argument factories for explicitly enabled capabilities."""
 
     api_key_store: Callable[[], APIKeyStore] | None = None
+    local_account_store: "Callable[[], _ConformanceLocalAccountStore] | None" = None
+    mfa_login_challenge_store: Callable[[], MFALoginChallengeStore] | None = None
+    mfa_store: Callable[[], MFAStore] | None = None
+    oauth_account_store: Callable[[], OAuthAccountStore] | None = None
+    oauth_transaction_store: Callable[[], OAuthTransactionStore] | None = None
+    passkey_store: Callable[[], PasskeyStore] | None = None
+    refresh_family_store: "Callable[[], _ConformanceRefreshFamilyStore] | None" = None
+    session_registry: Callable[[], SessionRegistry] | None = None
+    webauthn_challenge_store: Callable[[], WebAuthnChallengeStore] | None = None
+    websocket_connect_token_store: Callable[[], WebSocketConnectTokenStore] | None = None
 
 
 async def assert_api_key_store_conformance(factory: Callable[[], APIKeyStore]) -> None:
@@ -2543,7 +2553,9 @@ async def assert_oauth_account_store_conformance(factory: Callable[[], OAuthAcco
         )
 
 
-async def assert_security_backend_conformance(factories: StoreConformanceFactories) -> None:
+async def assert_security_backend_conformance(  # noqa: C901 - explicit public capability dispatch preserves field order
+    factories: StoreConformanceFactories,
+) -> None:
     """Run only the conformance scenarios whose factories were supplied.
 
     Args:
@@ -2557,6 +2569,26 @@ async def assert_security_backend_conformance(factories: StoreConformanceFactori
     """
     if factories.api_key_store is not None:
         await assert_api_key_store_conformance(factories.api_key_store)
+    if factories.local_account_store is not None:
+        await assert_local_account_store_conformance(factories.local_account_store)
+    if factories.mfa_login_challenge_store is not None:
+        await assert_mfa_login_challenge_store_conformance(factories.mfa_login_challenge_store)
+    if factories.mfa_store is not None:
+        await assert_mfa_store_conformance(factories.mfa_store)
+    if factories.oauth_account_store is not None:
+        await assert_oauth_account_store_conformance(factories.oauth_account_store)
+    if factories.oauth_transaction_store is not None:
+        await assert_oauth_transaction_store_conformance(factories.oauth_transaction_store)
+    if factories.passkey_store is not None:
+        await assert_passkey_store_conformance(factories.passkey_store)
+    if factories.refresh_family_store is not None:
+        await assert_refresh_family_store_conformance(factories.refresh_family_store)
+    if factories.session_registry is not None:
+        await assert_session_registry_conformance(factories.session_registry)
+    if factories.webauthn_challenge_store is not None:
+        await assert_webauthn_challenge_store_conformance(factories.webauthn_challenge_store)
+    if factories.websocket_connect_token_store is not None:
+        await assert_websocket_connect_token_store_conformance(factories.websocket_connect_token_store)
 
 
 def _conformance_api_key_record(key_id: str) -> APIKeyRecord:
