@@ -20,6 +20,8 @@ from litestar_security.accounts._access_tokens import (
 )
 from litestar_security.accounts._auth_service import LocalAuthService, trusted_client_key
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
+from litestar_security.accounts._mfa import MFAService
+from litestar_security.accounts._mfa_login import MFALoginChallengeStore, MFALoginService
 from litestar_security.accounts._passwords import Argon2PasswordHasher, PasswordHasher
 from litestar_security.accounts._purpose_tokens import PurposeTokenCodec
 from litestar_security.accounts._rate_limits import RateLimiter, RateLimitGuard, StoreRateLimiter
@@ -58,7 +60,7 @@ if TYPE_CHECKING:
     from litestar.openapi.spec import Tag
     from litestar.stores.registry import StoreRegistry
 
-    from litestar_security.accounts._mfa_login import MFALoginService
+    from litestar_security.config import MFAConfig
 
 __all__ = ("LocalAuth", "LocalAuthConfig", "LocalAuthSecrets", "LocalAuthService", "trusted_client_key")
 
@@ -314,7 +316,7 @@ class LocalAuthConfig(Generic[UserT]):
         if isinstance(limiter, StoreRateLimiter) and limiter.store is None:
             limiter.bind(stores.get(limiter.store_name))
 
-    def bind_mfa_login(self, mfa: object) -> None:
+    def bind_mfa_login(self, mfa: "MFAConfig") -> None:
         """Bind one opt-in MFA-login challenge service before route generation.
 
         Args:
@@ -323,11 +325,7 @@ class LocalAuthConfig(Generic[UserT]):
         Raises:
             ImproperlyConfiguredException: If binding is late, conflicting, or incomplete.
         """
-        from litestar_security.accounts import MFALoginChallengeStore, MFAService  # noqa: PLC0415
-        from litestar_security.accounts._mfa_login import MFALoginService  # noqa: PLC0415
-        from litestar_security.config import MFAConfig  # noqa: PLC0415 - avoid config/profile import cycle
-
-        if not isinstance(mfa, MFAConfig) or not mfa.require_at_login:
+        if mfa.require_at_login is not True:
             msg = "MFA login binding requires an MFAConfig with require_at_login enabled"
             raise ImproperlyConfiguredException(detail=msg)
         current = self.mfa_login
