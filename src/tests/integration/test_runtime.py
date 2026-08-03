@@ -790,6 +790,7 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  #
             get_by_id=get_account,
             get_password_state=unused,
             issue=unused,
+            issue_absent=unused,
             list_for_account=list_for_account,
             prepare_rotation=unused,
             rebind=rebind,
@@ -846,6 +847,7 @@ class _GeneratedRouteAccounts:
     refresh_tokens: dict[str, _RouteRefreshState] = field(default_factory=dict)
     verification_token: str | None = None
     recovery_token: str | None = None
+    absent_probes: int = 0
 
     async def find_for_login(self, normalized_identifier: str) -> LocalAccount[object] | None:
         if self.account is None or self.account.normalized_identifier != normalized_identifier:
@@ -909,6 +911,9 @@ class _GeneratedRouteAccounts:
             self.verification_token = notification.token
         elif issue.purpose is TokenPurpose.RECOVERY:
             self.recovery_token = notification.token
+
+    async def issue_absent(self) -> None:
+        self.absent_probes += 1
 
     async def consume_and_verify(self, token_id: str, digest: bytes, **_kwargs: object) -> ConsumeResult:
         issue = self.purpose_tokens.pop(token_id, None)

@@ -5561,6 +5561,7 @@ class _LifecycleStore:
         self.reset_status = reset_status
         self.fail = fail
         self.registrations: list[tuple[object, ...]] = []
+        self.absent_probes: list[None] = []
         self.issues: list[
             tuple[accounts_module.TokenIssue, accounts_module.NotificationCommand, accounts_module.SecurityEvent]
         ] = []
@@ -5608,6 +5609,11 @@ class _LifecycleStore:
         event: accounts_module.SecurityEvent,
     ) -> None:
         self.issues.append((issue, notification, event))
+        if self.fail:
+            raise OSError
+
+    async def issue_absent(self) -> None:
+        self.absent_probes.append(None)
         if self.fail:
             raise OSError
 
@@ -11445,6 +11451,27 @@ async def test_verification_resend_consumes_a_budget_for_an_unnormalizable_ident
 
     assert isinstance(await service.resend("user@example.com", now=_JWT_NOW), accounts_module.LifecycleAccepted)
     assert limiter.requests[0].subject_digest is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("family", ["verification", "recovery"])
+async def test_uniform_durable_write_cost_for_present_and_absent_identifiers(family: str) -> None:
+    counts: dict[str, int] = {}
+    for name, account in (("present", _lifecycle_account()), ("absent", None)):
+        store = _LifecycleStore(account=account)
+        codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+        if family == "verification":
+            outcome = await accounts_module.VerificationTokenService(accounts=store, store=store, tokens=codec).resend(
+                "user@example.com", now=_JWT_NOW
+            )
+        else:
+            outcome = await accounts_module.RecoveryTokenService(
+                accounts=store, store=store, tokens=codec, hasher=_PasswordHasher()
+            ).request("user@example.com", now=_JWT_NOW)
+        assert isinstance(outcome, accounts_module.LifecycleAccepted)
+        counts[name] = len(store.issues) + len(store.absent_probes)
+
+    assert counts["present"] == counts["absent"] == 1
 
 
 @pytest.mark.anyio

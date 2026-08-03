@@ -266,6 +266,17 @@ class VerificationTokenStore(Protocol):
         """
         ...  # pragma: no cover
 
+    async def issue_absent(self) -> None:
+        """Perform one durable round trip that commits nothing.
+
+        Called instead of :meth:`issue` when the identifier resolves to no
+        eligible account. The durable step MUST cost the same whether or not the
+        identifier resolves: an implementation that answers quickly for unknown
+        accounts makes a present account measurably slower to probe, defeating
+        the shared-response guarantee. Commit, notify, and mutate nothing.
+        """
+        ...  # pragma: no cover
+
     async def consume_and_verify(
         self, token_id: str, digest: bytes, *, now: "datetime", event: SecurityEvent
     ) -> ConsumeResult:
@@ -302,6 +313,17 @@ class RecoveryTokenStore(Protocol):
             notification: The delivery the application should send.
             event: The audit event to commit with the issue. Rejecting it must
                 fail the issue.
+        """
+        ...  # pragma: no cover
+
+    async def issue_absent(self) -> None:
+        """Perform one durable round trip that commits nothing.
+
+        Called instead of :meth:`issue` when the identifier resolves to no
+        eligible account. The durable step MUST cost the same whether or not the
+        identifier resolves: an implementation that answers quickly for unknown
+        accounts makes a present account measurably slower to probe, defeating
+        the shared-response guarantee. Commit, notify, and mutate nothing.
         """
         ...  # pragma: no cover
 

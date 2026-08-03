@@ -444,6 +444,11 @@ class RecoveryTokenService(Generic[UserT]):
         deliberately identical: the budget is consumed for unknown identifiers
         too, so being limited reveals nothing about whether an account exists.
 
+        Every request pays one durable store round trip: an eligible account
+        commits through :meth:`RecoveryTokenStore.issue`, any other identifier
+        probes through :meth:`RecoveryTokenStore.issue_absent`, so a present
+        account is not measurably slower to probe than an absent one.
+
         Args:
             identifier: The submitted identifier.
             now: Override the clock, for tests and replayable requests.
@@ -482,6 +487,8 @@ class RecoveryTokenService(Generic[UserT]):
                         account_id=account.account_id,
                     ),
                 )
+            else:
+                await self.store.issue_absent()
         except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
             _LOGGER.error("Recovery token request failed")  # noqa: TRY400 - omit untrusted exception details
         return LifecycleAccepted()

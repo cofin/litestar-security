@@ -117,6 +117,10 @@ class RegistrationService(Generic[UserT]):
     ):
         """Hash and pass one complete candidate registration to the atomic store.
 
+        The hash and the atomic ``register`` call both run unconditionally, so
+        the constant-time obligation for a taken versus a new identifier lives
+        in the application's :meth:`RegistrationStore.register` implementation.
+
         Args:
             identifier: The submitted identifier, normalized before use.
             password: The submitted password, checked against policy first.
@@ -239,6 +243,12 @@ class VerificationTokenService(Generic[UserT]):
         deliberately identical: the budget is consumed for unknown identifiers
         too, so being limited reveals nothing about whether an account exists.
 
+        Every request pays one durable store round trip: an eligible account
+        commits through :meth:`VerificationTokenStore.issue`, any other
+        identifier probes through :meth:`VerificationTokenStore.issue_absent`,
+        so a present account is not measurably slower to probe than an absent
+        one.
+
         Args:
             identifier: The submitted identifier.
             now: Override the clock, for tests and replayable requests.
@@ -277,6 +287,8 @@ class VerificationTokenService(Generic[UserT]):
                         account_id=account.account_id,
                     ),
                 )
+            else:
+                await self.store.issue_absent()
         except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
             _LOGGER.error("Verification token request failed")  # noqa: TRY400 - omit untrusted exception details
         return LifecycleAccepted()
