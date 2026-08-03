@@ -19,7 +19,6 @@ from litestar_security.accounts._access_tokens import (
     validate_access_token_lifetime,
 )
 from litestar_security.accounts._auth_service import LocalAuthService, trusted_client_key
-from litestar_security.accounts._controllers import LOCAL_AUTH_TAGS, build_local_auth_routes
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._passwords import Argon2PasswordHasher, PasswordHasher
 from litestar_security.accounts._purpose_tokens import PurposeTokenCodec
@@ -52,6 +51,7 @@ from litestar_security.accounts._stores import (
     SecurityEpochStore,
     VerificationTokenStore,
 )
+from litestar_security.accounts.controllers import LOCAL_AUTH_TAGS, build_local_auth_routes
 from litestar_security.providers.jwt import BearerSlotSelector, BearerTokenSlot, JWTValidationConfig, LocalKeyRing
 
 if TYPE_CHECKING:

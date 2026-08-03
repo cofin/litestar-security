@@ -6,7 +6,6 @@ from litestar_security.accounts._access_tokens import (
     LocalBearerIdentityResolver,
 )
 from litestar_security.accounts._auth_service import LocalAuthService, trusted_client_key
-from litestar_security.accounts._controllers import LOCAL_AUTH_TAGS, build_local_auth_routes, requires_local_bearer
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._mfa import (
     MFAService,
@@ -25,7 +24,6 @@ from litestar_security.accounts._mfa import (
     TOTPMethod,
     TOTPPolicy,
 )
-from litestar_security.accounts._mfa_controllers import build_mfa_routes
 from litestar_security.accounts._passkeys import (
     AssertionRecordResult,
     AttestationTrustMapper,
@@ -151,6 +149,12 @@ from litestar_security.accounts._stores import (
     SecurityEpochStore,
     SecurityEpochValidator,
     VerificationTokenStore,
+)
+from litestar_security.accounts.controllers import (
+    LOCAL_AUTH_TAGS,
+    build_local_auth_routes,
+    build_mfa_routes,
+    requires_local_bearer,
 )
 from litestar_security.accounts.schemas import (
     LocalAccountResponse,

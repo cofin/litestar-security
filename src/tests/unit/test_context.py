@@ -1180,8 +1180,8 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
     "module_name",
     [
         "litestar_security.accounts._profiles",
-        "litestar_security.accounts._controllers",
-        "litestar_security.accounts._mfa_controllers",
+        "litestar_security.accounts.controllers._local",
+        "litestar_security.accounts.controllers._mfa",
         "litestar_security.accounts._auth_service",
         "litestar_security.accounts._refresh",
         "litestar_security.accounts._sessions",
@@ -1196,10 +1196,11 @@ def test_accounts_layering_carries_no_cycle_break_suppressions(module_name: str)
 def test_profiles_reaches_the_generated_controllers_at_module_scope() -> None:
     profiles = import_module("litestar_security.accounts._profiles")
 
-    assert "litestar_security.accounts._controllers" in sys.modules
-    assert profiles.build_local_auth_routes is import_module(
-        "litestar_security.accounts._controllers"
-    ).build_local_auth_routes
+    assert "litestar_security.accounts.controllers" in sys.modules
+    assert (
+        profiles.build_local_auth_routes
+        is import_module("litestar_security.accounts.controllers").build_local_auth_routes
+    )
 
 
 @pytest.mark.parametrize(

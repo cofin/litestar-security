@@ -34,11 +34,11 @@ from litestar.stores.memory import MemoryStore
 
 import litestar_security.accounts as accounts_module
 import litestar_security.accounts._access_tokens as access_tokens_module
-import litestar_security.accounts._controllers as controllers_module
-import litestar_security.accounts._mfa_controllers as mfa_controllers_module
 import litestar_security.accounts._passkeys as passkeys_module
 import litestar_security.accounts._rate_limits as rate_limits_module
 import litestar_security.accounts._sessions as sessions_module
+import litestar_security.accounts.controllers._local as controllers_module
+import litestar_security.accounts.controllers._mfa as mfa_controllers_module
 import litestar_security.testing as testing_module
 from litestar_security.authentication import (
     Authenticated,
