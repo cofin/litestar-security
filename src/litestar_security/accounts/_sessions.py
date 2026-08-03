@@ -220,6 +220,7 @@ class SessionRecord:
     account_id: str
     security_epoch: int
     created_at: "datetime"
+    authenticated_at: "datetime"
     last_seen_at: "datetime"
     expires_at: "datetime"
     display_metadata: "Mapping[str, str]" = field(default_factory=lambda: _EMPTY_DISPLAY_METADATA)
@@ -228,6 +229,7 @@ class SessionRecord:
         """Validate authoritative record state and freeze safe display metadata."""
         try:
             created_at = aware_utc_time(self.created_at)
+            authenticated_at = aware_utc_time(self.authenticated_at)
             last_seen_at = aware_utc_time(self.last_seen_at)
             expires_at = aware_utc_time(self.expires_at)
         except (AttributeError, ValueError):
@@ -243,10 +245,12 @@ class SessionRecord:
             or len(self.binding_digest) != DIGEST_BYTES
             or not strict_text(self.account_id)
             or not created_at <= last_seen_at < expires_at
+            or authenticated_at > expires_at
         ):
             msg = "Session record is invalid"
             raise ValueError(msg)
         object.__setattr__(self, "created_at", created_at)
+        object.__setattr__(self, "authenticated_at", authenticated_at)
         object.__setattr__(self, "last_seen_at", last_seen_at)
         object.__setattr__(self, "expires_at", expires_at)
         object.__setattr__(self, "display_metadata", _freeze_display_metadata(self.display_metadata))
@@ -262,6 +266,7 @@ class CreateSessionCommand:
     account_id: str
     security_epoch: int
     created_at: "datetime"
+    authenticated_at: "datetime"
     expires_at: "datetime"
     display_metadata: "Mapping[str, str]" = field(default_factory=lambda: _EMPTY_DISPLAY_METADATA)
 
@@ -269,6 +274,7 @@ class CreateSessionCommand:
         """Validate atomic creation material and freeze safe display metadata."""
         try:
             created_at = aware_utc_time(self.created_at)
+            authenticated_at = aware_utc_time(self.authenticated_at)
             expires_at = aware_utc_time(self.expires_at)
         except (AttributeError, ValueError):
             msg = "Session creation timestamps must be timezone-aware"
@@ -283,10 +289,12 @@ class CreateSessionCommand:
             or len(self.binding_digest) != DIGEST_BYTES
             or not strict_text(self.account_id)
             or expires_at <= created_at
+            or authenticated_at > expires_at
         ):
             msg = "Session creation command is invalid"
             raise ValueError(msg)
         object.__setattr__(self, "created_at", created_at)
+        object.__setattr__(self, "authenticated_at", authenticated_at)
         object.__setattr__(self, "expires_at", expires_at)
         object.__setattr__(self, "display_metadata", _freeze_display_metadata(self.display_metadata))
 
@@ -310,6 +318,7 @@ class SessionRebindPlan:
             or self.binding_token.__class__ is not str
             or self.command.binding_id != self.binding_token.partition(".")[0]
             or self.command.created_at != authenticated_at
+            or self.command.authenticated_at != authenticated_at
         ):
             msg = "Session rebind plan is invalid"
             raise ValueError(msg)
@@ -646,6 +655,7 @@ class NativeSessionAuth(Generic[UserT]):
                 account_id=account.account_id,
                 security_epoch=account.security_epoch,
                 created_at=occurred_at,
+                authenticated_at=evidence.authenticated_at if evidence is not None else occurred_at,
                 expires_at=expires_at,
                 display_metadata=display_metadata,
             )
@@ -847,6 +857,7 @@ class NativeSessionAuth(Generic[UserT]):
                 account_id=account.account_id,
                 security_epoch=account.security_epoch,
                 created_at=occurred_at,
+                authenticated_at=occurred_at,
                 expires_at=occurred_at + timedelta(seconds=self.binding.max_age),
             )
             return SessionRebindPlan(
@@ -888,7 +899,7 @@ class NativeSessionAuth(Generic[UserT]):
             binding_id=command.binding_id,
             account_id=command.account_id,
             security_epoch=command.security_epoch,
-            authenticated_at=plan.authenticated_at,
+            authenticated_at=command.authenticated_at,
             expires_at=command.expires_at,
         )
         session[_SESSION_AUTHENTICATION_KEY] = self._encode_authentication(authentication)
@@ -1023,7 +1034,7 @@ class NativeSessionAuth(Generic[UserT]):
             == current_epoch
             == getattr(account, "security_epoch", None)
             and record.binding_id == authentication.binding_id
-            and record.created_at == authentication.authenticated_at
+            and record.authenticated_at == authentication.authenticated_at
             and record.expires_at == authentication.expires_at
             and now < authentication.expires_at
         )
@@ -1038,6 +1049,7 @@ class NativeSessionAuth(Generic[UserT]):
             and record.account_id == command.account_id
             and record.security_epoch == command.security_epoch
             and record.created_at == command.created_at
+            and record.authenticated_at == command.authenticated_at
             and record.expires_at == command.expires_at
         )
 

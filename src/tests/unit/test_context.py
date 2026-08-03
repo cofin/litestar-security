@@ -1318,6 +1318,7 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
             account_id=account.account_id,
             security_epoch=1,
             created_at=now,
+            authenticated_at=now,
             last_seen_at=now,
             expires_at=now + timedelta(hours=1),
         ),
@@ -1328,6 +1329,7 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
             account_id=account.account_id,
             security_epoch=1,
             created_at=now,
+            authenticated_at=now,
             expires_at=now + timedelta(hours=1),
         ),
         accounts_module.SessionSummary(
@@ -1847,10 +1849,10 @@ def test_account_password_session_and_refresh_contracts_share_one_strict_epoch_d
             _SESSION_ID, _BINDING_ID, "account-1", epoch, now, now + timedelta(hours=1)
         ),
         lambda: accounts_module.SessionRecord(
-            _SESSION_ID, _BINDING_ID, b"d" * 32, "account-1", epoch, now, now, now + timedelta(hours=1)
+            _SESSION_ID, _BINDING_ID, b"d" * 32, "account-1", epoch, now, now, now, now + timedelta(hours=1)
         ),
         lambda: accounts_module.CreateSessionCommand(
-            _SESSION_ID, _BINDING_ID, b"d" * 32, "account-1", epoch, now, now + timedelta(hours=1)
+            _SESSION_ID, _BINDING_ID, b"d" * 32, "account-1", epoch, now, now, now + timedelta(hours=1)
         ),
         lambda: accounts_module.RotateRefreshCommand(
             _REFRESH_ID,
@@ -2341,6 +2343,7 @@ def test_native_session_contracts_reject_malformed_state(
             "account_id",
             "security_epoch",
             "created_at",
+            "authenticated_at",
             "last_seen_at",
             "expires_at",
             "display_metadata",
@@ -2352,6 +2355,7 @@ def test_native_session_contracts_reject_malformed_state(
             "account_id",
             "security_epoch",
             "created_at",
+            "authenticated_at",
             "expires_at",
             "display_metadata",
         ),

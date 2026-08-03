@@ -364,6 +364,7 @@ class ExampleAccountStore:
             account_id=command.account_id,
             security_epoch=command.security_epoch,
             created_at=command.created_at,
+            authenticated_at=command.authenticated_at,
             last_seen_at=command.created_at,
             expires_at=command.expires_at,
             display_metadata=command.display_metadata,

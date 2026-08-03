@@ -5276,6 +5276,7 @@ def _replacement_session(*, security_epoch: int = 1) -> accounts_module.CreateSe
         account_id="account-1",
         security_epoch=security_epoch,
         created_at=_JWT_NOW,
+        authenticated_at=_JWT_NOW,
         expires_at=_JWT_NOW + timedelta(hours=1),
     )
 
@@ -6209,6 +6210,7 @@ class _NativeSessionStore:
             account_id=command.account_id,
             security_epoch=command.security_epoch,
             created_at=command.created_at,
+            authenticated_at=command.authenticated_at,
             last_seen_at=command.created_at,
             expires_at=command.expires_at,
             display_metadata=command.display_metadata,
@@ -6230,6 +6232,7 @@ class _NativeSessionStore:
                 account_id=record.account_id,
                 security_epoch=record.security_epoch,
                 created_at=record.created_at,
+                authenticated_at=record.authenticated_at,
                 last_seen_at=record.last_seen_at,
                 expires_at=record.expires_at,
             )
@@ -6270,6 +6273,7 @@ class _NativeSessionStore:
             account_id=record.account_id,
             security_epoch=record.security_epoch,
             created_at=record.created_at,
+            authenticated_at=record.authenticated_at,
             last_seen_at=now,
             expires_at=record.expires_at,
             display_metadata=record.display_metadata,
@@ -6503,6 +6507,50 @@ async def test_native_session_establish_authenticate_touch_and_rebind_are_fixati
     assert isinstance(await auth.authenticate(replacement_extraction.value, replacement_connection), Authenticated)
 
 
+@pytest.mark.anyio
+async def test_native_session_binds_evidence_authentication_time_to_durable_record() -> None:
+    store = _NativeSessionStore()
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: _JWT_NOW,
+        entropy=_SessionEntropy(),
+    )
+    session: dict[str, object] = {}
+    establishing_connection = _native_session_connection(session)
+    evidence_authenticated_at = _JWT_NOW - timedelta(minutes=5)
+    established = await auth.establish(
+        establishing_connection,
+        cast("accounts_module.LocalAccount[object]", store.account),
+        evidence=AuthenticationEvidence(
+            mechanism="local",
+            slot="password",
+            authenticated_at=evidence_authenticated_at,
+            expires_at=_JWT_NOW + timedelta(hours=1),
+            methods=frozenset({"password"}),
+            traits=frozenset(),
+            amr=("pwd",),
+        ),
+    )
+
+    assert isinstance(established, accounts_module.SessionAuthentication)
+    assert established.authenticated_at == evidence_authenticated_at
+    assert store.records[established.session_id].created_at == _JWT_NOW
+    token = _queued_binding_token(establishing_connection)
+    connection = _native_session_connection(session, binding_token=token)
+    extraction = auth.extract(connection)
+    assert isinstance(extraction, PresentedCredential)
+    assert isinstance(await auth.authenticate(extraction.value, connection), Authenticated)
+
+    payload = cast("dict[str, object]", session["_litestar_security"])
+    payload["authenticated_at"] = (_JWT_NOW - timedelta(minutes=4)).isoformat()
+    tampered_connection = _native_session_connection(session, binding_token=token)
+    tampered_extraction = auth.extract(tampered_connection)
+    assert isinstance(tampered_extraction, PresentedCredential)
+    assert isinstance(await auth.authenticate(tampered_extraction.value, tampered_connection), InvalidCredentials)
+    assert "_litestar_security" not in session
+
+
 @pytest.mark.parametrize(
     ("session_value", "binding_token", "outcome_type", "cleared"),
     [
@@ -6597,6 +6645,7 @@ async def test_native_session_current_state_mismatch_is_invalid_and_cleared(inva
             account_id=record.account_id,
             security_epoch=record.security_epoch,
             created_at=record.created_at,
+            authenticated_at=record.authenticated_at,
             last_seen_at=record.last_seen_at,
             expires_at=record.expires_at,
         )
@@ -6638,6 +6687,7 @@ async def test_native_session_logout_and_account_qualified_revoke_are_explicit_a
             account_id="account-1",
             security_epoch=1,
             created_at=_JWT_NOW,
+            authenticated_at=_JWT_NOW,
             expires_at=_JWT_NOW + timedelta(hours=1),
         )
     )
@@ -6981,6 +7031,7 @@ async def test_native_session_current_revoke_clears_browser_state_and_list_filte
         account_id="account-2",
         security_epoch=1,
         created_at=_JWT_NOW,
+        authenticated_at=_JWT_NOW,
         last_seen_at=_JWT_NOW,
         expires_at=_JWT_NOW + timedelta(hours=1),
     )
