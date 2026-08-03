@@ -7,6 +7,48 @@ Changelog
 Changed (breaking)
 ~~~~~~~~~~~~~~~~~~
 
+* ``intersect_authorization`` is renamed ``resolve_authorization``. The old name
+  described the implementation rather than the result, and ``resolve_`` matches
+  the naming the rest of the surface uses. No alias ships for the old name.
+* The WebSocket ticket family is renamed for what it authorizes, because the
+  library already issues access and refresh tokens to users and "ticket" gave no
+  clue which kind of value one was:
+
+  .. list-table::
+     :header-rows: 1
+
+     * - Before
+       - After
+     * - ``WebSocketTicketRecord``
+       - ``WebSocketConnectTokenRecord``
+     * - ``IssuedWebSocketTicket``
+       - ``IssuedWebSocketConnectToken``
+     * - ``WebSocketTicketStore``
+       - ``WebSocketConnectTokenStore``
+     * - ``WebSocketTicketService``
+       - ``WebSocketConnectTokenService``
+     * - ``InMemoryWebSocketTicketStore``
+       - ``InMemoryWebSocketConnectTokenStore``
+     * - ``WebSocketTicketUnavailableError``
+       - ``WebSocketConnectTokenUnavailableError``
+     * - ``issue_websocket_ticket()``
+       - ``issue_websocket_connect_token()``
+
+* Fields on public WebSocket types move with that rename, so an application
+  constructing them by keyword must be updated: ``WebSocketHandshake.ticket``
+  becomes ``.connect_token``, ``WebSocketConnectTokenRecord.ticket_id`` becomes
+  ``.connect_token_id``, and ``WebSocketSecurityConfig.ticket_store``,
+  ``.ticket_ttl``, ``.maximum_ticket_ttl`` and ``.ticket_query_parameter`` take
+  the matching ``connect_token`` names.
+* Three WebSocket values on the wire change with the name. The handshake query
+  parameter defaults to ``connect_token`` rather than ``ticket``, so a browser
+  that builds the URL itself sends the new name unless the application sets
+  ``connect_token_query_parameter`` back to ``ticket``. The issued credential is
+  prefixed ``wsct.`` rather than ``wst.``. The HMAC domain separator becomes
+  ``litestar-security/websocket-connect-token/v1``, which invalidates every
+  stored digest; connect tokens are short-lived, so an in-flight credential
+  fails closed and the client requests another. The evidence a connection
+  records also reads ``websocket-connect-token``.
 * Every generated ``/auth`` body is now ``snake_case``. The MFA, passkey,
   step-up, and OAuth provider routes previously used camel-case members on both
   requests and responses: ``stepUpGrant``, ``methodId``, ``enrollmentId``,
@@ -46,6 +88,21 @@ Added
 * ``WireStruct``, the shared base carrying that convention, is exported from the
   package root so applications can define their own schemas on the same
   casing and strictness policy.
+* ``litestar_security.typing`` exposes dependency-availability flags and
+  ``require_dependency``, which raises where a capability is used and names the
+  distribution to install. The flags resolve when they are read, so importing
+  the module never imports what it describes.
+
+Changed
+~~~~~~~
+
+* ``litestar_security.accounts`` and ``litestar_security.websocket`` were
+  reorganized internally. Every public import path is unchanged: the account
+  wire schemas and generated controllers moved into ``schemas`` and
+  ``controllers`` sub-packages, and the WebSocket module became a package of
+  layered modules. The worker budget, metrics port, and blocking-call bridge now
+  live in ``litestar_security.workers``; ``litestar_security.config`` re-exports
+  them, so the documented import path still resolves.
 
 0.1.0
 -----
