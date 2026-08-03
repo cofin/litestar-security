@@ -359,6 +359,254 @@ async def test_mfa_login_verifies_only_the_selected_factor(
     )
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"store": object()}, "store"),
+        ({"mfa": object()}, "MFA capability"),
+        ({"pepper": b"short"}, "pepper"),
+        ({"methods": frozenset()}, "methods"),
+        ({"ttl": timedelta()}, "lifetime"),
+        ({"clock": object()}, "callable"),
+    ],
+)
+def test_mfa_login_service_rejects_incomplete_or_unbounded_dependencies(kwargs: dict[str, object], match: str) -> None:
+    """The challenge service accepts only concrete, bounded security collaborators."""
+    values: dict[str, object] = {
+        "store": testing_module.InMemoryMFALoginChallengeStore(),
+        "mfa": _mfa_service(_MFAStore(), _MFAProtector()),
+        "pepper": b"p" * 32,
+    }
+    values.update(kwargs)
+
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        mfa_login_module.MFALoginService(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_mfa_login_service_fail_closes_invalid_inputs_and_collaborators() -> None:
+    """Invalid challenge context, entropy, clocks, stores, and factor input never leak through."""
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=0,
+    )
+    service = mfa_login_module.MFALoginService(
+        store=testing_module.InMemoryMFALoginChallengeStore(),
+        mfa=_mfa_service(_MFAStore(), _MFAProtector()),
+        pepper=b"p" * 32,
+        entropy=lambda _size: b"short",
+    )
+    assert await service.issue(account, client_key="client") == VerificationUnavailable()
+    assert await service.issue(replace(account, account_id="\ud800"), client_key="client") == VerificationUnavailable()
+    assert (
+        await service.consume("challenge", account_id="account-1", security_epoch=0, client_key="\ud800")
+        == InvalidCredentials()
+    )
+
+    class FailingStore:
+        async def put(self, _challenge: object) -> None:
+            raise OSError
+
+        async def consume(self, *_args: object, **_kwargs: object) -> None:
+            raise OSError
+
+    failing = mfa_login_module.MFALoginService(
+        store=cast("Any", FailingStore()), mfa=_mfa_service(_MFAStore(), _MFAProtector()), pepper=b"p" * 32
+    )
+    assert await failing.issue(account, client_key=None) == VerificationUnavailable()
+    assert (
+        await failing.consume("challenge", account_id="account-1", security_epoch=0, client_key=None)
+        == VerificationUnavailable()
+    )
+
+    record = accounts_module.MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key="client",
+        issued_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+    )
+    assert await service.verify(record, method="totp", method_id=None, code="123456") == InvalidCredentials()
+    assert await service.verify(record, method="other", method_id=None, code="123456") == InvalidCredentials()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["limit", "account", "consume", "verify"])
+async def test_local_auth_mfa_completion_fail_closes_collaborator_failures(failure: str) -> None:
+    """Every completion boundary returns the sanitized unavailable outcome on collaborator faults."""
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=0,
+    )
+
+    class Accounts:
+        async def get_by_id(self, _account_id: str) -> object:
+            if failure == "account":
+                raise OSError
+            return account
+
+    class Limits:
+        async def check(self, *_args: object, **_kwargs: object) -> None:
+            if failure == "limit":
+                raise OSError
+
+    class MFA:
+        async def consume(self, *_args: object, **_kwargs: object) -> object:
+            if failure == "consume":
+                raise OSError
+            return accounts_module.MFALoginChallenge(
+                challenge_digest=b"d" * 32,
+                account_id=account.account_id,
+                security_epoch=account.security_epoch,
+                client_key="client",
+                issued_at=_JWT_NOW,
+                expires_at=_JWT_NOW + timedelta(minutes=5),
+            )
+
+        async def verify(self, *_args: object, **_kwargs: object) -> object:
+            if failure == "verify":
+                raise OSError
+            return InvalidCredentials()
+
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", Accounts()),
+        password_login=cast("Any", object()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        rate_limits=cast("Any", Limits()),
+        mfa_login=cast("Any", MFA()),
+        client_key=lambda _request: "client",
+    )
+
+    assert (
+        await service.complete_mfa_login(
+            cast("Any", object()),
+            "challenge",
+            account_id=account.account_id,
+            method="totp",
+            method_id="method-1",
+            code="123456",
+        )
+        == VerificationUnavailable()
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("limited", "account", "expected"),
+    [
+        (accounts_module.RateLimited(retry_after=3), object(), accounts_module.RateLimited(retry_after=3)),
+        (None, None, InvalidCredentials()),
+        (
+            None,
+            accounts_module.LocalAccount(
+                account_id="account-1",
+                normalized_identifier="person@example.com",
+                display_name="Person",
+                active=False,
+                verified=True,
+                security_epoch=0,
+            ),
+            InvalidCredentials(),
+        ),
+    ],
+)
+async def test_local_auth_mfa_completion_stops_before_challenge_for_limited_or_inactive_accounts(
+    limited: object, account: object, expected: object
+) -> None:
+    """Rate limits and inactive/missing accounts are returned before consuming an MFA challenge."""
+
+    class Accounts:
+        async def get_by_id(self, _account_id: str) -> object:
+            return account
+
+    class Limits:
+        async def check(self, *_args: object, **_kwargs: object) -> object:
+            return limited
+
+    class MFA:
+        async def consume(self, *_args: object, **_kwargs: object) -> object:
+            pytest.fail("a rate limit or invalid account must not consume the challenge")
+
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", Accounts()),
+        password_login=cast("Any", object()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        rate_limits=cast("Any", Limits()),
+        mfa_login=cast("Any", MFA()),
+    )
+
+    assert (
+        await service.complete_mfa_login(
+            cast("Any", object()),
+            "challenge",
+            account_id="account-1",
+            method="totp",
+            method_id="method-1",
+            code="123456",
+        )
+        == expected
+    )
+
+
+@pytest.mark.anyio
+async def test_mfa_login_helper_boundaries_fail_closed_without_secret_processing() -> None:
+    """Malformed contextual inputs and exact helper contracts take their explicit fail-closed branches."""
+    service = mfa_login_module.MFALoginService(
+        store=testing_module.InMemoryMFALoginChallengeStore(),
+        mfa=_mfa_service(_MFAStore(), _MFAProtector()),
+        pepper=b"p" * 32,
+    )
+    invalid_account = SimpleNamespace(account_id="\ud800", security_epoch=0)
+    valid_account = SimpleNamespace(account_id="account-1", security_epoch=0)
+    assert await service.issue(cast("Any", invalid_account), client_key=None) == VerificationUnavailable()
+    assert await service.issue(cast("Any", valid_account), client_key="\ud800") == VerificationUnavailable()
+    assert mfa_login_module._strict_ascii_context("\ud800") is False  # noqa: SLF001
+    assert mfa_login_module._valid_methods({"totp"}) is False  # noqa: SLF001
+    assert mfa_login_module._client_keys_match(None, "client") is False  # noqa: SLF001
+    assert mfa_login_module._client_keys_match("client", 1) is False  # noqa: SLF001
+    assert mfa_login_module._client_keys_match("client", "\ud800") is False  # noqa: SLF001
+
+    record = accounts_module.MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key=None,
+        issued_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+    )
+    object.__setattr__(service, "methods", frozenset({"unimplemented"}))
+    assert await service.verify(record, method="unimplemented", method_id=None, code="123456") == InvalidCredentials()
+
+
+def test_local_mfa_wire_representations_redact_challenge_and_factor_proof() -> None:
+    """Typed MFA transport values cannot disclose either reusable secret through diagnostics."""
+    required = accounts_module.LocalMFARequiredResponse(
+        challenge="challenge-secret", account_id="account-1", expires_at=_JWT_NOW, methods=("totp",)
+    )
+    completion = accounts_module.LocalMFACompletionRequest(
+        challenge="challenge-secret", account_id="account-1", method="totp", code="factor-secret", method_id="method-1"
+    )
+
+    assert "challenge-secret" not in repr(required)
+    assert "challenge-secret" not in repr(completion)
+    assert "factor-secret" not in repr(completion)
+
+
 @pytest.mark.anyio
 async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_key() -> None:
     """MFA login burns before factor verification and delegates with merged evidence."""

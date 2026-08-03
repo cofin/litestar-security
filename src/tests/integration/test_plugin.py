@@ -1259,6 +1259,54 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
     ]
 
 
+def test_session_mfa_completion_translates_a_sanitized_failure() -> None:
+    """The public session completion route maps a failed factor to the normal bad-request response."""
+
+    class Service:
+        session_auth = object()
+        refresh_tokens = None
+        registration = None
+
+        async def session_login(self, _request: object, _data: object) -> MFARequired:
+            return MFARequired(
+                "challenge-secret", "account-1", datetime(2026, 7, 26, tzinfo=timezone.utc), frozenset({"totp"})
+            )
+
+        async def complete_mfa_login(self, *_args: object, **_kwargs: object) -> InvalidCredentials:
+            return InvalidCredentials()
+
+    csrf_secret = token_hex()
+    app = Litestar(
+        route_handlers=[
+            accounts_module.build_local_auth_routes(
+                cast(
+                    "Any",
+                    SimpleNamespace(
+                        local_auth_service=Service(),
+                        mfa_login=object(),
+                        mode=accounts_module.LocalAuthMode.SESSION,
+                        registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
+                        route_prefix="/identity",
+                    ),
+                )
+            )
+        ],
+        csrf_config=CSRFConfig(secret=csrf_secret),
+        plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+    )
+    with TestClient(app) as client:
+        csrf_token = generate_csrf_token(csrf_secret)
+        client.cookies.set("csrftoken", csrf_token)
+        response = client.post(
+            "/identity/login/mfa",
+            json={"challenge": "challenge-secret", "account_id": "account-1", "method": "totp", "code": "123456"},
+            headers={"x-csrftoken": csrf_token},
+        )
+
+    assert response.status_code == HTTP_400_BAD_REQUEST
+    assert "challenge-secret" not in response.text
+
+
 @pytest.mark.parametrize("mode", ["session", "tokens", "hybrid"])
 def test_generated_mfa_completion_routes_follow_local_auth_transport_and_csrf_mode(mode: str) -> None:
     """MFA completion exposes each enabled issuer path and only sessions require native CSRF."""
@@ -1588,6 +1636,20 @@ def test_plugin_mfa_login_binding_validates_configuration_and_is_idempotent() ->
     )
     with pytest.raises(ImproperlyConfiguredException, match="already bound"):
         local_auth.bind_mfa_login(other)
+
+
+def test_local_auth_mfa_binding_rejects_disabled_or_incomplete_capabilities() -> None:
+    """A local profile may bind login MFA only from an enabled, fully configured MFA graph."""
+    mfa_store, protector, _passkey_store, _challenge_store = _feature_test_ports()
+    local_auth = _local_session_auth()
+    disabled = MFAConfig(store=mfa_store, secret_protector=protector, require_at_login=False, register_routes=False)
+
+    with pytest.raises(ImproperlyConfiguredException, match="require_at_login"):
+        local_auth.bind_mfa_login(disabled)
+
+    incomplete = SimpleNamespace(require_at_login=True, login_challenge_store=object(), mfa_service=object())
+    with pytest.raises(ImproperlyConfiguredException, match="configured challenge and MFA services"):
+        local_auth.bind_mfa_login(cast("Any", incomplete))
 
 
 @pytest.mark.parametrize(
