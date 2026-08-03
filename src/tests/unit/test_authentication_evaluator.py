@@ -754,3 +754,55 @@ async def test_identity_resolution_unavailable_wins_over_invalid_after_all_resol
         await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True)
 
     assert [resolver.calls for resolver in resolvers] == [1, 1]
+
+
+class _RaisingSlot:
+    name = "slot-local"
+
+    def extract(self, _connection: object) -> object:
+        raise RuntimeError
+
+
+class _RaisingAuthenticator:
+    name = "local"
+    slot = "slot-local"
+    participates_by_default = True
+
+    async def authenticate(self, _credential: str, _connection: object) -> object:
+        raise RuntimeError
+
+
+class _RaisingResolver:
+    async def resolve(self, _claims: str) -> object:
+        raise RuntimeError
+
+
+class _RaisingAuthorizationResolver:
+    async def resolve(self, _principal: Principal[object]) -> object:
+        raise RuntimeError
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("port", ["slot", "authenticator", "identity_resolver", "authorization_resolver"])
+async def test_raising_application_port_fails_closed_as_unavailable(port: str) -> None:
+    events: list[str] = []
+    slot: object = _Slot("slot-local", PresentedCredential("token"), events)
+    authenticator: object = _Authenticator("local", "slot-local", _success("local", "slot-local"), events)
+    resolver: object = _Resolver(Principal(id="user-1"), "local", events)
+    authorization_resolver: object | None = None
+    if port == "slot":
+        slot = _RaisingSlot()
+    elif port == "authenticator":
+        authenticator = _RaisingAuthenticator()
+    elif port == "identity_resolver":
+        resolver = _RaisingResolver()
+    else:
+        authorization_resolver = _RaisingAuthorizationResolver()
+    registry = AuthenticationRegistry(  # type: ignore[arg-type]
+        slots=[slot],
+        mechanisms=[AuthenticationMechanism(authenticator=authenticator, resolver=resolver)],  # type: ignore[arg-type]
+        authorization_resolver=authorization_resolver,
+    )
+
+    with pytest.raises(ServiceUnavailableException, match="Authentication service unavailable"):
+        await registry.evaluator().evaluate(_CONNECTION, NullSessionHandle(), required=True)

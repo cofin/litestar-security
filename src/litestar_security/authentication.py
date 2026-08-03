@@ -864,7 +864,10 @@ class SecurityMiddleware(Generic[UserT]):
             if resolver is None:
                 authorization = AuthorizationSnapshot()
             else:
-                resolution = await resolver.resolve(principal)
+                try:
+                    resolution = await resolver.resolve(principal)
+                except Exception:  # noqa: BLE001 - a raising authorization resolver fails closed as one 503
+                    raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
                 if isinstance(resolution, VerificationUnavailable):
                     raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
                 if isinstance(resolution, InvalidCredentials):
@@ -1022,7 +1025,10 @@ class _AuthenticationEvaluator(Generic[UserT]):
         if resolver is None:
             snapshot = _merge_authorization(outcomes)
         else:
-            resolution = await resolver.resolve(principal)
+            try:
+                resolution = await resolver.resolve(principal)
+            except Exception:  # noqa: BLE001 - a raising authorization resolver fails closed as one 503
+                raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
             if isinstance(resolution, VerificationUnavailable):
                 raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
             if isinstance(resolution, InvalidCredentials):
@@ -1039,9 +1045,14 @@ class _AuthenticationEvaluator(Generic[UserT]):
         self, connection: ASGIConnection[Any, Any, Any, Any]
     ) -> tuple[tuple[str, CredentialExtraction[Any]], ...]:
         """Extract every configured credential slot exactly once."""
-        return tuple(
-            (slot_name, self.registry.get_slot(slot_name).extract(connection)) for slot_name in self.registry.slot_names
-        )
+        extracted: list[tuple[str, CredentialExtraction[Any]]] = []
+        for slot_name in self.registry.slot_names:
+            try:
+                extraction = self.registry.get_slot(slot_name).extract(connection)
+            except Exception:  # noqa: BLE001 - a raising credential slot fails closed as one 503
+                raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
+            extracted.append((slot_name, extraction))
+        return tuple(extracted)
 
     async def _authenticate(
         self, extracted: Sequence[tuple[str, CredentialExtraction[Any]]], connection: ASGIConnection[Any, Any, Any, Any]
@@ -1055,7 +1066,10 @@ class _AuthenticationEvaluator(Generic[UserT]):
             if mechanism is None:
                 invalid = True
                 continue
-            outcome = await mechanism.authenticator.authenticate(extraction.value, connection)
+            try:
+                outcome = await mechanism.authenticator.authenticate(extraction.value, connection)
+            except Exception:  # noqa: BLE001 - a raising authenticator fails closed as one 503
+                raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
             name = _normalize_name(mechanism.authenticator.name, "Authentication mechanism name")
             if isinstance(outcome, NoCredentials):
                 invalid = True
@@ -1077,7 +1091,11 @@ class _AuthenticationEvaluator(Generic[UserT]):
         for name, outcome in outcomes:
             authenticated = cast("Authenticated[Any]", outcome)
             mechanism = self.registry.get_mechanism(name)
-            resolutions.append((name, authenticated, await mechanism.resolver.resolve(authenticated.claims)))
+            try:
+                resolution = await mechanism.resolver.resolve(authenticated.claims)
+            except Exception:  # noqa: BLE001 - a raising identity resolver fails closed as one 503
+                raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
+            resolutions.append((name, authenticated, resolution))
         if any(isinstance(resolution, VerificationUnavailable) for _, _, resolution in resolutions):
             raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
         if any(isinstance(resolution, InvalidCredentials) for _, _, resolution in resolutions):

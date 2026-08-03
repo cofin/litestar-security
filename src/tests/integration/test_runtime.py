@@ -1809,6 +1809,7 @@ async def test_websocket_connect_token_merge_requires_the_same_authenticated_sub
         (AuthorizationSnapshot(scopes={"reports:read", "reports:write"}), None),
         (VerificationUnavailable(), ServiceUnavailableException),
         (InvalidCredentials(), NotAuthorizedException),
+        (RuntimeError(), ServiceUnavailableException),
     ],
 )
 async def test_anonymous_websocket_connect_token_uses_authorization_resolver(
@@ -1816,6 +1817,8 @@ async def test_anonymous_websocket_connect_token_uses_authorization_resolver(
 ) -> None:
     class Resolver:
         async def resolve(self, _principal: Principal[object]) -> object:
+            if isinstance(resolution, Exception):
+                raise resolution
             return resolution
 
     runtime = SecurityRuntimeConfig(registry=AuthenticationRegistry(authorization_resolver=Resolver()))
