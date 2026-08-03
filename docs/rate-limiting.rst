@@ -44,6 +44,9 @@ What is limited
    * - ``local.login``
      - 10 / 5 min
      - client + identifier
+   * - ``local.login.mfa``
+     - 10 / 5 min
+     - client + account
    * - ``local.registration``
      - 5 / hour
      - client + identifier
@@ -76,6 +79,10 @@ Session and token login share one ``local.login`` budget on purpose. They
 present the same credential to the same account store, so separate budgets would
 let an attacker double their allowance by alternating between ``/auth/login``
 and ``/auth/token``.
+
+MFA-login completion uses its own ``local.login.mfa`` budget. Its challenge is
+already bound to one account, so the limiter uses client and account buckets;
+the password-login allowance cannot be reused to make extra factor guesses.
 
 Password reset, verification confirmation, and refresh rotation are keyed on
 the client only. The value they present is a token, not an identifier, and

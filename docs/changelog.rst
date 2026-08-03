@@ -9,6 +9,13 @@ Added
 
 * ``LocalKeyRing`` can mint and verify bounded, purpose-specific capability
   JWTs for application-owned flows such as signed download URLs.
+* ``MFAConfig.require_at_login`` adds password-login MFA completion routes:
+  ``POST /auth/login/mfa`` (``LocalSessionMFALogin``) and
+  ``POST /auth/token/mfa`` (``LocalTokenMFALogin``). A verified password now
+  returns the typed ``MFARequired`` / ``LocalMFARequiredResponse`` outcome when
+  completion is required. ``MFALoginChallengeStore`` and the testing-only
+  ``InMemoryMFALoginChallengeStore`` provide the atomic, digest-only,
+  reveal-once challenge boundary.
 
 0.2.0
 -----

@@ -68,9 +68,10 @@ nobody can sign in to:
      - Operations
    * - ``Local sessions``
      - ``LocalSessionLogin``, ``LocalSessionLogout``, ``LocalSessionList``,
-       ``LocalSessionRevoke``
+       ``LocalSessionRevoke``, ``LocalSessionMFALogin``
    * - ``Local tokens``
-     - ``LocalTokenLogin``, ``LocalTokenRefresh``, ``LocalTokenRevoke``
+     - ``LocalTokenLogin``, ``LocalTokenRefresh``, ``LocalTokenRevoke``,
+       ``LocalTokenMFALogin``
    * - ``Local registration``
      - ``LocalRegister``
    * - ``Local passwords``
@@ -130,6 +131,11 @@ success case:
    * - ``401``
      - Authentication is required, or the presented credential no longer
        satisfies the account security epoch.
+   * - ``403``
+     - A password was verified but a configured second factor is still owed.
+       The typed ``LocalMFARequiredResponse`` contains ``code="mfa_required"``,
+       ``detail``, ``account_id``, ``challenge``, ``expires_at``, and
+       ``methods``.
    * - ``429``
      - The operation exceeded its rate limit. Carries ``Retry-After`` when the
        limiter reports one. See :doc:`rate-limiting`.
@@ -175,6 +181,23 @@ generated to file under them.
 MFA, passkeys, and step-up
 ==========================
 
+When ``MFAConfig.require_at_login=True``, a successful password login can
+return the documented ``403`` instead of establishing its transport. The
+``challenge`` is reveal-once, bound to the returned ``account_id`` and client,
+and expires after five minutes by default (never more than ten minutes). A
+found challenge is burned before its account, epoch, expiry, or client binding
+is checked; retrying a completion after any failed reveal attempt therefore
+requires a new password login.
+
+Session-capable profiles add ``POST /auth/login/mfa`` with operation ID
+``LocalSessionMFALogin``. It establishes the native session and is CSRF
+protected. Token-capable profiles add ``POST /auth/token/mfa`` with operation
+ID ``LocalTokenMFALogin`` and issue the access/refresh pair. Both accept the
+typed completion body: ``challenge``, ``account_id``, ``method``, ``code``,
+and optional ``method_id``. They accept ``totp`` and ``recovery-code`` methods;
+TOTP requires the ``method_id`` returned when that factor was enrolled. There
+is no factor-discovery port, so clients must retain that identifier.
+
 ``MFAConfig`` and ``PasskeyConfig`` add a second route bundle under the same
 ``/auth`` prefix. It contains TOTP enrollment and activation, recovery-code
 replacement, passkey registration and authentication, safe credential
@@ -197,10 +220,10 @@ of the factor being managed — and a purpose outside that map, or a factor the
 purpose does not allow, receives the same sanitized ``401`` as a wrong
 credential. An unrecognized purpose never mints a grant.
 
-All secret- and challenge-bearing responses set ``Cache-Control: no-store`` and
-``Pragma: no-cache``. Generated schemas describe the typed JSON models without
-embedding sample TOTP secrets, recovery codes, browser credential responses, or
-public verification keys.
+All secret- and challenge-bearing responses, including the login ``403``, set
+``Cache-Control: no-store`` and ``Pragma: no-cache``. Generated schemas describe
+the typed JSON models without embedding sample TOTP secrets, recovery codes,
+browser credential responses, or public verification keys.
 
 Passkey authentication options include a reveal-once ``binding`` alongside the
 browser options. Return that value unchanged in the verification request; it is

@@ -16,6 +16,14 @@ maximum issued-token lifetime.
 
 Store private keys, peppers, OAuth client secrets, session secrets, and
 attestation roots in application secret management. Never log raw credentials,
-nonces, refresh tokens, API keys, recovery codes, or passkey challenges. Use
-shared atomic rate-limit and revocation stores across workers and monitor
-verification-unavailable outcomes.
+nonces, refresh tokens, API keys, recovery codes, passkey challenges, or MFA
+login challenges. Use shared atomic rate-limit, revocation, and MFA-login
+challenge stores across workers and monitor verification-unavailable outcomes.
+
+Before enabling ``MFAConfig.require_at_login`` in a deployment, enroll a viable
+factor for every affected account and verify the completion routes with the
+same CSRF and session middleware used in production. The MFA-login challenge
+store must atomically burn a revealed challenge; a process-local implementation
+is suitable only for a single worker. Treat the reveal-once challenge and the
+completion proof like passwords: keep both out of application, proxy, and
+audit logs.
