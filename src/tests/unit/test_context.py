@@ -1262,6 +1262,35 @@ def test_default_rate_limit_policies_map_exactly_the_rate_limited_operations() -
 
 
 @pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("203.0.113.5", "203.0.113.5"),
+        ("203.0.113.5:4711", "203.0.113.5"),
+        ("::1", "::1"),
+        ("[::1]", "::1"),
+        ("[::1]:4711", "::1"),
+        ("::ffff:203.0.113.5", "203.0.113.5"),
+        ("not-an-address", None),
+        ("[unterminated", None),
+        ("203.0.113.5:garbage", None),
+        ("203.0.113.5:", None),
+        ("[::1]garbage", None),
+        ("[::1]:garbage", None),
+        ("[::1]:", None),
+        ("[::1]:0", None),
+        ("[::1]:65536", None),
+        ("", None),
+    ],
+)
+def test_parse_forwarded_address_normalizes_supported_forms(raw: str, expected: str | None) -> None:
+    auth_service = import_module("litestar_security.accounts._auth_service")
+
+    address = auth_service.__dict__["_parse_forwarded_address"](raw)
+
+    assert (None if address is None else str(address)) == expected
+
+
+@pytest.mark.parametrize(
     "module_name",
     [
         "litestar_security.accounts._profiles",

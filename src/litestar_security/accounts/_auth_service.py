@@ -8,6 +8,7 @@ that constructs them.
 """
 
 from dataclasses import dataclass, field
+from ipaddress import IPv4Address, IPv6Address, ip_address
 from logging import getLogger
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
@@ -44,6 +45,38 @@ __all__ = ("LocalAuthService", "trusted_client_key")
 
 UserT = TypeVar("UserT")
 _LOGGER = getLogger(__name__)
+_MAXIMUM_TCP_PORT = 65_535
+
+
+def _parse_forwarded_address(  # pyright: ignore[reportUnusedFunction] - consumed by forwarded_client_key in T2
+    raw: str,
+) -> "IPv4Address | IPv6Address | None":
+    """Parse an IPv4 or IPv6 address from a forwarded-address value."""
+    candidate = raw.strip()
+    if candidate.startswith("["):
+        end = candidate.find("]")
+        if end == -1:
+            return None
+        host = candidate[1:end]
+        suffix = candidate[end + 1 :]
+        if suffix and not _valid_forwarded_port(suffix):
+            return None
+    elif candidate.count(":") == 1:
+        host, port = candidate.rsplit(":", 1)
+        if not _valid_forwarded_port(f":{port}"):
+            return None
+    else:
+        host = candidate
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return None
+    return address.ipv4_mapped if isinstance(address, IPv6Address) and address.ipv4_mapped is not None else address
+
+
+def _valid_forwarded_port(suffix: str) -> bool:
+    port = suffix.removeprefix(":") if suffix.startswith(":") else ""
+    return port.isascii() and port.isdigit() and 1 <= int(port) <= _MAXIMUM_TCP_PORT
 
 
 def trusted_client_key(connection: "ASGIConnection[Any, Any, Any, Any]") -> str | None:
