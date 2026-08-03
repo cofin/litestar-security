@@ -490,6 +490,29 @@ def test_assurance_rejects_stale_raw_provider_or_wrong_purpose_evidence(
     assert predicate.decide(connection).code == code  # type: ignore[arg-type]
 
 
+def test_assurance_rejects_expired_evidence_without_max_age() -> None:
+    """Expired evidence cannot satisfy a bare assurance requirement."""
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    predicate = requires_assurance(methods={"totp"}, clock=lambda: now)
+    expired = AuthenticationEvidence(
+        mechanism="totp",
+        slot="mfa",
+        authenticated_at=now - timedelta(minutes=6),
+        expires_at=now - timedelta(minutes=1),
+        methods=frozenset({"totp"}),
+    )
+    live = AuthenticationEvidence(
+        mechanism="totp",
+        slot="mfa",
+        authenticated_at=now - timedelta(minutes=4),
+        expires_at=now + timedelta(minutes=1),
+        methods=frozenset({"totp"}),
+    )
+
+    assert predicate.decide(_guard_connection(evidence=(expired,))).code == "missing_assurance"  # type: ignore[arg-type]
+    assert predicate.decide(_guard_connection(evidence=(live,))).granted  # type: ignore[arg-type]
+
+
 def test_assurance_contract_validates_utc_clock_and_requirement_values() -> None:
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     with pytest.raises(ImproperlyConfiguredException, match="clock must return a timezone-aware"):

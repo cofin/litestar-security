@@ -81,7 +81,8 @@ _EMPTY_DISPLAY_METADATA: "Mapping[str, str]" = MappingProxyType({})
 _SESSION_AUTHENTICATION_KEY = "_litestar_security"
 
 
-_SESSION_PAYLOAD_VERSION = 2
+_SESSION_PAYLOAD_VERSION = 3
+_SESSION_PAYLOAD_ASSURANCE_VERSION = 2
 
 
 _SESSION_BINDING_PREFIX = "sb_"
@@ -149,6 +150,7 @@ class SessionAuthentication:
     security_epoch: int
     authenticated_at: "datetime"
     expires_at: "datetime"
+    assurance_expires_at: "datetime | None" = None
     methods: frozenset[str] = frozenset({"password"})
     traits: frozenset[str] = frozenset({"session"})
     amr: tuple[str, ...] = ("pwd",)
@@ -158,6 +160,9 @@ class SessionAuthentication:
         try:
             authenticated_at = aware_utc_time(self.authenticated_at)
             expires_at = aware_utc_time(self.expires_at)
+            assurance_expires_at = (
+                aware_utc_time(self.assurance_expires_at) if self.assurance_expires_at is not None else None
+            )
         except (AttributeError, ValueError):
             msg = "Session authentication timestamps must be timezone-aware"
             raise ValueError(msg) from None
@@ -169,6 +174,7 @@ class SessionAuthentication:
             or not valid_identifier(self.binding_id, prefix=_SESSION_BINDING_PREFIX)
             or not strict_text(self.account_id)
             or expires_at <= authenticated_at
+            or (assurance_expires_at is not None and assurance_expires_at <= authenticated_at)
         ):
             msg = "Session authentication payload is invalid"
             raise ValueError(msg)
@@ -177,7 +183,7 @@ class SessionAuthentication:
                 mechanism="local",
                 slot="session",
                 authenticated_at=authenticated_at,
-                expires_at=expires_at,
+                expires_at=min(assurance_expires_at, expires_at) if assurance_expires_at is not None else expires_at,
                 methods=self.methods,
                 traits=self.traits,
                 amr=self.amr,
@@ -187,6 +193,7 @@ class SessionAuthentication:
             raise ValueError(msg) from None
         object.__setattr__(self, "authenticated_at", authenticated_at)
         object.__setattr__(self, "expires_at", expires_at)
+        object.__setattr__(self, "assurance_expires_at", assurance_expires_at)
         object.__setattr__(self, "methods", evidence.methods)
         object.__setattr__(self, "traits", evidence.traits)
         object.__setattr__(self, "amr", evidence.amr)
@@ -598,7 +605,11 @@ class NativeSessionAuth(Generic[UserT]):
                 mechanism=self.name,
                 slot=self.slot,
                 authenticated_at=authentication.authenticated_at,
-                expires_at=authentication.expires_at,
+                expires_at=(
+                    min(authentication.assurance_expires_at, authentication.expires_at)
+                    if authentication.assurance_expires_at is not None
+                    else authentication.expires_at
+                ),
                 methods=authentication.methods,
                 traits=authentication.traits,
                 amr=authentication.amr,
@@ -682,6 +693,7 @@ class NativeSessionAuth(Generic[UserT]):
             security_epoch=command.security_epoch,
             authenticated_at=evidence.authenticated_at if evidence is not None else occurred_at,
             expires_at=expires_at,
+            assurance_expires_at=evidence.expires_at if evidence is not None else None,
             methods=evidence.methods if evidence is not None else frozenset({"password"}),
             traits=(evidence.traits | {"session"}) if evidence is not None else frozenset({"session"}),
             amr=evidence.amr or tuple(sorted(evidence.methods)) if evidence is not None else ("pwd",),
@@ -952,6 +964,11 @@ class NativeSessionAuth(Generic[UserT]):
             "security_epoch": authentication.security_epoch,
             "authenticated_at": authentication.authenticated_at.isoformat(),
             "expires_at": authentication.expires_at.isoformat(),
+            "assurance_expires_at": (
+                authentication.assurance_expires_at.isoformat()
+                if authentication.assurance_expires_at is not None
+                else None
+            ),
             "methods": sorted(authentication.methods),
             "traits": sorted(authentication.traits),
             "amr": list(authentication.amr),
@@ -972,12 +989,16 @@ class NativeSessionAuth(Generic[UserT]):
             "expires_at",
         }
         version = payload.get("version")
-        current_keys = legacy_keys | {"methods", "traits", "amr"}
-        if (version == 1 and set(payload) != legacy_keys) or (
-            version == _SESSION_PAYLOAD_VERSION and set(payload) != current_keys
+        version_two_keys = legacy_keys | {"methods", "traits", "amr"}
+        current_keys = version_two_keys | {"assurance_expires_at"}
+        if (
+            (version == 1 and set(payload) != legacy_keys)
+            or (version == _SESSION_PAYLOAD_ASSURANCE_VERSION and set(payload) != version_two_keys)
+            or (version == _SESSION_PAYLOAD_VERSION and set(payload) != current_keys)
         ):
             return None
-        if version.__class__ is not int or version not in {1, _SESSION_PAYLOAD_VERSION}:
+        supported_versions = {1, _SESSION_PAYLOAD_ASSURANCE_VERSION, _SESSION_PAYLOAD_VERSION}
+        if version.__class__ is not int or version not in supported_versions:
             return None
         try:
             return SessionAuthentication(
@@ -987,17 +1008,26 @@ class NativeSessionAuth(Generic[UserT]):
                 security_epoch=cast("int", payload["security_epoch"]),
                 authenticated_at=datetime.fromisoformat(cast("str", payload["authenticated_at"])),
                 expires_at=datetime.fromisoformat(cast("str", payload["expires_at"])),
+                assurance_expires_at=(
+                    datetime.fromisoformat(cast("str", payload["assurance_expires_at"]))
+                    if version == _SESSION_PAYLOAD_VERSION and payload["assurance_expires_at"] is not None
+                    else None
+                ),
                 methods=(
                     frozenset(cast("list[str]", payload["methods"]))
-                    if version == _SESSION_PAYLOAD_VERSION
+                    if version in {_SESSION_PAYLOAD_ASSURANCE_VERSION, _SESSION_PAYLOAD_VERSION}
                     else frozenset()
                 ),
                 traits=(
                     frozenset(cast("list[str]", payload["traits"]))
-                    if version == _SESSION_PAYLOAD_VERSION
+                    if version in {_SESSION_PAYLOAD_ASSURANCE_VERSION, _SESSION_PAYLOAD_VERSION}
                     else frozenset({"session"})
                 ),
-                amr=(tuple(cast("list[str]", payload["amr"])) if version == _SESSION_PAYLOAD_VERSION else ()),
+                amr=(
+                    tuple(cast("list[str]", payload["amr"]))
+                    if version in {_SESSION_PAYLOAD_ASSURANCE_VERSION, _SESSION_PAYLOAD_VERSION}
+                    else ()
+                ),
             )
         except (TypeError, ValueError):
             return None

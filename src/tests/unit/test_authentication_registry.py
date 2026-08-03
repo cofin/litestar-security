@@ -7712,6 +7712,68 @@ def test_native_session_legacy_v1_decode_does_not_synthesize_password_assurance(
     assert decision.code == "missing_assurance"
 
 
+def test_native_session_payload_preserves_independent_assurance_expiry() -> None:
+    """Session serialization retains a step-up expiry shorter than the session lifetime."""
+    assurance_expires_at = _JWT_NOW + timedelta(minutes=5)
+    authentication = accounts_module.SessionAuthentication(
+        session_id="bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4",
+        binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+        account_id="account-1",
+        security_epoch=1,
+        authenticated_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(hours=1),
+        assurance_expires_at=assurance_expires_at,
+        methods=frozenset({"totp"}),
+    )
+
+    payload = sessions_module.NativeSessionAuth._encode_authentication(authentication)  # noqa: SLF001
+    restored = sessions_module.NativeSessionAuth._decode_authentication(payload)  # noqa: SLF001
+
+    assert restored is not None
+    assert restored.assurance_expires_at == assurance_expires_at
+
+
+@pytest.mark.anyio
+async def test_native_session_remains_authenticated_after_step_up_assurance_expires() -> None:
+    """A short step-up expiry does not shorten the underlying native session."""
+    store = _NativeSessionStore()
+    current = [_JWT_NOW]
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: current[0],
+        entropy=_SessionEntropy(),
+    )
+    session: dict[str, object] = {}
+    connection = _native_session_connection(session)
+    evidence = AuthenticationEvidence(
+        mechanism="totp",
+        slot="mfa",
+        authenticated_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+        methods=frozenset({"totp"}),
+    )
+    established = await auth.establish(
+        connection, cast("accounts_module.LocalAccount[object]", store.account), evidence=evidence
+    )
+    assert isinstance(established, accounts_module.SessionAuthentication)
+    token = _queued_binding_token(connection)
+    current[0] += timedelta(minutes=6)
+    authenticated_connection = _native_session_connection(session, binding_token=token)
+    extraction = auth.extract(authenticated_connection)
+    assert isinstance(extraction, PresentedCredential)
+
+    outcome = await auth.authenticate(extraction.value, authenticated_connection)
+
+    assert isinstance(outcome, Authenticated)
+    authenticated_connection.scope["user"] = Principal(id="account-1")
+    authenticated_connection.scope["auth"] = SecurityContext(
+        session=NullSessionHandle(), evidence=(outcome.evidence,)
+    )
+    decision = requires_assurance(methods={"totp"}, clock=lambda: current[0]).decide(authenticated_connection)
+    assert decision.code == "missing_assurance"
+
+
 @pytest.mark.anyio
 async def test_native_session_establish_authenticate_touch_and_rebind_are_fixation_safe(
     monkeypatch: pytest.MonkeyPatch,
@@ -7736,13 +7798,14 @@ async def test_native_session_establish_authenticate_touch_and_rebind_are_fixati
     assert session == {
         "cart": "anonymous",
         "_litestar_security": {
-            "version": 2,
+            "version": 3,
             "session_id": authentication.session_id,
             "binding_id": authentication.binding_id,
             "account_id": "account-1",
             "security_epoch": 1,
             "authenticated_at": _JWT_NOW.isoformat(),
             "expires_at": (_JWT_NOW + timedelta(days=14)).isoformat(),
+            "assurance_expires_at": None,
             "methods": ["password"],
             "traits": ["session"],
             "amr": ["pwd"],
@@ -8272,7 +8335,7 @@ async def test_native_session_rejects_canonical_length_malformed_binding_and_pay
     else:
         payload = cast("dict[str, object]", session["_litestar_security"])
         if mutation in {"version", "boolean_version"}:
-            payload["version"] = True if mutation == "boolean_version" else 3
+            payload["version"] = True if mutation == "boolean_version" else 4
         else:
             payload["authenticated_at"] = "not-a-timestamp"
     connection = _native_session_connection(session, binding_token=token)
