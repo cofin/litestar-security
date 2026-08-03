@@ -19,6 +19,7 @@ from litestar.exceptions import (
 from litestar.middleware import DefineMiddleware
 from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
 from litestar.openapi.spec import SecurityScheme
+from litestar.routes import HTTPRoute
 from litestar.types import ASGIApp, HTTPScope, Message, Receive, Scope, Send
 from typing_extensions import Self
 
@@ -127,6 +128,30 @@ def queue_security_response_header(scope: Scope, header: tuple[bytes, bytes]) ->
     scope_data = cast("dict[str, object]", scope)
     headers = cast("list[tuple[bytes, bytes]]", scope_data.setdefault(_SECURITY_RESPONSE_HEADERS_SCOPE_KEY, []))
     headers.append(header)
+
+
+def is_generated_options_handler(handler: object) -> bool:
+    """Report whether a callable is an OPTIONS handler Litestar generated for a route.
+
+    This is the one predicate every compile-time and runtime bypass shares, so
+    the two sites can never drift apart. The handler is matched by the module
+    and exact qualname of the closure :meth:`HTTPRoute.create_options_handler`
+    produces, both read from that method rather than spelled as string
+    literals, so a Litestar reorganization fails here instead of silently
+    reclassifying routes. An application handler that merely shares the
+    function name is not matched and is authenticated normally.
+
+    Args:
+        handler: The route handler function to identify.
+
+    Returns:
+        True only when Litestar generated the handler to answer OPTIONS.
+    """
+    return (
+        getattr(handler, "__module__", None) == HTTPRoute.create_options_handler.__module__
+        and getattr(handler, "__qualname__", None)
+        == f"{HTTPRoute.create_options_handler.__qualname__}.<locals>.options_handler"
+    )
 
 
 class AuthenticationPolicy:
@@ -1107,11 +1132,7 @@ def _is_generated_options(scope: Scope) -> bool:
     if http_scope["method"] != "OPTIONS":
         return False
     route_handler = cast("Mapping[str, object]", scope).get("route_handler")
-    handler = getattr(route_handler, "fn", None)
-    return (
-        getattr(handler, "__module__", None) == "litestar.routes.http"
-        and getattr(handler, "__name__", None) == "options_handler"
-    )
+    return is_generated_options_handler(getattr(route_handler, "fn", None))
 
 
 def _websocket_route_name(scope: Scope) -> str:

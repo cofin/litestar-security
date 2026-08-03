@@ -32,6 +32,7 @@ from litestar_security.authentication import (
     OptionalPolicy,
     PublicPolicy,
     SecurityRuntimePlan,
+    is_generated_options_handler,
     mechanism,
     public,
     required,
@@ -580,12 +581,7 @@ class RouteCompiler(Generic[UserT]):
 
     @staticmethod
     def _is_generated_options(route_handler: BaseRouteHandler) -> bool:
-        handler = route_handler.fn
-        return (
-            getattr(handler, "__module__", None) == HTTPRoute.create_options_handler.__module__
-            and getattr(handler, "__qualname__", None)
-            == f"{HTTPRoute.create_options_handler.__qualname__}.<locals>.options_handler"
-        )
+        return is_generated_options_handler(route_handler.fn)
 
     @staticmethod
     def _attach_plan(route: BaseRoute, route_handler: BaseRouteHandler, plan: SecurityRuntimePlan) -> None:

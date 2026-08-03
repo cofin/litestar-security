@@ -27,6 +27,7 @@ from litestar.middleware.session.base import BaseSessionBackend, SessionMiddlewa
 from litestar.middleware.session.client_side import CookieBackendConfig
 from litestar.middleware.session.server_side import ServerSideSessionConfig
 from litestar.params import FromPath  # noqa: TC002 - Litestar resolves handler annotations at runtime
+from litestar.routes import HTTPRoute
 from litestar.status_codes import HTTP_400_BAD_REQUEST, HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAILABLE
 from litestar.stores.memory import MemoryStore
 from litestar.testing import AsyncTestClient, TestClient
@@ -362,7 +363,8 @@ async def test_generated_options_initializes_scope_without_extracting() -> None:
     def options_handler() -> None:
         return None
 
-    options_handler.__module__ = "litestar.routes.http"
+    options_handler.__module__ = HTTPRoute.create_options_handler.__module__
+    options_handler.__qualname__ = f"{HTTPRoute.create_options_handler.__qualname__}.<locals>.options_handler"
     route_handler = _RouteHandler(fn=options_handler)
 
     async def app(scope: Scope, _receive: Receive, _send: Send) -> None:
@@ -376,6 +378,29 @@ async def test_generated_options_initializes_scope_without_extracting() -> None:
     assert isinstance(observed[0]["auth"], SecurityContext)
     assert slot is not None
     assert slot.calls == 0
+
+
+@pytest.mark.anyio
+async def test_lookalike_options_handler_is_authenticated_not_bypassed() -> None:
+    config, slot, _ = _runtime(InvalidCredentials())
+
+    def options_handler() -> None:
+        return None
+
+    # Same module and name as a generated OPTIONS handler, but a foreign
+    # qualname: an application handler must never inherit the bypass.
+    options_handler.__module__ = "litestar.routes.http"
+    route_handler = _RouteHandler(fn=options_handler)
+
+    async def app(scope: Scope, _receive: Receive, _send: Send) -> None:
+        del scope
+
+    with pytest.raises(NotAuthorizedException):
+        await SecurityMiddleware(app=app, config=config)(
+            _scope(method="OPTIONS", route_handler=route_handler), _receive, _send
+        )
+    assert slot is not None
+    assert slot.calls == 1
 
 
 @pytest.mark.anyio
