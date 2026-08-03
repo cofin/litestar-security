@@ -965,6 +965,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "GitHubOAuthProvider",
         "GoogleIAPClaims",
         "GoogleIAPConfig",
+        "HttpxJWKSFetcher",
         "IssuedAPIKey",
         "JSONValue",
         "JWKSCacheEntry",
@@ -1049,6 +1050,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     assert jwks_module.__all__ == (
         "AsyncJWKSFetcher",
         "CachedJWKSProvider",
+        "HttpxJWKSFetcher",
         "JWKSCacheEntry",
         "JWKSCachePolicy",
         "JWKSFetchRequest",

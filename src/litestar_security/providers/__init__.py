@@ -17,6 +17,7 @@ from litestar_security.providers.iap import GoogleIAPClaims, GoogleIAPConfig
 from litestar_security.providers.jwks import (
     AsyncJWKSFetcher,
     CachedJWKSProvider,
+    HttpxJWKSFetcher,
     JWKSCacheEntry,
     JWKSCachePolicy,
     JWKSFetchRequest,
@@ -95,6 +96,7 @@ __all__ = (
     "GitHubOAuthProvider",
     "GoogleIAPClaims",
     "GoogleIAPConfig",
+    "HttpxJWKSFetcher",
     "IssuedAPIKey",
     "JSONValue",
     "JWKSCacheEntry",

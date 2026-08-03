@@ -8,12 +8,14 @@ from litestar_security.providers.jwks._fetching import (
     SyncJWKSFetcher,
     normalize_fetcher,
 )
+from litestar_security.providers.jwks._httpx import HttpxJWKSFetcher
 from litestar_security.providers.jwks._provider import CachedJWKSProvider, JWKSProvider
 from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 
 __all__ = (
     "AsyncJWKSFetcher",
     "CachedJWKSProvider",
+    "HttpxJWKSFetcher",
     "JWKSCacheEntry",
     "JWKSCachePolicy",
     "JWKSFetchRequest",

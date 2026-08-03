@@ -83,6 +83,7 @@ from litestar_security.providers import _internal as providers_internal
 from litestar_security.providers.jwks import (
     AsyncJWKSFetcher,
     CachedJWKSProvider,
+    HttpxJWKSFetcher,
     JWKSCacheEntry,
     JWKSCachePolicy,
     JWKSFetchRequest,
@@ -94,6 +95,7 @@ from litestar_security.providers.jwks import (
     normalize_fetcher,
 )
 from litestar_security.providers.jwks import _documents as jwks_documents
+from litestar_security.providers.jwks import _httpx as jwks_httpx
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
     BearerTokenSlot,
@@ -4432,6 +4434,39 @@ async def test_oidc_discovery_rejects_compressed_response_before_decoding() -> N
         await _discover_and_close(client)
 
     assert stream.was_iterated is False
+
+
+@pytest.mark.parametrize("uri", ["/jwks.json", "http://issuer.example/jwks.json", "https://user@issuer.example/jwks.json"])
+@pytest.mark.anyio
+async def test_httpx_jwks_fetcher_rejects_non_absolute_https_uri_before_resolution(uri: str) -> None:
+    async def resolver(_host: str, _port: int) -> tuple[str, ...]:
+        message = "Invalid JWKS URI must not reach DNS"
+        raise AssertionError(message)
+
+    transport = _RecordingMockTransport(lambda _request: httpx.Response(200))
+    fetcher = HttpxJWKSFetcher(transport=transport, resolver=resolver)
+
+    with pytest.raises(jwks_httpx._FetchGuardError):  # noqa: SLF001 - assert the private transport boundary failure
+        await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=uri))
+
+    assert transport.requests == []
+    await fetcher.aclose()
+
+
+@pytest.mark.anyio
+async def test_httpx_jwks_fetcher_rejects_encoded_response_before_decoding() -> None:
+    async def resolver(_host: str, _port: int) -> tuple[str, ...]:
+        return (_OIDC_PUBLIC_IP,)
+
+    stream = _ChunkedOIDCStream(b"encoded")
+    response = httpx.Response(200, headers={"content-encoding": "gzip"}, stream=stream)
+    fetcher = HttpxJWKSFetcher(transport=_RecordingMockTransport(lambda _request: response), resolver=resolver)
+
+    with pytest.raises(jwks_httpx._FetchGuardError):  # noqa: SLF001 - assert the private transport boundary failure
+        await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI))
+
+    assert stream.was_iterated is False
+    await fetcher.aclose()
 
 
 @pytest.mark.anyio
