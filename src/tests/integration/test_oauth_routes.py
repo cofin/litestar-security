@@ -1273,6 +1273,47 @@ async def test_oauth_routes_classify_domain_exceptions_without_tracebacks(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("empty", ["code", "state"])
+async def test_empty_code_or_state_callback_classifies_as_unauthorized(empty: str) -> None:
+    provider = oauth_fake_provider()
+    service = lifecycle_service(provider=provider)
+    app = Litestar(
+        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service, providers=(provider,)))],
+        dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
+        openapi_config=None,
+        debug=True,
+    )
+
+    async with AsyncTestClient(app=app, base_url="https://app.example") as client:
+        login = await client.get("/auth/oauth/example/login", follow_redirects=False)
+        state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
+        params = {"code": "code", "state": state, empty: ""}
+        response = await client.get("/auth/oauth/example/callback", params=params)
+
+    assert response.status_code == 401, response.text
+    assert "Traceback" not in response.text
+
+
+@pytest.mark.anyio
+async def test_empty_cookie_binding_on_login_behaves_as_absent() -> None:
+    provider = oauth_fake_provider()
+    service = lifecycle_service(provider=provider)
+    app = Litestar(
+        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service, providers=(provider,)))],
+        dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
+        openapi_config=None,
+        debug=True,
+    )
+
+    async with AsyncTestClient(app=app, base_url="https://app.example") as client:
+        response = await client.get(
+            "/auth/oauth/example/login", follow_redirects=False, headers={"cookie": "__Host-litestar-security-oauth="}
+        )
+
+    assert response.status_code == 302, response.text
+
+
+@pytest.mark.anyio
 async def test_replayed_callback_state_classifies_as_unauthorized() -> None:
     provider = oauth_fake_provider()
     service = lifecycle_service(provider=provider)

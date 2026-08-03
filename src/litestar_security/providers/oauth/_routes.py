@@ -440,7 +440,7 @@ class OAuthLifecycleService:
             authorization = await self._authorize(step_up_grant, account_id, purpose, request)
         requested_scopes = registration.default_scopes | (scopes or frozenset())
         cookie_value = request.cookies.get(OAUTH_BINDING_COOKIE_NAME)
-        existing_binding = SecretStr(cookie_value) if cookie_value is not None else None
+        existing_binding = SecretStr(cookie_value) if cookie_value else None
         start = await self.transactions.start(
             operation=operation,
             provider=provider,
@@ -467,6 +467,8 @@ class OAuthLifecycleService:
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
     ) -> OAuthRouteResponse | Response[Any]:
         """Consume one callback and complete its stored login, link, or scope purpose."""
+        if not code or not state:
+            raise InvalidOAuthCallback
         registration = self._registration(provider)
         transaction = await self.transactions.consume(
             state=state,
