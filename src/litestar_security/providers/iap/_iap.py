@@ -21,6 +21,7 @@ from litestar_security.authentication import (
     PresentedCredential,
     VerificationUnavailable,
 )
+from litestar_security.config import WorkerLimits
 from litestar_security.context import AuthenticationEvidence
 from litestar_security.providers.jwks import JWKSProvider
 from litestar_security.providers.jwt import (
@@ -61,6 +62,7 @@ class GoogleIAPConfig(Generic[UserT]):
     issuer: str = _IAP_ISSUER
     header_name: str = _IAP_HEADER
     clock_skew: timedelta = timedelta(seconds=30)
+    worker_limits: WorkerLimits = field(default_factory=WorkerLimits, repr=False, compare=False)
     _validation: JWTValidationConfig = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -75,6 +77,7 @@ class GoogleIAPConfig(Generic[UserT]):
             or not _valid_header_name(self.header_name)
             or self.clock_skew.__class__ is not timedelta
             or self.clock_skew < timedelta(0)
+            or not isinstance(cast("object", self.worker_limits), WorkerLimits)
             or not callable(getattr(resolver, "resolve", None))
             or not isinstance(jwks, JWKSProvider)
         ):
@@ -148,6 +151,7 @@ class _GoogleIAPAuthenticator(Generic[UserT]):
     name: str = field(default="google-iap", init=False)
     slot: str = field(default="google-iap", init=False)
     participates_by_default: bool = True
+    _verifiers: dict[str, PyJWTVerifier] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     async def authenticate(  # noqa: PLR0911 - every trust failure retains its structured security outcome
         self, credential: str, connection: ASGIConnection[Any, Any, Any, Any]
@@ -178,13 +182,19 @@ class _GoogleIAPAuthenticator(Generic[UserT]):
             return selection
         if not isinstance(selection, VerificationKey):
             return VerificationUnavailable()
-        outcome = await PyJWTVerifier(
-            config=self.validation,
-            key=selection.key,
-            mechanism_name=self.name,
-            slot_name=self.slot,
-            maximum_token_bytes=_MAXIMUM_ASSERTION_BYTES,
-        ).verify(credential, now=now)
+        verifier = self._verifiers.get(key_id)
+        if verifier is None:
+            verifier = PyJWTVerifier(
+                config=self.validation,
+                key=selection.key,
+                mechanism_name=self.name,
+                slot_name=self.slot,
+                maximum_token_bytes=_MAXIMUM_ASSERTION_BYTES,
+                limiter=self.config.worker_limits.crypto_limiter,
+                worker_timeout=self.config.worker_limits.timeout,
+            )
+            self._verifiers[key_id] = verifier
+        outcome = await verifier.verify(credential, now=now)
         if not isinstance(outcome, Authenticated):
             return outcome
         claims = outcome.claims
