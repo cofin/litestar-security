@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, TypeVar, runtime_checkable
 
 from litestar_security.context import AuthorizationSnapshot, Principal
-from litestar_security.websocket._internal import _strict_text
+from litestar_security.websocket._internal import strict_text
 
 __all__ = ("AuthorizationSnapshotRefresher", "WebSocketBinding", "WebSocketHandshake", "WebSocketRevocationSource")
 
@@ -38,11 +38,11 @@ class WebSocketBinding:
     def __post_init__(self) -> None:
         """Normalize stable binding identifiers."""
         if (
-            not _strict_text(self.connection_id)
-            or not _strict_text(self.subject_id)
-            or not _strict_text(self.route_name)
-            or any(not _strict_text(value) for value in self.credential_ids)
-            or (self.session_id is not None and not _strict_text(self.session_id))
+            not strict_text(self.connection_id)
+            or not strict_text(self.subject_id)
+            or not strict_text(self.route_name)
+            or any(not strict_text(value) for value in self.credential_ids)
+            or (self.session_id is not None and not strict_text(self.session_id))
         ):
             message = "WebSocket revocation binding is invalid"
             raise ValueError(message)

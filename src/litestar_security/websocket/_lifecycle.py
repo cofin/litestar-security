@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from litestar.types import Message, Send
 
 
-from litestar_security.websocket._internal import _DEFAULT_UNAUTHORIZED_CLOSE, _DEFAULT_UNAVAILABLE_CLOSE, _utc
+from litestar_security.websocket._internal import DEFAULT_UNAUTHORIZED_CLOSE, DEFAULT_UNAVAILABLE_CLOSE, aware_utc
 
 __all__ = ("WebSocketCloseCoordinator", "close_websocket", "supervise_websocket_lifetime")
 
@@ -103,8 +103,8 @@ async def supervise_websocket_lifetime(  # noqa: C901, PLR0913 - explicit race b
     expires_at: datetime | None,
     coordinator: WebSocketCloseCoordinator,
     unauthenticated_close_code: int,
-    unauthorized_close_code: int = _DEFAULT_UNAUTHORIZED_CLOSE,
-    unavailable_close_code: int = _DEFAULT_UNAVAILABLE_CLOSE,
+    unauthorized_close_code: int = DEFAULT_UNAUTHORIZED_CLOSE,
+    unavailable_close_code: int = DEFAULT_UNAVAILABLE_CLOSE,
     revocation_wait: Callable[[], Awaitable[None]] | None = None,
     refresh: Callable[[], Awaitable[None]] | None = None,
     refresh_interval: timedelta | None = None,
@@ -115,7 +115,7 @@ async def supervise_websocket_lifetime(  # noqa: C901, PLR0913 - explicit race b
     if expires_at is None and revocation_wait is None and refresh is None:
         await handler()
         return
-    delay = (_utc(expires_at) - _utc(clock())).total_seconds() if expires_at is not None else None
+    delay = (aware_utc(expires_at) - aware_utc(clock())).total_seconds() if expires_at is not None else None
     if delay is not None and delay <= 0:
         await coordinator.close(code=unauthenticated_close_code, reason="credential_expired")
         return

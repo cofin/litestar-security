@@ -18,17 +18,17 @@ if TYPE_CHECKING:
 
 __all__ = ()
 
-_DEFAULT_UNAUTHENTICATED_CLOSE = 4401
-_DEFAULT_UNAUTHORIZED_CLOSE = 4403
-_DEFAULT_UNAVAILABLE_CLOSE = 1013
+DEFAULT_UNAUTHENTICATED_CLOSE = 4401
+DEFAULT_UNAUTHORIZED_CLOSE = 4403
+DEFAULT_UNAVAILABLE_CLOSE = 1013
 _ASCII_CONTROL_LIMIT = 32
-_RESERVED_QUERY_PARAMETERS = frozenset({"access_token", "authorization", "bearer", "jwt", "token"})
+RESERVED_QUERY_PARAMETERS = frozenset({"access_token", "authorization", "bearer", "jwt", "token"})
 _HTTP_DEFAULT_PORTS = {"http": 80, "https": 443}
 _MAXIMUM_HOST_LENGTH = 253
 _MAXIMUM_HOST_LABEL_LENGTH = 63
 
 
-def _strict_text(value: object) -> bool:
+def strict_text(value: object) -> bool:
     return (
         isinstance(value, str)
         and value.__class__ is str
@@ -38,57 +38,57 @@ def _strict_text(value: object) -> bool:
     )
 
 
-def _utc(value: datetime) -> datetime:
+def aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         message = "WebSocket connect token timestamp must be timezone-aware"
         raise ValueError(message)
     return value.astimezone(timezone.utc)
 
 
-def _duration(value: object, name: str) -> timedelta:
+def duration(value: object, name: str) -> timedelta:
     if not isinstance(value, timedelta) or value.__class__ is not timedelta:
-        _configuration_error(f"WebSocket {name} must be positive")
+        configuration_error(f"WebSocket {name} must be positive")
     duration = value
     if duration <= timedelta(0):
-        _configuration_error(f"WebSocket {name} must be positive")
+        configuration_error(f"WebSocket {name} must be positive")
     return duration
 
 
-def _normalize_allowed_origins(value: object) -> frozenset[str]:
+def normalize_allowed_origins(value: object) -> frozenset[str]:
     if isinstance(value, str):
-        _configuration_error("WebSocket allowed origins must be a collection")
+        configuration_error("WebSocket allowed origins must be a collection")
     try:
         origins = tuple(cast("Iterable[object]", value))
     except TypeError:
-        _configuration_error("WebSocket allowed origins must be a collection")
+        configuration_error("WebSocket allowed origins must be a collection")
     if any(origin.__class__ is not str for origin in origins):
-        _configuration_error("WebSocket allowed origins must contain text")
-    canonical = tuple(_canonical_origin(cast("str", origin), configuration=True) for origin in origins)
+        configuration_error("WebSocket allowed origins must contain text")
+    canonical = tuple(canonical_origin(cast("str", origin), configuration=True) for origin in origins)
     if len(canonical) != len(set(canonical)):
-        _configuration_error("WebSocket allowed origins contain a duplicate")
+        configuration_error("WebSocket allowed origins contain a duplicate")
     return frozenset(canonical)
 
 
-def _invalid_origin(*, configuration: bool, close_code: int) -> NoReturn:
+def invalid_origin(*, configuration: bool, close_code: int) -> NoReturn:
     if configuration:
-        _configuration_error("WebSocket allowed origins must be canonical HTTP(S) origins")
+        configuration_error("WebSocket allowed origins must be canonical HTTP(S) origins")
     raise WebSocketException(code=close_code, detail="WebSocket Origin is not trusted")
 
 
-def _configuration_error(detail: str) -> NoReturn:
+def configuration_error(detail: str) -> NoReturn:
     raise ImproperlyConfiguredException(detail=detail)
 
 
-def _transport_error(code: int, detail: str) -> NoReturn:
+def transport_error(code: int, detail: str) -> NoReturn:
     raise WebSocketException(code=code, detail=detail)
 
 
-def _canonical_origin(value: str, *, configuration: bool, invalid_close_code: int = _DEFAULT_UNAUTHORIZED_CLOSE) -> str:
+def canonical_origin(value: str, *, configuration: bool, invalid_close_code: int = DEFAULT_UNAUTHORIZED_CLOSE) -> str:
     try:
         parsed = urlsplit(value)
         port = parsed.port
     except (UnicodeError, ValueError):
-        return _invalid_origin(configuration=configuration, close_code=invalid_close_code)
+        return invalid_origin(configuration=configuration, close_code=invalid_close_code)
     if (
         not value.isascii()
         or parsed.scheme not in _HTTP_DEFAULT_PORTS
@@ -102,19 +102,19 @@ def _canonical_origin(value: str, *, configuration: bool, invalid_close_code: in
         or "*" in parsed.hostname
         or "%" in parsed.hostname
     ):
-        return _invalid_origin(configuration=configuration, close_code=invalid_close_code)
-    hostname = _canonical_hostname(parsed.hostname)
+        return invalid_origin(configuration=configuration, close_code=invalid_close_code)
+    hostname = canonical_hostname(parsed.hostname)
     if hostname is None:
-        return _invalid_origin(configuration=configuration, close_code=invalid_close_code)
+        return invalid_origin(configuration=configuration, close_code=invalid_close_code)
     serialized_host = f"[{hostname}]" if ":" in hostname else hostname
     serialized_port = "" if port is None or port == _HTTP_DEFAULT_PORTS[parsed.scheme] else f":{port}"
     canonical = f"{parsed.scheme}://{serialized_host}{serialized_port}"
     if canonical != value:
-        return _invalid_origin(configuration=configuration, close_code=invalid_close_code)
+        return invalid_origin(configuration=configuration, close_code=invalid_close_code)
     return canonical
 
 
-def _valid_percent_encoding(value: str) -> bool:
+def valid_percent_encoding(value: str) -> bool:
     index = 0
     while (index := value.find("%", index)) >= 0:
         if index + 2 >= len(value) or value[index + 1] not in hexdigits or value[index + 2] not in hexdigits:
@@ -123,7 +123,7 @@ def _valid_percent_encoding(value: str) -> bool:
     return True
 
 
-def _canonical_hostname(value: str) -> str | None:
+def canonical_hostname(value: str) -> str | None:
     if ":" in value:
         return IPv6Address(value).compressed
     try:

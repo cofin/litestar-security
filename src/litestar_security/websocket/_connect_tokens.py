@@ -18,7 +18,7 @@ from anyio import Lock
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.context import CredentialRestrictions, Principal, SecurityContext
-from litestar_security.websocket._internal import _canonical_origin, _strict_text, _utc
+from litestar_security.websocket._internal import aware_utc, canonical_origin, strict_text
 
 __all__ = (
     "InMemoryWebSocketConnectTokenStore",
@@ -30,7 +30,7 @@ __all__ = (
     "issue_websocket_connect_token",
 )
 
-_MAXIMUM_CONNECT_TOKEN_TTL = timedelta(minutes=2)
+MAXIMUM_CONNECT_TOKEN_TTL = timedelta(minutes=2)
 _CONNECT_TOKEN_ID_BYTES = 16
 _CONNECT_TOKEN_SECRET_BYTES = 32
 _CONNECT_TOKEN_ID_CHARACTERS = 22
@@ -58,8 +58,8 @@ class WebSocketConnectTokenRecord:
 
     def __post_init__(self) -> None:
         """Validate the immutable connect token binding and exclusive expiry."""
-        issued_at = _utc(self.issued_at)
-        expires_at = _utc(self.expires_at)
+        issued_at = aware_utc(self.issued_at)
+        expires_at = aware_utc(self.expires_at)
         if (
             _decode_connect_token_segment(
                 self.connect_token_id,
@@ -69,13 +69,13 @@ class WebSocketConnectTokenRecord:
             is None
             or self.digest.__class__ is not bytes
             or len(self.digest) != _DIGEST_BYTES
-            or not _strict_text(self.subject_id)
-            or not _strict_text(self.route_name)
-            or _canonical_origin(self.origin, configuration=True) != self.origin
+            or not strict_text(self.subject_id)
+            or not strict_text(self.route_name)
+            or canonical_origin(self.origin, configuration=True) != self.origin
             or self.restrictions.__class__ is not CredentialRestrictions
-            or not _strict_text(self.policy_fingerprint)
+            or not strict_text(self.policy_fingerprint)
             or expires_at <= issued_at
-            or expires_at - issued_at > _MAXIMUM_CONNECT_TOKEN_TTL
+            or expires_at - issued_at > MAXIMUM_CONNECT_TOKEN_TTL
         ):
             message = "WebSocket connect token record is invalid"
             raise ValueError(message)
@@ -95,7 +95,7 @@ class IssuedWebSocketConnectToken:
         if _connect_token_proof(self.value) is None:
             message = "Issued WebSocket connect token is invalid"
             raise ValueError(message)
-        object.__setattr__(self, "expires_at", _utc(self.expires_at))
+        object.__setattr__(self, "expires_at", aware_utc(self.expires_at))
 
     def __repr__(self) -> str:
         """Return a secret-free representation."""
@@ -147,7 +147,7 @@ class InMemoryWebSocketConnectTokenStore:
         self, *, connect_token_id: str, digest: bytes, now: datetime
     ) -> WebSocketConnectTokenRecord | None:
         """Atomically return and delete one matching unexpired record."""
-        current = _utc(now)
+        current = aware_utc(now)
         async with self._lock:
             record = self._records.get(connect_token_id)
             if record is None:
@@ -175,7 +175,7 @@ class WebSocketConnectTokenService:
         if (
             not isinstance(store, WebSocketConnectTokenStore)
             or self.ttl.__class__ is not timedelta
-            or not timedelta(0) < self.ttl <= _MAXIMUM_CONNECT_TOKEN_TTL
+            or not timedelta(0) < self.ttl <= MAXIMUM_CONNECT_TOKEN_TTL
             or not callable(self.clock)
             or not callable(self.entropy)
         ):
@@ -196,7 +196,7 @@ class WebSocketConnectTokenService:
         if not principal.is_authenticated or context.__class__ is not SecurityContext:
             message = "WebSocket connect tokens require an authenticated security context"
             raise ValueError(message)
-        now = _utc(self.clock())
+        now = aware_utc(self.clock())
         connect_token_id = _encode_connect_token_segment(self._entropy(_CONNECT_TOKEN_ID_BYTES))
         secret = _encode_connect_token_segment(self._entropy(_CONNECT_TOKEN_SECRET_BYTES))
         selected_restrictions = restrictions if restrictions is not None else CredentialRestrictions()
@@ -225,7 +225,9 @@ class WebSocketConnectTokenService:
             return None
         connect_token_id, digest = proof
         try:
-            record = await self.store.consume(connect_token_id=connect_token_id, digest=digest, now=_utc(self.clock()))
+            record = await self.store.consume(
+                connect_token_id=connect_token_id, digest=digest, now=aware_utc(self.clock())
+            )
         except Exception:  # noqa: BLE001 - application store failures fail closed at the connect token boundary
             raise WebSocketConnectTokenUnavailableError from None
         if (

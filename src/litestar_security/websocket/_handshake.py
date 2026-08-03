@@ -9,10 +9,10 @@ if TYPE_CHECKING:
 from litestar_security.websocket._bindings import WebSocketHandshake
 from litestar_security.websocket._config import WebSocketSecurityConfig
 from litestar_security.websocket._internal import (
-    _RESERVED_QUERY_PARAMETERS,
-    _canonical_origin,
-    _transport_error,
-    _valid_percent_encoding,
+    RESERVED_QUERY_PARAMETERS,
+    canonical_origin,
+    transport_error,
+    valid_percent_encoding,
 )
 
 __all__ = ("extract_websocket_handshake",)
@@ -66,17 +66,17 @@ def _validated_request_origin(
 ) -> str | None:
     if not values:
         if required:
-            _transport_error(config.close_codes.unauthorized, "WebSocket Origin is required")
+            transport_error(config.close_codes.unauthorized, "WebSocket Origin is required")
         return None
     if len(values) != 1:
-        _transport_error(config.close_codes.unauthorized, "WebSocket Origin is not trusted")
+        transport_error(config.close_codes.unauthorized, "WebSocket Origin is not trusted")
     try:
         value = values[0].decode("ascii")
     except (AttributeError, UnicodeDecodeError):
-        _transport_error(config.close_codes.unauthorized, "WebSocket Origin is not trusted")
-    origin = _canonical_origin(value, configuration=False, invalid_close_code=config.close_codes.unauthorized)
+        transport_error(config.close_codes.unauthorized, "WebSocket Origin is not trusted")
+    origin = canonical_origin(value, configuration=False, invalid_close_code=config.close_codes.unauthorized)
     if origin not in config.allowed_origins:
-        _transport_error(config.close_codes.unauthorized, "WebSocket Origin is not trusted")
+        transport_error(config.close_codes.unauthorized, "WebSocket Origin is not trusted")
     return origin
 
 
@@ -87,15 +87,15 @@ def _extract_connect_token(query_string: bytes, *, config: WebSocketSecurityConf
         encoded = query_string.decode("ascii")
         parameters = parse_qsl(encoded, keep_blank_values=True, encoding="utf-8", errors="strict")
     except (UnicodeDecodeError, ValueError):
-        _transport_error(config.close_codes.unauthenticated, "WebSocket query credentials are invalid")
-    if not _valid_percent_encoding(encoded):
-        _transport_error(config.close_codes.unauthenticated, "WebSocket query credentials are invalid")
+        transport_error(config.close_codes.unauthenticated, "WebSocket query credentials are invalid")
+    if not valid_percent_encoding(encoded):
+        transport_error(config.close_codes.unauthenticated, "WebSocket query credentials are invalid")
     connect_tokens: list[str] = []
     for name, value in parameters:
-        if name.casefold() in _RESERVED_QUERY_PARAMETERS:
-            _transport_error(config.close_codes.unauthenticated, "Reusable URL credentials are forbidden")
+        if name.casefold() in RESERVED_QUERY_PARAMETERS:
+            transport_error(config.close_codes.unauthenticated, "Reusable URL credentials are forbidden")
         if name == config.connect_token_query_parameter:
             connect_tokens.append(value)
     if len(connect_tokens) > 1 or (connect_tokens and not connect_tokens[0]):
-        _transport_error(config.close_codes.unauthenticated, "WebSocket connect token is invalid")
+        transport_error(config.close_codes.unauthenticated, "WebSocket connect token is invalid")
     return connect_tokens[0] if connect_tokens else None
