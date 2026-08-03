@@ -382,6 +382,11 @@ def resolve_authorization(
 
     Returns:
         One immutable effective snapshot that never expands ``snapshot``.
+
+    Notes:
+        A credential never expands or restates ``attributes``; they remain
+        application-authoritative, and guards must not read them as a
+        credential-granted authorization axis.
     """
     scopes = snapshot.scopes
     roles = snapshot.roles
@@ -399,6 +404,12 @@ def resolve_authorization(
         if restriction.team_ids is not None:
             team_roles = {
                 team_id: team_roles[team_id] for team_id in sorted(team_roles) if team_id in restriction.team_ids
+            }
+        if restriction.roles is not None:
+            team_roles = {
+                team_id: narrowed
+                for team_id in sorted(team_roles)
+                if (narrowed := team_roles[team_id] & restriction.roles)
             }
         if restriction.tenant_ids is not None:
             tenant_ids = tenant_ids & restriction.tenant_ids

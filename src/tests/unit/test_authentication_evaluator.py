@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, cast
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
@@ -38,6 +39,7 @@ from litestar_security.context import (
     ResourcePermission,
     resolve_authorization,
 )
+from litestar_security.guards import requires_team_role
 
 if TYPE_CHECKING:
     from litestar.connection import ASGIConnection
@@ -638,6 +640,60 @@ def test_resource_restriction_truth_table(
     effective = resolve_authorization(snapshot, (CredentialRestrictions(resources=bounds),))
 
     assert {permission.resource: set(permission.scopes) for permission in effective.resources} == expected
+
+
+@pytest.mark.parametrize(
+    ("role_bound", "expected"),
+    [
+        (frozenset({"member"}), {"team-1": frozenset({"member"}), "team-2": frozenset({"member"})}),
+        (frozenset({"auditor"}), {}),
+        (None, {"team-1": frozenset({"admin", "member"}), "team-2": frozenset({"member"})}),
+    ],
+    ids=["narrows-every-team", "drops-empty-grants", "unbounded-preserves-team-roles"],
+)
+def test_resolve_authorization_narrows_team_roles_with_credential_role_bound(
+    role_bound: frozenset[str] | None, expected: dict[str, frozenset[str]]
+) -> None:
+    snapshot = AuthorizationSnapshot(
+        roles=frozenset({"admin", "member"}),
+        team_roles={"team-2": frozenset({"member"}), "team-1": frozenset({"admin", "member"})},
+    )
+
+    effective = resolve_authorization(snapshot, (CredentialRestrictions(roles=role_bound),))
+
+    assert effective.team_roles == expected
+
+
+@pytest.mark.anyio
+async def test_team_role_guard_denies_role_removed_by_credential_ceiling() -> None:
+    events: list[str] = []
+    evaluator, _, _, _ = _evaluator(
+        [
+            (
+                "local",
+                PresentedCredential("token"),
+                _success("local", "slot-local", restrictions=CredentialRestrictions(roles=frozenset({"member"}))),
+                Principal(id="user-1"),
+            )
+        ],
+        events,
+        authorization_resolver=_AuthorizationResolver(
+            AuthorizationSnapshot(
+                roles=frozenset({"admin", "member"}), team_roles={"team-1": frozenset({"admin", "member"})}
+            ),
+            events,
+        ),
+    )
+    principal, context = await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True)
+    connection = cast(
+        "ASGIConnection[Any, Any, Any, Any]",
+        SimpleNamespace(user=principal, auth=context, path_params={"team_id": "team-1"}),
+    )
+
+    decision = requires_team_role(roles={"admin"}).decide(connection)
+
+    assert not decision.granted
+    assert decision.code == "missing_team_role"
 
 
 @pytest.mark.anyio
