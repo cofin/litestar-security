@@ -1,19 +1,65 @@
 """Unit tests for the deterministic aggregate security backend."""
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from anyio import create_task_group
 
+from litestar_security.accounts import (
+    ConsumeStatus,
+    CreateRefreshFamilyCommand,
+    CreateSessionCommand,
+    LocalAccountCapabilities,
+    NativeSessionStore,
+    NotificationCommand,
+    PasswordResetStatus,
+    PrepareRefreshResult,
+    PurposeTokenCodec,
+    RefreshRotationStatus,
+    RefreshTokenFamilyStore,
+    RefreshTokenProof,
+    RegistrationCommand,
+    RegistrationStatus,
+    RegistrationStore,
+    RotateRefreshCommand,
+    SecurityEvent,
+    TokenIssue,
+    TokenPurpose,
+)
 from litestar_security.providers.api_key import APIKeyRecord
 from litestar_security.providers.oauth import OAuthOperation, OAuthTransaction, SecretStr
 from litestar_security.testing import InMemorySecurityBackend
 
 _NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
+_INVITATION_ID = "invitation_aWlpaWlpaWlpaWlpaWlpaQ"
+_SECOND_INVITATION_ID = "invitation_ampqampqampqampqampqag"
+_REFRESH_ID = "rt_aWlpaWlpaWlpaWlpaWlpaQ"
+_REFRESH_SUCCESSOR_ID = "rt_ampqampqampqampqampqag"
+_SESSION_ID = "c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M"
+_SECOND_SESSION_ID = "bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4"
 
 
 def _record(key_id: str) -> APIKeyRecord:
     return APIKeyRecord(key_id=key_id, subject_id="subject-1", digest=b"d" * 32)
+
+
+def _event(operation: str = "test") -> SecurityEvent:
+    return SecurityEvent(event_id="event-1", occurred_at=_NOW, operation=operation, outcome="accepted")
+
+
+async def _register(backend: InMemorySecurityBackend, identifier: str = "user@example.com") -> str:
+    result = await backend.accounts.register(
+        RegistrationCommand(normalized_identifier=identifier),
+        "test-hash",
+        invitation_digest=None,
+        verification=None,
+        now=_NOW,
+        event=_event(),
+    )
+    assert result.status is RegistrationStatus.CREATED
+    assert result.account is not None
+    return result.account.account_id
 
 
 def test_in_memory_backend_defaults_are_deterministic_and_isolated() -> None:
@@ -26,6 +72,305 @@ def test_in_memory_backend_defaults_are_deterministic_and_isolated() -> None:
     assert first.password_hash == second.password_hash
     assert first.api_keys is not second.api_keys
     assert first.mfa is not second.mfa
+
+
+def test_in_memory_backend_exposes_full_local_account_store() -> None:
+    backend = InMemorySecurityBackend()
+    store: LocalAccountCapabilities[object] = backend.accounts
+
+    assert isinstance(store, LocalAccountCapabilities)
+    assert isinstance(store, NativeSessionStore)
+    assert isinstance(store, RefreshTokenFamilyStore)
+    assert isinstance(store, RegistrationStore)
+
+
+@pytest.mark.anyio
+async def test_local_account_store_consumes_invitations_only_with_successful_registration() -> None:
+    backend = InMemorySecurityBackend(clock=lambda: _NOW)
+    invitation = TokenIssue(
+        token_id=_INVITATION_ID,
+        digest=b"i" * 32,
+        purpose=TokenPurpose.INVITATION,
+        account_id="invitation",
+        expires_at=_NOW + timedelta(hours=1),
+        maximum_attempts=2,
+    )
+    notification = NotificationCommand("invite", "test@example.com", "secret", _NOW + timedelta(hours=1))
+    await backend.accounts.issue(invitation, notification, event=_event())
+    with pytest.raises(ValueError, match="purpose-token identifier collision"):
+        await backend.accounts.issue(replace(invitation, digest=b"z" * 32), notification, event=_event())
+
+    missing = await backend.accounts.register(
+        RegistrationCommand(normalized_identifier="missing@example.com"),
+        "test-hash",
+        invitation_digest=b"x" * 32,
+        verification=None,
+        now=_NOW,
+        event=_event(),
+    )
+    created = await backend.accounts.register(
+        RegistrationCommand(normalized_identifier="user@example.com"),
+        "test-hash",
+        invitation_digest=invitation.digest,
+        verification=None,
+        now=_NOW,
+        event=_event(),
+    )
+
+    second_invitation = TokenIssue(
+        token_id=_SECOND_INVITATION_ID,
+        digest=b"j" * 32,
+        purpose=TokenPurpose.INVITATION,
+        account_id="invitation",
+        expires_at=_NOW + timedelta(hours=1),
+        maximum_attempts=2,
+    )
+    await backend.accounts.issue(second_invitation, notification, event=_event())
+    duplicate = await backend.accounts.register(
+        RegistrationCommand(normalized_identifier="user@example.com"),
+        "test-hash",
+        invitation_digest=second_invitation.digest,
+        verification=None,
+        now=_NOW,
+        event=_event(),
+    )
+    later = await backend.accounts.register(
+        RegistrationCommand(normalized_identifier="later@example.com"),
+        "test-hash",
+        invitation_digest=second_invitation.digest,
+        verification=None,
+        now=_NOW,
+        event=_event(),
+    )
+
+    assert missing.status is RegistrationStatus.INVALID_INVITATION
+    assert created.status is RegistrationStatus.CREATED
+    assert duplicate.status is RegistrationStatus.DUPLICATE
+    assert later.status is RegistrationStatus.CREATED
+
+
+@pytest.mark.anyio
+async def test_local_account_store_rejects_registration_verification_token_collisions_before_writes() -> None:
+    backend = InMemorySecurityBackend(clock=lambda: _NOW)
+    delivery = PurposeTokenCodec(pepper=b"p" * 32, entropy=lambda length: b"v" * length).issue(
+        TokenPurpose.VERIFICATION,
+        now=_NOW,
+        lifetime=timedelta(hours=1),
+        template="verify",
+        destination="test@example.com",
+    )
+    issue, notification = delivery.bind("existing-account")
+    await backend.accounts.issue(issue, notification, event=_event())
+
+    with pytest.raises(ValueError, match="purpose-token identifier collision"):
+        await backend.accounts.register(
+            RegistrationCommand(normalized_identifier="collision@example.com"),
+            "test-hash",
+            invitation_digest=None,
+            verification=delivery,
+            now=_NOW,
+            event=_event(),
+        )
+
+    assert await backend.accounts.find_for_login("collision@example.com") is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("purpose", "result_status"),
+    [
+        (TokenPurpose.VERIFICATION, ConsumeStatus.USED),
+        (TokenPurpose.RECOVERY, PasswordResetStatus.USED),
+    ],
+)
+async def test_local_account_store_burns_purpose_tokens_after_failed_attempt_limit(
+    purpose: TokenPurpose, result_status: ConsumeStatus | PasswordResetStatus
+) -> None:
+    backend = InMemorySecurityBackend(clock=lambda: _NOW)
+    account_id = await _register(backend)
+    issue = TokenIssue(
+        token_id=("verification" if purpose is TokenPurpose.VERIFICATION else "recovery") + "_aWlpaWlpaWlpaWlpaWlpaQ",
+        digest=b"t" * 32,
+        purpose=purpose,
+        account_id=account_id,
+        expires_at=_NOW + timedelta(hours=1),
+        maximum_attempts=2,
+        issued_security_epoch=1 if purpose is TokenPurpose.RECOVERY else None,
+    )
+    notification = NotificationCommand("token", "test@example.com", "secret", _NOW + timedelta(hours=1))
+    await backend.accounts.issue(issue, notification, event=_event())
+
+    if purpose is TokenPurpose.VERIFICATION:
+        await backend.accounts.consume_and_verify(issue.token_id, b"x" * 32, now=_NOW, event=_event())
+        await backend.accounts.consume_and_verify(issue.token_id, b"x" * 32, now=_NOW, event=_event())
+        result = await backend.accounts.consume_and_verify(issue.token_id, issue.digest, now=_NOW, event=_event())
+    else:
+        await backend.accounts.consume_and_reset(issue.token_id, b"x" * 32, "new", now=_NOW, event=_event())
+        await backend.accounts.consume_and_reset(issue.token_id, b"x" * 32, "new", now=_NOW, event=_event())
+        result = await backend.accounts.consume_and_reset(issue.token_id, issue.digest, "new", now=_NOW, event=_event())
+
+    assert result.status is result_status
+
+
+@pytest.mark.anyio
+async def test_local_account_store_filters_expired_sessions_using_its_clock() -> None:
+    current = [_NOW]
+    backend = InMemorySecurityBackend(clock=lambda: current[0])
+    account_id = await _register(backend)
+    command = CreateSessionCommand(
+        session_id="c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",
+        binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+        binding_digest=b"b" * 32,
+        account_id=account_id,
+        security_epoch=1,
+        created_at=_NOW,
+        authenticated_at=_NOW,
+        expires_at=_NOW + timedelta(minutes=1),
+    )
+    await backend.accounts.create(command, event=_event())
+    assert await backend.accounts.touch(command.session_id, now=command.expires_at) is None
+    current[0] = command.expires_at
+
+    assert await backend.accounts.get(command.session_id) is None
+    assert await backend.accounts.list_for_account(account_id) == ()
+    assert await backend.accounts.touch(command.session_id, now=_NOW) is None
+
+
+@pytest.mark.anyio
+async def test_local_account_store_rejects_session_identifier_collisions_before_mutation() -> None:
+    backend = InMemorySecurityBackend(clock=lambda: _NOW)
+    account_id = await _register(backend)
+    existing = CreateSessionCommand(
+        session_id=_SESSION_ID,
+        binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+        binding_digest=b"b" * 32,
+        account_id=account_id,
+        security_epoch=1,
+        created_at=_NOW,
+        authenticated_at=_NOW,
+        expires_at=_NOW + timedelta(hours=1),
+    )
+    prior = replace(existing, session_id=_SECOND_SESSION_ID)
+    await backend.accounts.create(existing, event=_event())
+    await backend.accounts.create(prior, event=_event())
+
+    with pytest.raises(ValueError, match="session identifier collision"):
+        await backend.accounts.create(existing, event=_event())
+    with pytest.raises(ValueError, match="session identifier collision"):
+        await backend.accounts.rebind(prior.session_id, existing, event=_event())
+
+    assert await backend.accounts.get(existing.session_id) is not None
+    assert await backend.accounts.get(prior.session_id) is not None
+
+
+@pytest.mark.anyio
+async def test_local_account_store_keeps_refresh_families_revoked_and_does_not_rotate_expired_tokens() -> None:
+    backend = InMemorySecurityBackend(clock=lambda: _NOW)
+    account_id = await _register(backend)
+    create = CreateRefreshFamilyCommand(
+        token_id=_REFRESH_ID,
+        token_digest=b"d" * 32,
+        account_id=account_id,
+        family_id="rf_a2tra2tra2tra2tra2traw",
+        security_epoch=1,
+        created_at=_NOW,
+        token_expires_at=_NOW + timedelta(minutes=1),
+        family_expires_at=_NOW + timedelta(hours=1),
+    )
+    rotate = RotateRefreshCommand(
+        token_id=create.token_id,
+        token_digest=create.token_digest,
+        account_id=account_id,
+        family_id=create.family_id,
+        security_epoch=1,
+        successor_id="rt_ampqampqampqampqampqag",
+        successor_digest=b"s" * 32,
+        successor_expires_at=_NOW + timedelta(minutes=2),
+        family_expires_at=create.family_expires_at,
+        sealed_receipt=b"receipt",
+        receipt_expires_at=_NOW + timedelta(seconds=30),
+        idempotency_digest=b"k" * 32,
+    )
+    assert await backend.accounts.create_family(create, event=_event())
+    assert (await backend.accounts.rotate(rotate, now=_NOW, event=_event())).status is RefreshRotationStatus.ROTATED
+    replay = await backend.accounts.prepare_rotation(
+        RefreshTokenProof(create.token_id, create.token_digest), b"x" * 32, now=_NOW, event=_event()
+    )
+    after_revoke = await backend.accounts.prepare_rotation(
+        RefreshTokenProof(create.token_id, create.token_digest), rotate.idempotency_digest, now=_NOW, event=_event()
+    )
+
+    assert isinstance(replay, PrepareRefreshResult)
+    assert replay.status is RefreshRotationStatus.REPLAY_DETECTED
+    assert isinstance(after_revoke, PrepareRefreshResult)
+    assert after_revoke.status is RefreshRotationStatus.REVOKED
+
+    expired_backend = InMemorySecurityBackend(clock=lambda: _NOW)
+    expired_account_id = await _register(expired_backend)
+    expired_create = replace(create, account_id=expired_account_id)
+    expired_rotate = replace(rotate, account_id=expired_account_id)
+    assert await expired_backend.accounts.create_family(expired_create, event=_event())
+    expired = await expired_backend.accounts.rotate(expired_rotate, now=_NOW + timedelta(hours=2), event=_event())
+
+    assert expired.status is RefreshRotationStatus.EXPIRED
+    assert not isinstance(
+        await expired_backend.accounts.prepare_rotation(
+            RefreshTokenProof(expired_create.token_id, expired_create.token_digest), None, now=_NOW, event=_event()
+        ),
+        PrepareRefreshResult,
+    )
+
+
+@pytest.mark.anyio
+async def test_local_account_store_rejects_refresh_identifier_collisions_before_mutation() -> None:
+    backend = InMemorySecurityBackend(clock=lambda: _NOW)
+    account_id = await _register(backend)
+    create = CreateRefreshFamilyCommand(
+        token_id=_REFRESH_ID,
+        token_digest=b"d" * 32,
+        account_id=account_id,
+        family_id="rf_a2tra2tra2tra2tra2traw",
+        security_epoch=1,
+        created_at=_NOW,
+        token_expires_at=_NOW + timedelta(hours=1),
+        family_expires_at=_NOW + timedelta(hours=2),
+    )
+    assert await backend.accounts.create_family(create, event=_event())
+    assert not await backend.accounts.create_family(
+        replace(create, family_id="rf_bm5ubm5ubm5ubm5ubm5ubg"), event=_event()
+    )
+    assert not await backend.accounts.create_family(
+        replace(create, token_id=_REFRESH_SUCCESSOR_ID), event=_event()
+    )
+
+    successor = replace(
+        create,
+        token_id=_REFRESH_SUCCESSOR_ID,
+        token_digest=b"s" * 32,
+        family_id="rf_bm5ubm5ubm5ubm5ubm5ubg",
+    )
+    assert await backend.accounts.create_family(successor, event=_event())
+    rotation = RotateRefreshCommand(
+        token_id=create.token_id,
+        token_digest=create.token_digest,
+        account_id=account_id,
+        family_id=create.family_id,
+        security_epoch=1,
+        successor_id=successor.token_id,
+        successor_digest=b"x" * 32,
+        successor_expires_at=_NOW + timedelta(hours=1),
+        family_expires_at=create.family_expires_at,
+        sealed_receipt=b"receipt",
+        receipt_expires_at=_NOW + timedelta(seconds=30),
+    )
+
+    assert (await backend.accounts.rotate(rotation, now=_NOW, event=_event())).status is RefreshRotationStatus.INVALID
+    assert not isinstance(
+        await backend.accounts.prepare_rotation(
+            RefreshTokenProof(create.token_id, create.token_digest), None, now=_NOW, event=_event()
+        ),
+        PrepareRefreshResult,
+    )
 
 
 def test_in_memory_backend_accepts_injected_deterministic_sources() -> None:

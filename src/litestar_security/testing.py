@@ -15,13 +15,40 @@ from anyio import Event, Lock, create_task_group
 
 from litestar_security.accounts import (
     AssertionRecordResult,
+    ConsumeResult,
+    ConsumeStatus,
+    CreateRefreshFamilyCommand,
+    CreateSessionCommand,
+    LocalAccount,
     LoginMethod,
     MFALoginChallenge,
+    NotificationCommand,
     PasskeyCredential,
+    PasswordChangeResult,
+    PasswordChangeStatus,
+    PasswordCredentialState,
+    PasswordResetResult,
+    PasswordResetStatus,
     PendingTOTPEnrollment,
+    PrepareRefreshResult,
+    PurposeTokenDelivery,
     RecoveryCodeDigest,
+    RefreshFamilyContext,
+    RefreshReceiptReplay,
+    RefreshRotationStatus,
+    RefreshTokenProof,
+    RegistrationCommand,
+    RegistrationResult,
+    RegistrationStatus,
+    RevokeLoginMethodResult,
+    RevokeLoginMethodStatus,
+    RotateRefreshCommand,
+    RotateRefreshResult,
     SecurityEvent,
+    SessionRecord,
     StepUpRecord,
+    TokenIssue,
+    TokenPurpose,
     TOTPMethod,
     WebAuthnChallenge,
 )
@@ -47,6 +74,7 @@ __all__ = (
     "FakeOAuthHTTPTransport",
     "FakeOAuthProvider",
     "InMemoryAPIKeyStore",
+    "InMemoryLocalAccountStore",
     "InMemoryMFALoginChallengeStore",
     "InMemoryMFAStore",
     "InMemoryPasskeyStore",
@@ -289,6 +317,561 @@ class InMemoryAPIKeyStore:
             self._records[key_id] = replace(record, revoked_at=now, overlap_until=None)
 
 
+@dataclass(slots=True)
+class _InMemoryRefreshState:
+    """One opaque refresh token retained by the reference store."""
+
+    token_id: str
+    token_digest: bytes
+    account_id: str
+    family_id: str
+    security_epoch: int
+    token_expires_at: datetime
+    family_expires_at: datetime
+    scopes: frozenset[str]
+    consumed: bool = False
+    revoked: bool = False
+    idempotency_digest: bytes | None = None
+    sealed_receipt: bytes | None = None
+
+
+class InMemoryLocalAccountStore:
+    """Atomic in-memory local-account, session, and refresh reference store."""
+
+    __slots__ = (
+        "_accounts",
+        "_clock",
+        "_entropy",
+        "_identifiers",
+        "_lock",
+        "_login_methods",
+        "_observe",
+        "_password_hashes",
+        "_purpose_attempts",
+        "_purpose_tokens",
+        "_refresh_tokens",
+        "_sessions",
+        "_used_purpose_tokens",
+    )
+
+    def __init__(
+        self,
+        observe: "Callable[[str, Mapping[str, str]], Awaitable[None]]",
+        *,
+        clock: "Callable[[], datetime]",
+        identifiers: "Callable[[str], str]",
+        entropy: "Callable[[int], bytes]",
+    ) -> None:
+        """Initialize isolated state with aggregate deterministic sources."""
+        self._accounts: dict[str, LocalAccount[object]] = {}
+        self._password_hashes: dict[str, str] = {}
+        self._login_methods: dict[str, dict[str, LoginMethod]] = {}
+        self._purpose_attempts: dict[str, int] = {}
+        self._purpose_tokens: dict[str, TokenIssue] = {}
+        self._used_purpose_tokens: set[str] = set()
+        self._sessions: dict[str, SessionRecord] = {}
+        self._refresh_tokens: dict[str, _InMemoryRefreshState] = {}
+        self._clock = clock
+        self._identifiers = identifiers
+        self._entropy = entropy
+        self._lock = Lock()
+        self._observe = observe
+
+    async def find_for_login(self, normalized_identifier: str) -> LocalAccount[object] | None:
+        """Find one account through its normalized identifier."""
+        async with self._lock:
+            return next(
+                (
+                    account
+                    for account in self._accounts.values()
+                    if account.normalized_identifier == normalized_identifier
+                ),
+                None,
+            )
+
+    async def get_by_id(self, account_id: str) -> LocalAccount[object] | None:
+        """Return one account by its stable identifier."""
+        async with self._lock:
+            return self._accounts.get(account_id)
+
+    async def current_epoch(self, account_id: str) -> int | None:
+        """Return the authoritative account epoch."""
+        async with self._lock:
+            account = self._accounts.get(account_id)
+            return account.security_epoch if account is not None else None
+
+    async def get_password_state(self, account_id: str) -> PasswordCredentialState | None:
+        """Return one atomic password and account-state snapshot."""
+        async with self._lock:
+            account = self._accounts.get(account_id)
+            password_hash = self._password_hashes.get(account_id)
+            if account is None or password_hash is None:
+                return None
+            return PasswordCredentialState(
+                password_hash=password_hash,
+                security_epoch=account.security_epoch,
+                active=account.active,
+                verified=account.verified,
+            )
+
+    async def compare_and_replace_password(
+        self, account_id: str, expected_hash: str, password_hash: str, *, event: SecurityEvent
+    ) -> bool:
+        """Replace one current password hash atomically."""
+        del event
+        await self._observe("accounts.compare_and_replace_password", {"account_id": account_id})
+        async with self._lock:
+            if account_id not in self._accounts or self._password_hashes.get(account_id) != expected_hash:
+                return False
+            self._password_hashes[account_id] = password_hash
+            return True
+
+    async def replace_password_and_bump_epoch(
+        self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
+    ) -> PasswordChangeResult:
+        """Replace a password and advance its exact security epoch."""
+        del event
+        await self._observe("accounts.replace_password_and_bump_epoch", {"account_id": account_id})
+        async with self._lock:
+            account = self._accounts.get(account_id)
+            if account is None:
+                return PasswordChangeResult(PasswordChangeStatus.NOT_FOUND)
+            if account.security_epoch != expected_epoch:
+                return PasswordChangeResult(PasswordChangeStatus.CONFLICT)
+            self._password_hashes[account_id] = password_hash
+            self._accounts[account_id] = replace(account, security_epoch=expected_epoch + 1)
+            return PasswordChangeResult(PasswordChangeStatus.CHANGED, expected_epoch + 1)
+
+    async def register_login_method(self, account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
+        """Record a login method for an existing account."""
+        del event
+        await self._observe("accounts.register_login_method", {"account_id": account_id, "method_id": method.method_id})
+        async with self._lock:
+            self._login_methods.setdefault(account_id, {})[method.method_id] = method
+
+    async def revoke_login_method(
+        self, account_id: str, method_id: str, *, require_remaining: bool = True, event: SecurityEvent
+    ) -> RevokeLoginMethodResult:
+        """Revoke one login method while preserving the requested invariant."""
+        del event
+        await self._observe("accounts.revoke_login_method", {"account_id": account_id, "method_id": method_id})
+        async with self._lock:
+            methods = self._login_methods.get(account_id)
+            if methods is None or method_id not in methods:
+                return RevokeLoginMethodResult(RevokeLoginMethodStatus.NOT_FOUND)
+            if require_remaining and len(methods) == 1:
+                return RevokeLoginMethodResult(RevokeLoginMethodStatus.FINAL_METHOD)
+            del methods[method_id]
+            return RevokeLoginMethodResult(RevokeLoginMethodStatus.REVOKED)
+
+    async def register(  # noqa: PLR0913 - protocol has explicit registration inputs
+        self,
+        command: RegistrationCommand,
+        password_hash: str,
+        *,
+        invitation_digest: bytes | None,
+        verification: PurposeTokenDelivery | None,
+        now: datetime,
+        event: SecurityEvent,
+    ) -> RegistrationResult[object]:
+        """Create one account and optional verification issue atomically."""
+        del event
+        await self._observe("accounts.register", {"normalized_identifier": command.normalized_identifier})
+        async with self._lock:
+            if any(
+                account.normalized_identifier == command.normalized_identifier for account in self._accounts.values()
+            ):
+                return RegistrationResult(RegistrationStatus.DUPLICATE)
+            invitation = (
+                next(
+                    (
+                        issue
+                        for issue in self._purpose_tokens.values()
+                        if issue.purpose is TokenPurpose.INVITATION
+                        and compare_digest(issue.digest, invitation_digest)
+                    ),
+                    None,
+                )
+                if invitation_digest is not None
+                else None
+            )
+            if invitation_digest is not None and (invitation is None or invitation.expires_at <= now):
+                return RegistrationResult(RegistrationStatus.INVALID_INVITATION)
+            if verification is not None and self._purpose_token_id_exists_locked(verification.issue.token_id):
+                message = "In-memory purpose-token identifier collision"
+                raise ValueError(message)
+            account_id = self._identifiers("account")
+            if account_id in self._accounts:
+                message = "In-memory account identifier collision"
+                raise ValueError(message)
+            account = LocalAccount(
+                account_id=account_id,
+                normalized_identifier=command.normalized_identifier,
+                display_name=command.display_name,
+                active=True,
+                verified=verification is None,
+                security_epoch=1,
+                user=object(),
+            )
+            if verification is not None:
+                issue, _notification = verification.bind(account_id)
+                self._purpose_tokens[issue.token_id] = issue
+            self._accounts[account_id] = account
+            self._password_hashes[account_id] = password_hash
+            if invitation is not None:
+                del self._purpose_tokens[invitation.token_id]
+                self._used_purpose_tokens.add(invitation.token_id)
+            return RegistrationResult(RegistrationStatus.CREATED, account)
+
+    async def issue(self, issue: TokenIssue, notification: NotificationCommand, *, event: SecurityEvent) -> None:
+        """Store one purpose-token issue without retaining its delivery secret."""
+        del notification, event
+        await self._observe("accounts.issue", {"account_id": issue.account_id, "token_id": issue.token_id})
+        async with self._lock:
+            if self._purpose_token_id_exists_locked(issue.token_id):
+                message = "In-memory purpose-token identifier collision"
+                raise ValueError(message)
+            self._purpose_tokens[issue.token_id] = issue
+
+    async def issue_absent(self) -> None:
+        """Perform the deterministic no-op used for absent accounts."""
+        await self._observe("accounts.issue_absent", {})
+        async with self._lock:
+            return
+
+    async def consume_and_verify(
+        self, token_id: str, digest: bytes, *, now: datetime, event: SecurityEvent
+    ) -> ConsumeResult:
+        """Consume one verification token and mark its account verified."""
+        del event
+        await self._observe("accounts.consume_and_verify", {"token_id": token_id})
+        async with self._lock:
+            issue = self._purpose_tokens.get(token_id)
+            if issue is None or issue.purpose is not TokenPurpose.VERIFICATION:
+                status = ConsumeStatus.USED if token_id in self._used_purpose_tokens else ConsumeStatus.INVALID
+                return ConsumeResult(status)
+            if not compare_digest(issue.digest, digest):
+                self._record_failed_purpose_proof_locked(issue)
+                return ConsumeResult(ConsumeStatus.INVALID)
+            if issue.expires_at <= now:
+                return ConsumeResult(ConsumeStatus.EXPIRED)
+            account = self._accounts.get(issue.account_id)
+            if account is None:
+                return ConsumeResult(ConsumeStatus.INVALID)
+            del self._purpose_tokens[token_id]
+            self._purpose_attempts.pop(token_id, None)
+            self._used_purpose_tokens.add(token_id)
+            self._accounts[account.account_id] = replace(account, verified=True)
+            return ConsumeResult(ConsumeStatus.CONSUMED, account.account_id, account.security_epoch)
+
+    async def consume_and_reset(
+        self, token_id: str, digest: bytes, new_password_hash: str, *, now: datetime, event: SecurityEvent
+    ) -> PasswordResetResult:
+        """Consume one recovery token and reset its account password atomically."""
+        del event
+        await self._observe("accounts.consume_and_reset", {"token_id": token_id})
+        async with self._lock:
+            issue = self._purpose_tokens.get(token_id)
+            if issue is None or issue.purpose is not TokenPurpose.RECOVERY:
+                status = (
+                    PasswordResetStatus.USED if token_id in self._used_purpose_tokens else PasswordResetStatus.INVALID
+                )
+                return PasswordResetResult(status)
+            if not compare_digest(issue.digest, digest):
+                self._record_failed_purpose_proof_locked(issue)
+                return PasswordResetResult(PasswordResetStatus.INVALID)
+            if issue.expires_at <= now:
+                return PasswordResetResult(PasswordResetStatus.EXPIRED)
+            account = self._accounts.get(issue.account_id)
+            if account is None or issue.issued_security_epoch != account.security_epoch:
+                return PasswordResetResult(PasswordResetStatus.CONFLICT)
+            next_epoch = account.security_epoch + 1
+            del self._purpose_tokens[token_id]
+            self._purpose_attempts.pop(token_id, None)
+            self._used_purpose_tokens.add(token_id)
+            self._password_hashes[account.account_id] = new_password_hash
+            self._accounts[account.account_id] = replace(account, security_epoch=next_epoch)
+            return PasswordResetResult(PasswordResetStatus.RESET, account.account_id, next_epoch)
+
+    async def create(self, command: CreateSessionCommand, *, event: SecurityEvent) -> SessionRecord:
+        """Create one native session record."""
+        del event
+        await self._observe(
+            "accounts.create_session", {"account_id": command.account_id, "session_id": command.session_id}
+        )
+        async with self._lock:
+            if command.session_id in self._sessions:
+                message = "In-memory session identifier collision"
+                raise ValueError(message)
+            record = SessionRecord(
+                session_id=command.session_id,
+                binding_id=command.binding_id,
+                binding_digest=command.binding_digest,
+                account_id=command.account_id,
+                security_epoch=command.security_epoch,
+                created_at=command.created_at,
+                authenticated_at=command.authenticated_at,
+                last_seen_at=command.created_at,
+                expires_at=command.expires_at,
+                display_metadata=command.display_metadata,
+            )
+            self._sessions[record.session_id] = record
+            return record
+
+    async def get(self, session_id: str) -> SessionRecord | None:
+        """Return one currently stored native session."""
+        async with self._lock:
+            record = self._sessions.get(session_id)
+            return record if record is not None and record.expires_at > self._clock() else None
+
+    async def list_for_account(self, account_id: str) -> tuple[SessionRecord, ...]:
+        """Return the account's current native-session records."""
+        async with self._lock:
+            current = self._clock()
+            return tuple(
+                record
+                for record in self._sessions.values()
+                if record.account_id == account_id and record.expires_at > current
+            )
+
+    async def touch(self, session_id: str, *, now: datetime) -> SessionRecord | None:
+        """Advance one session's last-seen time."""
+        await self._observe("accounts.touch_session", {"session_id": session_id})
+        async with self._lock:
+            record = self._sessions.get(session_id)
+            if record is None or record.expires_at <= now or record.expires_at <= self._clock():
+                return None
+            updated = replace(record, last_seen_at=now)
+            self._sessions[session_id] = updated
+            return updated
+
+    async def revoke_session_for_account(self, account_id: str, session_id: str, *, event: SecurityEvent) -> bool:
+        """Revoke one account-owned native session."""
+        del event
+        await self._observe("accounts.revoke_session", {"account_id": account_id, "session_id": session_id})
+        async with self._lock:
+            record = self._sessions.get(session_id)
+            if record is None or record.account_id != account_id:
+                return False
+            del self._sessions[session_id]
+            return True
+
+    async def revoke_sessions_for_account(self, account_id: str, *, event: SecurityEvent) -> int:
+        """Revoke every native session owned by one account."""
+        del event
+        await self._observe("accounts.revoke_sessions", {"account_id": account_id})
+        async with self._lock:
+            session_ids = tuple(key for key, record in self._sessions.items() if record.account_id == account_id)
+            for session_id in session_ids:
+                del self._sessions[session_id]
+            return len(session_ids)
+
+    async def revoke_other_sessions(self, account_id: str, session_id: str, *, event: SecurityEvent) -> int:
+        """Revoke all native sessions except the named current one."""
+        del event
+        await self._observe("accounts.revoke_other_sessions", {"account_id": account_id, "session_id": session_id})
+        async with self._lock:
+            session_ids = tuple(
+                key for key, record in self._sessions.items() if record.account_id == account_id and key != session_id
+            )
+            for other_session_id in session_ids:
+                del self._sessions[other_session_id]
+            return len(session_ids)
+
+    async def rebind(
+        self, prior_session_id: str, command: CreateSessionCommand, *, event: SecurityEvent
+    ) -> SessionRecord | None:
+        """Replace one existing session with a successor atomically."""
+        del event
+        await self._observe(
+            "accounts.rebind_session", {"prior_session_id": prior_session_id, "session_id": command.session_id}
+        )
+        async with self._lock:
+            if prior_session_id not in self._sessions:
+                return None
+            if command.session_id in self._sessions:
+                message = "In-memory session identifier collision"
+                raise ValueError(message)
+            del self._sessions[prior_session_id]
+            record = SessionRecord(
+                session_id=command.session_id,
+                binding_id=command.binding_id,
+                binding_digest=command.binding_digest,
+                account_id=command.account_id,
+                security_epoch=command.security_epoch,
+                created_at=command.created_at,
+                authenticated_at=command.authenticated_at,
+                last_seen_at=command.created_at,
+                expires_at=command.expires_at,
+                display_metadata=command.display_metadata,
+            )
+            self._sessions[record.session_id] = record
+            return record
+
+    async def create_family(self, command: CreateRefreshFamilyCommand, *, event: SecurityEvent) -> bool:
+        """Create a refresh family when its account epoch remains current."""
+        del event
+        await self._observe(
+            "accounts.create_refresh_family",
+            {"account_id": command.account_id, "family_id": command.family_id, "token_id": command.token_id},
+        )
+        async with self._lock:
+            account = self._accounts.get(command.account_id)
+            if (
+                account is None
+                or account.security_epoch != command.security_epoch
+                or command.token_id in self._refresh_tokens
+                or any(state.family_id == command.family_id for state in self._refresh_tokens.values())
+            ):
+                return False
+            self._refresh_tokens[command.token_id] = _InMemoryRefreshState(
+                token_id=command.token_id,
+                token_digest=command.token_digest,
+                account_id=command.account_id,
+                family_id=command.family_id,
+                security_epoch=command.security_epoch,
+                token_expires_at=command.token_expires_at,
+                family_expires_at=command.family_expires_at,
+                scopes=command.scopes,
+            )
+            return True
+
+    async def prepare_rotation(  # noqa: PLR0911 - explicit refresh-state outcomes are security critical
+        self, proof: RefreshTokenProof, idempotency_digest: bytes | None, *, now: datetime, event: SecurityEvent
+    ) -> RefreshFamilyContext | RefreshReceiptReplay | PrepareRefreshResult:
+        """Resolve one exact refresh token for a later atomic rotation."""
+        del event
+        await self._observe("accounts.prepare_refresh_rotation", {"token_id": proof.token_id})
+        async with self._lock:
+            state = self._refresh_tokens.get(proof.token_id)
+            if state is None or state.token_digest != proof.digest:
+                return PrepareRefreshResult(RefreshRotationStatus.INVALID)
+            if state.revoked:
+                return PrepareRefreshResult(RefreshRotationStatus.REVOKED, family_revoked=True)
+            if state.consumed:
+                if state.idempotency_digest == idempotency_digest and state.sealed_receipt is not None:
+                    return RefreshReceiptReplay(self._refresh_context(state), state.sealed_receipt)
+                self._revoke_family_locked(state.family_id)
+                return PrepareRefreshResult(RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True)
+            if state.token_expires_at <= now or state.family_expires_at <= now:
+                return PrepareRefreshResult(RefreshRotationStatus.EXPIRED)
+            account = self._accounts.get(state.account_id)
+            if account is None or account.security_epoch != state.security_epoch:
+                return PrepareRefreshResult(RefreshRotationStatus.EPOCH_MISMATCH)
+            return self._refresh_context(state)
+
+    async def rotate(
+        self, command: RotateRefreshCommand, *, now: datetime, event: SecurityEvent
+    ) -> RotateRefreshResult:
+        """Atomically rotate one prepared refresh token."""
+        del event
+        await self._observe(
+            "accounts.rotate_refresh", {"family_id": command.family_id, "token_id": command.token_id}
+        )
+        async with self._lock:
+            state = self._refresh_tokens.get(command.token_id)
+            account = self._accounts.get(command.account_id)
+            if (
+                state is None
+                or state.consumed
+                or state.revoked
+                or account is None
+                or state.token_digest != command.token_digest
+                or state.account_id != command.account_id
+                or state.family_id != command.family_id
+                or state.security_epoch != command.security_epoch
+                or account.security_epoch != command.security_epoch
+                or command.successor_id in self._refresh_tokens
+            ):
+                return RotateRefreshResult(RefreshRotationStatus.INVALID)
+            if state.token_expires_at <= now or state.family_expires_at <= now:
+                return RotateRefreshResult(RefreshRotationStatus.EXPIRED)
+            state.consumed = True
+            state.idempotency_digest = command.idempotency_digest
+            state.sealed_receipt = command.sealed_receipt
+            self._refresh_tokens[command.successor_id] = _InMemoryRefreshState(
+                token_id=command.successor_id,
+                token_digest=command.successor_digest,
+                account_id=command.account_id,
+                family_id=command.family_id,
+                security_epoch=command.security_epoch,
+                token_expires_at=command.successor_expires_at,
+                family_expires_at=command.family_expires_at,
+                scopes=command.scopes,
+            )
+            return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+
+    async def revoke_family(self, family_id: str, *, event: SecurityEvent) -> bool:
+        """Revoke every token in one refresh family."""
+        del event
+        await self._observe("accounts.revoke_refresh_family", {"family_id": family_id})
+        async with self._lock:
+            return self._revoke_family_locked(family_id)
+
+    async def revoke_token(self, token_id: str, token_digest: bytes, *, event: SecurityEvent) -> bool:
+        """Revoke the family owning one exact presented token."""
+        del event
+        await self._observe("accounts.revoke_refresh_token", {"token_id": token_id})
+        async with self._lock:
+            state = self._refresh_tokens.get(token_id)
+            return (
+                state is not None and state.token_digest == token_digest and self._revoke_family_locked(state.family_id)
+            )
+
+    async def revoke_token_for_account(
+        self, account_id: str, token_id: str, token_digest: bytes, *, event: SecurityEvent
+    ) -> bool:
+        """Revoke one exact refresh token only for its owning account."""
+        del event
+        await self._observe("accounts.revoke_refresh_token", {"account_id": account_id, "token_id": token_id})
+        async with self._lock:
+            state = self._refresh_tokens.get(token_id)
+            return (
+                state is not None
+                and state.account_id == account_id
+                and state.token_digest == token_digest
+                and self._revoke_family_locked(state.family_id)
+            )
+
+    async def revoke_for_account(self, account_id: str, *, event: SecurityEvent) -> int:
+        """Revoke every refresh family owned by one account."""
+        del event
+        await self._observe("accounts.revoke_refresh_for_account", {"account_id": account_id})
+        async with self._lock:
+            family_ids = {state.family_id for state in self._refresh_tokens.values() if state.account_id == account_id}
+            return sum(1 for family_id in family_ids if self._revoke_family_locked(family_id))
+
+    def _refresh_context(self, state: _InMemoryRefreshState) -> RefreshFamilyContext:
+        return RefreshFamilyContext(
+            account_id=state.account_id,
+            family_id=state.family_id,
+            security_epoch=state.security_epoch,
+            token_expires_at=state.token_expires_at,
+            family_expires_at=state.family_expires_at,
+            scopes=state.scopes,
+        )
+
+    def _record_failed_purpose_proof_locked(self, issue: TokenIssue) -> None:
+        attempts = self._purpose_attempts.get(issue.token_id, 0) + 1
+        if attempts < issue.maximum_attempts:
+            self._purpose_attempts[issue.token_id] = attempts
+            return
+        del self._purpose_tokens[issue.token_id]
+        self._purpose_attempts.pop(issue.token_id, None)
+        self._used_purpose_tokens.add(issue.token_id)
+
+    def _purpose_token_id_exists_locked(self, token_id: str) -> bool:
+        return token_id in self._purpose_tokens or token_id in self._used_purpose_tokens
+
+    def _revoke_family_locked(self, family_id: str) -> bool:
+        states = tuple(state for state in self._refresh_tokens.values() if state.family_id == family_id)
+        if not states or all(state.revoked for state in states):
+            return False
+        for state in states:
+            state.revoked = True
+        return True
+
+
 class InMemorySecurityBackend:
     """Deterministic aggregate backend intended only for tests and examples."""
 
@@ -307,6 +890,7 @@ class InMemorySecurityBackend:
         "_failpoints",
         "_identifier_sequence",
         "_identifiers",
+        "accounts",
         "api_keys",
         "challenges",
         "mfa",
@@ -379,6 +963,12 @@ class InMemorySecurityBackend:
         self.oauth_accounts = MemoryOAuthAccountStore()
         self.oauth_transactions = MemoryOAuthTransactionStore(protector=selected_protector)
         self.oauth_tokens = MemoryTokenVault(provider="test", client_id="test-client", protector=selected_protector)
+        self.accounts = InMemoryLocalAccountStore(
+            self._observe,
+            clock=self.clock,
+            identifiers=self.next_identifier,
+            entropy=self.entropy,
+        )
         self.api_keys = InMemoryAPIKeyStore(self._observe)
         self.websocket_connect_tokens = InMemoryWebSocketConnectTokenStore()
 
