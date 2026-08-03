@@ -1,6 +1,15 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+Added
+~~~~~
+
+* ``LocalKeyRing`` can mint and verify bounded, purpose-specific capability
+  JWTs for application-owned flows such as signed download URLs.
+
 0.2.0
 -----
 
