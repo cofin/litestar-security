@@ -10214,6 +10214,7 @@ def test_pywebauthn_adapter_projects_pinned_dependency_results(monkeypatch: pyte
         rp_id="example.com",
         origins=("https://example.com",),
         public_key=b"public-key",
+        current_sign_count=1,
         require_user_verification=True,
     )
     assert registration.credential_id == b"credential"
@@ -10221,6 +10222,17 @@ def test_pywebauthn_adapter_projects_pinned_dependency_results(monkeypatch: pyte
     assert registration_kwargs["pem_root_certs_bytes_by_fmt"] == {
         passkeys_module.AttestationFormat.PACKED: [b"trusted-root"]
     }
+    verified.fmt = passkeys_module.AttestationFormat.APPLE
+    unproven_builtin_root = adapter.verify_registration(
+        response="{}",
+        challenge=b"challenge",
+        rp_id="example.com",
+        origins=("https://example.com",),
+        require_user_verification=True,
+        algorithms=(-7,),
+        root_certificates={"apple": (b"application-root",)},
+    )
+    assert not unproven_builtin_root.attestation_chain_verified
     assert authentication.sign_count == 2
 
     monkeypatch.setattr(passkeys_module, "options_to_json", lambda _options: 1 / 0)

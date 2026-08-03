@@ -81,6 +81,9 @@ _MAXIMUM_CHALLENGE_TTL = timedelta(minutes=10)
 _DEFAULT_CHALLENGE_TTL = timedelta(minutes=5)
 _DEFAULT_ALGORITHMS = (-8, -7, -257)
 _SUPPORTED_ALGORITHMS = frozenset(_DEFAULT_ALGORITHMS)
+_APPLICATION_ROOT_VERIFYING_FORMATS = frozenset(
+    {AttestationFormat.FIDO_U2F, AttestationFormat.PACKED, AttestationFormat.TPM}
+)
 WorkerT = TypeVar("WorkerT")
 
 
@@ -592,7 +595,11 @@ class PyWebAuthnVerifier:
             user_verified=verified.user_verified,
             aaguid=verified.aaguid,
             attestation_format=verified.fmt.value,
-            attestation_chain_verified=bool(attestation.att_stmt.x5c) and bool(root_certificates.get(verified.fmt)),
+            attestation_chain_verified=(
+                verified.fmt in _APPLICATION_ROOT_VERIFYING_FORMATS
+                and bool(root_certificates.get(verified.fmt))
+                and bool(attestation.att_stmt.x5c)
+            ),
         )
 
     def verify_authentication(self, **kwargs: object) -> AuthenticationVerification:
