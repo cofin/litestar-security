@@ -18,6 +18,10 @@ purpose-bound, and one-time. Removing a password, provider identity, TOTP
 factor, or passkey must preserve at least one viable login method through an
 application-store atomic operation.
 
+Recovery-code digests are account-bound under the current ``v2`` domain. Codes
+issued by an earlier release must be replaced with
+``MFAService.generate_recovery_codes()`` before they can be used.
+
 Generated controllers are optional. Set ``register_routes=False`` and compose
 the typed services into application-owned handlers when product behavior or
 administrator workflow differs. See :doc:`customization`.

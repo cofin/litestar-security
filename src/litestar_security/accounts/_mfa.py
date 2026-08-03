@@ -654,7 +654,7 @@ class MFAService:
                 RecoveryCodeDigest(
                     account_id=account_id,
                     pepper_version=active.key_version,
-                    digest=_recovery_digest(active, recovery_code),
+                    digest=_recovery_digest(active, account_id, recovery_code),
                 )
                 for recovery_code in codes
             )
@@ -732,7 +732,9 @@ class MFAService:
             codes = _generate_recovery_codes(active.key_version, self.recovery_code_count, self.recovery_entropy)
             digests = tuple(
                 RecoveryCodeDigest(
-                    account_id=account_id, pepper_version=active.key_version, digest=_recovery_digest(active, code)
+                    account_id=account_id,
+                    pepper_version=active.key_version,
+                    digest=_recovery_digest(active, account_id, code),
                 )
                 for code in codes
             )
@@ -762,7 +764,7 @@ class MFAService:
             pepper = next((candidate for candidate in self.recovery_peppers if candidate.key_version == version), None)
             if pepper is None:
                 return InvalidCredentials()
-            digest = _recovery_digest(pepper, code)
+            digest = _recovery_digest(pepper, account_id, code)
             if not await self.store.consume_recovery_code(account_id, digest, now=now):
                 return InvalidCredentials()
         except (TypeError, ValueError):
@@ -1039,7 +1041,14 @@ def _recovery_code_version(code: str) -> str:
     return parts[1]
 
 
-def _recovery_digest(pepper: RecoveryCodePepper, code: str) -> bytes:
+def _recovery_digest(pepper: RecoveryCodePepper, account_id: str, code: str) -> bytes:
     _recovery_code_version(code)
-    payload = b"litestar-security:recovery-code:v1\x00" + code.encode("ascii")
+    if not strict_context_text(account_id) or "\x00" in account_id:
+        raise ValueError
+    payload = (
+        b"litestar-security:recovery-code:v2\x00"
+        + account_id.encode("utf-8")
+        + b"\x00"
+        + code.encode("ascii")
+    )
     return new_hmac(pepper.key, payload, sha256).digest()

@@ -45,6 +45,7 @@ from litestar.stores.memory import MemoryStore
 
 import litestar_security.accounts as accounts_module
 import litestar_security.accounts._access_tokens as access_tokens_module
+import litestar_security.accounts._mfa as mfa_module
 import litestar_security.accounts._mfa_login as mfa_login_module
 import litestar_security.accounts._passkeys as passkeys_module
 import litestar_security.accounts._rate_limits as rate_limits_module
@@ -9230,6 +9231,17 @@ async def test_recovery_codes_are_reveal_once_digest_only_and_atomically_consume
 
     assert sum(isinstance(outcome, AuthenticationEvidence) for outcome in outcomes) == 1
     assert sum(isinstance(outcome, InvalidCredentials) for outcome in outcomes) == 1
+
+
+def test_recovery_code_digest_is_bound_to_its_account() -> None:
+    """The same recovery code cannot produce a portable cross-account digest."""
+    pepper = accounts_module.RecoveryCodePepper(key_version="v1", key=b"p" * 32)
+    code = "rc_v1_00000000000000000000000000000001"
+
+    owner_digest = mfa_module._recovery_digest(pepper, "account-1", code)  # noqa: SLF001
+    other_digest = mfa_module._recovery_digest(pepper, "account-2", code)  # noqa: SLF001
+
+    assert owner_digest != other_digest
 
 
 @pytest.mark.anyio
