@@ -2172,7 +2172,7 @@ def test_capability_claims_reject_reserved_claim_names() -> None:
 
 def test_capability_claim_builder_returns_detached_json_payload() -> None:
     capabilities = importlib.import_module("litestar_security.providers.jwt._capabilities")
-    application_claims = {"resource": {"parts": ["one"]}}
+    application_claims = {"resource": {"parts": ["one"]}, "weight": 1.5}
 
     payload = capabilities.build_capability_claims(
         issuer=_JWT_ISSUER,
@@ -2187,6 +2187,7 @@ def test_capability_claim_builder_returns_detached_json_payload() -> None:
 
     assert isinstance(payload, dict)
     assert payload["resource"] == {"parts": ["one"]}
+    assert payload["weight"] == 1.5
     assert json.loads(json.dumps(payload))["resource"] == {"parts": ["one"]}
 
 
@@ -2205,23 +2206,97 @@ def test_capability_claim_builder_rejects_non_json_application_values() -> None:
         )
 
 
-@pytest.mark.anyio
-async def test_mint_capability_header_is_never_accepted_by_the_access_verifier(
-    local_key_ring: LocalKeyRing,
+@pytest.mark.parametrize(
+    ("claims", "lifetime", "match"),
+    [
+        ({1: "value"}, timedelta(minutes=5), "object keys"),
+        ({"nested": {1: "value"}}, timedelta(minutes=5), "object keys"),
+        ({"value": nan}, timedelta(minutes=5), "finite"),
+        ({"value": inf}, timedelta(minutes=5), "finite"),
+        ({}, timedelta(milliseconds=500), "whole second"),
+    ],
+)
+def test_capability_claim_builder_rejects_noncanonical_json_values(
+    claims: Mapping[object, object], lifetime: timedelta, match: str
 ) -> None:
-    with pytest.raises(ValueError, match="24 hours"):
-        await local_key_ring.mint_capability(
+    with pytest.raises(ValueError, match=match):
+        jwt_capabilities.build_capability_claims(
+            issuer=_JWT_ISSUER,
             purpose="download",
             subject="user-1",
             audience="files",
-            lifetime=timedelta(hours=25),
+            lifetime=lifetime,
+            claims=cast("Mapping[str, jwt_capabilities.JSONValue]", claims),
+            now=_JWT_NOW,
+        )
+
+
+def test_capability_claim_builder_rejects_excessive_json_depth() -> None:
+    nested: object = "value"
+    for _ in range(33):
+        nested = [nested]
+
+    with pytest.raises(ValueError, match="bounded"):
+        jwt_capabilities.build_capability_claims(
+            issuer=_JWT_ISSUER,
+            purpose="download",
+            subject="user-1",
+            audience="files",
+            lifetime=timedelta(minutes=5),
+            claims={"nested": cast("jwt_capabilities.JSONValue", nested)},
+            now=_JWT_NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "now"),
+    [
+        ("missing", _JWT_NOW),
+        ("invalid-numeric", _JWT_NOW),
+        ("overflow-numeric", _JWT_NOW),
+        ("expired-lifetime", _JWT_NOW),
+        ("not-before-after-expiry", _JWT_NOW),
+        ("invalid-now", cast("datetime", None)),
+    ],
+)
+def test_normalize_capability_claims_rejects_malformed_temporal_claims(mutation: str, now: datetime) -> None:
+    payload: dict[str, jwt_capabilities.JSONValue] = {
+        "iss": _JWT_ISSUER,
+        "sub": "user-1",
+        "aud": "files",
+        "purpose": "download",
+        "jti": "capability-1",
+        "iat": int(_JWT_NOW.timestamp()),
+        "exp": int((_JWT_NOW + timedelta(minutes=5)).timestamp()),
+    }
+    if mutation == "missing":
+        del payload["jti"]
+    elif mutation == "invalid-numeric":
+        payload["iat"] = True
+    elif mutation == "overflow-numeric":
+        payload["exp"] = inf
+    elif mutation == "expired-lifetime":
+        payload["exp"] = payload["iat"]
+    elif mutation == "not-before-after-expiry":
+        payload["nbf"] = payload["exp"]
+
+    assert (
+        jwt_capabilities.normalize_capability_claims(
+            payload, purpose="download", audience="files", issuer=_JWT_ISSUER, now=now
+        )
+        == InvalidCredentials()
+    )
+
+
+@pytest.mark.anyio
+async def test_mint_capability_header_is_never_accepted_by_the_access_verifier(local_key_ring: LocalKeyRing) -> None:
+    with pytest.raises(ValueError, match="24 hours"):
+        await local_key_ring.mint_capability(
+            purpose="download", subject="user-1", audience="files", lifetime=timedelta(hours=25)
         )
 
     token = await local_key_ring.mint_capability(
-        purpose="download",
-        subject="user-1",
-        audience="files",
-        lifetime=timedelta(minutes=5),
+        purpose="download", subject="user-1", audience="files", lifetime=timedelta(minutes=5)
     )
 
     assert jwt.get_unverified_header(token)["typ"] == "capability+jwt"
@@ -2304,6 +2379,85 @@ async def test_verify_capability_accepts_a_retained_rotation_key(
 
     assert isinstance(result, jwt_capabilities.VerifiedCapability)
     assert result.subject == "user-1"
+
+
+@pytest.mark.anyio
+async def test_capability_worker_failures_are_sanitized(
+    local_key_ring: LocalKeyRing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capability = await local_key_ring.mint_capability(
+        purpose="download", subject="user-1", audience="files", lifetime=timedelta(minutes=5)
+    )
+
+    async def failure(*_args: object, **_kwargs: object) -> object:
+        message = "internal failure"
+        raise OSError(message)
+
+    monkeypatch.setattr(jwt_keyring, "run_worker", failure)
+    with pytest.raises(RuntimeError, match="Capability minting unavailable") as exc_info:
+        await local_key_ring.mint_capability(
+            purpose="download", subject="user-1", audience="files", lifetime=timedelta(minutes=5)
+        )
+    assert "internal failure" not in str(exc_info.value)
+
+    outcome = await local_key_ring.verify_capability(
+        capability, purpose="download", audience="files", now=datetime.now(timezone.utc)
+    )
+
+    assert isinstance(outcome, VerificationUnavailable)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("raw", "failure", "outcome_type"),
+    [("not-a-jwt", None, InvalidCredentials), (None, jwt.InvalidTokenError(), InvalidCredentials)],
+)
+async def test_verify_capability_sanitizes_untrusted_routes_and_crypto_failures(
+    raw: str | None,
+    failure: Exception | None,
+    outcome_type: type[InvalidCredentials],
+    local_key_ring: LocalKeyRing,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if raw is None:
+        raw = await local_key_ring.mint_capability(
+            purpose="download", subject="user-1", audience="files", lifetime=timedelta(minutes=5)
+        )
+
+        async def fail_worker(*_args: object, **_kwargs: object) -> object:
+            raise cast("Exception", failure)
+
+        monkeypatch.setattr(jwt_keyring, "run_worker", fail_worker)
+
+    outcome = await local_key_ring.verify_capability(
+        raw, purpose="download", audience="files", now=datetime.now(timezone.utc)
+    )
+
+    assert isinstance(outcome, outcome_type)
+
+
+@pytest.mark.anyio
+async def test_verify_capability_rejects_an_unknown_key_id(local_key_ring: LocalKeyRing) -> None:
+    now = datetime.now(timezone.utc)
+    payload = jwt_capabilities.build_capability_claims(
+        issuer=local_key_ring.issuer,
+        purpose="download",
+        subject="user-1",
+        audience="files",
+        lifetime=timedelta(minutes=5),
+        claims={},
+        now=now,
+    )
+    raw = jwt.encode(
+        dict(payload),
+        cast("Any", local_key_ring.active_signing_key)._prepared_key,  # noqa: SLF001 - exercise untrusted key routing
+        algorithm=local_key_ring.active_signing_key.algorithm,
+        headers={"kid": "unknown", "typ": jwt_capabilities.CAPABILITY_TOKEN_TYPE},
+    )
+
+    outcome = await local_key_ring.verify_capability(raw, purpose="download", audience="files", now=now)
+
+    assert isinstance(outcome, InvalidCredentials)
 
 
 @pytest.mark.parametrize(

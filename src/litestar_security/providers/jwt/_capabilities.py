@@ -64,9 +64,7 @@ class VerifiedCapability:
         object.__setattr__(self, "claims", cast("Mapping[str, JSONValue]", freeze_json(dict(self.claims))))
 
 
-def validate_capability_header(
-    header: Mapping[str, JSONValue],
-) -> tuple[JWTAlgorithm, str] | InvalidCredentials:
+def validate_capability_header(header: Mapping[str, JSONValue]) -> tuple[JWTAlgorithm, str] | InvalidCredentials:
     """Validate immutable routing fields for one capability JWT.
 
     Args:
