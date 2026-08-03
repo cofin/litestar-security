@@ -154,6 +154,10 @@ testpaths = ["src/tests"]
 [tool.coverage.run]
 branch = true
 source = ["src/litestar_security"]
+# The dependency shims are staged for the optional-extras work and nothing
+# imports them yet. Remove both entries when the capabilities move behind
+# extras and start resolving their dependencies through them.
+omit = ["src/litestar_security/_typing.py", "src/litestar_security/typing.py"]
 
 [tool.coverage.report]
 fail_under = 100
