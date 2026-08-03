@@ -2,11 +2,20 @@ Hardening and operations
 ========================
 
 Browser sessions require native CSRF coverage. Static security headers use
-Litestar's native response-header configuration. Optional CSP has no guessed
+Litestar's native response-header configuration and are backfilled onto every
+response, including framework error responses. Use
+``SecurityHeadersConfig.hardened()`` as the recommended opt-in baseline for
+HSTS, frame, content-type, and referrer protection; a handler that explicitly
+sets a configured header keeps its value. Optional CSP has no guessed
 allowlist: applications provide every directive. Static CSP adds no send hook;
 nonce CSP generates at least 128 random bits per response and uses one native
 ``before_send`` hook. Report-only mode emits the standard report-only header.
 No CSP report collector is included.
+
+``auth=public()`` excludes a stateless route from native CSRF. Public handlers
+that establish cookie-authenticated state must instead declare
+``csrf_required=True``. Conversely, ``auth=exclude()`` bypasses authentication
+only: session-capable excluded routes retain their derived CSRF coverage.
 
 Pin issuer, audience, algorithms, redirect URIs, discovery origins, JWKS URLs,
 network egress, and IAP ingress. JWKS fresh hits are lock-free; misses use

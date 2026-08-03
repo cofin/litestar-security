@@ -6991,6 +6991,16 @@ class _LifecycleStore:
         return accounts_module.PasswordResetResult(self.reset_status)
 
 
+def test_notification_destination_rejects_control_characters() -> None:
+    with pytest.raises(ValueError, match="destination"):
+        accounts_module.NotificationCommand(
+            template="local.recovery",
+            destination="victim@example.com\r\nBcc: attacker@example.com",
+            token="opaque-token",  # noqa: S106 - opaque test fixture, not a credential
+            expires_at=_JWT_NOW + timedelta(minutes=30),
+        )
+
+
 def _lifecycle_account(*, active: bool = True, verified: bool = False) -> "accounts_module.LocalAccount[object]":
     return accounts_module.LocalAccount(
         account_id="account-1",
@@ -7297,6 +7307,23 @@ async def test_recovery_request_is_generic_and_emits_only_atomic_outbox_commands
         assert (event.operation, event.account_id) == ("local.recovery.issue", "account-1")
     if fail:
         assert "Recovery token request failed" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_recovery_request_with_control_character_destination_stays_generic_and_does_not_emit() -> None:
+    store = _LifecycleStore(account=_lifecycle_account())
+    service = accounts_module.RecoveryTokenService(
+        accounts=store,
+        store=store,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        hasher=_PasswordHasher(),
+        event_ids=lambda: "event-1",
+    )
+
+    outcome = await service.request("victim@example.com\r\nBcc: attacker@example.com", now=_JWT_NOW)
+
+    assert outcome == accounts_module.LifecycleAccepted()
+    assert store.issues == []
 
 
 @pytest.mark.parametrize(

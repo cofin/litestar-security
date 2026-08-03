@@ -64,7 +64,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     __slots__ = (
         "_api_key_lifespan",
         "_api_key_service",
-        "_headers_hook",
+        "_headers_hooks",
         "_jwks_lifespan",
         "_local_auth_route_handlers",
         "_mfa_route_handlers",
@@ -90,7 +90,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._runtime_config: SecurityRuntimeConfig[UserT] | None = None
         self._middleware: DefineMiddleware | None = None
         self._jwks_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
-        self._headers_hook: CSPHook | None = None
+        self._headers_hooks: tuple[CSPHook, ...] = ()
         self._api_key_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
         self._api_key_service: object | None = None
         self._local_auth_route_handlers: tuple[Router, ...] | None = None
@@ -209,7 +209,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     def _configure_headers(self, app_config: AppConfig) -> None:
         headers = self.config.headers
         if headers is not None:
-            self._headers_hook = configure_security_headers(app_config, headers, self._headers_hook)
+            self._headers_hooks = configure_security_headers(app_config, headers, self._headers_hooks)
 
     def _get_runtime(self) -> tuple[SecurityRuntimeConfig[UserT], DefineMiddleware]:
         if self._runtime_config is None:
@@ -363,7 +363,9 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             message = "Native CSRF configuration must be a Litestar CSRFConfig"
             raise ImproperlyConfiguredException(detail=message)
         if config.exclude is not None:
-            message = "Native CSRF path exclusions are forbidden; use compiled route policy"
+            message = (
+                "Native CSRF path exclusions are forbidden; use compiled route policy (`auth=`) or csrf_required=True"
+            )
             raise ImproperlyConfiguredException(detail=message)
         try:
             safe_methods = frozenset(config.safe_methods)

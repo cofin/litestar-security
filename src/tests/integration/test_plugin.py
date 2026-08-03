@@ -122,7 +122,7 @@ from litestar_security.providers.oidc import ServiceTokenConfig
 from litestar_security.websocket import WebSocketSecurityConfig
 
 
-def test_static_security_headers_use_native_response_headers_without_hook() -> None:
+def test_static_security_headers_cover_success_and_error_responses_without_duplicates() -> None:
     @get("/", sync_to_thread=False)
     def handler() -> None:
         return None
@@ -139,10 +139,16 @@ def test_static_security_headers_use_native_response_headers_without_hook() -> N
 
     with TestClient(app) as client:
         response = client.get("/")
+        missing = client.get("/missing")
 
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["content-security-policy"] == "default-src 'self'"
-    assert app.before_send == []
+    assert len(response.headers.get_list("x-content-type-options")) == 1
+    assert len(response.headers.get_list("content-security-policy")) == 1
+    assert missing.status_code == 404
+    assert missing.headers["x-content-type-options"] == "nosniff"
+    assert missing.headers["content-security-policy"] == "default-src 'self'"
+    assert len(app.before_send) == 1
 
 
 def test_nonce_csp_dependency_matches_fresh_response_header() -> None:
@@ -198,7 +204,7 @@ def test_security_headers_reject_application_ownership_collisions() -> None:
 
 
 @pytest.mark.anyio
-async def test_nonce_csp_hook_is_idempotent_and_rejects_response_conflicts() -> None:
+async def test_nonce_csp_hook_is_idempotent_and_replaces_response_conflicts() -> None:
     plugin = SecurityPlugin[object](
         SecurityConfig[object](
             headers=SecurityHeadersConfig(
@@ -221,8 +227,8 @@ async def test_nonce_csp_hook_is_idempotent_and_rejects_response_conflicts() -> 
     assert message["headers"] == [header]
 
     message["headers"][0] = (header[0], b"script-src 'none'")
-    with pytest.raises(ImproperlyConfiguredException, match="conflicting Content-Security-Policy"):
-        await hook(message, scope)
+    await hook(message, scope)
+    assert message["headers"] == [header]
 
 
 if TYPE_CHECKING:
@@ -2127,6 +2133,37 @@ def test_route_policy_uses_native_nearest_owner_inheritance() -> None:
             assert _operation_security(app, path) == [{mechanism_name: []}]
             assert client.get(path, headers={f"x-auth-{mechanism_name}": "valid"}).status_code == 200
             assert client.get(path).status_code == 401
+
+
+def test_native_csrf_coverage_marks_public_required_and_public_cookie_routes_distinctly() -> None:
+    @post("/public", auth=public())
+    async def public_handler() -> None:
+        return None
+
+    @post("/required", auth=required("session"))
+    async def required_handler() -> None:
+        return None
+
+    @post("/public-cookie", auth=public(), csrf_required=True)
+    async def public_cookie_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[public_handler, required_handler, public_cookie_handler],
+        csrf_config=CSRFConfig(secret=token_hex()),
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+    )
+
+    def marker(path: str) -> bool:
+        route_value = next(
+            route_value for route_value in app.routes if isinstance(route_value, HTTPRoute) and route_value.path == path
+        )
+        return cast("bool", route_value.route_handler_map["POST"][0].opt["litestar_security_csrf"])
+
+    assert marker("/public") is True
+    assert marker("/required") is False
+    assert marker("/public-cookie") is False
 
 
 def test_http_methods_and_options_receive_distinct_compiled_plans() -> None:

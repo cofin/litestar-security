@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 from litestar.exceptions import ImproperlyConfiguredException
 
-from litestar_security.accounts._internal import aware_utc_time, strict_text, valid_security_epoch
+from litestar_security.accounts._internal import aware_utc_time, strict_context_text, strict_text, valid_security_epoch
 from litestar_security.accounts._records import TokenPurpose
 
 if TYPE_CHECKING:
@@ -134,8 +134,11 @@ class NotificationCommand:
 
     def __post_init__(self) -> None:
         """Reject incomplete delivery commands and unapproved callback shapes."""
-        if not strict_text(self.template) or not strict_text(self.destination) or not strict_text(self.token):
-            msg = "Notification template, destination, and token must not be blank"
+        if not strict_text(self.template) or not strict_text(self.token):
+            msg = "Notification template and token must not be blank"
+            raise ValueError(msg)
+        if not strict_context_text(self.destination):
+            msg = "Notification destination must be bounded text without control characters"
             raise ValueError(msg)
         try:
             aware_utc_time(self.expires_at)

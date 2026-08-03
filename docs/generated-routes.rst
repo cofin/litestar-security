@@ -148,6 +148,12 @@ and registration answer ``202`` with the same body for every identifier, so a
 client cannot tell an existing account from an absent one by reading the
 response.
 
+Notification destinations reject control characters before the application
+delivery command is created. In particular, a recovery or verification request
+containing CRLF characters still receives the same ``202`` response but emits
+no notification, preventing mail-header injection without becoming an account
+enumeration signal.
+
 The same guarantee extends to timing, and part of it is a store obligation.
 On recovery request and verification resend, an eligible account commits
 through :meth:`~litestar_security.accounts.RecoveryTokenStore.issue` while any

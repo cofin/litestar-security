@@ -129,6 +129,23 @@ class SecurityHeadersConfig:
     static: Mapping[str, str] = field(default_factory=lambda: cast("Mapping[str, str]", {}))
     csp: ContentSecurityPolicy | None = None
 
+    @classmethod
+    def hardened(cls) -> "SecurityHeadersConfig":
+        """Create the recommended opt-in static browser-security baseline.
+
+        Returns:
+            A configuration with HSTS, frame, content-type, and referrer
+            protections. Callers may supply more restrictive per-route headers.
+        """
+        return cls(
+            static={
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options": "DENY",
+                "Referrer-Policy": "no-referrer",
+                "Strict-Transport-Security": "max-age=63072000; includeSubDomains",
+            }
+        )
+
     def __post_init__(self) -> None:
         """Validate and freeze header configuration."""
         normalized: dict[str, str] = {}
@@ -155,17 +172,17 @@ class SecurityHeadersConfig:
 
 
 def configure_security_headers(
-    app_config: "AppConfig", config: SecurityHeadersConfig, hook: CSPHook | None = None
-) -> CSPHook | None:
+    app_config: "AppConfig", config: SecurityHeadersConfig, hooks: tuple[CSPHook, ...] = ()
+) -> tuple[CSPHook, ...]:
     """Install validated headers through native Litestar configuration.
 
     Args:
         app_config: Application configuration being initialized.
         config: Validated security-header configuration.
-        hook: Previously created hook when initialization is repeated.
+        hooks: Previously created hooks when initialization is repeated.
 
     Returns:
-        The nonce hook when dynamic CSP is configured, otherwise ``None``.
+        The managed backfill and nonce hooks.
 
     Raises:
         ImproperlyConfiguredException: If application-owned headers or
@@ -176,19 +193,53 @@ def configure_security_headers(
     if csp is not None and not csp.nonce_directives:
         static[csp.header_name] = csp.serialize()
     _merge_native_headers(app_config, static)
+    managed_hooks = hooks
+    if static:
+        static_hook = next((hook for hook in hooks if hook.__name__ == "add_static_headers"), None)
+        managed_hooks = (
+            *managed_hooks,
+            static_hook if static_hook is not None else _create_static_headers_hook(static),
+        )
     if csp is None or not csp.nonce_directives:
-        return None
+        _append_managed_hooks(app_config, managed_hooks)
+        return managed_hooks
     existing_dependency = app_config.dependencies.get("csp_nonce")
-    if existing_dependency is not None and hook is None:
+    if existing_dependency is not None and not hooks:
         message = "Application config already owns the reserved 'csp_nonce' dependency"
         raise ImproperlyConfiguredException(detail=message)
     if existing_dependency is None:
         app_config.dependencies["csp_nonce"] = Provide(_provide_csp_nonce, sync_to_thread=False, use_cache=False)
     app_config.signature_namespace.setdefault("csp_nonce", csp_nonce)
-    nonce_hook = hook if hook is not None else _create_csp_hook(csp)
-    if nonce_hook not in app_config.before_send:
-        app_config.before_send.append(nonce_hook)
-    return nonce_hook
+    nonce_hook = next((hook for hook in hooks if hook.__name__ == "add_csp_header"), None)
+    managed_hooks = (*managed_hooks, nonce_hook if nonce_hook is not None else _create_csp_hook(csp))
+    _append_managed_hooks(app_config, managed_hooks)
+    return managed_hooks
+
+
+def _append_managed_hooks(app_config: "AppConfig", hooks: tuple[CSPHook, ...]) -> None:
+    for hook in hooks:
+        if hook not in app_config.before_send:
+            app_config.before_send.append(hook)
+
+
+def _create_static_headers_hook(static: Mapping[str, str]) -> CSPHook:
+    """Build an add-if-absent static-header backfill hook for every response."""
+    encoded = tuple(
+        (name.lower().encode("latin-1"), name.encode("latin-1"), value.encode("latin-1"))
+        for name, value in static.items()
+    )
+
+    async def add_static_headers(message: Message, scope: Scope) -> None:
+        del scope
+        if message["type"] != "http.response.start":
+            return
+        headers = cast("list[tuple[bytes, bytes]]", message.setdefault("headers", []))
+        present = {name.lower() for name, _ in headers}
+        for lower, name, value in encoded:
+            if lower not in present:
+                headers.append((name, value))
+
+    return add_static_headers
 
 
 def _provide_csp_nonce(scope: Scope) -> str:
@@ -213,9 +264,7 @@ def _create_csp_hook(policy: ContentSecurityPolicy) -> CSPHook:
         headers = cast("list[tuple[bytes, bytes]]", message.setdefault("headers", []))
         matches = [index for index, (name, _) in enumerate(headers) if name.lower() == expected_name]
         if matches:
-            if any(headers[index][1] != value for index in matches):
-                message_text = f"Dynamic response contains a conflicting {policy.header_name} header"
-                raise ImproperlyConfiguredException(detail=message_text)
+            headers[matches[0]] = (expected_name, value)
             for index in reversed(matches[1:]):
                 headers.pop(index)
             return

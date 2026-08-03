@@ -392,6 +392,9 @@ class RouteCompiler(Generic[UserT]):
         self, route: HTTPRoute, route_handler: HTTPRouteHandler, policy: AuthenticationPolicy, plan: SecurityRuntimePlan
     ) -> SecurityRuntimePlan:
         native = self.csrf_exclude_key is not None
+        # A public() plan is excluded from native CSRF. A public route that
+        # establishes cookie state must instead declare csrf_required=True;
+        # see patterns.md, "Local generated routes".
         desired_exclusion = not bool(plan.csrf_required)
         self._validate_csrf_metadata(route, route_handler, desired_exclusion=desired_exclusion)
         enforcement = self._resolve_csrf_enforcement(route, route_handler, plan, native=native)
