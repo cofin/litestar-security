@@ -14,6 +14,7 @@ import anyio.lowlevel
 import click
 import pytest
 from click.testing import CliRunner
+from litestar import Controller, Litestar, Router, WebSocket, asgi, get, post, route, websocket
 from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
 from litestar.di import Provide
@@ -27,13 +28,12 @@ from litestar.openapi import OpenAPIConfig
 from litestar.openapi.controller import OpenAPIController
 from litestar.openapi.plugins import JsonRenderPlugin, SwaggerRenderPlugin
 from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme, Tag
+from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED, HTTP_400_BAD_REQUEST
 from litestar.testing import TestClient
 
 import litestar_security.accounts as accounts_module
-from litestar import Controller, Litestar, Router, WebSocket, asgi, get, post, route, websocket
-from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
 from litestar_security import MFAConfig, PasskeyConfig, SecurityConfig, SecurityPlugin, __version__, csp_nonce
 from litestar_security._cli import register, security_group
 from litestar_security.accounts import (
@@ -658,9 +658,7 @@ def test_generated_mfa_bodies_are_snake_case_on_the_wire() -> None:
             json={"label": "person@example.com", "step_up_grant": "grant"},
         )
         stepped_up = client.post(
-            "/auth/step-up/totp-enroll",
-            headers=authenticated,
-            json={"method": "password", "credential": "secret"},
+            "/auth/step-up/totp-enroll", headers=authenticated, json={"method": "password", "credential": "secret"}
         )
         options = client.post("/auth/passkeys/authentication/options", json={"account_id": "user"})
         rejected_casing = client.post(
@@ -701,9 +699,7 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
         local_auth.password_reauthentication.failure = False
         assert (
             client.post(
-                "/auth/step-up/recovery-codes",
-                headers=authenticated,
-                json={"method": "passkey", "credential": "{}"},
+                "/auth/step-up/recovery-codes", headers=authenticated, json={"method": "passkey", "credential": "{}"}
             ).status_code
             == HTTP_200_OK
         )

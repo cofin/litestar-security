@@ -11505,15 +11505,15 @@ async def test_generated_verification_confirm_reports_denials_with_the_client_bu
 
     services = cast(
         "Any",
-        SimpleNamespace(
-            verification=SimpleNamespace(consume=consume),
-            client_key_for=lambda _connection: "1.1.1.1",
-        ),
+        SimpleNamespace(verification=SimpleNamespace(consume=consume), client_key_for=lambda _connection: "1.1.1.1"),
     )
     handler = cast("Any", controllers_module._LocalLifecycleController.confirm_verification.fn)  # noqa: SLF001
 
     response = await handler(
-        None, accounts_module.LocalTokenRequest(token="vt_token.secret"), cast("Any", SimpleNamespace()), services
+        None,
+        accounts_module.LocalTokenRequest(token="vt_token.secret"),  # noqa: S106 - deterministic fixture token
+        cast("Any", SimpleNamespace()),
+        services,
     )
 
     assert response.status_code == 429
