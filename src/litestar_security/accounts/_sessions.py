@@ -979,14 +979,14 @@ class NativeSessionAuth(Generic[UserT]):
                 methods=(
                     frozenset(cast("list[str]", payload["methods"]))
                     if version == _SESSION_PAYLOAD_VERSION
-                    else frozenset({"password"})
+                    else frozenset()
                 ),
                 traits=(
                     frozenset(cast("list[str]", payload["traits"]))
                     if version == _SESSION_PAYLOAD_VERSION
                     else frozenset({"session"})
                 ),
-                amr=(tuple(cast("list[str]", payload["amr"])) if version == _SESSION_PAYLOAD_VERSION else ("pwd",)),
+                amr=(tuple(cast("list[str]", payload["amr"])) if version == _SESSION_PAYLOAD_VERSION else ()),
             )
         except (TypeError, ValueError):
             return None

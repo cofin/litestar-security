@@ -74,6 +74,7 @@ from litestar_security.context import (
     Principal,
     SecurityContext,
 )
+from litestar_security.guards import requires_assurance
 from litestar_security.providers.jwks import (
     AsyncJWKSFetcher,
     CachedJWKSProvider,
@@ -6338,6 +6339,45 @@ def _queued_binding_token(connection: ASGIConnection[Any, Any, Any, Any]) -> str
 
 def _copy_native_session(session: dict[str, object]) -> dict[str, object]:
     return {key: dict(value) if isinstance(value, dict) else value for key, value in session.items()}
+
+
+def test_native_session_legacy_v1_decode_does_not_synthesize_password_assurance() -> None:
+    authentication = sessions_module.NativeSessionAuth._decode_authentication(  # noqa: SLF001 - decode contract regression
+        {
+            "version": 1,
+            "session_id": "bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4",
+            "binding_id": "sb_aWlpaWlpaWlpaWlpaWlpaQ",
+            "account_id": "account-1",
+            "security_epoch": 1,
+            "authenticated_at": _JWT_NOW.isoformat(),
+            "expires_at": (_JWT_NOW + timedelta(hours=1)).isoformat(),
+        }
+    )
+
+    assert authentication is not None
+    assert authentication.methods == frozenset()
+    assert authentication.amr == ()
+    assert authentication.traits == frozenset({"session"})
+    evidence = AuthenticationEvidence(
+        mechanism="session",
+        slot="session",
+        authenticated_at=authentication.authenticated_at,
+        expires_at=authentication.expires_at,
+        methods=authentication.methods,
+        traits=authentication.traits,
+        amr=authentication.amr,
+    )
+    decision = requires_assurance(methods={"password"}, clock=lambda: _JWT_NOW).decide(
+        cast(
+            "Any",
+            SimpleNamespace(
+                user=Principal(id=authentication.account_id),
+                auth=SecurityContext(session=NullSessionHandle(), evidence=(evidence,)),
+            ),
+        )
+    )
+    assert not decision.granted
+    assert decision.code == "missing_assurance"
 
 
 @pytest.mark.anyio
