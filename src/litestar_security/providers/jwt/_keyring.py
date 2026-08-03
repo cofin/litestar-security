@@ -16,6 +16,7 @@ from typing import Any, cast
 
 import jwt
 from anyio import CapacityLimiter
+from jwt.exceptions import PyJWTError
 from litestar.connection.request import Request
 from litestar.datastructures import ResponseHeader
 from litestar.handlers.http_handlers import HTTPRouteHandler, get
@@ -23,12 +24,24 @@ from litestar.openapi.datastructures import ResponseSpec
 from litestar.response import Response
 from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
-from litestar_security.authentication import AuthenticationOutcome, InvalidCredentials, public
+from litestar_security.authentication import AuthenticationOutcome, InvalidCredentials, VerificationUnavailable, public
 from litestar_security.providers._internal import JSONValue, raise_config
-from litestar_security.providers.jwt._capabilities import CAPABILITY_TOKEN_TYPE, build_capability_claims
+from litestar_security.providers.jwt._capabilities import (
+    CAPABILITY_TOKEN_TYPE,
+    VerifiedCapability,
+    build_capability_claims,
+    normalize_capability_claims,
+    validate_capability_header,
+)
 from litestar_security.providers.jwt._claims import JWTClaims, JWTValidationConfig, validate_local_access_claims
 from litestar_security.providers.jwt._internal import aware_utc, strict_identifier
-from litestar_security.providers.jwt._keys import LocalJWKSDocument, SigningKey, VerificationKey
+from litestar_security.providers.jwt._keys import (
+    LocalJWKSDocument,
+    PreparedVerificationKey,
+    SigningKey,
+    VerificationKey,
+    prepared_verification_key,
+)
 from litestar_security.providers.jwt._signing import TokenSigner
 from litestar_security.providers.jwt._verification import JWTVerifier, PyJWTVerifier, parse_unverified_jwt_route
 from litestar_security.providers.jwt._workers import metric_sink, run_worker, validate_limiter
@@ -252,6 +265,58 @@ class LocalKeyRing:
             message = "Capability minting unavailable"
             raise RuntimeError(message) from None
 
+    async def verify_capability(  # noqa: PLR0911 - preserve explicit sanitized outcomes at each security boundary
+        self, raw: str, *, purpose: str, audience: str, now: datetime
+    ) -> VerifiedCapability | InvalidCredentials | VerificationUnavailable:
+        """Verify one capability JWT against this key ring.
+
+        Args:
+            raw: The untrusted compact JWT.
+            purpose: The exact application-defined capability purpose to accept.
+            audience: The exact service or resource that may accept the capability.
+            now: The timezone-aware verification timestamp.
+
+        Returns:
+            The verified capability, a sanitized invalid-credential outcome, or
+            an unavailable-verification outcome for unexpected worker failures.
+        """
+        if now.tzinfo is None or now.utcoffset() is None:
+            return _INVALID
+        now = now.astimezone(timezone.utc)
+        route = parse_unverified_jwt_route(raw)
+        if isinstance(route, InvalidCredentials):
+            return route
+        header_result = validate_capability_header(route.header)
+        if isinstance(header_result, InvalidCredentials):
+            return header_result
+        algorithm, key_id = header_result
+        key = next(
+            (
+                candidate
+                for candidate in self.all_verification_keys
+                if candidate.key_id == key_id and candidate.algorithm == algorithm
+            ),
+            None,
+        )
+        if key is None:
+            return _INVALID
+        verify = partial(_verify_capability_signature, raw, prepared_verification_key(key), algorithm)
+        try:
+            await run_worker(
+                verify,
+                limiter=self.worker_limits.crypto_limiter,
+                worker_timeout=self.worker_limits.timeout,
+                metrics=self.metrics,
+                operation_metric="security.jwt.verify_duration",
+            )
+        except (PyJWTError, TypeError, ValueError):
+            return _INVALID
+        except Exception:  # noqa: BLE001 - unexpected worker failures are unavailable verification
+            return VerificationUnavailable()
+        return normalize_capability_claims(
+            route.payload, purpose=purpose, audience=audience, issuer=self.issuer, now=now
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class LocalJWKSConfig:
@@ -432,4 +497,24 @@ def _if_none_match(value: str | None, etag: str) -> bool:
         return False
     return any(
         candidate == "*" or candidate.removeprefix("W/") == etag for candidate in map(str.strip, value.split(","))
+    )
+
+
+def _verify_capability_signature(token: str, key: PreparedVerificationKey, algorithm: str) -> None:
+    """Verify only one selected capability JWT signature."""
+    jwt.decode_complete(
+        token,
+        key=key,  # pyright: ignore[reportArgumentType] - third-party signature is wider than its runtime contract
+        algorithms=[algorithm],
+        options={
+            "require": [],
+            "verify_aud": False,
+            "verify_exp": False,
+            "verify_iat": False,
+            "verify_iss": False,
+            "verify_jti": False,
+            "verify_nbf": False,
+            "verify_signature": True,
+            "verify_sub": False,
+        },
     )

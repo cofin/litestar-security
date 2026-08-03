@@ -111,6 +111,7 @@ from litestar_security.providers.jwt import (
     normalize_verifier,
     parse_unverified_jwt_route,
 )
+from litestar_security.providers.jwt import _capabilities as jwt_capabilities
 from litestar_security.providers.jwt import _claims as jwt_claims
 from litestar_security.providers.jwt import _keyring as jwt_keyring
 from litestar_security.providers.jwt import _workers as jwt_workers
@@ -2232,6 +2233,77 @@ async def test_mint_capability_header_is_never_accepted_by_the_access_verifier(
         )
     )
     assert isinstance(await verifier.verify(token, now=_JWT_NOW), InvalidCredentials)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("case", ["access-token", "purpose", "audience", "expired", "naive-now"])
+async def test_verify_capability_rejects_untrusted_or_mismatched_tokens_as_one_outcome(
+    case: str, local_key_ring: LocalKeyRing
+) -> None:
+    now = datetime.now(timezone.utc)
+    capability = await local_key_ring.mint_capability(
+        purpose="download", subject="user-1", audience="files", lifetime=timedelta(minutes=1)
+    )
+    if case == "access-token":
+        token = await local_key_ring.build_signer().sign(
+            build_access_token_claims(
+                issuer=local_key_ring.issuer,
+                audience="files",
+                subject="user-1",
+                client_id="client-1",
+                security_epoch=0,
+                scopes=frozenset(),
+                now=now,
+                lifetime=timedelta(minutes=1),
+                jti="access-token-1",
+            ),
+            now=now,
+        )
+        purpose, audience, verification_now = "download", "files", now
+    elif case == "purpose":
+        token, purpose, audience, verification_now = capability, "upload", "files", now
+    elif case == "audience":
+        token, purpose, audience, verification_now = capability, "download", "images", now
+    elif case == "expired":
+        token, purpose, audience, verification_now = (
+            capability,
+            "download",
+            "files",
+            now + timedelta(minutes=1, seconds=31),
+        )
+    else:
+        token, purpose, audience, verification_now = capability, "download", "files", _NAIVE_JWT_NOW
+
+    assert (
+        await local_key_ring.verify_capability(token, purpose=purpose, audience=audience, now=verification_now)
+        == InvalidCredentials()
+    )
+
+
+@pytest.mark.anyio
+async def test_verify_capability_accepts_a_retained_rotation_key(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    old_private, old_public = jwt_key_material["RS256"]
+    new_private, _new_public = jwt_key_material["RS256_ALT"]
+    old_ring = LocalKeyRing(
+        issuer=_JWT_ISSUER, active_signing_key=SigningKey(key_id="old", algorithm="RS256", private_key=old_private)
+    )
+    token = await old_ring.mint_capability(
+        purpose="download", subject="user-1", audience="files", lifetime=timedelta(minutes=5)
+    )
+    rotated_ring = LocalKeyRing(
+        issuer=_JWT_ISSUER,
+        active_signing_key=SigningKey(key_id="new", algorithm="RS256", private_key=new_private),
+        verification_keys=(VerificationKey(key_id="old", algorithm="RS256", key=old_public),),
+    )
+
+    result = await rotated_ring.verify_capability(
+        token, purpose="download", audience="files", now=datetime.now(timezone.utc)
+    )
+
+    assert isinstance(result, jwt_capabilities.VerifiedCapability)
+    assert result.subject == "user-1"
 
 
 @pytest.mark.parametrize(

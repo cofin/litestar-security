@@ -9,6 +9,7 @@ from typing import cast
 
 from litestar_security.authentication import InvalidCredentials
 from litestar_security.providers._internal import JSONValue
+from litestar_security.providers.jwt._claims import JWTAlgorithm
 from litestar_security.providers.jwt._internal import (
     aware_utc,
     freeze_json,
@@ -25,6 +26,8 @@ _CAPABILITY_MAXIMUM_LIFETIME = timedelta(hours=24)
 _MAXIMUM_APPLICATION_CLAIM_DEPTH = 32
 _RESERVED_CAPABILITY_CLAIMS = frozenset({"iss", "sub", "aud", "exp", "iat", "nbf", "purpose", "jti"})
 _REQUIRED_CAPABILITY_CLAIMS = _RESERVED_CAPABILITY_CLAIMS.difference({"nbf"})
+_FORBIDDEN_JOSE_HEADERS = frozenset({"b64", "crit", "jku", "jwk", "x5c", "x5t", "x5t#S256", "x5u"})
+_SUPPORTED_CAPABILITY_ALGORITHMS = frozenset({"EdDSA", "ES256", "RS256", "HS256"})
 _INVALID = InvalidCredentials()
 
 
@@ -43,6 +46,34 @@ class VerifiedCapability:
     def __post_init__(self) -> None:
         """Freeze application claims at the verified boundary."""
         object.__setattr__(self, "claims", cast("Mapping[str, JSONValue]", freeze_json(dict(self.claims))))
+
+
+def validate_capability_header(
+    header: Mapping[str, JSONValue],
+) -> tuple[JWTAlgorithm, str] | InvalidCredentials:
+    """Validate immutable routing fields for one capability JWT.
+
+    Args:
+        header: The cryptographically untrusted JOSE header.
+
+    Returns:
+        The exact algorithm and key identifier to use for signature verification,
+        or a sanitized rejected outcome.
+    """
+    algorithm = header.get("alg")
+    token_type = header.get("typ")
+    key_id = header.get("kid")
+    if (
+        not isinstance(algorithm, str)
+        or algorithm not in _SUPPORTED_CAPABILITY_ALGORITHMS
+        or algorithm == "none"
+        or token_type != CAPABILITY_TOKEN_TYPE
+        or not isinstance(key_id, str)
+        or not is_strict_identifier(key_id)
+        or _FORBIDDEN_JOSE_HEADERS.intersection(header)
+    ):
+        return _INVALID
+    return cast("JWTAlgorithm", algorithm), key_id
 
 
 def build_capability_claims(  # noqa: PLR0913 - explicit claim construction inputs remain cohesive
