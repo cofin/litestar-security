@@ -42,7 +42,16 @@ from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED, HTTP_400_BAD_RE
 from litestar.testing import TestClient
 
 import litestar_security.accounts as accounts_module
-from litestar_security import MFAConfig, PasskeyConfig, SecurityConfig, SecurityPlugin, __version__, csp_nonce
+from litestar_security import (
+    MFAConfig,
+    PasskeyConfig,
+    PublicController,
+    SecureController,
+    SecurityConfig,
+    SecurityPlugin,
+    __version__,
+    csp_nonce,
+)
 from litestar_security._cli import register, security_group
 from litestar_security.accounts import (
     LOCAL_AUTH_TAGS,
@@ -1986,6 +1995,69 @@ def test_plugin_receives_routes_and_attaches_public_runtime_plan() -> None:
     assert isinstance(plugin, ReceiveRoutePlugin)
     assert route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(authenticate=False, csrf_required=False)
     assert app.openapi_schema.paths["/"].get.security == [{}]
+
+
+def test_typed_controller_auth_resolves_through_native_route_registration() -> None:
+    @get("/application")
+    async def application_handler() -> None:
+        return None
+
+    class Accounts(SecureController):
+        path = "/accounts"
+        auth = required("b")
+
+        @get("/owned")
+        async def owned(self) -> None:
+            return None
+
+        @get("/override", auth=required("a"))
+        async def handler_override(self) -> None:
+            return None
+
+    class Health(PublicController):
+        path = "/health"
+
+        @get("/")
+        async def health(self) -> None:
+            return None
+
+    app = Litestar(
+        route_handlers=[application_handler, Accounts, Health],
+        csrf_config=CSRFConfig(secret=token_hex()),
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        opt={"auth": required("a")},
+        plugins=[SecurityPlugin(_compiler_config(session_names=frozenset({"b"})))],
+    )
+
+    application_plan = _http_plan(app, "/application")
+    owned_plan = _http_plan(app, "/accounts/owned")
+    override_plan = _http_plan(app, "/accounts/override")
+    health_plan = _http_plan(app, "/health")
+
+    assert application_plan.participant_names == frozenset({"a"})
+    assert application_plan.authenticate is True
+    assert application_plan.csrf_required is False
+    assert owned_plan.participant_names == frozenset({"b"})
+    assert owned_plan.authenticate is True
+    assert owned_plan.csrf_required is True
+    assert owned_plan.csrf_enforcement == "native"
+    assert override_plan.participant_names == frozenset({"a"})
+    assert override_plan.authenticate is True
+    assert override_plan.csrf_required is False
+    assert health_plan.participant_names is None
+    assert health_plan.authenticate is False
+    assert health_plan.csrf_required is False
+
+    with TestClient(app) as client:
+        assert client.get("/application", headers={"x-auth-a": "valid"}).status_code == 200
+        assert client.get("/application").status_code == 401
+        assert client.get("/accounts/owned", headers={"x-auth-b": "valid"}).status_code == 200
+        assert client.get("/accounts/owned", headers={"x-auth-a": "valid"}).status_code == 401
+        assert client.get("/accounts/owned").status_code == 401
+        assert client.get("/accounts/override", headers={"x-auth-a": "valid"}).status_code == 200
+        assert client.get("/accounts/override", headers={"x-auth-b": "valid"}).status_code == 401
+        assert client.get("/accounts/override").status_code == 401
+        assert client.get("/health").status_code == 200
 
 
 def test_route_policy_uses_native_nearest_owner_inheritance() -> None:
