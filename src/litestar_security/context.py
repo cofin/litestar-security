@@ -23,7 +23,7 @@ __all__ = (
     "SessionHandle",
     "SessionPersistenceUnavailableError",
     "SessionUnavailableError",
-    "intersect_authorization",
+    "resolve_authorization",
 )
 
 UserT = TypeVar("UserT")
@@ -371,8 +371,7 @@ class CredentialRestrictions:
         object.__setattr__(self, "resources", None if self.resources is None else frozenset(self.resources))
 
 
-# ai: rename to resolve_authorization or similar as "intersect" is not clear to users
-def intersect_authorization(
+def resolve_authorization(
     snapshot: AuthorizationSnapshot, restrictions: Sequence[CredentialRestrictions]
 ) -> AuthorizationSnapshot:
     """Narrow application authorization by every credential-carried bound.

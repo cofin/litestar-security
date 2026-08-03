@@ -179,7 +179,6 @@ _PUBLIC_API = (
     "guard_any_of",
     "guard_at_least",
     "guard_one_of",
-    "intersect_authorization",
     "issue_websocket_ticket",
     "mechanism",
     "optional",
@@ -192,6 +191,7 @@ _PUBLIC_API = (
     "requires_scope",
     "requires_team_role",
     "requires_tenant",
+    "resolve_authorization",
     "websocket_policy_fingerprint",
 )
 

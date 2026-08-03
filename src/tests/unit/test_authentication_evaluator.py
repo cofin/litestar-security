@@ -36,7 +36,7 @@ from litestar_security.context import (
     NullSessionHandle,
     Principal,
     ResourcePermission,
-    intersect_authorization,
+    resolve_authorization,
 )
 
 if TYPE_CHECKING:
@@ -635,7 +635,7 @@ def test_resource_restriction_truth_table(
         }
     )
 
-    effective = intersect_authorization(snapshot, (CredentialRestrictions(resources=bounds),))
+    effective = resolve_authorization(snapshot, (CredentialRestrictions(resources=bounds),))
 
     assert {permission.resource: set(permission.scopes) for permission in effective.resources} == expected
 

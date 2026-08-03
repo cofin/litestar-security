@@ -32,7 +32,7 @@ from litestar_security.context import (
     ResourcePermission,
     SecurityContext,
     SessionHandle,
-    intersect_authorization,
+    resolve_authorization,
 )
 from litestar_security.websocket import (
     WebSocketBinding,
@@ -744,7 +744,7 @@ class SecurityMiddleware(Generic[UserT]):
                 if snapshot.__class__ is not AuthorizationSnapshot:
                     raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
                 current_context = replace(
-                    current_context, authorization=intersect_authorization(snapshot, current_context.restrictions)
+                    current_context, authorization=resolve_authorization(snapshot, current_context.restrictions)
                 )
                 scope["auth"] = current_context
                 route_handler = cast("Any", cast("Mapping[str, object]", scope).get("route_handler"))
@@ -832,7 +832,7 @@ class SecurityMiddleware(Generic[UserT]):
         if principal.is_authenticated:
             if principal.id != ticket.subject_id:
                 raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-            authorization = intersect_authorization(context.authorization, (ticket.restrictions,))
+            authorization = resolve_authorization(context.authorization, (ticket.restrictions,))
         else:
             principal = Principal(id=ticket.subject_id)
             resolver = self.config.registry.authorization_resolver
@@ -845,7 +845,7 @@ class SecurityMiddleware(Generic[UserT]):
                 if isinstance(resolution, InvalidCredentials):
                     raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
                 authorization = resolution
-            authorization = intersect_authorization(authorization, (ticket.restrictions,))
+            authorization = resolve_authorization(authorization, (ticket.restrictions,))
         evidence = AuthenticationEvidence(
             mechanism="websocket-ticket",
             slot=self.config.websocket.ticket_query_parameter,
@@ -1003,7 +1003,7 @@ class _AuthenticationEvaluator(Generic[UserT]):
             if isinstance(resolution, InvalidCredentials):
                 raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
             snapshot = resolution
-        return intersect_authorization(snapshot, tuple(outcome.restrictions for outcome in outcomes))
+        return resolve_authorization(snapshot, tuple(outcome.restrictions for outcome in outcomes))
 
     def _participant_names(self, participant_names: AbstractSet[str] | None) -> frozenset[str]:
         if participant_names is None:
