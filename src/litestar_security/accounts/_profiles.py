@@ -1,7 +1,7 @@
 """Explicit session, token, and hybrid local-authentication profiles."""
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from hashlib import sha256
 from hmac import digest as hmac_digest
@@ -57,6 +57,8 @@ from litestar_security.providers.jwt import BearerSlotSelector, BearerTokenSlot,
 if TYPE_CHECKING:
     from litestar.openapi.spec import Tag
     from litestar.stores.registry import StoreRegistry
+
+    from litestar_security.accounts._mfa_login import MFALoginService
 
 __all__ = ("LocalAuth", "LocalAuthConfig", "LocalAuthSecrets", "LocalAuthService", "trusted_client_key")
 
@@ -185,6 +187,8 @@ class LocalAuthConfig(Generic[UserT]):
         init=False, default=None, repr=False, compare=False
     )
     local_auth_service: LocalAuthService[UserT] = field(init=False, repr=False, compare=False)
+    mfa_login: "MFALoginService | None" = field(init=False, default=None, repr=False, compare=False)
+    _mfa_login_config: object | None = field(init=False, default=None, repr=False, compare=False)
     _route_handlers: tuple[Router, ...] | None = field(init=False, default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:  # noqa: C901 - explicit transport invariants remain centralized
@@ -309,6 +313,40 @@ class LocalAuthConfig(Generic[UserT]):
         limiter = self.rate_limiter
         if isinstance(limiter, StoreRateLimiter) and limiter.store is None:
             limiter.bind(stores.get(limiter.store_name))
+
+    def bind_mfa_login(self, mfa: object) -> None:
+        """Bind one opt-in MFA-login challenge service before route generation.
+
+        Args:
+            mfa: The MFA configuration providing the MFA and challenge-store ports.
+
+        Raises:
+            ImproperlyConfiguredException: If binding is late, conflicting, or incomplete.
+        """
+        from litestar_security.accounts import MFALoginChallengeStore, MFAService  # noqa: PLC0415
+        from litestar_security.accounts._mfa_login import MFALoginService  # noqa: PLC0415
+        from litestar_security.config import MFAConfig  # noqa: PLC0415 - avoid config/profile import cycle
+
+        if not isinstance(mfa, MFAConfig) or not mfa.require_at_login:
+            msg = "MFA login binding requires an MFAConfig with require_at_login enabled"
+            raise ImproperlyConfiguredException(detail=msg)
+        current = self.mfa_login
+        if current is not None:
+            if self._mfa_login_config is mfa:
+                return
+            msg = "Local authentication MFA login is already bound to a different MFA configuration"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self._route_handlers is not None:
+            msg = "Local authentication MFA login must bind before route handlers are cached"
+            raise ImproperlyConfiguredException(detail=msg)
+        store = mfa.login_challenge_store
+        if not isinstance(store, MFALoginChallengeStore) or not isinstance(mfa.mfa_service, MFAService):
+            msg = "MFA login binding requires configured challenge and MFA services"
+            raise ImproperlyConfiguredException(detail=msg)
+        service = MFALoginService(store=store, mfa=mfa.mfa_service, pepper=self.secrets.mfa_login_pepper)
+        object.__setattr__(self, "mfa_login", service)
+        object.__setattr__(self, "_mfa_login_config", mfa)
+        object.__setattr__(self, "local_auth_service", replace(self.local_auth_service, mfa_login=service))
 
     def _validate_capabilities(self) -> None:
         required: list[type[Any]] = [

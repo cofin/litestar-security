@@ -92,6 +92,8 @@ class MFAConfig:
     login_methods: "LoginMethodStore | None" = field(default=None, repr=False)
     events: "SecurityEventSink | None" = field(default=None, repr=False)
     step_up_store: object | None = field(default=None, repr=False)
+    require_at_login: bool = False
+    login_challenge_store: object | None = field(default=None, repr=False)
     route_prefix: str = "/auth"
     issuer: str = "Litestar Security"
     register_routes: bool = True
@@ -101,6 +103,7 @@ class MFAConfig:
     def __post_init__(self) -> None:
         """Build project-owned services from explicit application ports."""
         from litestar_security.accounts import (  # noqa: PLC0415 - account services load only when configured
+            MFALoginChallengeStore,
             MFAService,
             StepUpService,
             StepUpStore,
@@ -129,7 +132,18 @@ class MFAConfig:
         if register_routes_value.__class__ is not bool:
             msg = "MFA route registration must be boolean"
             raise ImproperlyConfiguredException(detail=msg)
-        if self.register_routes and (not self.recovery_peppers or self.login_methods is None):
+        require_at_login_value = cast("object", self.require_at_login)
+        if require_at_login_value.__class__ is not bool:
+            msg = "MFA require_at_login must be boolean"
+            raise ImproperlyConfiguredException(detail=msg)
+        login_challenge_store = self.login_challenge_store if self.login_challenge_store is not None else self.store
+        if self.require_at_login and not isinstance(login_challenge_store, MFALoginChallengeStore):
+            msg = "MFA login challenge store must implement MFALoginChallengeStore"
+            raise ImproperlyConfiguredException(detail=msg)
+        object.__setattr__(self, "login_challenge_store", login_challenge_store)
+        if (self.register_routes or self.require_at_login) and (
+            not self.recovery_peppers or self.login_methods is None
+        ):
             msg = "Generated MFA routes require recovery-code peppers and a login-method store"
             raise ImproperlyConfiguredException(detail=msg)
 

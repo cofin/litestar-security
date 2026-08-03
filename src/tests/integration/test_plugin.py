@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib.metadata import entry_points
 from secrets import token_hex
@@ -49,6 +50,7 @@ from litestar_security.accounts import (
     LocalAccountResponse,
     LocalAuth,
     LocalAuthSecrets,
+    LocalCredentials,
     PasskeySummary,
     PasswordReauthenticationProof,
     ProtectedSecret,
@@ -69,6 +71,8 @@ from litestar_security.accounts import (
     WebAuthnOptions,
     build_mfa_routes,
 )
+from litestar_security.accounts._mfa_login import MFARequired
+from litestar_security.accounts._records import LocalAccount
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -1224,6 +1228,127 @@ def test_plugin_mfa_route_registration_validates_ownership_and_is_idempotent() -
     plugin._configure_mfa_routes(app_config)  # noqa: SLF001
     plugin._configure_mfa_routes(app_config)  # noqa: SLF001
     assert len(app_config.route_handlers) == 1
+
+
+@pytest.mark.anyio
+async def test_plugin_binds_login_mfa_before_local_route_caching_and_gates_password_login() -> None:
+    """The MFA-login service is installed before generated local routes can cache."""
+    mfa_store, protector, _passkey_store, _challenge_store = _feature_test_ports()
+    mfa = MFAConfig(
+        store=mfa_store,
+        secret_protector=protector,
+        recovery_peppers=(accounts_module.RecoveryCodePepper("v1", b"p" * 32),),
+        login_methods=cast("Any", mfa_store),
+        require_at_login=True,
+        register_routes=False,
+    )
+    local_auth = _local_session_auth()
+    plugin = SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa))
+
+    plugin._configure_mfa_login()  # noqa: SLF001 - assert composition order directly
+
+    assert local_auth.mfa_login is not None
+    assert local_auth.local_auth_service.mfa_login is local_auth.mfa_login
+    assert local_auth.build_route_handlers() == ()
+
+    account = LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=1,
+    )
+
+    class PasswordLogin:
+        async def authenticate(self, *_args: object, **_kwargs: object) -> LocalAccount[object]:
+            return account
+
+    service = replace(local_auth.local_auth_service, password_login=cast("Any", PasswordLogin()))
+    outcome = await service.session_login(
+        cast("Any", object()), LocalCredentials(identifier="person@example.com", password="password")  # noqa: S106
+    )
+    assert isinstance(outcome, MFARequired)
+
+
+def test_plugin_mfa_login_binding_validates_configuration_and_is_idempotent() -> None:
+    mfa_store, protector, _passkey_store, _challenge_store = _feature_test_ports()
+    peppers = (accounts_module.RecoveryCodePepper("v1", b"p" * 32),)
+    mfa = MFAConfig(
+        store=mfa_store,
+        secret_protector=protector,
+        recovery_peppers=peppers,
+        login_methods=cast("Any", mfa_store),
+        require_at_login=True,
+    )
+    local_auth = _local_session_auth()
+    plugin = SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa))
+
+    plugin._configure_mfa_login()  # noqa: SLF001 - plugin composition boundary
+    bound = local_auth.mfa_login
+    plugin._configure_mfa_login()  # noqa: SLF001 - same config is intentionally idempotent
+    assert local_auth.mfa_login is bound
+
+    cached_auth = LocalAuth.session(
+        accounts=cast("Any", _local_session_accounts()),
+        secrets=_local_auth_secrets(),
+        binding=SessionBindingConfig(pepper=b"binding-pepper-for-plugin-tests!", max_age=600),
+    )
+    cached_auth.build_route_handlers()
+    with pytest.raises(ImproperlyConfiguredException, match="route handlers"):
+        cached_auth.bind_mfa_login(mfa)
+
+    other = MFAConfig(
+        store=mfa_store,
+        secret_protector=protector,
+        recovery_peppers=peppers,
+        login_methods=cast("Any", mfa_store),
+        require_at_login=True,
+    )
+    with pytest.raises(ImproperlyConfiguredException, match="already bound"):
+        local_auth.bind_mfa_login(other)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"require_at_login": cast("Any", 1)}, "require_at_login must be boolean"),
+        ({"require_at_login": True, "login_challenge_store": object()}, "MFALoginChallengeStore"),
+        ({"require_at_login": True}, "recovery-code peppers and a login-method store"),
+    ],
+)
+def test_mfa_login_config_requires_a_valid_challenge_store_and_dependencies(
+    kwargs: dict[str, object], match: str
+) -> None:
+    mfa_store, protector, _passkey_store, _challenge_store = _feature_test_ports()
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        MFAConfig(store=mfa_store, secret_protector=protector, register_routes=False, **kwargs)  # type: ignore[arg-type]
+
+
+def test_plugin_mfa_login_allows_explicit_store_override_and_requires_local_auth() -> None:
+    mfa_store, protector, _passkey_store, _challenge_store = _feature_test_ports()
+
+    class OverrideStore:
+        async def put(self, _challenge: object) -> None:
+            return None
+
+        async def consume(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    override = OverrideStore()
+    mfa = MFAConfig(
+        store=mfa_store,
+        secret_protector=protector,
+        login_challenge_store=override,
+        recovery_peppers=(accounts_module.RecoveryCodePepper("v1", b"p" * 32),),
+        login_methods=cast("Any", mfa_store),
+        require_at_login=True,
+        register_routes=False,
+    )
+    assert mfa.login_challenge_store is override
+
+    with pytest.raises(ImproperlyConfiguredException, match="local authentication"):
+        SecurityPlugin(SecurityConfig(mfa=mfa))._configure_mfa_login()  # noqa: SLF001
 
 
 def _local_session_accounts() -> Any:

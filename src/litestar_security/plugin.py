@@ -116,6 +116,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         """
         self._configure_headers(app_config)
         self._configure_local_auth_rate_limits(app_config)
+        self._configure_mfa_login()
         self._configure_local_auth_routes(app_config)
         self._configure_mfa_routes(app_config)
         self._configure_oauth_routes(app_config)
@@ -413,6 +414,18 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         for route_handler in route_handlers:
             if not any(existing is route_handler for existing in app_config.route_handlers):
                 app_config.route_handlers.append(route_handler)
+
+    def _configure_mfa_login(self) -> None:
+        """Bind MFA-login challenges independently of generated MFA management routes."""
+        mfa = self.config.mfa
+        if mfa is None or not mfa.require_at_login:
+            return
+        local_auth = self.config.local_auth
+        if local_auth is None:
+            message = "MFA login requires local authentication"
+            raise ImproperlyConfiguredException(detail=message)
+        _validate_local_auth(local_auth)
+        local_auth.bind_mfa_login(mfa)
 
     def _configure_mfa_routes(self, app_config: AppConfig) -> None:
         mfa_config = self.config.mfa

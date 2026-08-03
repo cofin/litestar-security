@@ -385,8 +385,8 @@ async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_ke
             assert evidence.amr == ("pwd", "otp")
             calls.append("establish")
             return accounts_module.SessionAuthentication(
-                session_id="c3Nzc2lvbi0xMjM0NTY3ODkwMTIzNA",
-                binding_id="sb_YmluZGluZy0xMjM0NTY3ODkwMTIzNA",
+                session_id="c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",
+                binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
                 account_id=account.account_id,
                 security_epoch=account.security_epoch,
                 authenticated_at=_JWT_NOW,
