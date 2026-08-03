@@ -12,6 +12,8 @@ import litestar_security.testing as testing_module
 from litestar_security.accounts import (
     ConsumeResult,
     ConsumeStatus,
+    CreateRefreshFamilyCommand,
+    CreateSessionCommand,
     LocalAccount,
     LocalAccountCapabilities,
     LoginMethod,
@@ -21,14 +23,24 @@ from litestar_security.accounts import (
     PasswordCredentialState,
     PasswordResetResult,
     PasswordResetStatus,
+    PrepareRefreshResult,
     PurposeTokenDelivery,
+    RefreshFamilyContext,
+    RefreshReceiptReplay,
+    RefreshRotationStatus,
+    RefreshTokenFamilyStore,
+    RefreshTokenProof,
     RegistrationCommand,
     RegistrationResult,
     RegistrationStatus,
     RegistrationStore,
     RevokeLoginMethodResult,
     RevokeLoginMethodStatus,
+    RotateRefreshCommand,
+    RotateRefreshResult,
     SecurityEvent,
+    SessionRecord,
+    SessionRegistry,
     TokenIssue,
 )
 from litestar_security.providers.api_key import APIKeyRecord, APIKeyStore
@@ -38,10 +50,13 @@ from litestar_security.testing import (
     _single_winner,  # pyright: ignore[reportPrivateUsage] - T1 verifies the private contender harness directly
     assert_api_key_store_conformance,
     assert_local_account_store_conformance,
+    assert_refresh_family_store_conformance,
     assert_security_backend_conformance,
+    assert_session_registry_conformance,
 )
 
 _NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
+_CONFORMANCE_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 @dataclass
@@ -340,6 +355,205 @@ class _YieldingEpochBumpStore(_BrokenAccountStore):
             )
 
 
+@dataclass
+class _BrokenSessionStore:
+    """Session-registry delegate with one optional violated invariant."""
+
+    delegate: SessionRegistry
+    rebind_is_atomic: bool = True
+    rebind_commits: bool = True
+    checks_ownership: bool = True
+    keeps_current: bool = True
+
+    async def create(self, command: CreateSessionCommand, *, event: SecurityEvent) -> SessionRecord:
+        return await self.delegate.create(command, event=event)
+
+    async def get(self, session_id: str) -> SessionRecord | None:
+        return await self.delegate.get(session_id)
+
+    async def list_for_account(self, account_id: str) -> tuple[SessionRecord, ...]:
+        return tuple(await self.delegate.list_for_account(account_id))
+
+    async def touch(self, session_id: str, *, now: datetime) -> SessionRecord | None:
+        return await self.delegate.touch(session_id, now=now)
+
+    async def revoke_session_for_account(self, account_id: str, session_id: str, *, event: SecurityEvent) -> bool:
+        if not self.checks_ownership:
+            return await self.delegate.revoke_session_for_account("conformance-session-other", session_id, event=event)
+        return await self.delegate.revoke_session_for_account(account_id, session_id, event=event)
+
+    async def revoke_sessions_for_account(self, account_id: str, *, event: SecurityEvent) -> int:
+        return await self.delegate.revoke_sessions_for_account(account_id, event=event)
+
+    async def revoke_other_sessions(self, account_id: str, session_id: str, *, event: SecurityEvent) -> int:
+        if not self.keeps_current:
+            return 0
+        return await self.delegate.revoke_other_sessions(account_id, session_id, event=event)
+
+    async def rebind(
+        self, prior_session_id: str, command: CreateSessionCommand, *, event: SecurityEvent
+    ) -> SessionRecord | None:
+        result = await self.delegate.rebind(prior_session_id, command, event=event)
+        if not self.rebind_is_atomic and result is None:
+            return await self.delegate.create(command, event=event)
+        if not self.rebind_commits and result is not None:
+            await self.delegate.revoke_session_for_account(command.account_id, command.session_id, event=event)
+        return result
+
+
+class _YieldingSessionStore(_BrokenSessionStore):
+    """Split a rebind read from its write so both contenders can win."""
+
+    def __init__(self, delegate: SessionRegistry) -> None:
+        super().__init__(delegate)
+        self._release = Event()
+        self._started = 0
+
+    async def rebind(
+        self, prior_session_id: str, command: CreateSessionCommand, *, event: SecurityEvent
+    ) -> SessionRecord | None:
+        snapshot = await self.delegate.get(prior_session_id)
+        if snapshot is None:
+            return None
+        self._started += 1
+        if self._started == 2:
+            self._release.set()
+        await self._release.wait()
+        result = await self.delegate.rebind(prior_session_id, command, event=event)
+        return result if result is not None else await self.delegate.create(command, event=event)
+
+
+class _RefreshRegistrationStore(RegistrationStore[object], RefreshTokenFamilyStore, Protocol):
+    """Combined test-only setup surface for refresh-family conformance."""
+
+    async def get_password_state(self, account_id: str) -> PasswordCredentialState | None:
+        """Return state required to advance a registered account's epoch."""
+        ...
+
+    async def replace_password_and_bump_epoch(
+        self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
+    ) -> PasswordChangeResult:
+        """Advance the epoch used to invalidate a prepared refresh context."""
+        ...
+
+
+@dataclass
+class _BrokenRefreshStore:
+    """Refresh-family delegate with one optional violated invariant."""
+
+    delegate: _RefreshRegistrationStore
+    create_rejects_collisions: bool = True
+    rejects_expiry: bool = True
+    rotate_is_atomic: bool = True
+    rotate_commits: bool = True
+    rotate_revalidates_epoch: bool = True
+    rotate_rejects_expiry: bool = True
+    idempotency_receipt: bool = True
+    replays_revoke: bool = True
+    checks_ownership: bool = True
+    _commands: dict[str, CreateRefreshFamilyCommand] = field(default_factory=dict[str, CreateRefreshFamilyCommand])
+    _rotations: dict[str, RotateRefreshCommand] = field(default_factory=dict[str, RotateRefreshCommand])
+
+    async def register(  # noqa: PLR0913 - mirrors the public registration protocol
+        self,
+        command: RegistrationCommand,
+        password_hash: str,
+        *,
+        invitation_digest: bytes | None,
+        verification: PurposeTokenDelivery | None,
+        now: datetime,
+        event: SecurityEvent,
+    ) -> RegistrationResult[object]:
+        return await self.delegate.register(
+            command, password_hash, invitation_digest=invitation_digest, verification=verification, now=now, event=event
+        )
+
+    async def create_family(self, command: CreateRefreshFamilyCommand, *, event: SecurityEvent) -> bool:
+        result = await self.delegate.create_family(command, event=event)
+        if result:
+            self._commands[command.token_id] = command
+        return result or not self.create_rejects_collisions
+
+    async def get_password_state(self, account_id: str) -> PasswordCredentialState | None:
+        return await self.delegate.get_password_state(account_id)
+
+    async def replace_password_and_bump_epoch(
+        self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
+    ) -> PasswordChangeResult:
+        return await self.delegate.replace_password_and_bump_epoch(
+            account_id, password_hash, expected_epoch=expected_epoch, event=event
+        )
+
+    async def prepare_rotation(
+        self, proof: RefreshTokenProof, idempotency_digest: bytes | None, *, now: datetime, event: SecurityEvent
+    ) -> RefreshFamilyContext | RefreshReceiptReplay | PrepareRefreshResult:
+        rotation = self._rotations.get(proof.token_id)
+        if rotation is not None:
+            if (
+                not self.idempotency_receipt
+                and rotation.token_digest == bytes((8,)) * 32
+                and idempotency_digest == rotation.idempotency_digest
+            ):
+                return PrepareRefreshResult(RefreshRotationStatus.INVALID)
+            if not self.replays_revoke and idempotency_digest != rotation.idempotency_digest:
+                return PrepareRefreshResult(RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True)
+        result = await self.delegate.prepare_rotation(proof, idempotency_digest, now=now, event=event)
+        command = self._commands.get(proof.token_id)
+        if (
+            not self.rejects_expiry
+            and isinstance(result, PrepareRefreshResult)
+            and result.status is RefreshRotationStatus.EXPIRED
+        ):
+            if command is None:  # pragma: no cover - controlled test setup always records the command
+                return result
+            return RefreshFamilyContext(
+                account_id=command.account_id,
+                family_id=command.family_id,
+                security_epoch=command.security_epoch,
+                token_expires_at=command.token_expires_at,
+                family_expires_at=command.family_expires_at,
+                scopes=command.scopes,
+            )
+        return result
+
+    async def rotate(
+        self, command: RotateRefreshCommand, *, now: datetime, event: SecurityEvent
+    ) -> RotateRefreshResult:
+        if not self.rotate_commits and command.successor_digest == bytes((7,)) * 32:
+            return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+        source = self._commands.get(command.token_id)
+        if not self.rotate_rejects_expiry and source is not None and now >= source.token_expires_at:
+            return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+        result = await self.delegate.rotate(command, now=now, event=event)
+        if result.status is RefreshRotationStatus.ROTATED:
+            self._rotations[command.token_id] = command
+        if not self.rotate_is_atomic and result.status is not RefreshRotationStatus.ROTATED:
+            return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+        if (
+            not self.rotate_revalidates_epoch
+            and command.token_digest == bytes((13,)) * 32
+            and result.status is not RefreshRotationStatus.ROTATED
+        ):
+            return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+        return result
+
+    async def revoke_family(self, family_id: str, *, event: SecurityEvent) -> bool:
+        return await self.delegate.revoke_family(family_id, event=event)
+
+    async def revoke_token(self, token_id: str, token_digest: bytes, *, event: SecurityEvent) -> bool:
+        return await self.delegate.revoke_token(token_id, token_digest, event=event)
+
+    async def revoke_token_for_account(
+        self, account_id: str, token_id: str, token_digest: bytes, *, event: SecurityEvent
+    ) -> bool:
+        if not self.checks_ownership:
+            return await self.delegate.revoke_token(token_id, token_digest, event=event)
+        return await self.delegate.revoke_token_for_account(account_id, token_id, token_digest, event=event)
+
+    async def revoke_for_account(self, account_id: str, *, event: SecurityEvent) -> int:
+        return await self.delegate.revoke_for_account(account_id, event=event)
+
+
 @pytest.mark.anyio
 async def test_single_winner_counts_only_successful_contenders() -> None:
     release = Event()
@@ -486,6 +700,72 @@ async def test_api_key_conformance_names_a_non_atomic_rotation_invariant() -> No
 
 
 @pytest.mark.anyio
+async def test_session_registry_conformance_accepts_the_reference_store_in_isolation() -> None:
+    await assert_session_registry_conformance(
+        lambda: InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW).accounts, now=_CONFORMANCE_NOW
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("toggle", "invariant"),
+    [
+        ("rebind_is_atomic", r"SessionRegistry\.rebind atomicity invariant"),
+        ("rebind_commits", r"SessionRegistry\.rebind partial-write invariant"),
+        ("checks_ownership", r"SessionRegistry\.revoke_session_for_account ownership invariant"),
+        ("keeps_current", r"SessionRegistry\.revoke_other_sessions keep-current invariant"),
+    ],
+)
+async def test_session_registry_conformance_names_each_broken_invariant(toggle: str, invariant: str) -> None:
+    def factory() -> _BrokenSessionStore:
+        store = _BrokenSessionStore(InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW).accounts)
+        setattr(store, toggle, False)
+        return store
+
+    with pytest.raises(AssertionError, match=invariant):
+        await assert_session_registry_conformance(factory, now=_CONFORMANCE_NOW)
+
+
+@pytest.mark.anyio
+async def test_session_registry_conformance_detects_a_yielding_rebind_lost_update() -> None:
+    with pytest.raises(AssertionError, match=r"SessionRegistry\.rebind atomicity invariant"):
+        await assert_session_registry_conformance(
+            lambda: _YieldingSessionStore(InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW).accounts),
+            now=_CONFORMANCE_NOW,
+        )
+
+
+@pytest.mark.anyio
+async def test_refresh_family_store_conformance_accepts_the_reference_store_in_isolation() -> None:
+    await assert_refresh_family_store_conformance(lambda: InMemorySecurityBackend(clock=lambda: _NOW).accounts)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("toggle", "invariant"),
+    [
+        ("create_rejects_collisions", r"RefreshTokenFamilyStore\.create_family collision invariant"),
+        ("rejects_expiry", r"RefreshTokenFamilyStore\.prepare_rotation expiry invariant"),
+        ("rotate_is_atomic", r"RefreshTokenFamilyStore\.rotate atomicity invariant"),
+        ("rotate_commits", r"RefreshTokenFamilyStore\.rotate partial-write invariant"),
+        ("rotate_rejects_expiry", r"RefreshTokenFamilyStore\.rotate late-expiry invariant"),
+        ("rotate_revalidates_epoch", r"RefreshTokenFamilyStore\.rotate epoch invariant"),
+        ("idempotency_receipt", r"RefreshTokenFamilyStore\.prepare_rotation idempotency invariant"),
+        ("replays_revoke", r"RefreshTokenFamilyStore\.prepare_rotation replay invariant"),
+        ("checks_ownership", r"RefreshTokenFamilyStore\.revoke_token_for_account ownership invariant"),
+    ],
+)
+async def test_refresh_family_store_conformance_names_each_broken_invariant(toggle: str, invariant: str) -> None:
+    def factory() -> _BrokenRefreshStore:
+        store = _BrokenRefreshStore(InMemorySecurityBackend(clock=lambda: _NOW).accounts)
+        setattr(store, toggle, False)
+        return store
+
+    with pytest.raises(AssertionError, match=invariant):
+        await assert_refresh_family_store_conformance(factory)
+
+
+@pytest.mark.anyio
 async def test_aggregate_conformance_runs_only_supplied_feature_factories() -> None:
     calls: list[str] = []
 
@@ -528,7 +808,9 @@ def test_testing_surface_is_explicit_and_stable() -> None:
         "StoreConformanceFactories",
         "assert_api_key_store_conformance",
         "assert_local_account_store_conformance",
+        "assert_refresh_family_store_conformance",
         "assert_security_backend_conformance",
+        "assert_session_registry_conformance",
     )
 
 

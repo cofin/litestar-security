@@ -1,5 +1,6 @@
 """Deterministic conformance helpers for security integration test suites."""
 
+from base64 import urlsafe_b64encode
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
@@ -38,6 +39,7 @@ from litestar_security.accounts import (
     RefreshFamilyContext,
     RefreshReceiptReplay,
     RefreshRotationStatus,
+    RefreshTokenFamilyStore,
     RefreshTokenProof,
     RegistrationCommand,
     RegistrationResult,
@@ -49,6 +51,7 @@ from litestar_security.accounts import (
     RotateRefreshResult,
     SecurityEvent,
     SessionRecord,
+    SessionRegistry,
     StepUpRecord,
     TokenIssue,
     TokenPurpose,
@@ -91,7 +94,9 @@ __all__ = (
     "StoreConformanceFactories",
     "assert_api_key_store_conformance",
     "assert_local_account_store_conformance",
+    "assert_refresh_family_store_conformance",
     "assert_security_backend_conformance",
+    "assert_session_registry_conformance",
 )
 
 _DEFAULT_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -491,8 +496,7 @@ class InMemoryLocalAccountStore:
                     (
                         issue
                         for issue in self._purpose_tokens.values()
-                        if issue.purpose is TokenPurpose.INVITATION
-                        and compare_digest(issue.digest, invitation_digest)
+                        if issue.purpose is TokenPurpose.INVITATION and compare_digest(issue.digest, invitation_digest)
                     ),
                     None,
                 )
@@ -769,9 +773,7 @@ class InMemoryLocalAccountStore:
     ) -> RotateRefreshResult:
         """Atomically rotate one prepared refresh token."""
         del event
-        await self._observe(
-            "accounts.rotate_refresh", {"family_id": command.family_id, "token_id": command.token_id}
-        )
+        await self._observe("accounts.rotate_refresh", {"family_id": command.family_id, "token_id": command.token_id})
         async with self._lock:
             state = self._refresh_tokens.get(command.token_id)
             account = self._accounts.get(command.account_id)
@@ -968,10 +970,7 @@ class InMemorySecurityBackend:
         self.oauth_transactions = MemoryOAuthTransactionStore(protector=selected_protector)
         self.oauth_tokens = MemoryTokenVault(provider="test", client_id="test-client", protector=selected_protector)
         self.accounts = InMemoryLocalAccountStore(
-            self._observe,
-            clock=self.clock,
-            identifiers=self.next_identifier,
-            entropy=self.entropy,
+            self._observe, clock=self.clock, identifiers=self.next_identifier, entropy=self.entropy
         )
         self.api_keys = InMemoryAPIKeyStore(self._observe)
         self.websocket_connect_tokens = InMemoryWebSocketConnectTokenStore()
@@ -1557,6 +1556,505 @@ async def _assert_final_login_method(store: _ConformanceLocalAccountStore, accou
         raise AssertionError(message)
 
 
+async def assert_session_registry_conformance(  # noqa: C901, PLR0915 - one public scenario intentionally names each invariant
+    factory: Callable[[], SessionRegistry], *, now: datetime = _DEFAULT_NOW
+) -> None:
+    """Assert session-registry state, atomic replacement, and ownership behavior.
+
+    Args:
+        factory: Isolated zero-argument session-registry factory initialized so
+            ``get()`` evaluates expiry against ``now``.
+        now: Time used for every created record and expiry assertion.
+
+    Returns:
+        None when every session-registry invariant holds.
+
+    Raises:
+        AssertionError: If session creation, expiry, replacement, or revocation
+            violates its public contract.
+    """
+    store = factory()
+    isolated = factory()
+    if store is isolated:
+        message = "SessionRegistry factory invariant: each call must return isolated state"
+        raise AssertionError(message)
+    command = _conformance_session_command(marker=1, account_id="conformance-session-owner", now=now)
+    created = await store.create(command, event=_conformance_event("create-session"))
+    expected = _conformance_session_record(command)
+    if created != expected or await store.get(command.session_id) != expected:
+        message = "SessionRegistry.create/get state invariant: created records must be exact"
+        raise AssertionError(message)
+    if await isolated.get(command.session_id) is not None:
+        message = "SessionRegistry factory isolation invariant: created sessions must be factory-local"
+        raise AssertionError(message)
+    expired = _conformance_session_command(
+        marker=2, account_id=command.account_id, now=now, created_at=now - timedelta(minutes=2), expires_at=now
+    )
+    await store.create(expired, event=_conformance_event("create-expired-session"))
+    if await store.get(expired.session_id) is not None:
+        message = "SessionRegistry.get expiry invariant: expired sessions must not be returned"
+        raise AssertionError(message)
+
+    replacements = tuple(
+        _conformance_session_command(marker=marker, account_id=command.account_id, now=now) for marker in (3, 4)
+    )
+
+    results: list[tuple[CreateSessionCommand, SessionRecord | None]] = []
+
+    def contender(replacement: CreateSessionCommand) -> Callable[[], Awaitable[bool]]:
+        async def attempt() -> bool:
+            result = await store.rebind(command.session_id, replacement, event=_conformance_event("rebind-session"))
+            results.append((replacement, result))
+            return _won_by_presence(result)
+
+        return attempt
+
+    winners = await _single_winner(tuple(contender(replacement) for replacement in replacements))
+    if winners != 1:
+        message = "SessionRegistry.rebind atomicity invariant: two contenders must produce one replacement"
+        raise AssertionError(message)
+    winner = next((candidate, result) for candidate, result in results if result is not None)
+    winner_command, winner_record = winner
+    if winner_record != _conformance_session_record(winner_command):
+        message = "SessionRegistry.rebind state invariant: the winning replacement record must be exact"
+        raise AssertionError(message)
+    successor_records = [await store.get(replacement.session_id) for replacement in replacements]
+    if await store.get(command.session_id) is not None or sum(record is not None for record in successor_records) != 1:
+        message = (
+            "SessionRegistry.rebind partial-write invariant: exactly one replacement must remain and the prior session "
+            "must be gone"
+        )
+        raise AssertionError(message)
+
+    other = _conformance_session_command(marker=5, account_id="conformance-session-other", now=now)
+    await store.create(other, event=_conformance_event("create-other-session"))
+    if await store.revoke_session_for_account(
+        command.account_id, other.session_id, event=_conformance_event("cross-account-session-revoke")
+    ) or await store.get(other.session_id) != _conformance_session_record(other):
+        message = (
+            "SessionRegistry.revoke_session_for_account ownership invariant: another account's session must remain"
+        )
+        raise AssertionError(message)
+    current = next(record for record in successor_records if record is not None)
+    extra = _conformance_session_command(marker=6, account_id=command.account_id, now=now)
+    await store.create(extra, event=_conformance_event("create-extra-session"))
+    await store.revoke_other_sessions(
+        command.account_id, current.session_id, event=_conformance_event("revoke-other-sessions")
+    )
+    if (
+        await store.get(current.session_id) != current
+        or await store.get(extra.session_id) is not None
+        or await store.get(other.session_id) != _conformance_session_record(other)
+    ):
+        message = "SessionRegistry.revoke_other_sessions keep-current invariant: retain only the named owner session"
+        raise AssertionError(message)
+
+
+class _ConformanceRefreshFamilyStore(RefreshTokenFamilyStore, RegistrationStore[object], Protocol):
+    """Refresh-family port plus the account registration setup required by its epoch contract."""
+
+    async def get_password_state(self, account_id: str) -> PasswordCredentialState | None:
+        """Return the password state used to force an epoch change after preparation."""
+        ...  # pragma: no cover
+
+    async def replace_password_and_bump_epoch(
+        self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
+    ) -> PasswordChangeResult:
+        """Advance an account epoch so rotation must revalidate prepared context."""
+        ...  # pragma: no cover
+
+
+async def assert_refresh_family_store_conformance(factory: Callable[[], _ConformanceRefreshFamilyStore]) -> None:
+    """Assert strict refresh-family creation, rotation, replay, and ownership behavior.
+
+    Args:
+        factory: Isolated zero-argument combined local-account and refresh-family
+            store factory frozen at the conformance clock.
+
+    Returns:
+        None when every refresh-family invariant holds.
+
+    Raises:
+        AssertionError: If a refresh-family transition is not exact, atomic, or
+            account-owned.
+    """
+    store = factory()
+    isolated = factory()
+    if store is isolated:
+        message = "RefreshTokenFamilyStore factory invariant: each call must return isolated state"
+        raise AssertionError(message)
+    account = await _conformance_register_account(store, "refresh-owner@example.com")
+    command = _conformance_refresh_family_command(account, marker=1)
+    if not await store.create_family(command, event=_conformance_event("create-refresh-family")):
+        message = "RefreshTokenFamilyStore.create_family state invariant: a current account epoch must create a family"
+        raise AssertionError(message)
+    context = await store.prepare_rotation(
+        RefreshTokenProof(command.token_id, command.token_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-refresh"),
+    )
+    expected_context = _conformance_refresh_context(command)
+    if context != expected_context:
+        message = "RefreshTokenFamilyStore.prepare_rotation state invariant: active family context must be exact"
+        raise AssertionError(message)
+    token_collision = replace(command, family_id=_conformance_identifier("rf_", 12))
+    family_collision = replace(command, token_id=_conformance_identifier("rt_", 12), token_digest=bytes((12,)) * 32)
+    if await store.create_family(
+        token_collision, event=_conformance_event("create-refresh-token-collision")
+    ) or await store.create_family(family_collision, event=_conformance_event("create-refresh-family-collision")):
+        message = (
+            "RefreshTokenFamilyStore.create_family collision invariant: "
+            "duplicate token and family identifiers must each fail"
+        )
+        raise AssertionError(message)
+    isolated_result = await isolated.prepare_rotation(
+        RefreshTokenProof(command.token_id, command.token_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-isolated-refresh"),
+    )
+    if (
+        not isinstance(isolated_result, PrepareRefreshResult)
+        or isolated_result.status is not RefreshRotationStatus.INVALID
+    ):
+        message = "RefreshTokenFamilyStore factory isolation invariant: created families must be factory-local"
+        raise AssertionError(message)
+
+    expired = _conformance_refresh_family_command(account, marker=2, expires_at=_DEFAULT_NOW)
+    if not await store.create_family(expired, event=_conformance_event("create-expired-refresh")):
+        message = (
+            "RefreshTokenFamilyStore.create_family expiry setup invariant: expired families must still be recorded"
+        )
+        raise AssertionError(message)
+    expired_result = await store.prepare_rotation(
+        RefreshTokenProof(expired.token_id, expired.token_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-expired-refresh"),
+    )
+    if (
+        not isinstance(expired_result, PrepareRefreshResult)
+        or expired_result.status is not RefreshRotationStatus.EXPIRED
+    ):
+        message = "RefreshTokenFamilyStore.prepare_rotation expiry invariant: expired tokens must be rejected"
+        raise AssertionError(message)
+
+    # A valid command requires token_expires_at <= family_expires_at, so an
+    # independently expired family with a live token is unrepresentable. This
+    # shared deadline covers the public state boundary; divergent internal
+    # store state is outside the protocol contract.
+    shared_expiry = _conformance_refresh_family_command(
+        account, marker=15, token_expires_at=_DEFAULT_NOW, family_expires_at=_DEFAULT_NOW
+    )
+    if not await store.create_family(shared_expiry, event=_conformance_event("create-shared-expiry-refresh")):
+        message = (
+            "RefreshTokenFamilyStore.prepare_rotation expiry setup invariant: a shared-expiry family must be created"
+        )
+        raise AssertionError(message)
+    shared_result = await store.prepare_rotation(
+        RefreshTokenProof(shared_expiry.token_id, shared_expiry.token_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-shared-expiry-refresh"),
+    )
+    if not isinstance(shared_result, PrepareRefreshResult) or shared_result.status is not RefreshRotationStatus.EXPIRED:
+        message = (
+            "RefreshTokenFamilyStore.prepare_rotation shared-expiry invariant: "
+            "the token/family deadline must bound rotation"
+        )
+        raise AssertionError(message)
+
+    await _assert_refresh_rotation_atomicity(store, account)
+    await _assert_refresh_rotation_commit(store, account)
+    await _assert_refresh_replay_and_idempotency(store, account)
+    await _assert_refresh_ownership(store, account)
+    await _assert_refresh_late_rotation_rejection(store, account)
+
+
+async def _assert_refresh_rotation_atomicity(
+    store: _ConformanceRefreshFamilyStore, account: LocalAccount[object]
+) -> None:
+    command = _conformance_refresh_family_command(account, marker=3)
+    if not await store.create_family(command, event=_conformance_event("create-atomic-refresh")):
+        message = "RefreshTokenFamilyStore.rotate atomicity setup invariant: a fresh family must be created"
+        raise AssertionError(message)
+    context = _conformance_refresh_context(command)
+    commands = tuple(_conformance_rotate_command(context, command, marker) for marker in (4, 5))
+    results: list[tuple[RotateRefreshCommand, RotateRefreshResult]] = []
+
+    async def rotate(candidate: RotateRefreshCommand) -> bool:
+        result = await store.rotate(candidate, now=_DEFAULT_NOW, event=_conformance_event("rotate-refresh"))
+        results.append((candidate, result))
+        return _won_by_status(result.status, winning=RefreshRotationStatus.ROTATED)
+
+    def contender(candidate: RotateRefreshCommand) -> Callable[[], Awaitable[bool]]:
+        async def attempt() -> bool:
+            return await rotate(candidate)
+
+        return attempt
+
+    winners = await _single_winner(tuple(contender(candidate) for candidate in commands))
+    if winners != 1:
+        message = "RefreshTokenFamilyStore.rotate atomicity invariant: two contenders must produce one rotation"
+        raise AssertionError(message)
+    winner, winner_result = next(
+        (candidate, result) for candidate, result in results if result.status is RefreshRotationStatus.ROTATED
+    )
+    loser, loser_result = next((candidate, result) for candidate, result in results if candidate is not winner)
+    winner_context = await store.prepare_rotation(
+        RefreshTokenProof(winner.successor_id, winner.successor_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-atomic-winner"),
+    )
+    loser_context = await store.prepare_rotation(
+        RefreshTokenProof(loser.successor_id, loser.successor_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-atomic-loser"),
+    )
+    if (
+        winner_result.sealed_receipt != winner.sealed_receipt
+        or loser_result.status is RefreshRotationStatus.ROTATED
+        or loser_result.sealed_receipt is not None
+        or winner_context != _conformance_successor_context(winner)
+        or not isinstance(loser_context, PrepareRefreshResult)
+        or loser_context.status is not RefreshRotationStatus.INVALID
+    ):
+        message = (
+            "RefreshTokenFamilyStore.rotate durable-state invariant: one exact successor and receipt must persist, "
+            "with no loser successor"
+        )
+        raise AssertionError(message)
+    replay = await store.prepare_rotation(
+        RefreshTokenProof(command.token_id, command.token_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-atomic-replay"),
+    )
+    revoked_successor = await store.prepare_rotation(
+        RefreshTokenProof(winner.successor_id, winner.successor_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-atomic-revoked-successor"),
+    )
+    if (
+        not isinstance(replay, PrepareRefreshResult)
+        or replay.status is not RefreshRotationStatus.REPLAY_DETECTED
+        or not replay.family_revoked
+        or not isinstance(revoked_successor, PrepareRefreshResult)
+        or revoked_successor.status is not RefreshRotationStatus.REVOKED
+        or not revoked_successor.family_revoked
+    ):
+        message = (
+            "RefreshTokenFamilyStore.prepare_rotation replay invariant: "
+            "unkeyed consumed-token reuse must revoke the family"
+        )
+        raise AssertionError(message)
+
+
+async def _assert_refresh_rotation_commit(store: _ConformanceRefreshFamilyStore, account: LocalAccount[object]) -> None:
+    command = _conformance_refresh_family_command(account, marker=6)
+    if not await store.create_family(command, event=_conformance_event("create-commit-refresh")):
+        message = "RefreshTokenFamilyStore.rotate partial-write setup invariant: a fresh family must be created"
+        raise AssertionError(message)
+    context = _conformance_refresh_context(command)
+    rotation = _conformance_rotate_command(context, command, marker=7)
+    result = await store.rotate(rotation, now=_DEFAULT_NOW, event=_conformance_event("rotate-commit-refresh"))
+    replay = await store.prepare_rotation(
+        RefreshTokenProof(command.token_id, command.token_digest),
+        rotation.idempotency_digest,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-commit-receipt"),
+    )
+    successor = await store.prepare_rotation(
+        RefreshTokenProof(rotation.successor_id, rotation.successor_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-commit-successor"),
+    )
+    if (
+        result.status is not RefreshRotationStatus.ROTATED
+        or result.sealed_receipt != rotation.sealed_receipt
+        or not isinstance(replay, RefreshReceiptReplay)
+        or replay.sealed_receipt != rotation.sealed_receipt
+        or replay.context != context
+        or successor != _conformance_successor_context(rotation)
+    ):
+        message = (
+            "RefreshTokenFamilyStore.rotate partial-write invariant: "
+            "consume, successor, and receipt must commit together"
+        )
+        raise AssertionError(message)
+
+
+async def _assert_refresh_late_rotation_rejection(
+    store: _ConformanceRefreshFamilyStore, account: LocalAccount[object]
+) -> None:
+    expiry_command = _conformance_refresh_family_command(account, marker=10)
+    if not await store.create_family(expiry_command, event=_conformance_event("create-late-expiry-refresh")):
+        message = "RefreshTokenFamilyStore.rotate late-expiry setup invariant: a fresh family must be created"
+        raise AssertionError(message)
+    expiry_context = await store.prepare_rotation(
+        RefreshTokenProof(expiry_command.token_id, expiry_command.token_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-late-expiry-refresh"),
+    )
+    if not isinstance(expiry_context, RefreshFamilyContext) or expiry_context != _conformance_refresh_context(
+        expiry_command
+    ):
+        message = "RefreshTokenFamilyStore.rotate late-expiry setup invariant: an active context must be prepared"
+        raise AssertionError(message)
+    expired_rotation = _conformance_rotate_command(expiry_context, expiry_command, marker=16)
+    expired_result = await store.rotate(
+        expired_rotation, now=expiry_command.token_expires_at, event=_conformance_event("rotate-late-expiry-refresh")
+    )
+    expired_successor = await store.prepare_rotation(
+        RefreshTokenProof(expired_rotation.successor_id, expired_rotation.successor_digest),
+        None,
+        now=expiry_command.token_expires_at,
+        event=_conformance_event("prepare-late-expiry-successor"),
+    )
+    if (
+        expired_result.status is RefreshRotationStatus.ROTATED
+        or expired_result.sealed_receipt is not None
+        or not isinstance(expired_successor, PrepareRefreshResult)
+        or expired_successor.status is not RefreshRotationStatus.INVALID
+    ):
+        message = (
+            "RefreshTokenFamilyStore.rotate late-expiry invariant: expired commit must leave no successor or receipt"
+        )
+        raise AssertionError(message)
+
+    epoch_command = _conformance_refresh_family_command(account, marker=13)
+    if not await store.create_family(epoch_command, event=_conformance_event("create-late-epoch-refresh")):
+        message = "RefreshTokenFamilyStore.rotate epoch setup invariant: a fresh family must be created"
+        raise AssertionError(message)
+    epoch_context = await store.prepare_rotation(
+        RefreshTokenProof(epoch_command.token_id, epoch_command.token_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-late-epoch-refresh"),
+    )
+    password_state = await store.get_password_state(account.account_id)
+    if (
+        not isinstance(epoch_context, RefreshFamilyContext)
+        or epoch_context != _conformance_refresh_context(epoch_command)
+        or password_state is None
+    ):
+        message = "RefreshTokenFamilyStore.rotate epoch setup invariant: prepared families require password state"
+        raise AssertionError(message)
+    changed = await store.replace_password_and_bump_epoch(
+        account.account_id,
+        "conformance-refresh-epoch-bump",
+        expected_epoch=epoch_context.security_epoch,
+        event=_conformance_event("bump-refresh-epoch"),
+    )
+    epoch_rotation = _conformance_rotate_command(epoch_context, epoch_command, marker=14)
+    epoch_result = await store.rotate(
+        epoch_rotation, now=_DEFAULT_NOW, event=_conformance_event("rotate-late-epoch-refresh")
+    )
+    epoch_successor = await store.prepare_rotation(
+        RefreshTokenProof(epoch_rotation.successor_id, epoch_rotation.successor_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-late-epoch-successor"),
+    )
+    if (
+        changed.status is not PasswordChangeStatus.CHANGED
+        or epoch_result.status is RefreshRotationStatus.ROTATED
+        or epoch_result.sealed_receipt is not None
+        or not isinstance(epoch_successor, PrepareRefreshResult)
+        or epoch_successor.status is not RefreshRotationStatus.INVALID
+    ):
+        message = (
+            "RefreshTokenFamilyStore.rotate epoch invariant: stale prepared context must leave no successor or receipt"
+        )
+        raise AssertionError(message)
+
+
+async def _assert_refresh_replay_and_idempotency(
+    store: _ConformanceRefreshFamilyStore, account: LocalAccount[object]
+) -> None:
+    command = _conformance_refresh_family_command(account, marker=8)
+    if not await store.create_family(command, event=_conformance_event("create-replay-refresh")):
+        message = "RefreshTokenFamilyStore.prepare_rotation replay setup invariant: a fresh family must be created"
+        raise AssertionError(message)
+    context = _conformance_refresh_context(command)
+    rotation = _conformance_rotate_command(context, command, marker=9)
+    await store.rotate(rotation, now=_DEFAULT_NOW, event=_conformance_event("rotate-replay-refresh"))
+    receipt = await store.prepare_rotation(
+        RefreshTokenProof(command.token_id, command.token_digest),
+        rotation.idempotency_digest,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-idempotent-refresh"),
+    )
+    if not isinstance(receipt, RefreshReceiptReplay) or receipt.sealed_receipt != rotation.sealed_receipt:
+        message = (
+            "RefreshTokenFamilyStore.prepare_rotation idempotency invariant: matching retries must recover one receipt"
+        )
+        raise AssertionError(message)
+    replay = await store.prepare_rotation(
+        RefreshTokenProof(command.token_id, command.token_digest),
+        bytes((10,)) * 32,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-replayed-refresh"),
+    )
+    successor = await store.prepare_rotation(
+        RefreshTokenProof(rotation.successor_id, rotation.successor_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-revoked-successor"),
+    )
+    if (
+        not isinstance(replay, PrepareRefreshResult)
+        or replay.status is not RefreshRotationStatus.REPLAY_DETECTED
+        or not replay.family_revoked
+        or not isinstance(successor, PrepareRefreshResult)
+        or successor.status is not RefreshRotationStatus.REVOKED
+        or not successor.family_revoked
+    ):
+        message = (
+            "RefreshTokenFamilyStore.prepare_rotation replay invariant: consumed-token reuse must revoke its family"
+        )
+        raise AssertionError(message)
+
+
+async def _assert_refresh_ownership(store: _ConformanceRefreshFamilyStore, account: LocalAccount[object]) -> None:
+    command = _conformance_refresh_family_command(account, marker=11)
+    if not await store.create_family(command, event=_conformance_event("create-owned-refresh")):
+        message = (
+            "RefreshTokenFamilyStore.revoke_token_for_account ownership setup invariant: a fresh family must be created"
+        )
+        raise AssertionError(message)
+    other = await _conformance_register_account(store, "refresh-other@example.com")
+    if await store.revoke_token_for_account(
+        other.account_id,
+        command.token_id,
+        command.token_digest,
+        event=_conformance_event("cross-account-refresh-revoke"),
+    ):
+        message = (
+            "RefreshTokenFamilyStore.revoke_token_for_account ownership invariant: "
+            "another account must not revoke a family"
+        )
+        raise AssertionError(message)
+    result = await store.prepare_rotation(
+        RefreshTokenProof(command.token_id, command.token_digest),
+        None,
+        now=_DEFAULT_NOW,
+        event=_conformance_event("prepare-owned-refresh"),
+    )
+    if not isinstance(result, RefreshFamilyContext):
+        message = (
+            "RefreshTokenFamilyStore.revoke_token_for_account ownership invariant: "
+            "rejected cross-account revocation must not mutate"
+        )
+        raise AssertionError(message)  # noqa: TRY004 - conformance failures are intentionally AssertionError
+
+
 async def assert_security_backend_conformance(factories: StoreConformanceFactories) -> None:
     """Run only the conformance scenarios whose factories were supplied.
 
@@ -1577,11 +2075,124 @@ def _conformance_api_key_record(key_id: str) -> APIKeyRecord:
     return APIKeyRecord(key_id=key_id, subject_id="conformance-subject", digest=b"d" * 32)
 
 
-async def _conformance_register_account(
-    store: _ConformanceLocalAccountStore,
-    normalized_identifier: str,
+def _conformance_session_command(
     *,
-    verification: PurposeTokenDelivery | None = None,
+    marker: int,
+    account_id: str,
+    now: datetime = _DEFAULT_NOW,
+    created_at: datetime | None = None,
+    expires_at: datetime | None = None,
+) -> CreateSessionCommand:
+    """Build one deterministic session command with exact valid identifier material."""
+    session_created_at = created_at if created_at is not None else now
+    return CreateSessionCommand(
+        session_id=_conformance_identifier(None, marker),
+        binding_id=_conformance_identifier("sb_", marker),
+        binding_digest=bytes((marker,)) * 32,
+        account_id=account_id,
+        security_epoch=1,
+        created_at=session_created_at,
+        authenticated_at=session_created_at,
+        expires_at=expires_at if expires_at is not None else now + timedelta(minutes=5),
+        display_metadata={"device": f"conformance-{marker}"},
+    )
+
+
+def _conformance_session_record(command: CreateSessionCommand) -> SessionRecord:
+    """Return the exact stored projection required by one session creation command."""
+    return SessionRecord(
+        session_id=command.session_id,
+        binding_id=command.binding_id,
+        binding_digest=command.binding_digest,
+        account_id=command.account_id,
+        security_epoch=command.security_epoch,
+        created_at=command.created_at,
+        authenticated_at=command.authenticated_at,
+        last_seen_at=command.created_at,
+        expires_at=command.expires_at,
+        display_metadata=command.display_metadata,
+    )
+
+
+def _conformance_refresh_family_command(
+    account: LocalAccount[object],
+    *,
+    marker: int,
+    expires_at: datetime | None = None,
+    token_expires_at: datetime | None = None,
+    family_expires_at: datetime | None = None,
+) -> CreateRefreshFamilyCommand:
+    """Build one deterministic family command bound to a registered account epoch."""
+    expiration = token_expires_at if token_expires_at is not None else expires_at
+    token_expiry = expiration if expiration is not None else _DEFAULT_NOW + timedelta(minutes=5)
+    family_expiry = family_expires_at if family_expires_at is not None else _DEFAULT_NOW + timedelta(minutes=10)
+    return CreateRefreshFamilyCommand(
+        token_id=_conformance_identifier("rt_", marker),
+        token_digest=bytes((marker,)) * 32,
+        account_id=account.account_id,
+        family_id=_conformance_identifier("rf_", marker),
+        security_epoch=account.security_epoch,
+        created_at=_DEFAULT_NOW - timedelta(minutes=1) if expiration is not None else _DEFAULT_NOW,
+        token_expires_at=token_expiry,
+        family_expires_at=family_expiry,
+        scopes=frozenset({"conformance"}),
+    )
+
+
+def _conformance_refresh_context(command: CreateRefreshFamilyCommand) -> RefreshFamilyContext:
+    """Return the exact active context for a newly created refresh family."""
+    return RefreshFamilyContext(
+        account_id=command.account_id,
+        family_id=command.family_id,
+        security_epoch=command.security_epoch,
+        token_expires_at=command.token_expires_at,
+        family_expires_at=command.family_expires_at,
+        scopes=command.scopes,
+    )
+
+
+def _conformance_successor_context(command: RotateRefreshCommand) -> RefreshFamilyContext:
+    """Return the exact active context committed for a rotated successor token."""
+    return RefreshFamilyContext(
+        account_id=command.account_id,
+        family_id=command.family_id,
+        security_epoch=command.security_epoch,
+        token_expires_at=command.successor_expires_at,
+        family_expires_at=command.family_expires_at,
+        scopes=command.scopes,
+    )
+
+
+def _conformance_rotate_command(
+    context: RefreshFamilyContext, command: CreateRefreshFamilyCommand, marker: int
+) -> RotateRefreshCommand:
+    """Build a deterministic one-time successor and receipt for one family context."""
+    return RotateRefreshCommand(
+        token_id=command.token_id,
+        token_digest=command.token_digest,
+        account_id=context.account_id,
+        family_id=context.family_id,
+        security_epoch=context.security_epoch,
+        successor_id=_conformance_identifier("rt_", marker),
+        successor_digest=bytes((marker,)) * 32,
+        successor_expires_at=context.token_expires_at,
+        family_expires_at=context.family_expires_at,
+        sealed_receipt=bytes((marker,)),
+        receipt_expires_at=context.token_expires_at,
+        idempotency_digest=bytes((marker,)) * 32,
+        scopes=context.scopes,
+    )
+
+
+def _conformance_identifier(prefix: str | None, marker: int) -> str:
+    """Build an exact base64url lookup identifier without randomness."""
+    length = 16 if prefix is not None else 32
+    value = urlsafe_b64encode(bytes((marker,)) * length).rstrip(b"=").decode("ascii")
+    return f"{prefix or ''}{value}"
+
+
+async def _conformance_register_account(
+    store: RegistrationStore[object], normalized_identifier: str, *, verification: PurposeTokenDelivery | None = None
 ) -> LocalAccount[object]:
     """Register one password account required by several local-account scenarios."""
     result = await store.register(
