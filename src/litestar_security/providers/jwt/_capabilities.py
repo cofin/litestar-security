@@ -33,7 +33,23 @@ _INVALID = InvalidCredentials()
 
 @dataclass(frozen=True, slots=True)
 class VerifiedCapability:
-    """Verified application capability claims without the compact credential."""
+    """Verified application capability claims without the compact credential.
+
+    Args:
+        purpose: The exact application-defined capability purpose.
+        subject: The principal the capability represents.
+        audience: The exact service or resource allowed to accept the capability.
+        issued_at: The timezone-aware timestamp at which the capability was issued.
+        expires_at: The timezone-aware timestamp at which the capability expires.
+        token_id: The unique capability identifier used for optional application-level consumption.
+        claims: The immutable application claims with reserved credential claims removed.
+
+    Returns:
+        A frozen capability projection that contains no compact credential.
+
+    Raises:
+        Never directly raises; invalid credentials are rejected before this value is created.
+    """
 
     purpose: str
     subject: str

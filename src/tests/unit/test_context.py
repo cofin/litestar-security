@@ -939,6 +939,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "TokenVault",
         "VerificationKey",
         "VerificationKeySet",
+        "VerifiedCapability",
         "WorkerLimits",
         "build_access_token_claims",
         "build_local_jwks_handler",
@@ -955,6 +956,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     iap_module = import_module("litestar_security.providers.iap")
     jwks_module = import_module("litestar_security.providers.jwks")
     jwt_module = import_module("litestar_security.providers.jwt")
+    capability_module = import_module("litestar_security.providers.jwt._capabilities")
     oidc_module = import_module("litestar_security.providers.oidc")
     oauth_exports = {
         "GitHubOAuthProvider",
@@ -968,6 +970,8 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     assert set(api_key_module.__all__).union(
         iap_module.__all__, jwks_module.__all__, jwt_module.__all__, oidc_module.__all__, oauth_exports
     ) == set(providers.__all__)
+    assert "VerifiedCapability" in jwt_module.__all__
+    assert providers.VerifiedCapability is jwt_module.VerifiedCapability is capability_module.VerifiedCapability
     assert api_key_module.__all__ == (
         "APIKeyClaims",
         "APIKeyCodec",

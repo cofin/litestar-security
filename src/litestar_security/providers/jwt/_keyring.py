@@ -279,6 +279,10 @@ class LocalKeyRing:
         Returns:
             The verified capability, a sanitized invalid-credential outcome, or
             an unavailable-verification outcome for unexpected worker failures.
+
+        Raises:
+            Never for untrusted credential input; failures are returned as
+            sanitized invalid-credential or unavailable-verification outcomes.
         """
         if now.tzinfo is None or now.utcoffset() is None:
             return _INVALID
