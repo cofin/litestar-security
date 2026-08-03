@@ -1118,6 +1118,143 @@ def test_generated_credential_bearing_route_errors_raise_unauthorized() -> None:
     assert revoked.status_code == 401, revoked.text
 
 
+def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() -> None:
+    """MFA-gated password login exposes only the configured completion transports."""
+
+    class Service:
+        session_auth = object()
+        refresh_tokens = object()
+        registration = None
+
+        def __init__(self) -> None:
+            self.completions: list[dict[str, object]] = []
+
+        async def session_login(self, _request: object, _data: object) -> MFARequired:
+            return MFARequired(
+                challenge="challenge-secret",
+                account_id="account-1",
+                expires_at=datetime(2026, 7, 26, 12, 5, tzinfo=timezone.utc),
+                methods=frozenset({"totp", "recovery-code"}),
+            )
+
+        async def token_login(self, request: object, data: object) -> MFARequired:
+            return await self.session_login(request, data)
+
+        async def complete_mfa_login(self, _request: object, _challenge: str, **kwargs: object) -> object:
+            self.completions.append(kwargs)
+            if kwargs["transport"] == "session":
+                return LocalAccountResponse(account_id="account-1")
+            return InvalidCredentials()
+
+    service = Service()
+    config = SimpleNamespace(
+        local_auth_service=service,
+        mfa_login=object(),
+        mode=accounts_module.LocalAuthMode.HYBRID,
+        registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
+        route_prefix="/identity",
+    )
+    csrf_secret = token_hex()
+    app = Litestar(
+        route_handlers=[accounts_module.build_local_auth_routes(cast("Any", config))],
+        csrf_config=CSRFConfig(secret=csrf_secret),
+        openapi_config=OpenAPIConfig(title="MFA login", version="1.0"),
+        plugins=[SecurityPlugin(_compiler_config(names=("session", "bearer"), session_names=frozenset({"session"})))],
+    )
+    paths = {route_value.path for route_value in app.routes if isinstance(route_value, HTTPRoute)}
+    assert {"/identity/login/mfa", "/identity/token/mfa"} <= paths
+    route_handlers = {
+        route_value.path: route_value.route_handler_map["POST"][0]
+        for route_value in app.routes
+        if isinstance(route_value, HTTPRoute) and route_value.path in {"/identity/login/mfa", "/identity/token/mfa"}
+    }
+    assert (route_handlers["/identity/login/mfa"].name, route_handlers["/identity/login/mfa"].operation_id) == (
+        "local.session.login.mfa",
+        "LocalSessionMFALogin",
+    )
+    assert (route_handlers["/identity/token/mfa"].name, route_handlers["/identity/token/mfa"].operation_id) == (
+        "local.token.login.mfa",
+        "LocalTokenMFALogin",
+    )
+    assert _http_plan(app, "/identity/login/mfa", "POST").csrf_required is True
+    assert _http_plan(app, "/identity/token/mfa", "POST").csrf_required is False
+    session_login = app.openapi_schema.paths["/identity/login"].post
+    token_login = app.openapi_schema.paths["/identity/token"].post
+    assert session_login is not None
+    assert session_login.responses is not None
+    assert token_login is not None
+    assert token_login.responses is not None
+    for responses, success_schema in (
+        (session_login.responses, "#/components/schemas/LocalAccountResponse"),
+        (token_login.responses, "#/components/schemas/RefreshTokenResponse"),
+    ):
+        success_content = responses["200"].content
+        required_content = responses["403"].content
+        assert success_content is not None
+        assert required_content is not None
+        assert success_content["application/json"].schema is not None
+        assert required_content["application/json"].schema is not None
+        assert success_content["application/json"].schema.ref == success_schema
+        assert required_content["application/json"].schema.ref == "#/components/schemas/LocalMFARequiredResponse"
+
+    with TestClient(app) as client:
+        csrf_token = generate_csrf_token(csrf_secret)
+        client.cookies.set("csrftoken", csrf_token)
+        required = client.post(
+            "/identity/login",
+            json={"identifier": "person@example.com", "password": "password"},
+            headers={"x-csrftoken": csrf_token},
+        )
+        completed = client.post(
+            "/identity/login/mfa",
+            json={
+                "challenge": "challenge-secret",
+                "account_id": "account-1",
+                "method": "totp",
+                "method_id": "method-1",
+                "code": "123456",
+            },
+            headers={"x-csrftoken": csrf_token},
+        )
+        token_completed = client.post(
+            "/identity/token/mfa",
+            json={
+                "challenge": "challenge-secret",
+                "account_id": "account-1",
+                "method": "recovery-code",
+                "code": "recovery-secret",
+            },
+        )
+
+    assert required.status_code == 403
+    assert required.json() == {
+        "challenge": "challenge-secret",
+        "account_id": "account-1",
+        "expires_at": "2026-07-26T12:05:00Z",
+        "methods": ["recovery-code", "totp"],
+        "code": "mfa_required",
+        "detail": "Multi-factor authentication is required.",
+    }
+    assert completed.status_code == 200
+    assert token_completed.status_code == 400
+    assert service.completions == [
+        {
+            "account_id": "account-1",
+            "method": "totp",
+            "method_id": "method-1",
+            "code": "123456",
+            "transport": "session",
+        },
+        {
+            "account_id": "account-1",
+            "method": "recovery-code",
+            "method_id": None,
+            "code": "recovery-secret",
+            "transport": "tokens",
+        },
+    ]
+
+
 def _feature_test_ports() -> tuple[object, object, object, object]:
     async def none(*_args: object, **_kwargs: object) -> None:
         return None

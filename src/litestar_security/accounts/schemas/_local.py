@@ -12,6 +12,8 @@ __all__ = (
     "LocalCredentials",
     "LocalIdentifierRequest",
     "LocalInvitationRegistrationRequest",
+    "LocalMFACompletionRequest",
+    "LocalMFARequiredResponse",
     "LocalPasswordChangeRequest",
     "LocalPasswordResetRequest",
     "LocalRegistrationRequest",
@@ -35,6 +37,47 @@ class LocalCredentials(WireStruct, frozen=True):
     def __repr__(self) -> str:
         """Redact the presented password."""
         return f"{type(self).__name__}(identifier={self.identifier!r}, password=<redacted>)"
+
+
+class LocalMFARequiredResponse(WireStruct, frozen=True):
+    """A one-time challenge returned when password login requires MFA completion."""
+
+    challenge: Annotated[str, msgspec.Meta(description="The opaque one-time challenge to present at completion.")]
+    account_id: Annotated[str, msgspec.Meta(description="The account bound to this challenge.")]
+    expires_at: Annotated[datetime, msgspec.Meta(description="When the opaque challenge can no longer be used.")]
+    methods: Annotated[tuple[str, ...], msgspec.Meta(description="The permitted second-factor methods.")]
+    code: Annotated[
+        str, msgspec.Meta(description="The stable machine-readable MFA challenge outcome.")
+    ] = "mfa_required"
+    detail: Annotated[str, msgspec.Meta(description="The human-readable MFA challenge outcome.")] = (
+        "Multi-factor authentication is required."
+    )
+
+    def __repr__(self) -> str:
+        """Redact the opaque challenge credential."""
+        return (
+            f"{type(self).__name__}(challenge=<redacted>, account_id={self.account_id!r}, "
+            f"expires_at={self.expires_at!r}, methods={self.methods!r}, code={self.code!r}, detail={self.detail!r})"
+        )
+
+
+class LocalMFACompletionRequest(WireStruct, frozen=True):
+    """Typed input that completes a pending password-login MFA challenge."""
+
+    challenge: Annotated[str, msgspec.Meta(description="The opaque one-time challenge from password login.")]
+    account_id: Annotated[str, msgspec.Meta(description="The account identifier returned with the challenge.")]
+    method: Annotated[str, msgspec.Meta(description="The selected second-factor method.")]
+    code: Annotated[str, msgspec.Meta(description="The proof for the selected second-factor method.")]
+    method_id: Annotated[
+        str | None, msgspec.Meta(description="The selected TOTP method identifier, when required.")
+    ] = None
+
+    def __repr__(self) -> str:
+        """Redact the one-time challenge and factor proof."""
+        return (
+            f"{type(self).__name__}(challenge=<redacted>, account_id={self.account_id!r}, method={self.method!r}, "
+            f"code=<redacted>, method_id={self.method_id!r})"
+        )
 
 
 class LocalRegistrationRequest(WireStruct, frozen=True):

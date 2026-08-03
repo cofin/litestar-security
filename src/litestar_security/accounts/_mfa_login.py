@@ -42,6 +42,7 @@ class MFARequired:
     """Sanitized outcome: the password verified but a second factor is owed."""
 
     challenge: str = field(repr=False)
+    account_id: str
     expires_at: datetime
     methods: frozenset[str]
     code: str = "mfa_required"
@@ -177,7 +178,7 @@ class MFALoginService:
             )
         except Exception:  # noqa: BLE001 - sanitize clock, entropy, and store failures
             return VerificationUnavailable()
-        return MFARequired(challenge=token, expires_at=expires_at, methods=self.methods)
+        return MFARequired(challenge=token, account_id=account.account_id, expires_at=expires_at, methods=self.methods)
 
     async def consume(
         self, challenge: str, *, account_id: str, security_epoch: int, client_key: str | None

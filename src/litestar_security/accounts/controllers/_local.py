@@ -1,6 +1,6 @@
 """Native Litestar controllers for the built-in local-auth routes."""
 
-from typing import TYPE_CHECKING, Annotated, Any, NoReturn
+from typing import TYPE_CHECKING, Annotated, Any, NoReturn, cast
 
 from litestar import Controller, Request, Response, Router, delete, get, post
 from litestar.connection import ASGIConnection
@@ -21,11 +21,13 @@ from litestar.status_codes import (
     HTTP_202_ACCEPTED,
     HTTP_400_BAD_REQUEST,
     HTTP_401_UNAUTHORIZED,
+    HTTP_403_FORBIDDEN,
     HTTP_429_TOO_MANY_REQUESTS,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
 from litestar_security.accounts._auth_service import LocalAuthService
+from litestar_security.accounts._mfa_login import MFARequired
 from litestar_security.accounts._rate_limits import RateLimited
 from litestar_security.accounts._records import (
     ConsumeResult,
@@ -45,6 +47,8 @@ from litestar_security.accounts.schemas import (
     LocalCredentials,
     LocalIdentifierRequest,
     LocalInvitationRegistrationRequest,
+    LocalMFACompletionRequest,
+    LocalMFARequiredResponse,
     LocalPasswordChangeRequest,
     LocalPasswordResetRequest,
     LocalRegistrationRequest,
@@ -125,6 +129,27 @@ _LOCAL_AUTH_REQUIRED_RESPONSES = {
 }
 
 
+_LOCAL_MFA_LOGIN_RESPONSES = {
+    **_LOCAL_BAD_REQUEST_RESPONSES,
+    HTTP_403_FORBIDDEN: ResponseSpec(
+        LocalMFARequiredResponse,
+        description="The password was verified and the returned challenge requires a second factor.",
+    ),
+}
+
+
+_LOCAL_SESSION_MFA_LOGIN_RESPONSES = {
+    HTTP_200_OK: ResponseSpec(LocalAccountResponse, description="The signed-in account projection."),
+    **_LOCAL_MFA_LOGIN_RESPONSES,
+}
+
+
+_LOCAL_TOKEN_MFA_LOGIN_RESPONSES = {
+    HTTP_200_OK: ResponseSpec(RefreshTokenResponse, description="A newly issued access and refresh token pair."),
+    **_LOCAL_MFA_LOGIN_RESPONSES,
+}
+
+
 _LOCAL_REAUTHENTICATION_RESPONSES = {**_LOCAL_BAD_REQUEST_RESPONSES, **_LOCAL_AUTH_REQUIRED_RESPONSES}
 
 
@@ -162,10 +187,15 @@ def build_local_auth_routes(config: "LocalAuthConfig[Any]") -> Router:
         return config.local_auth_service
 
     route_handlers: list[type[Controller]] = [_LocalLifecycleController]
+    mfa_login = config.mfa_login
     if config.mode in {LocalAuthMode.SESSION, LocalAuthMode.HYBRID}:
         route_handlers.extend((_LocalSessionController, _LocalSessionPasswordController))
+        if mfa_login is not None:
+            route_handlers.append(_LocalSessionMFAController)
     if config.mode in {LocalAuthMode.TOKENS, LocalAuthMode.HYBRID}:
         route_handlers.append(_LocalTokenController)
+        if mfa_login is not None:
+            route_handlers.append(_LocalTokenMFAController)
         if config.mode is LocalAuthMode.TOKENS:
             route_handlers.append(_LocalTokenOnlyPasswordController)
         else:
@@ -185,6 +215,20 @@ def build_local_auth_routes(config: "LocalAuthConfig[Any]") -> Router:
 
 def _route_response(content: RouteStatusResponse, *, status_code: int) -> Response[RouteStatusResponse]:
     return Response(content=content, status_code=status_code)
+
+
+def _mfa_required_response(outcome: MFARequired) -> Response[LocalMFARequiredResponse]:
+    """Project the internal challenge outcome onto its typed public 403 response."""
+    return Response(
+        content=LocalMFARequiredResponse(
+            code=outcome.code,
+            challenge=outcome.challenge,
+            account_id=outcome.account_id,
+            expires_at=outcome.expires_at,
+            methods=tuple(sorted(outcome.methods)),
+        ),
+        status_code=HTTP_403_FORBIDDEN,
+    )
 
 
 def _route_error(outcome: object, *, credentials: bool = False) -> NoReturn:
@@ -217,7 +261,7 @@ class _LocalSessionController(Controller):
         ),
         response_description="The signed-in account projection.",
         status_code=HTTP_200_OK,
-        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        responses=_LOCAL_SESSION_MFA_LOGIN_RESPONSES,
         auth=public(),
         csrf_required=True,
     )
@@ -226,9 +270,11 @@ class _LocalSessionController(Controller):
         data: JSONBody[LocalCredentials],
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[LocalAccountResponse]:
+    ) -> Response[LocalAccountResponse | LocalMFARequiredResponse]:
         """Authenticate a password and establish one native session."""
         result = await local_auth_service.session_login(request, data)
+        if isinstance(result, MFARequired):
+            return cast("Response[LocalAccountResponse | LocalMFARequiredResponse]", _mfa_required_response(result))
         if not isinstance(result, LocalAccountResponse):
             _route_error(result)
         return Response(content=result, status_code=HTTP_200_OK)
@@ -338,6 +384,45 @@ class _LocalSessionController(Controller):
         return _route_response(RouteStatusResponse(detail="Session revoked."), status_code=HTTP_200_OK)
 
 
+class _LocalSessionMFAController(Controller):
+    """Complete MFA-gated native-session password logins."""
+
+    path = "/"
+    tags = (_SESSIONS_TAG,)
+
+    @post(
+        "/login/mfa",
+        name="local.session.login.mfa",
+        operation_id="LocalSessionMFALogin",
+        summary="Complete session login MFA",
+        description="Complete the one-time MFA challenge returned by session password login.",
+        response_description="The signed-in account projection.",
+        status_code=HTTP_200_OK,
+        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        auth=public(),
+        csrf_required=True,
+    )
+    async def complete(
+        self,
+        data: JSONBody[LocalMFACompletionRequest],
+        request: Request[Any, Any, Any],
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
+    ) -> Response[LocalAccountResponse]:
+        """Verify one challenge factor and establish the native session transport."""
+        result = await local_auth_service.complete_mfa_login(
+            request,
+            data.challenge,
+            account_id=data.account_id,
+            method=data.method,
+            method_id=data.method_id,
+            code=data.code,
+            transport="session",
+        )
+        if not isinstance(result, LocalAccountResponse):
+            _route_error(result)
+        return Response(content=result, status_code=HTTP_200_OK)
+
+
 class _LocalTokenController(Controller):
     path = "/"
     tags = (_TOKENS_TAG,)
@@ -353,7 +438,7 @@ class _LocalTokenController(Controller):
         ),
         response_description="A newly issued access and refresh token pair.",
         status_code=HTTP_200_OK,
-        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        responses=_LOCAL_TOKEN_MFA_LOGIN_RESPONSES,
         auth=public(),
     )
     async def login(
@@ -361,9 +446,11 @@ class _LocalTokenController(Controller):
         data: JSONBody[LocalCredentials],
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[RefreshTokenResponse]:
+    ) -> Response[RefreshTokenResponse | LocalMFARequiredResponse]:
         """Authenticate a password and issue a local access/refresh pair."""
         result = await local_auth_service.token_login(request, data)
+        if isinstance(result, MFARequired):
+            return cast("Response[RefreshTokenResponse | LocalMFARequiredResponse]", _mfa_required_response(result))
         if not isinstance(result, RefreshTokenResponse):
             _route_error(result)
         return Response(content=result, status_code=HTTP_200_OK)
@@ -431,6 +518,44 @@ class _LocalTokenController(Controller):
         if isinstance(result, VerificationUnavailable):
             _route_error(result)
         return _route_response(RouteStatusResponse(detail="Token revoked."), status_code=HTTP_200_OK)
+
+
+class _LocalTokenMFAController(Controller):
+    """Complete MFA-gated token password logins."""
+
+    path = "/"
+    tags = (_TOKENS_TAG,)
+
+    @post(
+        "/token/mfa",
+        name="local.token.login.mfa",
+        operation_id="LocalTokenMFALogin",
+        summary="Complete token login MFA",
+        description="Complete the one-time MFA challenge returned by token password login.",
+        response_description="A newly issued access and refresh token pair.",
+        status_code=HTTP_200_OK,
+        responses=_LOCAL_BAD_REQUEST_RESPONSES,
+        auth=public(),
+    )
+    async def complete(
+        self,
+        data: JSONBody[LocalMFACompletionRequest],
+        request: Request[Any, Any, Any],
+        local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
+    ) -> Response[RefreshTokenResponse]:
+        """Verify one challenge factor and issue the token transport."""
+        result = await local_auth_service.complete_mfa_login(
+            request,
+            data.challenge,
+            account_id=data.account_id,
+            method=data.method,
+            method_id=data.method_id,
+            code=data.code,
+            transport="tokens",
+        )
+        if not isinstance(result, RefreshTokenResponse):
+            _route_error(result)
+        return Response(content=result, status_code=HTTP_200_OK)
 
 
 class _LocalLifecycleController(Controller):

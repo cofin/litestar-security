@@ -24,7 +24,7 @@ from litestar_security.accounts._mfa import (
     TOTPMethod,
     TOTPPolicy,
 )
-from litestar_security.accounts._mfa_login import MFALoginChallenge, MFALoginChallengeStore
+from litestar_security.accounts._mfa_login import MFALoginChallenge, MFALoginChallengeStore, MFARequired
 from litestar_security.accounts._passkeys import (
     AssertionRecordResult,
     AttestationTrustMapper,
@@ -162,6 +162,8 @@ from litestar_security.accounts.schemas import (
     LocalCredentials,
     LocalIdentifierRequest,
     LocalInvitationRegistrationRequest,
+    LocalMFACompletionRequest,
+    LocalMFARequiredResponse,
     LocalPasswordChangeRequest,
     LocalPasswordResetRequest,
     LocalRegistrationRequest,
@@ -219,6 +221,8 @@ __all__ = (
     "LocalCredentials",
     "LocalIdentifierRequest",
     "LocalInvitationRegistrationRequest",
+    "LocalMFACompletionRequest",
+    "LocalMFARequiredResponse",
     "LocalPasswordChangeRequest",
     "LocalPasswordResetRequest",
     "LocalRegistrationRequest",
@@ -229,6 +233,7 @@ __all__ = (
     "LoginMethodStore",
     "MFALoginChallenge",
     "MFALoginChallengeStore",
+    "MFARequired",
     "MFAService",
     "MFAStore",
     "NativeSessionAuth",

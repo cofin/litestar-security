@@ -139,11 +139,13 @@ def test_mfa_login_outcome_is_secret_safe_and_rate_limited() -> None:
     """The pre-authentication MFA outcome never exposes its challenge in repr."""
     outcome = MFARequired(
         challenge="reveal-once-challenge",
+        account_id="account-1",
         expires_at=_JWT_NOW + timedelta(minutes=5),
         methods=frozenset({"totp", "recovery-code"}),
     )
 
     assert outcome.code == "mfa_required"
+    assert outcome.account_id == "account-1"
     assert "reveal-once-challenge" not in repr(outcome)
     with pytest.raises(FrozenInstanceError):
         outcome.challenge = "replacement"  # type: ignore[misc]
@@ -180,6 +182,7 @@ async def test_mfa_login_issue_derives_a_domain_separated_digest_and_consumes_on
     )
 
     assert isinstance(issued, MFARequired)
+    assert issued.account_id == "account-1"
     assert issued.challenge == "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg"
     assert len(store.challenges) == 1
     expected_digest = hmac.digest(secrets.mfa_login_pepper, issued.challenge.encode("ascii"), "sha256")
@@ -356,7 +359,7 @@ async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_ke
             assert issued is account
             assert client_key in {"client-session", "client-token"}
             calls.append("issue-challenge")
-            return MFARequired("challenge", _JWT_NOW + timedelta(minutes=5), frozenset({"totp"}))
+            return MFARequired("challenge", account.account_id, _JWT_NOW + timedelta(minutes=5), frozenset({"totp"}))
 
         async def consume(self, value: str, **kwargs: object) -> accounts_module.MFALoginChallenge:
             assert value == "challenge"
