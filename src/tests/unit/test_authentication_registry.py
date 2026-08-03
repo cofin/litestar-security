@@ -163,9 +163,7 @@ def test_mfa_login_outcome_is_secret_safe_and_rate_limited() -> None:
         (timedelta(minutes=10, microseconds=1), False),
     ],
 )
-def test_mfa_login_challenge_enforces_exact_positive_ten_minute_lifetime(
-    lifetime: timedelta, *, valid: bool
-) -> None:
+def test_mfa_login_challenge_enforces_exact_positive_ten_minute_lifetime(lifetime: timedelta, *, valid: bool) -> None:
     """The persisted challenge contract accepts only positive lifetimes up to ten minutes."""
     values = {
         "challenge_digest": b"d" * 32,

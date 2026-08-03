@@ -46,9 +46,9 @@ class LocalMFARequiredResponse(WireStruct, frozen=True):
     account_id: Annotated[str, msgspec.Meta(description="The account bound to this challenge.")]
     expires_at: Annotated[datetime, msgspec.Meta(description="When the opaque challenge can no longer be used.")]
     methods: Annotated[tuple[str, ...], msgspec.Meta(description="The permitted second-factor methods.")]
-    code: Annotated[
-        str, msgspec.Meta(description="The stable machine-readable MFA challenge outcome.")
-    ] = "mfa_required"
+    code: Annotated[str, msgspec.Meta(description="The stable machine-readable MFA challenge outcome.")] = (
+        "mfa_required"
+    )
     detail: Annotated[str, msgspec.Meta(description="The human-readable MFA challenge outcome.")] = (
         "Multi-factor authentication is required."
     )

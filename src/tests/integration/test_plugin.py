@@ -1296,9 +1296,7 @@ def test_generated_mfa_completion_routes_follow_local_auth_transport_and_csrf_mo
     service = Service()
     csrf_secret = token_hex()
     session_enabled = mode in {"session", "hybrid"}
-    mechanism_names = (
-        ("session", "bearer") if mode == "hybrid" else (("session",) if session_enabled else ("bearer",))
-    )
+    mechanism_names = ("session", "bearer") if mode == "hybrid" else (("session",) if session_enabled else ("bearer",))
     app = Litestar(
         route_handlers=[
             accounts_module.build_local_auth_routes(
@@ -1319,15 +1317,12 @@ def test_generated_mfa_completion_routes_follow_local_auth_transport_and_csrf_mo
         plugins=[
             SecurityPlugin(
                 _compiler_config(
-                    names=mechanism_names,
-                    session_names=frozenset({"session"}) if session_enabled else frozenset(),
+                    names=mechanism_names, session_names=frozenset({"session"}) if session_enabled else frozenset()
                 )
             )
         ],
     )
-    expected = {
-        "/identity/login/mfa" if session_enabled else "/identity/token/mfa",
-    }
+    expected = {"/identity/login/mfa" if session_enabled else "/identity/token/mfa"}
     if mode == "hybrid":
         expected.add("/identity/token/mfa")
     completion_paths = {
@@ -1551,7 +1546,8 @@ async def test_plugin_binds_login_mfa_before_local_route_caching_and_gates_passw
 
     service = replace(local_auth.local_auth_service, password_login=cast("Any", PasswordLogin()))
     outcome = await service.session_login(
-        cast("Any", object()), LocalCredentials(identifier="person@example.com", password="password")  # noqa: S106
+        cast("Any", object()),
+        LocalCredentials(identifier="person@example.com", password="password"),  # noqa: S106
     )
     assert isinstance(outcome, MFARequired)
 

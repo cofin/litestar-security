@@ -193,10 +193,7 @@ class MFALoginService:
         try:
             now = aware_utc_time(self.clock())
             record = await self.store.consume(
-                _challenge_digest(self.pepper, challenge),
-                account_id=account_id,
-                security_epoch=security_epoch,
-                now=now,
+                _challenge_digest(self.pepper, challenge), account_id=account_id, security_epoch=security_epoch, now=now
             )
         except Exception:  # noqa: BLE001 - sanitize clock and store failures
             return VerificationUnavailable()
