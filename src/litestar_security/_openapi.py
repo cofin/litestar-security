@@ -20,6 +20,7 @@ from litestar.openapi.controller import OpenAPIController
 from litestar.openapi.plugins import OpenAPIRenderPlugin
 from litestar.openapi.spec import Components, Reference, SecurityRequirement, SecurityScheme, Tag
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
+from litestar.types import Empty
 
 from litestar_security.authentication import (
     AUTH_POLICY_OPT_KEY,
@@ -576,7 +577,11 @@ class RouteCompiler(Generic[UserT]):
                 continue
             self._raise_route_error(route, route_handler, "Competing native Litestar security declaration")
         route_handler.security = projection
-        route_handler.resolve_security()[:] = projection
+        # A plugin registered ahead of this one may already have memoized the
+        # stale resolution, so drop it and let the next resolve_security() flow
+        # through Litestar's own layer merge; the competing-declaration check
+        # above guarantees no other ownership layer contributes to that merge.
+        route_handler._resolved_security = Empty  # noqa: SLF001 - Litestar exposes no resolution-invalidation API
         route_handler.opt[_OPENAPI_SECURITY_OPT_KEY] = canonical
 
     @staticmethod
