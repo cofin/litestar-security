@@ -101,7 +101,7 @@ class _ServiceJWTVerifier:
     owner: ServiceTokenConfig
     config: JWTValidationConfig
     _verifiers: dict[tuple[str, str], PyJWTVerifier] = field(
-        default_factory=dict, init=False, repr=False, compare=False
+        default_factory=dict[tuple[str, str], PyJWTVerifier], init=False, repr=False, compare=False
     )
 
     async def verify(  # noqa: PLR0911 - preserve structured trust outcomes at every verifier boundary

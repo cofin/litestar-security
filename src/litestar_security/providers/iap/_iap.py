@@ -151,7 +151,9 @@ class _GoogleIAPAuthenticator(Generic[UserT]):
     name: str = field(default="google-iap", init=False)
     slot: str = field(default="google-iap", init=False)
     participates_by_default: bool = True
-    _verifiers: dict[str, PyJWTVerifier] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _verifiers: dict[str, PyJWTVerifier] = field(
+        default_factory=dict[str, PyJWTVerifier], init=False, repr=False, compare=False
+    )
 
     async def authenticate(  # noqa: PLR0911 - every trust failure retains its structured security outcome
         self, credential: str, connection: ASGIConnection[Any, Any, Any, Any]
