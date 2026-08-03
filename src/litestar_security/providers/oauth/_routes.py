@@ -20,6 +20,7 @@ from litestar.exceptions import (
 )
 from litestar.openapi.datastructures import ResponseSpec
 from litestar.params import Body, FromPath, FromQuery, JSONBody, QueryParameter, SkipValidation
+from litestar.response import Redirect
 from litestar.status_codes import (
     HTTP_200_OK,
     HTTP_302_FOUND,
@@ -829,10 +830,8 @@ def _account_id(principal: Principal[Any]) -> str:
     return cast("str", principal.id)
 
 
-def _authorization_response(result: OAuthAuthorization) -> Response[None]:
-    return Response(
-        content=None, status_code=HTTP_302_FOUND, headers={"Location": result.url}, cookies=[result.binding_cookie]
-    )
+def _authorization_response(result: OAuthAuthorization) -> Redirect:
+    return Redirect(result.url, status_code=HTTP_302_FOUND, cookies=[result.binding_cookie])
 
 
 class _OAuthController(Controller):
@@ -859,7 +858,7 @@ class _OAuthController(Controller):
         request: Request[Any, Any, Any],
         oauth_service: NamedDependency[SkipValidation[OAuthRouteService]],
         return_to: FromQuery[str] = "/",
-    ) -> Response[None]:
+    ) -> Redirect:
         """Create a public login transaction."""
         result = await oauth_service.begin(
             provider=provider,
@@ -916,7 +915,7 @@ class _OAuthController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         oauth_service: NamedDependency[SkipValidation[OAuthRouteService]],
-    ) -> Response[None]:
+    ) -> Redirect:
         """Begin an authenticated provider link."""
         result = await oauth_service.begin(
             provider=provider,
@@ -981,7 +980,7 @@ class _OAuthController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         oauth_service: NamedDependency[SkipValidation[OAuthRouteService]],
-    ) -> Response[None]:
+    ) -> Redirect:
         """Begin allowlisted incremental provider consent."""
         result = await oauth_service.begin(
             provider=provider,
@@ -1046,6 +1045,8 @@ class _OAuthController(Controller):
         """Complete local logout, then optionally redirect to a validated RP endpoint."""
         result = await oauth_service.logout(provider=provider, account_id=_account_id(principal), request=request)
         if result.redirect_url is not None:
+            # Response rather than litestar.response.Redirect: this 302 carries
+            # the logout detail as its JSON body, which Redirect cannot express.
             return Response(
                 content=OAuthRouteResponse(detail=result.detail),
                 status_code=HTTP_302_FOUND,
