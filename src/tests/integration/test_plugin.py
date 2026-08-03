@@ -2363,6 +2363,22 @@ def test_exclude_rejects_competing_authentication_policy() -> None:
             route_handlers=[conflicting_handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())]
         )
 
+    @websocket("/socket-conflict", auth=public(), opt={"exclude_from_auth": True})
+    async def conflicting_socket(socket: WebSocket) -> None:
+        del socket
+
+    with pytest.raises(
+        ImproperlyConfiguredException, match=r"both auth and exclude_from_auth.*websocket /socket-conflict"
+    ):
+        Litestar(route_handlers=[conflicting_socket], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+
+    @asgi("/asgi-conflict", auth=public(), opt={"exclude_from_auth": True}, copy_scope=True)
+    async def conflicting_asgi(scope: Scope, receive: Receive, send: Send) -> None:
+        del scope, receive, send
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"both auth and exclude_from_auth.*asgi /asgi-conflict"):
+        Litestar(route_handlers=[conflicting_asgi], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+
 
 def test_exclude_follows_nearest_owner_precedence() -> None:
     class Excluded(SecureController):
