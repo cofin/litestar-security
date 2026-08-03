@@ -12809,6 +12809,14 @@ def test_forwarded_client_key_normalizes_addresses_and_falls_back_safely(peer: s
     assert extractor(connection) == expected
 
 
+@pytest.mark.parametrize("headers", [{}, {"x-forwarded-for": "10.0.0.1, 10.0.0.2"}])
+def test_forwarded_client_key_falls_back_when_no_external_hop_is_available(headers: dict[str, str]) -> None:
+    extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"})
+    connection = cast("Any", SimpleNamespace(client=SimpleNamespace(host="10.0.0.5"), headers=headers))
+
+    assert extractor(connection) == "10.0.0.5"
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
