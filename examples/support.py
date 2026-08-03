@@ -321,6 +321,9 @@ class ExampleAccountStore:
         elif issue.purpose is TokenPurpose.RECOVERY:
             self.recovery_token = notification.token
 
+    async def issue_absent(self) -> None:
+        """Perform the equal-cost durable round trip for an unresolved identifier."""
+
     async def consume_and_verify(self, token_id: str, digest: bytes, **_kwargs: object) -> ConsumeResult:
         """Consume a verification token."""
         issue = self.purpose_tokens.pop(token_id, None)
