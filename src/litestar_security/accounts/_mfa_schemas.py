@@ -11,8 +11,8 @@ __all__ = (
     "PasskeyRegistrationOptionsRequest",
     "PasskeySummaryResponse",
     "PasskeyVerifyRequest",
-    "RecoveryCodesRequest",
     "RecoveryCodesResponse",
+    "StepUpAuthorizedRequest",
     "StepUpRequest",
     "StepUpResponse",
     "TOTPEnrollmentRequest",
@@ -59,8 +59,8 @@ class TOTPVerificationRequest(WireStruct, frozen=True):
         return f"{type(self).__name__}(enrollment_id={self.enrollment_id!r}, code=<redacted>)"
 
 
-class RecoveryCodesRequest(WireStruct, frozen=True):
-    """Authorize a recovery-code replacement."""
+class StepUpAuthorizedRequest(WireStruct, frozen=True):
+    """Carry the grant authorizing one sensitive factor operation."""
 
     step_up_grant: str
 

@@ -12,8 +12,15 @@ from litestar.datastructures import CacheControlHeader, Cookie
 from litestar.di import NamedDependency, Provide
 from litestar.enums import RequestEncodingType
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
+from litestar.openapi.datastructures import ResponseSpec
 from litestar.params import Body, FromPath, FromQuery, JSONBody, QueryParameter, SkipValidation
-from litestar.status_codes import HTTP_200_OK, HTTP_302_FOUND
+from litestar.status_codes import (
+    HTTP_200_OK,
+    HTTP_302_FOUND,
+    HTTP_400_BAD_REQUEST,
+    HTTP_401_UNAUTHORIZED,
+    HTTP_503_SERVICE_UNAVAILABLE,
+)
 
 from litestar_security.authentication import public, required
 from litestar_security.context import Principal
@@ -135,6 +142,19 @@ class OAuthLogoutResult(msgspec.Struct, frozen=True, kw_only=True):
         """Redact a redirect that may contain an OIDC id-token hint."""
         redirect = "None" if self.redirect_url is None else "<redacted>"
         return f"{type(self).__name__}(detail={self.detail!r}, redirect_url={redirect})"
+
+
+_OAUTH_PUBLIC_RESPONSES = {
+    HTTP_400_BAD_REQUEST: ResponseSpec(OAuthRouteResponse, description="The provider request is invalid."),
+    HTTP_401_UNAUTHORIZED: ResponseSpec(OAuthRouteResponse, description="The provider exchange was rejected."),
+    HTTP_503_SERVICE_UNAVAILABLE: ResponseSpec(OAuthRouteResponse, description="The provider is unavailable."),
+}
+
+
+_OAUTH_AUTHENTICATED_RESPONSES = {
+    **_OAUTH_PUBLIC_RESPONSES,
+    HTTP_401_UNAUTHORIZED: ResponseSpec(OAuthRouteResponse, description="Authentication or step-up is required."),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -702,7 +722,20 @@ class _OAuthController(Controller):
     path = "/oauth/{provider:str}"
     tags = ("OAuth providers",)
 
-    @get("/login", operation_id="OAuthLogin", status_code=HTTP_302_FOUND, auth=public())
+    @get(
+        "/login",
+        name="oauth.login",
+        operation_id="OAuthLogin",
+        summary="Begin provider login",
+        description=(
+            "Start a public login transaction and redirect to the provider. A dedicated browser-binding "
+            "cookie is set so the callback can only be completed by the browser that began the flow."
+        ),
+        response_description="A redirect to the provider authorization endpoint.",
+        status_code=HTTP_302_FOUND,
+        responses=_OAUTH_PUBLIC_RESPONSES,
+        auth=public(),
+    )
     async def login(
         self,
         provider: FromPath[str],
@@ -723,7 +756,20 @@ class _OAuthController(Controller):
         )
         return _authorization_response(result)
 
-    @get("/callback", operation_id="OAuthCallback", status_code=HTTP_200_OK, auth=public())
+    @get(
+        "/callback",
+        name="oauth.callback",
+        operation_id="OAuthCallback",
+        summary="Complete a provider transaction",
+        description=(
+            "Consume one transaction-bound callback and establish the configured local transport. The "
+            "stored transaction, its browser binding, and the parameters the provider returned must all agree."
+        ),
+        response_description="The authenticated local account, or the issued token pair.",
+        status_code=HTTP_200_OK,
+        responses=_OAUTH_PUBLIC_RESPONSES,
+        auth=public(),
+    )
     async def callback(
         self,
         provider: FromPath[str],
@@ -735,7 +781,17 @@ class _OAuthController(Controller):
         """Consume a transaction-bound callback and issue local authentication."""
         return await oauth_service.callback(provider=provider, code=code, state=oauth_state, request=request)
 
-    @post("/link", operation_id="OAuthLink", status_code=HTTP_302_FOUND, auth=required())
+    @post(
+        "/link",
+        name="oauth.link",
+        operation_id="OAuthLink",
+        summary="Link a provider account",
+        description="Start a step-up-authorized transaction that links a provider identity to the caller's account.",
+        response_description="A redirect to the provider authorization endpoint.",
+        status_code=HTTP_302_FOUND,
+        responses=_OAUTH_AUTHENTICATED_RESPONSES,
+        auth=required(),
+    )
     async def link(
         self,
         provider: FromPath[str],
@@ -757,7 +813,20 @@ class _OAuthController(Controller):
         )
         return _authorization_response(result)
 
-    @delete("/links/{provider_account_id:str}", operation_id="OAuthUnlink", status_code=HTTP_200_OK, auth=required())
+    @delete(
+        "/links/{provider_account_id:str}",
+        name="oauth.unlink",
+        operation_id="OAuthUnlink",
+        summary="Unlink a provider account",
+        description=(
+            "Unlink one provider identity after exact step-up. An unlink that would leave the account with "
+            "no login method is refused."
+        ),
+        response_description="The unlink outcome.",
+        status_code=HTTP_200_OK,
+        responses=_OAUTH_AUTHENTICATED_RESPONSES,
+        auth=required(),
+    )
     async def unlink(  # noqa: PLR0913 - Litestar injects each route binding explicitly
         self,
         *,
@@ -777,7 +846,17 @@ class _OAuthController(Controller):
             request=request,
         )
 
-    @post("/scopes", operation_id="OAuthScopeUpgrade", status_code=HTTP_302_FOUND, auth=required())
+    @post(
+        "/scopes",
+        name="oauth.scopes",
+        operation_id="OAuthScopeUpgrade",
+        summary="Request additional provider scopes",
+        description="Start a step-up-authorized transaction that requests further scopes for a linked account.",
+        response_description="A redirect to the provider authorization endpoint.",
+        status_code=HTTP_302_FOUND,
+        responses=_OAUTH_AUTHENTICATED_RESPONSES,
+        auth=required(),
+    )
     async def scopes(
         self,
         provider: FromPath[str],
@@ -799,7 +878,20 @@ class _OAuthController(Controller):
         )
         return _authorization_response(result)
 
-    @post("/revoke", operation_id="OAuthRevoke", status_code=HTTP_200_OK, auth=required())
+    @post(
+        "/revoke",
+        name="oauth.revoke",
+        operation_id="OAuthRevoke",
+        summary="Revoke stored provider tokens",
+        description=(
+            "Delete the locally stored provider tokens for the caller. The deletion is local and final "
+            "regardless of whether the upstream revocation call succeeds."
+        ),
+        response_description="The revocation outcome.",
+        status_code=HTTP_200_OK,
+        responses=_OAUTH_AUTHENTICATED_RESPONSES,
+        auth=required(),
+    )
     async def revoke(
         self,
         provider: FromPath[str],
@@ -813,7 +905,20 @@ class _OAuthController(Controller):
             provider=provider, account_id=_account_id(principal), step_up_grant=data.step_up_grant, request=request
         )
 
-    @post("/logout", operation_id="OAuthLogout", status_code=HTTP_200_OK, auth=required())
+    @post(
+        "/logout",
+        name="oauth.logout",
+        operation_id="OAuthLogout",
+        summary="Log out of the provider session",
+        description=(
+            "End the local session and, when the provider registration supplies an end-session endpoint, "
+            "redirect onward to it."
+        ),
+        response_description="The logout outcome, or a redirect to the provider end-session endpoint.",
+        status_code=HTTP_200_OK,
+        responses=_OAUTH_AUTHENTICATED_RESPONSES,
+        auth=required(),
+    )
     async def logout(
         self,
         provider: FromPath[str],
@@ -836,7 +941,17 @@ class _OIDCLogoutController(Controller):
     path = "/oidc/{provider:str}"
     tags = ("OIDC logout",)
 
-    @get("/frontchannel-logout", operation_id="OIDCFrontchannelLogout", auth=public())
+    @get(
+        "/frontchannel-logout",
+        name="oidc.logout.frontchannel",
+        operation_id="OIDCFrontchannelLogout",
+        summary="Front-channel logout",
+        description="Revoke the local sessions mapped to one exact issuer and provider session identifier.",
+        response_description="How many local sessions were revoked.",
+        status_code=HTTP_200_OK,
+        responses=_OAUTH_PUBLIC_RESPONSES,
+        auth=public(),
+    )
     async def frontchannel_logout(
         self,
         provider: FromPath[str],
@@ -847,7 +962,20 @@ class _OIDCLogoutController(Controller):
         """Revoke local sessions mapped to one exact issuer and provider sid."""
         return await oidc_service.frontchannel(provider, issuer, session_id)
 
-    @post("/backchannel-logout", operation_id="OIDCBackchannelLogout", status_code=HTTP_200_OK, auth=public())
+    @post(
+        "/backchannel-logout",
+        name="oidc.logout.backchannel",
+        operation_id="OIDCBackchannelLogout",
+        summary="Back-channel logout",
+        description=(
+            "Verify a logout token, consume its identifier so it cannot be replayed, and revoke the local "
+            "sessions it maps to."
+        ),
+        response_description="How many local sessions were revoked.",
+        status_code=HTTP_200_OK,
+        responses=_OAUTH_PUBLIC_RESPONSES,
+        auth=public(),
+    )
     async def backchannel_logout(
         self,
         provider: FromPath[str],

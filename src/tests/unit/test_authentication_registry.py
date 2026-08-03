@@ -8387,7 +8387,7 @@ async def test_public_conformance_helpers_execute_factor_atomicity_matrix() -> N
             expires_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
         ),
         accounts_module.TOTPVerificationRequest(enrollment_id="e1", code="123456"),
-        accounts_module.RecoveryCodesRequest(step_up_grant="grant-secret"),
+        accounts_module.StepUpAuthorizedRequest(step_up_grant="grant-secret"),
         accounts_module.StepUpRequest(method="totp", credential="123456", method_id="m1"),
         accounts_module.StepUpResponse(
             grant="grant-secret", purpose="settings", expires_at=datetime(2026, 7, 27, tzinfo=timezone.utc)

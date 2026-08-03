@@ -10,6 +10,7 @@ from litestar import Controller, Request, Response, Router, delete, get, post
 from litestar.connection import ASGIConnection
 from litestar.datastructures import CacheControlHeader
 from litestar.di import NamedDependency, Provide
+from litestar.openapi.datastructures import ResponseSpec
 from litestar.params import FromPath, JSONBody, SkipValidation
 from litestar.status_codes import (
     HTTP_200_OK,
@@ -29,8 +30,8 @@ from litestar_security.accounts._mfa_schemas import (
     PasskeyRegistrationOptionsRequest,
     PasskeySummaryResponse,
     PasskeyVerifyRequest,
-    RecoveryCodesRequest,
     RecoveryCodesResponse,
+    StepUpAuthorizedRequest,
     StepUpRequest,
     StepUpResponse,
     TOTPEnrollmentRequest,
@@ -212,10 +213,38 @@ async def _consume_step_up(
     )
 
 
+_MFA_BAD_REQUEST_RESPONSES = {
+    HTTP_400_BAD_REQUEST: ResponseSpec(MFAStatusResponse, description="The request is invalid."),
+    HTTP_401_UNAUTHORIZED: ResponseSpec(MFAStatusResponse, description="Authentication or step-up is required."),
+    HTTP_429_TOO_MANY_REQUESTS: ResponseSpec(MFAStatusResponse, description="The operation exceeded its rate limit."),
+    HTTP_503_SERVICE_UNAVAILABLE: ResponseSpec(MFAStatusResponse, description="The factor service is unavailable."),
+}
+
+
+_MFA_CONFLICT_RESPONSES = {
+    **_MFA_BAD_REQUEST_RESPONSES,
+    HTTP_409_CONFLICT: ResponseSpec(MFAStatusResponse, description="The change would remove the final login method."),
+}
+
+
 class _StepUpController(Controller):
     tags = (_STEP_UP_TAG,)
 
-    @post("/step-up/{purpose:str}", operation_id="SecurityStepUp", status_code=HTTP_200_OK, auth=required())
+    @post(
+        "/step-up/{purpose:str}",
+        name="security.step_up",
+        operation_id="SecurityStepUp",
+        summary="Obtain a step-up grant",
+        description=(
+            "Present a configured factor to obtain one short-lived grant bound to this exact purpose, "
+            "the caller's current security epoch, and the current transport. A grant for one purpose "
+            "cannot authorize another."
+        ),
+        response_description="The reveal-once grant and its expiry.",
+        status_code=HTTP_200_OK,
+        responses=_MFA_BAD_REQUEST_RESPONSES,
+        auth=required(),
+    )
     async def issue(  # noqa: PLR0911 - each authentication boundary has one explicit safe outcome
         self,
         purpose: FromPath[str],
@@ -287,7 +316,20 @@ class _StepUpController(Controller):
 class _MFAController(Controller):
     tags = (_MFA_TAG,)
 
-    @post("/mfa/totp/enroll", operation_id="MFAEnrollTOTP", status_code=HTTP_201_CREATED, auth=required())
+    @post(
+        "/mfa/totp/enroll",
+        name="mfa.totp.enroll",
+        operation_id="MFAEnrollTOTP",
+        summary="Begin TOTP enrollment",
+        description=(
+            "Create one pending TOTP enrollment and reveal its provisioning URI exactly once. The factor "
+            "is not usable until it is verified."
+        ),
+        response_description="The reveal-once provisioning URI and its expiry.",
+        status_code=HTTP_201_CREATED,
+        responses=_MFA_BAD_REQUEST_RESPONSES,
+        auth=required(),
+    )
     async def enroll_totp(
         self,
         data: JSONBody[TOTPEnrollmentRequest],
@@ -327,7 +369,20 @@ class _MFAController(Controller):
             HTTP_201_CREATED,
         )
 
-    @post("/mfa/totp/verify", operation_id="MFAVerifyTOTPEnrollment", status_code=HTTP_200_OK, auth=required())
+    @post(
+        "/mfa/totp/verify",
+        name="mfa.totp.verify",
+        operation_id="MFAVerifyTOTPEnrollment",
+        summary="Activate TOTP enrollment",
+        description=(
+            "Activate one pending enrollment by presenting a current code. Activating the first factor "
+            "reveals the caller's recovery codes once."
+        ),
+        response_description="The reveal-once recovery-code set.",
+        status_code=HTTP_200_OK,
+        responses=_MFA_BAD_REQUEST_RESPONSES,
+        auth=required(),
+    )
     async def verify_totp(
         self,
         data: JSONBody[TOTPVerificationRequest],
@@ -350,11 +405,24 @@ class _MFAController(Controller):
             return _error(recovery)
         return _response(RecoveryCodesResponse(codes=recovery.codes))
 
-    @delete("/mfa/totp/{method_id:str}", operation_id="MFARemoveTOTP", status_code=HTTP_200_OK, auth=required())
+    @delete(
+        "/mfa/totp/{method_id:str}",
+        name="mfa.totp.remove",
+        operation_id="MFARemoveTOTP",
+        summary="Remove a TOTP factor",
+        description=(
+            "Remove one TOTP factor after exact step-up. A removal that would leave the account with no "
+            "login method is refused."
+        ),
+        response_description="The removal outcome.",
+        status_code=HTTP_200_OK,
+        responses=_MFA_CONFLICT_RESPONSES,
+        auth=required(),
+    )
     async def remove_totp(
         self,
         method_id: FromPath[str],
-        data: JSONBody[RecoveryCodesRequest],
+        data: JSONBody[StepUpAuthorizedRequest],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
@@ -378,10 +446,23 @@ class _MFAController(Controller):
         result = await totp_service.remove_totp_method(account_id, method_id)
         return _removal_response(result)
 
-    @post("/mfa/recovery-codes", operation_id="MFAReplaceRecoveryCodes", status_code=HTTP_200_OK, auth=required())
+    @post(
+        "/mfa/recovery-codes",
+        name="mfa.recovery_codes.replace",
+        operation_id="MFAReplaceRecoveryCodes",
+        summary="Replace recovery codes",
+        description=(
+            "Invalidate the caller's existing recovery codes and reveal a replacement set exactly once. "
+            "The previous set stops working immediately."
+        ),
+        response_description="The reveal-once replacement code set.",
+        status_code=HTTP_200_OK,
+        responses=_MFA_BAD_REQUEST_RESPONSES,
+        auth=required(),
+    )
     async def recovery_codes(
         self,
-        data: JSONBody[RecoveryCodesRequest],
+        data: JSONBody[StepUpAuthorizedRequest],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
@@ -416,8 +497,16 @@ class _PasskeyController(Controller):
 
     @post(
         "/passkeys/registration/options",
+        name="passkey.registration.options",
         operation_id="PasskeyRegistrationOptions",
+        summary="Request passkey registration options",
+        description=(
+            "Return bound WebAuthn registration options after exact step-up. The reveal-once binding "
+            "returned alongside them must be presented unchanged to the verification route."
+        ),
+        response_description="The WebAuthn options and their reveal-once binding.",
         status_code=HTTP_200_OK,
+        responses=_MFA_BAD_REQUEST_RESPONSES,
         auth=required(),
     )
     async def registration_options(
@@ -453,8 +542,13 @@ class _PasskeyController(Controller):
 
     @post(
         "/passkeys/registration/verify",
+        name="passkey.registration.verify",
         operation_id="PasskeyRegistrationVerify",
+        summary="Register a passkey",
+        description="Complete one registration ceremony and store the credential against the caller's account.",
+        response_description="The registration outcome.",
         status_code=HTTP_201_CREATED,
+        responses=_MFA_BAD_REQUEST_RESPONSES,
         auth=required(),
     )
     async def registration_verify(
@@ -481,8 +575,16 @@ class _PasskeyController(Controller):
 
     @post(
         "/passkeys/authentication/options",
+        name="passkey.authentication.options",
         operation_id="PasskeyAuthenticationOptions",
+        summary="Request passkey authentication options",
+        description=(
+            "Return WebAuthn authentication options and a reveal-once binding. The binding lets the public "
+            "verification route complete the ceremony without relying on an existing cookie or token."
+        ),
+        response_description="The WebAuthn options and their reveal-once binding.",
         status_code=HTTP_200_OK,
+        responses=_MFA_BAD_REQUEST_RESPONSES,
         auth=optional(required()),
     )
     async def authentication_options(
@@ -502,7 +604,17 @@ class _PasskeyController(Controller):
         result = await passkey_service.begin_authentication(data.account_id, binding=binding.encode("ascii"))
         return _options_response(result, binding=binding)
 
-    @get("/passkeys", operation_id="PasskeyList", auth=required())
+    @get(
+        "/passkeys",
+        name="passkey.list",
+        operation_id="PasskeyList",
+        summary="List registered passkeys",
+        description="List only the caller's own credential metadata; no public key or challenge material is returned.",
+        response_description="The caller's own registered credentials.",
+        status_code=HTTP_200_OK,
+        responses=_MFA_BAD_REQUEST_RESPONSES,
+        auth=required(),
+    )
     async def list_passkeys(
         self,
         principal: NamedDependency[Principal[Any]],
@@ -520,11 +632,24 @@ class _PasskeyController(Controller):
             return _error(result)
         return _response(tuple(_summary_response(summary) for summary in result))
 
-    @delete("/passkeys/{credential_id:str}", operation_id="PasskeyRemove", status_code=HTTP_200_OK, auth=required())
+    @delete(
+        "/passkeys/{credential_id:str}",
+        name="passkey.remove",
+        operation_id="PasskeyRemove",
+        summary="Remove a passkey",
+        description=(
+            "Remove one of the caller's own credentials after exact step-up. A removal that would leave the "
+            "account with no login method is refused."
+        ),
+        response_description="The removal outcome.",
+        status_code=HTTP_200_OK,
+        responses=_MFA_CONFLICT_RESPONSES,
+        auth=required(),
+    )
     async def remove_passkey(
         self,
         credential_id: FromPath[str],
-        data: JSONBody[RecoveryCodesRequest],
+        data: JSONBody[StepUpAuthorizedRequest],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
@@ -558,8 +683,16 @@ class _PasskeySessionAuthenticationController(Controller):
 
     @post(
         "/passkeys/authentication/verify",
+        name="passkey.authentication.session.verify",
         operation_id="PasskeyAuthenticationVerify",
+        summary="Verify a passkey (session)",
+        description=(
+            "Complete one authentication ceremony and establish a browser session. "
+            "The route enforces CSRF because it establishes a cookie-backed transport."
+        ),
+        response_description="The established local transport.",
         status_code=HTTP_200_OK,
+        responses=_MFA_BAD_REQUEST_RESPONSES,
         auth=public(),
         csrf_required=True,
     )
@@ -580,8 +713,16 @@ class _PasskeyTokenAuthenticationController(Controller):
 
     @post(
         "/passkeys/authentication/verify",
+        name="passkey.authentication.tokens.verify",
         operation_id="PasskeyAuthenticationVerify",
+        summary="Verify a passkey (tokens)",
+        description=(
+            "Complete one authentication ceremony and issue a local access and refresh "
+            "pair. No browser CSRF cookie is required because no cookie transport is established."
+        ),
+        response_description="The established local transport.",
         status_code=HTTP_200_OK,
+        responses=_MFA_BAD_REQUEST_RESPONSES,
         auth=public(),
     )
     async def authentication_verify(
@@ -599,8 +740,16 @@ class _PasskeyHybridSessionController(Controller):
 
     @post(
         "/passkeys/authentication/session/verify",
+        name="passkey.authentication.hybrid.session.verify",
         operation_id="PasskeySessionAuthenticationVerify",
+        summary="Verify a passkey for a session",
+        description=(
+            "Complete one authentication ceremony and establish the hybrid profile's session "
+            "transport. CSRF policy is fixed by this route rather than selected by an untrusted request field."
+        ),
+        response_description="The established local transport.",
         status_code=HTTP_200_OK,
+        responses=_MFA_BAD_REQUEST_RESPONSES,
         auth=public(),
         csrf_required=True,
     )
@@ -621,8 +770,16 @@ class _PasskeyHybridTokenController(Controller):
 
     @post(
         "/passkeys/authentication/tokens/verify",
+        name="passkey.authentication.hybrid.tokens.verify",
         operation_id="PasskeyTokenAuthenticationVerify",
+        summary="Verify a passkey for tokens",
+        description=(
+            "Complete one authentication ceremony and issue the hybrid profile's local token pair. "
+            "CSRF policy is fixed by this route rather than selected by an untrusted request field."
+        ),
+        response_description="The established local transport.",
         status_code=HTTP_200_OK,
+        responses=_MFA_BAD_REQUEST_RESPONSES,
         auth=public(),
     )
     async def authentication_verify(
