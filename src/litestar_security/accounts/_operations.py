@@ -11,6 +11,7 @@ what the operation settled on, not whether the request succeeded.
 
 __all__ = (
     "LOGIN",
+    "LOGIN_MFA",
     "MFA_RECOVERY_CONSUME",
     "MFA_RECOVERY_REPLACE",
     "MFA_TOTP_ENROLL",
@@ -94,6 +95,7 @@ SESSION_REVOKE_ALL_SUFFIX = ".session_revoke_all"
 # separate budgets would let an attacker double their allowance by alternating
 # between the two routes.
 LOGIN = "local.login"
+LOGIN_MFA = "local.login.mfa"
 MFA_RECOVERY_CONSUME = "local.mfa.recovery.consume"
 MFA_RECOVERY_REPLACE = "local.mfa.recovery.replace"
 MFA_TOTP_ENROLL = "local.mfa.totp.enroll"
@@ -113,6 +115,7 @@ VERIFICATION_RESEND = "local.verification.resend"
 # unlimited (StoreRateLimiter.acquire admits unmapped operations).
 RATE_LIMITED_OPERATIONS = frozenset({
     LOGIN,
+    LOGIN_MFA,
     REGISTRATION,
     RECOVERY,
     PASSWORD_RESET,

@@ -48,6 +48,8 @@ import litestar_security.accounts._sessions as sessions_module
 import litestar_security.accounts.controllers._local as controllers_module
 import litestar_security.accounts.controllers._mfa as mfa_controllers_module
 import litestar_security.testing as testing_module
+from litestar_security.accounts._mfa_login import MFARequired
+from litestar_security.accounts._operations import LOGIN_MFA
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -130,6 +132,23 @@ _JWKS_URI = f"{_JWT_ISSUER}/.well-known/jwks.json"
 _MFA_VECTOR_NOW = datetime.fromtimestamp(59, tz=timezone.utc)
 _MFA_ENCODED_SEED = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
 _MFA_POLICY = accounts_module.TOTPPolicy()
+
+
+def test_mfa_login_outcome_is_secret_safe_and_rate_limited() -> None:
+    """The pre-authentication MFA outcome never exposes its challenge in repr."""
+    outcome = MFARequired(
+        challenge="reveal-once-challenge",
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+        methods=frozenset({"totp", "recovery-code"}),
+    )
+
+    assert outcome.code == "mfa_required"
+    assert "reveal-once-challenge" not in repr(outcome)
+    with pytest.raises(FrozenInstanceError):
+        outcome.challenge = "replacement"  # type: ignore[misc]
+    assert rate_limits_module.DEFAULT_RATE_LIMIT_POLICIES[LOGIN_MFA] == rate_limits_module.RateLimitPolicy(
+        limit=10, window=timedelta(minutes=5)
+    )
 
 
 async def _assert_http_exception(

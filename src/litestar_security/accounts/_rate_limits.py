@@ -39,6 +39,7 @@ from litestar_security.accounts._internal import (
 )
 from litestar_security.accounts._operations import (
     LOGIN,
+    LOGIN_MFA,
     MFA_RECOVERY_CONSUME,
     MFA_RECOVERY_REPLACE,
     MFA_TOTP_ENROLL,
@@ -127,6 +128,7 @@ class RateLimitPolicy:
 
 DEFAULT_RATE_LIMIT_POLICIES: "Mapping[str, RateLimitPolicy]" = MappingProxyType({
     LOGIN: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
+    LOGIN_MFA: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     MFA_RECOVERY_CONSUME: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     MFA_RECOVERY_REPLACE: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     MFA_TOTP_ENROLL: RateLimitPolicy(limit=5, window=timedelta(hours=1)),

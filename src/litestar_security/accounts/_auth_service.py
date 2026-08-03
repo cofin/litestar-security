@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 from litestar import Request
 
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
+from litestar_security.accounts._mfa_login import MFARequired
 from litestar_security.accounts._passwords import PasswordPolicyResult
 from litestar_security.accounts._rate_limits import RateLimited
 from litestar_security.accounts._records import (
@@ -100,7 +101,7 @@ class LocalAuthService(Generic[UserT]):
 
     async def session_login(
         self, request: Request[Any, Any, Any], credentials: LocalCredentials
-    ) -> LocalAccountResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccountResponse | MFARequired | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Authenticate a password and establish fixation-safe session state.
 
         Args:
@@ -126,7 +127,7 @@ class LocalAuthService(Generic[UserT]):
 
     async def token_login(
         self, request: Request[Any, Any, Any], credentials: LocalCredentials
-    ) -> RefreshTokenResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
+    ) -> RefreshTokenResponse | MFARequired | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Authenticate a password and issue one access/refresh pair.
 
         Args:
