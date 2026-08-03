@@ -282,9 +282,8 @@ network, such as an isolated Keycloak development environment.
 JWKS cache lifecycle
 --------------------
 
-``CachedJWKSProvider`` is transport-neutral. Supply a bounded async or sync
-fetcher that returns ``JWKSFetchResponse`` and configure each trusted
-``(issuer, jwks_uri)`` pair explicitly:
+The example below supplies ``HttpxJWKSFetcher`` to ``CachedJWKSProvider``.
+Configure each trusted ``(issuer, jwks_uri)`` pair explicitly:
 
 .. code-block:: python
 
@@ -292,19 +291,11 @@ fetcher that returns ``JWKSFetchResponse`` and configure each trusted
 
    from litestar_security import SecurityConfig, SecurityPlugin
    from litestar_security.config import SecurityMetrics, WorkerLimits
-   from litestar_security.providers import (
-       AsyncJWKSFetcher,
-       CachedJWKSProvider,
-       JWKSCacheEntry,
-       JWKSCachePolicy,
-   )
+   from litestar_security.providers import CachedJWKSProvider, HttpxJWKSFetcher
+   from litestar_security.providers import JWKSCacheEntry, JWKSCachePolicy
 
 
-   def create_remote_app(
-       fetcher: AsyncJWKSFetcher,
-       workers: WorkerLimits,
-       metrics: SecurityMetrics,
-   ) -> Litestar:
+   def create_remote_app(workers: WorkerLimits, metrics: SecurityMetrics) -> Litestar:
        provider = CachedJWKSProvider(
            entries=(
                JWKSCacheEntry(
@@ -313,7 +304,7 @@ fetcher that returns ``JWKSFetchResponse`` and configure each trusted
                    algorithms=frozenset({"EdDSA", "RS256"}),
                ),
            ),
-           fetcher=fetcher,
+           fetcher=HttpxJWKSFetcher(),
            policy=JWKSCachePolicy(warm_on_startup=True),
            worker_limits=workers,
            metrics=metrics,
@@ -336,6 +327,9 @@ verification remains unavailable. Litestar's lifespan closes every configured
 provider. The provider closes its fetcher only when ``fetcher_owned=True``;
 otherwise the application that supplied the fetcher remains responsible for
 closing it.
+
+``AsyncJWKSFetcher`` and ``SyncJWKSFetcher`` remain the extension points when
+an application needs a custom transport.
 
 Fresh snapshots are immutable and selected without network I/O or lock
 acquisition. Expiry and unknown key IDs use per-entry single-flight refreshes;
