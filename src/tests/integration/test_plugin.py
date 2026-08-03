@@ -14,7 +14,6 @@ import anyio.lowlevel
 import click
 import pytest
 from click.testing import CliRunner
-from litestar import Controller, Litestar, Router, WebSocket, asgi, get, post, route, websocket
 from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
 from litestar.di import Provide
@@ -26,14 +25,15 @@ from litestar.middleware.session.client_side import CookieBackendConfig
 from litestar.middleware.session.server_side import ServerSideSessionConfig
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.controller import OpenAPIController
-from litestar.openapi.plugins import JsonRenderPlugin
+from litestar.openapi.plugins import JsonRenderPlugin, SwaggerRenderPlugin
 from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme, Tag
-from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED, HTTP_400_BAD_REQUEST
 from litestar.testing import TestClient
 
 import litestar_security.accounts as accounts_module
+from litestar import Controller, Litestar, Router, WebSocket, asgi, get, post, route, websocket
+from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
 from litestar_security import MFAConfig, PasskeyConfig, SecurityConfig, SecurityPlugin, __version__, csp_nonce
 from litestar_security._cli import register, security_group
 from litestar_security.accounts import (
@@ -1634,6 +1634,59 @@ def test_openapi_routes_use_default_configured_and_custom_router_policy(
 
     assert plan.participant_names == expected_participants
     assert plan.authenticate is (expected_participants is not None)
+
+
+@pytest.mark.parametrize(
+    ("openapi_config", "application_path"),
+    [
+        pytest.param(
+            OpenAPIConfig(title="Test", version="1.0", path="/api", render_plugins=[JsonRenderPlugin()]),
+            "/api/orders",
+            id="openapi_base_path_shadows_the_api",
+        ),
+        pytest.param(
+            OpenAPIConfig(title="Test", version="1.0", path="/", render_plugins=[JsonRenderPlugin()]),
+            "/orders",
+            id="openapi_base_path_shadows_the_root",
+        ),
+        pytest.param(
+            OpenAPIConfig(title="Test", version="1.0", render_plugins=[JsonRenderPlugin()]),
+            "/schema-report",
+            id="openapi_base_path_shares_only_a_string_boundary",
+        ),
+    ],
+)
+def test_application_route_under_the_openapi_base_path_keeps_its_own_auth(
+    openapi_config: OpenAPIConfig, application_path: str
+) -> None:
+    @get(application_path, opt={"auth": required("a")})
+    async def application_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[application_handler],
+        openapi_config=openapi_config,
+        plugins=[SecurityPlugin(_compiler_config(names=("a",)))],
+    )
+    plan = _http_plan(app, application_path)
+
+    assert plan.authenticate is True
+    assert plan.participant_names == frozenset({"a"})
+
+
+@pytest.mark.parametrize(
+    "schema_path", ["/schema/openapi.json", "/schema/swagger", "/schema/oauth2-redirect.html", "/schema/{path:str}"]
+)
+def test_every_generated_schema_route_stays_public_whatever_module_defines_it(schema_path: str) -> None:
+    app = Litestar(
+        route_handlers=[],
+        openapi_config=OpenAPIConfig(
+            title="Test", version="1.0", render_plugins=[SwaggerRenderPlugin(), JsonRenderPlugin()]
+        ),
+        plugins=[SecurityPlugin(_compiler_config(names=("a",)))],
+    )
+
+    assert _http_plan(app, schema_path).authenticate is False
 
 
 @pytest.mark.parametrize(

@@ -11,10 +11,13 @@ from types import MappingProxyType
 from typing import Generic, NoReturn, TypeVar, cast
 from warnings import catch_warnings, simplefilter
 
+from litestar._openapi.plugin import OpenAPIPlugin
 from litestar.exceptions import ImproperlyConfiguredException, LitestarDeprecationWarning
 from litestar.handlers.base import BaseRouteHandler
 from litestar.handlers.http_handlers import HTTPRouteHandler
 from litestar.openapi.config import OpenAPIConfig
+from litestar.openapi.controller import OpenAPIController
+from litestar.openapi.plugins import OpenAPIRenderPlugin
 from litestar.openapi.spec import Components, Reference, SecurityRequirement, SecurityScheme, Tag
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 
@@ -41,6 +44,20 @@ __all__ = ()
 UserT = TypeVar("UserT")
 _OPENAPI_SECURITY_OPT_KEY = "litestar_security_openapi_security"
 _CSRF_COVERAGE_OPT_KEY = "litestar_security_csrf"
+_OPENAPI_HANDLER_MODULES = frozenset({
+    OpenAPIPlugin.__module__,
+    OpenAPIController.__module__,
+    OpenAPIRenderPlugin.__module__,
+})
+"""Modules that define Litestar's own OpenAPI schema and documentation handlers.
+
+`OpenAPIPlugin.__module__` covers the render-plugin router Litestar builds
+internally, `OpenAPIController.__module__` the deprecated controller, and
+`OpenAPIRenderPlugin.__module__` the handlers render plugins contribute
+directly. The modules are read from the classes rather than spelled as string
+literals so that a Litestar reorganization fails at import instead of silently
+reclassifying schema routes.
+"""
 _RESERVED_OPT_KEYS = frozenset({
     AUTH_POLICY_OPT_KEY,
     CSRF_REQUIRED_OPT_KEY,
@@ -319,7 +336,7 @@ class RouteCompiler(Generic[UserT]):
         if self._is_generated_options(route_handler):
             policy = public()
             csrf_override = False
-        elif self._is_openapi_handler(route):
+        elif self._is_openapi_handler(route_handler):
             policy = self._nearest_non_application_policy(route, route_handler) or public()
             csrf_override = self._http_csrf_override(route, route_handler)
         else:
@@ -452,6 +469,27 @@ class RouteCompiler(Generic[UserT]):
     def _nearest_non_application_policy(
         self, route: BaseRoute, route_handler: BaseRouteHandler
     ) -> AuthenticationPolicy | None:
+        """Resolve the policy an owning layer declares for a generated handler.
+
+        The walk covers ``ownership_layers[1:-1]``, which excludes the
+        application layer and the handler itself: a Litestar-generated schema
+        handler carries no ``auth=`` of its own, and an application-wide default
+        must not silently protect the documentation. Wrapping the schema router
+        or controller in an owner that carries ``opt={"auth": ...}`` is the
+        supported way to require authentication for the schema routes.
+
+        Only handlers `_is_openapi_handler` identified as Litestar's own reach
+        this walk, so excluding the handler layer cannot discard an application
+        route's declared policy.
+
+        Args:
+            route: The route being compiled.
+            route_handler: The handler being compiled.
+
+        Returns:
+            The policy declared by the nearest owning layer, or None when no
+            layer between the application and the handler declares one.
+        """
         for layer in reversed(route_handler.ownership_layers[1:-1]):
             layer_opt = getattr(layer, "opt", None)
             if not isinstance(layer_opt, Mapping):
@@ -491,19 +529,29 @@ class RouteCompiler(Generic[UserT]):
             if isinstance(layer_opt, Mapping) and CSRF_REQUIRED_OPT_KEY in layer_opt:
                 self._raise_route_error(route, route_handler, "csrf_required is supported only on HTTP routes")
 
-    def _is_openapi_handler(self, route: HTTPRoute) -> bool:
+    def _is_openapi_handler(self, route_handler: HTTPRouteHandler) -> bool:
+        """Report whether a handler is one Litestar generated to serve the schema.
+
+        The handler is matched by the module that defines it, never by its URL.
+        An application route is free to share the configured OpenAPI base path;
+        it is still an application route and its own ``auth=`` is honored.
+
+        A handler this cannot positively identify is reported as an application
+        handler, so an unrecognized route is authenticated rather than served
+        anonymously. An application that serves documentation from its own
+        handlers therefore declares ``opt={"auth": public()}`` on the owning
+        router or controller to keep them open.
+
+        Args:
+            route_handler: The handler compiled for the current route.
+
+        Returns:
+            True when Litestar defined the handler as part of its OpenAPI
+            support, False for every application handler.
+        """
         if self.openapi_config is None:
             return False
-        configured_router = self.openapi_config.openapi_router
-        configured_controller = self.openapi_config.openapi_controller
-        base_path = (
-            configured_router.path
-            if configured_router is not None
-            else configured_controller.path
-            if configured_controller is not None
-            else self.openapi_config.path or "/schema"
-        )
-        return route.path == base_path or route.path.startswith(f"{base_path}/")
+        return getattr(route_handler.fn, "__module__", None) in _OPENAPI_HANDLER_MODULES
 
     def _attach_openapi_security(
         self, route: HTTPRoute, route_handler: HTTPRouteHandler, plan: SecurityRuntimePlan

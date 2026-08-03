@@ -57,6 +57,14 @@ Keep authorization in Litestar's native ``guards=[...]``. Litestar's
 from ``auth``. To protect schema endpoints, supply a custom OpenAPI router or
 controller with ``opt={"auth": ...}``.
 
+Schema endpoints are recognized by the handler Litestar generated for them, not
+by their URL. An application route is authenticated by its own ``auth`` even
+when it sits under the configured OpenAPI base path, so ``path="/api"`` on
+:class:`~litestar.openapi.OpenAPIConfig` never relaxes ``/api/orders``. A route
+served by an application handler is always treated as an application route; to
+serve documentation from your own handlers, declare ``opt={"auth": public()}``
+on the router or controller that owns them.
+
 Authorization guards compose separately:
 
 * ``requires_scope`` and ``requires_capability``;
