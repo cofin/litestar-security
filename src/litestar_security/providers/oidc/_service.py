@@ -1,7 +1,7 @@
 """External service JWT verification and userless principal resolution."""
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
@@ -118,8 +118,9 @@ class _ServiceJWTVerifier:
             return selection
         if not isinstance(selection, VerificationKey):
             return VerificationUnavailable()
+        key_config = replace(self.config, algorithms=frozenset({algorithm}))
         outcome = await PyJWTVerifier(
-            config=self.config,
+            config=key_config,
             key=selection.key,
             mechanism_name="service-jwt",
             slot_name="authorization.bearer",
