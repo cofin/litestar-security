@@ -8,11 +8,12 @@ that constructs them.
 """
 
 from dataclasses import dataclass, field
-from ipaddress import IPv4Address, IPv6Address, ip_address
+from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_address, ip_network
 from logging import getLogger
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from litestar import Request
+from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._mfa_login import MFALoginChallenge, MFALoginService, MFARequired
@@ -37,20 +38,18 @@ from litestar_security.authentication import InvalidCredentials, VerificationUna
 from litestar_security.context import AuthenticationEvidence
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection
 
     from litestar.connection import ASGIConnection
 
-__all__ = ("LocalAuthService", "trusted_client_key")
+__all__ = ("LocalAuthService", "forwarded_client_key", "trusted_client_key")
 
 UserT = TypeVar("UserT")
 _LOGGER = getLogger(__name__)
 _MAXIMUM_TCP_PORT = 65_535
 
 
-def _parse_forwarded_address(  # pyright: ignore[reportUnusedFunction] - consumed by forwarded_client_key in T2
-    raw: str,
-) -> "IPv4Address | IPv6Address | None":
+def _parse_forwarded_address(raw: str) -> "IPv4Address | IPv6Address | None":
     """Parse an IPv4 or IPv6 address from a forwarded-address value."""
     candidate = raw.strip()
     if candidate.startswith("["):
@@ -96,6 +95,82 @@ def trusted_client_key(connection: "ASGIConnection[Any, Any, Any, Any]") -> str 
     """
     client = connection.client
     return client.host if client is not None else None
+
+
+def _trusted_proxy_networks(trusted_proxies: "Collection[str]") -> tuple[IPv4Network | IPv6Network, ...]:
+    try:
+        networks = tuple(ip_network(proxy, strict=False) for proxy in trusted_proxies)
+    except (TypeError, ValueError) as error:
+        msg = "Trusted proxies must be CIDR networks"
+        raise ImproperlyConfiguredException(detail=msg) from error
+    if not networks:
+        msg = "at least one trusted proxy is required"
+        raise ImproperlyConfiguredException(detail=msg)
+    return networks
+
+
+def _forwarded_header_name(header: object) -> str:
+    if not isinstance(header, str) or not (normalized := header.strip().lower()):
+        msg = "Forwarding header must be a nonempty header name"
+        raise ImproperlyConfiguredException(detail=msg)
+    return normalized
+
+
+def forwarded_client_key(
+    *, trusted_proxies: "Collection[str]", header: str = "x-forwarded-for", max_hops: int = 3
+) -> "Callable[[ASGIConnection[Any, Any, Any, Any]], str | None]":
+    """Build a client-key extractor which trusts forwarding data from known proxies.
+
+    The extractor accepts the forwarding header only when the directly connected
+    peer belongs to ``trusted_proxies``. It then walks at most ``max_hops``
+    addresses from right to left and returns the first address outside those
+    networks. Invalid forwarding data falls back to the direct peer, preserving
+    a client rate-limit bucket instead of disabling it.
+
+    Args:
+        trusted_proxies: CIDR networks for reverse-proxy hops operated by the
+            application.
+        header: The forwarding header name to read from a trusted peer.
+        max_hops: Maximum rightmost forwarding entries to inspect.
+
+    Returns:
+        An extractor that returns a normalized client address, the direct peer
+        when forwarding data is unavailable or unsafe, or ``None`` when the
+        connection has no peer.
+
+    Raises:
+        ImproperlyConfiguredException: If the networks, header name, or hop
+            limit are invalid.
+    """
+    networks = _trusted_proxy_networks(trusted_proxies)
+    if max_hops.__class__ is not int or max_hops < 1:
+        msg = "Maximum forwarding hops must be a positive integer"
+        raise ImproperlyConfiguredException(detail=msg)
+    header = _forwarded_header_name(header)
+
+    def _trusted(address: "IPv4Address | IPv6Address") -> bool:
+        return any(address in network for network in networks)
+
+    def extractor(connection: "ASGIConnection[Any, Any, Any, Any]") -> str | None:
+        """Return the forwarded client address only when the direct peer is trusted."""
+        client = connection.client
+        if client is None:
+            return None
+        peer = _parse_forwarded_address(client.host)
+        if peer is None or not _trusted(peer):
+            return client.host
+        raw_header = connection.headers.get(header)
+        if not raw_header:
+            return client.host
+        for raw in reversed(raw_header.split(",")[-max_hops:]):
+            address = _parse_forwarded_address(raw)
+            if address is None:
+                return client.host
+            if not _trusted(address):
+                return str(address)
+        return client.host
+
+    return extractor
 
 
 @dataclass(frozen=True, slots=True)

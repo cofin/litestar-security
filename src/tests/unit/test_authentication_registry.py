@@ -12728,6 +12728,86 @@ async def test_unlimited_rate_limiter_allows_every_attempt() -> None:
 
 
 @pytest.mark.parametrize(
+    "forwarded_for",
+    [
+        "203.0.113.9, 10.0.0.1",
+        "198.51.100.1, 203.0.113.9, 10.0.0.1",
+    ],
+)
+def test_forwarded_client_key_uses_only_trusted_proxy_hops(forwarded_for: str) -> None:
+    extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"})
+    connection = cast(
+        "Any",
+        SimpleNamespace(client=SimpleNamespace(host="10.0.0.5"), headers={"x-forwarded-for": forwarded_for}),
+    )
+
+    assert extractor(connection) == "203.0.113.9"
+
+
+@pytest.mark.parametrize("peer", ["203.0.113.8", "unparseable-peer"])
+def test_forwarded_client_key_ignores_spoofed_header_from_an_untrusted_peer(peer: str) -> None:
+    class ExplosiveHeaders:
+        def get(self, _key: str) -> str:
+            msg = "untrusted peer must not read a forwarding header"
+            raise AssertionError(msg)
+
+    extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"})
+    connection = cast("Any", SimpleNamespace(client=SimpleNamespace(host=peer), headers=ExplosiveHeaders()))
+
+    assert extractor(connection) == peer
+
+
+def test_forwarded_client_key_returns_none_when_the_connection_has_no_peer() -> None:
+    extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"})
+
+    assert extractor(cast("Any", SimpleNamespace(client=None, headers={}))) is None
+
+
+def test_forwarded_client_key_normalizes_the_configured_header_name() -> None:
+    extractor = accounts_module.forwarded_client_key(
+        trusted_proxies={"10.0.0.0/8"}, header=" X-Client-Forwarded-For "
+    )
+    connection = cast(
+        "Any",
+        SimpleNamespace(client=SimpleNamespace(host="10.0.0.5"), headers={"x-client-forwarded-for": "203.0.113.9"}),
+    )
+
+    assert extractor(connection) == "203.0.113.9"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"trusted_proxies": set()}, "at least one trusted proxy"),
+        ({"trusted_proxies": {"not-a-cidr"}}, "CIDR networks"),
+        ({"trusted_proxies": {"10.0.0.0/8"}, "max_hops": True}, "positive integer"),
+        ({"trusted_proxies": {"10.0.0.0/8"}, "max_hops": 0}, "positive integer"),
+        ({"trusted_proxies": {"10.0.0.0/8"}, "header": "  "}, "nonempty header name"),
+    ],
+)
+def test_forwarded_client_key_validates_its_configuration(kwargs: dict[str, object], match: str) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        accounts_module.forwarded_client_key(**cast("Any", kwargs))
+
+
+@pytest.mark.parametrize(
+    ("peer", "header", "expected"),
+    [
+        ("::ffff:10.0.0.5", "203.0.113.9, 10.0.0.1", "203.0.113.9"),
+        ("10.0.0.5", "203.0.113.9, malformed", "10.0.0.5"),
+        ("unparseable-peer", "203.0.113.9", "unparseable-peer"),
+    ],
+)
+def test_forwarded_client_key_normalizes_addresses_and_falls_back_safely(
+    peer: str, header: str, expected: str
+) -> None:
+    extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"})
+    connection = cast("Any", SimpleNamespace(client=SimpleNamespace(host=peer), headers={"x-forwarded-for": header}))
+
+    assert extractor(connection) == expected
+
+
+@pytest.mark.parametrize(
     "kwargs",
     [
         {"store_name": " "},

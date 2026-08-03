@@ -1242,6 +1242,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "WebAuthnVerifier",
         "build_local_auth_routes",
         "build_mfa_routes",
+        "forwarded_client_key",
         "normalize_identifier",
         "requires_local_bearer",
         "trusted_client_key",

@@ -5,7 +5,7 @@ from litestar_security.accounts._access_tokens import (
     LocalAccessTokenIssuer,
     LocalBearerIdentityResolver,
 )
-from litestar_security.accounts._auth_service import LocalAuthService, trusted_client_key
+from litestar_security.accounts._auth_service import LocalAuthService, forwarded_client_key, trusted_client_key
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._mfa import (
     MFAService,
@@ -350,6 +350,7 @@ __all__ = (
     "WebAuthnVerifier",
     "build_local_auth_routes",
     "build_mfa_routes",
+    "forwarded_client_key",
     "normalize_identifier",
     "requires_local_bearer",
     "trusted_client_key",
