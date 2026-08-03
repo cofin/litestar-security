@@ -178,10 +178,7 @@ async def test_local_account_store_rejects_registration_verification_token_colli
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("purpose", "result_status"),
-    [
-        (TokenPurpose.VERIFICATION, ConsumeStatus.USED),
-        (TokenPurpose.RECOVERY, PasswordResetStatus.USED),
-    ],
+    [(TokenPurpose.VERIFICATION, ConsumeStatus.USED), (TokenPurpose.RECOVERY, PasswordResetStatus.USED)],
 )
 async def test_local_account_store_burns_purpose_tokens_after_failed_attempt_limit(
     purpose: TokenPurpose, result_status: ConsumeStatus | PasswordResetStatus
@@ -339,15 +336,10 @@ async def test_local_account_store_rejects_refresh_identifier_collisions_before_
     assert not await backend.accounts.create_family(
         replace(create, family_id="rf_bm5ubm5ubm5ubm5ubm5ubg"), event=_event()
     )
-    assert not await backend.accounts.create_family(
-        replace(create, token_id=_REFRESH_SUCCESSOR_ID), event=_event()
-    )
+    assert not await backend.accounts.create_family(replace(create, token_id=_REFRESH_SUCCESSOR_ID), event=_event())
 
     successor = replace(
-        create,
-        token_id=_REFRESH_SUCCESSOR_ID,
-        token_digest=b"s" * 32,
-        family_id="rf_bm5ubm5ubm5ubm5ubm5ubg",
+        create, token_id=_REFRESH_SUCCESSOR_ID, token_digest=b"s" * 32, family_id="rf_bm5ubm5ubm5ubm5ubm5ubg"
     )
     assert await backend.accounts.create_family(successor, event=_event())
     rotation = RotateRefreshCommand(

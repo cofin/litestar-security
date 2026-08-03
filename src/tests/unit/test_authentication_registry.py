@@ -12740,18 +12740,11 @@ async def test_unlimited_rate_limiter_allows_every_attempt() -> None:
     assert decision == accounts_module.RateLimitDecision(allowed=True)
 
 
-@pytest.mark.parametrize(
-    "forwarded_for",
-    [
-        "203.0.113.9, 10.0.0.1",
-        "198.51.100.1, 203.0.113.9, 10.0.0.1",
-    ],
-)
+@pytest.mark.parametrize("forwarded_for", ["203.0.113.9, 10.0.0.1", "198.51.100.1, 203.0.113.9, 10.0.0.1"])
 def test_forwarded_client_key_uses_only_trusted_proxy_hops(forwarded_for: str) -> None:
     extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"})
     connection = cast(
-        "Any",
-        SimpleNamespace(client=SimpleNamespace(host="10.0.0.5"), headers={"x-forwarded-for": forwarded_for}),
+        "Any", SimpleNamespace(client=SimpleNamespace(host="10.0.0.5"), headers={"x-forwarded-for": forwarded_for})
     )
 
     assert extractor(connection) == "203.0.113.9"
@@ -12777,9 +12770,7 @@ def test_forwarded_client_key_returns_none_when_the_connection_has_no_peer() -> 
 
 
 def test_forwarded_client_key_normalizes_the_configured_header_name() -> None:
-    extractor = accounts_module.forwarded_client_key(
-        trusted_proxies={"10.0.0.0/8"}, header=" X-Client-Forwarded-For "
-    )
+    extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"}, header=" X-Client-Forwarded-For ")
     connection = cast(
         "Any",
         SimpleNamespace(client=SimpleNamespace(host="10.0.0.5"), headers={"x-client-forwarded-for": "203.0.113.9"}),
@@ -12811,9 +12802,7 @@ def test_forwarded_client_key_validates_its_configuration(kwargs: dict[str, obje
         ("unparseable-peer", "203.0.113.9", "unparseable-peer"),
     ],
 )
-def test_forwarded_client_key_normalizes_addresses_and_falls_back_safely(
-    peer: str, header: str, expected: str
-) -> None:
+def test_forwarded_client_key_normalizes_addresses_and_falls_back_safely(peer: str, header: str, expected: str) -> None:
     extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"})
     connection = cast("Any", SimpleNamespace(client=SimpleNamespace(host=peer), headers={"x-forwarded-for": header}))
 
@@ -13012,12 +13001,8 @@ async def test_store_rate_limiter_serializes_each_multi_bucket_acquire() -> None
         policies={"concurrent": accounts_module.RateLimitPolicy(limit=5, window=timedelta(minutes=1))},
         store=_InterleavingStore(),
     )
-    first = accounts_module.RateLimitRequest(
-        operation="concurrent", client_key="client-a", subject_digest="subject-a"
-    )
-    second = accounts_module.RateLimitRequest(
-        operation="concurrent", client_key="client-b", subject_digest="subject-b"
-    )
+    first = accounts_module.RateLimitRequest(operation="concurrent", client_key="client-a", subject_digest="subject-a")
+    second = accounts_module.RateLimitRequest(operation="concurrent", client_key="client-b", subject_digest="subject-b")
 
     async with create_task_group() as task_group:
         task_group.start_soon(limiter.acquire, first)

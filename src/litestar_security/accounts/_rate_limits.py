@@ -316,9 +316,7 @@ class StoreRateLimiter:
     store_name: str = RATE_LIMIT_STORE_NAME
     store: Store | None = field(default=None, repr=False)
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
-    _lock: LockType = field(
-        default_factory=lambda: _PROCESS_RATE_LIMIT_LOCK, init=False, repr=False, compare=False
-    )
+    _lock: LockType = field(default_factory=lambda: _PROCESS_RATE_LIMIT_LOCK, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate the store name, policies, and clock, then freeze the mapping."""

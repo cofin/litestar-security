@@ -11,6 +11,9 @@ import httpx
 from litestar_security.providers._internal import AddressResolver, public_address, raise_config, resolve_addresses
 from litestar_security.providers.jwks._fetching import JWKSFetchRequest, JWKSFetchResponse
 
+__all__ = ("HttpxJWKSFetcher",)
+
+
 _HOST_RESOLUTION_UNAVAILABLE = "JWKS host resolution unavailable"
 _RESPONSE_TOO_LARGE = "JWKS response exceeds the configured byte limit"
 _NO_RESOLVED_ADDRESSES = "JWKS host resolution returned no addresses"
