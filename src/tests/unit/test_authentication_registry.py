@@ -10829,8 +10829,8 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
     assert (await reset(None, reset_request, request, services)).status_code == 400
     assert (await cast("Any", lifecycle.verification.fn)(None, identifier, request, services)).status_code == 202
     confirm = cast("Any", lifecycle.confirm_verification.fn)
-    assert (await confirm(None, token_request, services)).status_code == 200
-    assert (await confirm(None, token_request, services)).status_code == 400
+    assert (await confirm(None, token_request, request, services)).status_code == 200
+    assert (await confirm(None, token_request, request, services)).status_code == 400
 
     register = cast("Any", controllers_module._LocalRegistrationController.register.fn)  # noqa: SLF001
     registration = accounts_module.LocalRegistrationRequest(
@@ -11445,6 +11445,53 @@ async def test_verification_resend_consumes_a_budget_for_an_unnormalizable_ident
 
     assert isinstance(await service.resend("user@example.com", now=_JWT_NOW), accounts_module.LifecycleAccepted)
     assert limiter.requests[0].subject_digest is None
+
+
+@pytest.mark.anyio
+async def test_verification_consume_buckets_only_the_client_never_the_token() -> None:
+    limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=False, retry_after=7))
+    store = _LifecycleStore()
+    service = accounts_module.VerificationTokenService(
+        accounts=store,
+        store=store,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        rate_limits=_guard(limiter),
+    )
+
+    outcome = await service.consume("vt_token.secret", client_key="1.1.1.1", now=_JWT_NOW)
+
+    assert outcome == accounts_module.RateLimited(retry_after=7)
+    assert store.consumptions == []
+    assert limiter.requests[0].operation == "local.verification.consume"
+    assert limiter.requests[0].client_key == "1.1.1.1"
+    assert limiter.requests[0].subject_digest is None
+
+
+@pytest.mark.anyio
+async def test_generated_verification_confirm_reports_denials_with_the_client_bucket() -> None:
+    captured: dict[str, object] = {}
+
+    async def consume(token: object, *, client_key: str | None = None) -> object:
+        del token
+        captured["client_key"] = client_key
+        return accounts_module.RateLimited(retry_after=7)
+
+    services = cast(
+        "Any",
+        SimpleNamespace(
+            verification=SimpleNamespace(consume=consume),
+            client_key_for=lambda _connection: "1.1.1.1",
+        ),
+    )
+    handler = cast("Any", controllers_module._LocalLifecycleController.confirm_verification.fn)  # noqa: SLF001
+
+    response = await handler(
+        None, accounts_module.LocalTokenRequest(token="vt_token.secret"), cast("Any", SimpleNamespace()), services
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "7"
+    assert captured["client_key"] == "1.1.1.1"
 
 
 @pytest.mark.anyio

@@ -544,10 +544,13 @@ class _LocalLifecycleController(Controller):
     async def confirm_verification(
         self,
         data: JSONBody[LocalTokenRequest],
+        request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
     ) -> Response[RouteStatusResponse]:
         """Consume one account-verification token."""
-        result = await local_auth_service.verification.consume(data.token)
+        result = await local_auth_service.verification.consume(
+            data.token, client_key=local_auth_service.client_key_for(request)
+        )
         if isinstance(result, ConsumeResult) and result.status is ConsumeStatus.CONSUMED:
             return _route_response(RouteStatusResponse(detail="Account verified."), status_code=HTTP_200_OK)
         return _route_error(result)

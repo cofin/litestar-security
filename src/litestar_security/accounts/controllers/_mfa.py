@@ -27,11 +27,13 @@ from litestar_security.accounts._mfa import MFAService, RecoveryCodes, StepUpGra
 from litestar_security.accounts._operations import (
     MFA_RECOVERY_REPLACE,
     MFA_TOTP_ENROLL,
+    MFA_TOTP_REMOVE,
     MFA_TOTP_VERIFY,
     PASSKEY_ASSERT,
     PASSKEY_AUTH_OPTIONS,
     PASSKEY_REGISTER_OPTIONS,
     PASSKEY_REGISTER_VERIFY,
+    PASSKEY_REMOVE,
     PASSWORD_VERIFY,
 )
 from litestar_security.accounts._passkeys import PasskeyService, PasskeySummary, WebAuthnOptions
@@ -432,6 +434,9 @@ class _MFAController(Controller):
             account_id is None or totp_service is None
         ):  # pragma: no cover - controller registration and auth guarantee both
             return _error(InvalidCredentials())
+        limited = await _check_rate_limit(mfa_service, request, MFA_TOTP_REMOVE, account_id)
+        if limited is not None:
+            return _error(limited)
         assurance = await _consume_step_up(
             mfa_service=mfa_service,
             request=request,
@@ -659,6 +664,9 @@ class _PasskeyController(Controller):
             account_id is None or passkey_service is None
         ):  # pragma: no cover - controller registration and auth guarantee both
             return _error(InvalidCredentials())
+        limited = await _check_rate_limit(mfa_service, request, PASSKEY_REMOVE, account_id)
+        if limited is not None:
+            return _error(limited)
         assurance = await _consume_step_up(
             mfa_service=mfa_service,
             request=request,

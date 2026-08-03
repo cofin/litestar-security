@@ -281,17 +281,30 @@ class VerificationTokenService(Generic[UserT]):
             _LOGGER.error("Verification token request failed")  # noqa: TRY400 - omit untrusted exception details
         return LifecycleAccepted()
 
-    async def consume(self, token: object, *, now: datetime | None = None) -> ConsumeResult | VerificationUnavailable:
+    async def consume(
+        self, token: object, *, now: datetime | None = None, client_key: str | None = None
+    ) -> "ConsumeResult | RateLimited | VerificationUnavailable":
         """Verify purpose locally and delegate single-use mutation atomically.
+
+        The budget is keyed on the client bucket only: the route consumes a
+        token, and digesting tokens into a subject bucket would turn the limiter
+        backend into a record of attempted tokens.
 
         Args:
             token: The presented verification token.
             now: Override the clock, for tests and replayable consumption.
+            client_key: The caller identity for the rate-limit client bucket.
 
         Returns:
-            The consumption outcome, or ``VerificationUnavailable`` when the store
-            failed. An expired, used, and unknown token are not distinguished.
+            The consumption outcome, ``RateLimited`` when the budget is spent, or
+            ``VerificationUnavailable`` when the store failed. An expired, used,
+            and unknown token are not distinguished.
         """
+        rate_limits = self.rate_limits
+        if rate_limits is not None:
+            limited = await rate_limits.check(VERIFICATION_CONSUME, client_key=client_key)
+            if limited is not None:
+                return limited
         proof = self.tokens.proof(token, expected_purpose=TokenPurpose.VERIFICATION)
         if proof is None:
             return ConsumeResult(ConsumeStatus.INVALID)
