@@ -8,6 +8,7 @@ from litestar_security.accounts._access_tokens import (
 from litestar_security.accounts._auth_service import LocalAuthService, forwarded_client_key, trusted_client_key
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._mfa import (
+    AESGCMSecretProtector,
     MFAService,
     MFAStore,
     PendingTOTPEnrollment,
@@ -16,6 +17,7 @@ from litestar_security.accounts._mfa import (
     RecoveryCodePepper,
     RecoveryCodes,
     SecretProtector,
+    SecretProtectorKey,
     StepUpGrant,
     StepUpRecord,
     StepUpService,
@@ -191,6 +193,7 @@ __all__ = (
     "LOCAL_AUTH_TAGS",
     "RATE_LIMIT_STORE_NAME",
     "REFRESH_RESPONSE_HEADERS",
+    "AESGCMSecretProtector",
     "AccountLookup",
     "Argon2PasswordHasher",
     "AssertionRecordResult",
@@ -313,6 +316,7 @@ __all__ = (
     "RotateRefreshResult",
     "RouteStatusResponse",
     "SecretProtector",
+    "SecretProtectorKey",
     "SecurityEpochStore",
     "SecurityEpochValidator",
     "SecurityEvent",

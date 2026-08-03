@@ -1,7 +1,7 @@
 """MFA assurance, TOTP, recovery, and step-up contracts."""
 
 from base64 import b32decode, urlsafe_b64encode
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha1, sha256, sha512
@@ -11,6 +11,7 @@ from secrets import token_bytes, token_urlsafe
 from typing import Literal, Protocol, cast, runtime_checkable
 
 import pyotp
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts._internal import (
@@ -43,6 +44,7 @@ from litestar_security.authentication import InvalidCredentials, VerificationUna
 from litestar_security.context import AuthenticationEvidence
 
 __all__ = (
+    "AESGCMSecretProtector",
     "MFAService",
     "MFAStore",
     "PendingTOTPEnrollment",
@@ -51,6 +53,7 @@ __all__ = (
     "RecoveryCodePepper",
     "RecoveryCodes",
     "SecretProtector",
+    "SecretProtectorKey",
     "StepUpGrant",
     "StepUpRecord",
     "StepUpService",
@@ -73,6 +76,8 @@ _MAXIMUM_RECOVERY_CODE_COUNT = 100
 _MINIMUM_PEPPER_BYTES = 32
 _MAXIMUM_PEPPER_VERSION_LENGTH = 16
 _RECOVERY_CODE_PARTS = 3
+_AES_256_KEY_BYTES = 32
+_AES_GCM_NONCE_BYTES = 12
 _ALGORITHMS = {"SHA1": sha1, "SHA256": sha256, "SHA512": sha512}
 
 
@@ -166,6 +171,94 @@ class SecretProtector(Protocol):
         """
         ...  # pragma: no cover
 
+
+@dataclass(frozen=True, slots=True)
+class SecretProtectorKey:
+    """One AES-256-GCM MFA-secret key selected by a non-secret version."""
+
+    key_version: str
+    key: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        """Require a stable version and exact AES-256 key material."""
+        if (
+            not strict_context_text(self.key_version)
+            or self.key.__class__ is not bytes
+            or len(self.key) != _AES_256_KEY_BYTES
+        ):
+            msg = "Secret protector key requires a version and 32-byte key"
+            raise ImproperlyConfiguredException(detail=msg)
+
+
+@dataclass(frozen=True, slots=True)
+class AESGCMSecretProtector:
+    """Protect MFA secrets with AES-256-GCM under application-owned keys."""
+
+    active_key: SecretProtectorKey = field(repr=False)
+    retained_keys: tuple[SecretProtectorKey, ...] = field(default=(), repr=False)
+    entropy: Callable[[int], bytes] = field(default=token_bytes, repr=False, compare=False)
+    _keys: Mapping[str, SecretProtectorKey] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Compile a unique versioned key ring and validate the entropy source."""
+        keys = (self.active_key, *self.retained_keys)
+        if (
+            any(key.__class__ is not SecretProtectorKey for key in keys)
+            or len({key.key_version for key in keys}) != len(keys)
+            or not callable(self.entropy)
+        ):
+            msg = "Secret protector requires unique keys and callable entropy"
+            raise ImproperlyConfiguredException(detail=msg)
+        object.__setattr__(self, "_keys", {key.key_version: key for key in keys})
+
+    @property
+    def active_key_version(self) -> str:
+        """Return the version used by the next protection operation."""
+        return self.active_key.key_version
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedSecret:
+        """Encrypt one secret under exact associated data.
+
+        Args:
+            secret: Plaintext secret bytes.
+            associated_data: Unencrypted account and purpose binding.
+
+        Returns:
+            A versioned, nonce-prefixed ciphertext envelope.
+
+        Raises:
+            ValueError: If the entropy source does not return a 12-byte nonce.
+        """
+        nonce = self.entropy(_AES_GCM_NONCE_BYTES)
+        if nonce.__class__ is not bytes or len(nonce) != _AES_GCM_NONCE_BYTES:
+            msg = "Secret protector entropy must return a 12-byte nonce"
+            raise ValueError(msg)
+        ciphertext = nonce + AESGCM(self.active_key.key).encrypt(nonce, secret, associated_data)
+        return ProtectedSecret(ciphertext=ciphertext, key_version=self.active_key.key_version)
+
+    async def unprotect(self, protected: ProtectedSecret, *, associated_data: bytes) -> bytes:
+        """Decrypt one envelope only under its original associated data.
+
+        Args:
+            protected: Versioned ciphertext envelope.
+            associated_data: Exact unencrypted account and purpose binding.
+
+        Returns:
+            The authenticated plaintext bytes.
+
+        Raises:
+            ValueError: If the key version or ciphertext envelope is invalid.
+            cryptography.exceptions.InvalidTag: If authentication fails.
+        """
+        key = self._keys.get(protected.key_version)
+        if key is None or len(protected.ciphertext) <= _AES_GCM_NONCE_BYTES:
+            msg = "Secret protector envelope is invalid"
+            raise ValueError(msg)
+        nonce, ciphertext = (
+            protected.ciphertext[:_AES_GCM_NONCE_BYTES],
+            protected.ciphertext[_AES_GCM_NONCE_BYTES:],
+        )
+        return AESGCM(key.key).decrypt(nonce, ciphertext, associated_data)
 
 @dataclass(frozen=True, slots=True)
 class PendingTOTPEnrollment:

@@ -14,6 +14,7 @@ from typing import Any, ClassVar, cast
 
 import msgspec
 import pytest
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from litestar import Controller
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, PermissionDeniedException
@@ -1106,6 +1107,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "LOCAL_AUTH_TAGS",
         "RATE_LIMIT_STORE_NAME",
         "REFRESH_RESPONSE_HEADERS",
+        "AESGCMSecretProtector",
         "AccountLookup",
         "Argon2PasswordHasher",
         "AssertionRecordResult",
@@ -1228,6 +1230,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "RotateRefreshResult",
         "RouteStatusResponse",
         "SecretProtector",
+        "SecretProtectorKey",
         "SecurityEpochStore",
         "SecurityEpochValidator",
         "SecurityEvent",
@@ -1270,6 +1273,23 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "requires_local_bearer",
         "trusted_client_key",
     )
+
+
+@pytest.mark.anyio
+async def test_aesgcm_secret_protector_is_nondeterministic_and_aad_bound() -> None:
+    key = accounts_module.SecretProtectorKey("v1", b"k" * 32)
+    nonces = iter((b"1" * 12, b"2" * 12))
+    protector = accounts_module.AESGCMSecretProtector(active_key=key, entropy=lambda _length: next(nonces))
+
+    first = await protector.protect(b"secret", associated_data=b"account-1")
+    second = await protector.protect(b"secret", associated_data=b"account-1")
+
+    assert first.ciphertext != second.ciphertext
+    assert await protector.unprotect(first, associated_data=b"account-1") == b"secret"
+    with pytest.raises(InvalidTag):
+        await protector.unprotect(first, associated_data=b"account-2")
+    with pytest.raises(ImproperlyConfiguredException, match="32-byte"):
+        accounts_module.SecretProtectorKey("v1", b"short")
 
 
 def test_default_rate_limit_policies_map_exactly_the_rate_limited_operations() -> None:
