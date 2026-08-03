@@ -6,32 +6,22 @@ response can never redirect trust to an issuer the caller did not ask for.
 
 import ipaddress
 import json
-from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TypeAlias, cast
 
 import httpx
 from litestar.status_codes import HTTP_200_OK, HTTP_300_MULTIPLE_CHOICES, HTTP_400_BAD_REQUEST
 
-from litestar_security.providers._internal import raise_config
+from litestar_security.providers._internal import AddressResolver, public_address, raise_config, resolve_addresses
 from litestar_security.providers.oidc._internal import (
     OIDCDiscoveryError,
     load_document,
     positive_finite,
     raise_discovery,
 )
-from litestar_security.providers.oidc._urls import (
-    NormalizedURL,
-    normalize_url,
-    optional_url_value,
-    public_address,
-    resolve_addresses,
-)
+from litestar_security.providers.oidc._urls import NormalizedURL, normalize_url, optional_url_value
 
 __all__ = ("DiscoveryPolicy", "OIDCDiscoveryClient", "OIDCMetadata")
-
-
-AddressResolver: TypeAlias = Callable[[str, int], Awaitable[Sequence[str]]]
 
 
 JSONObject: TypeAlias = dict[str, object]

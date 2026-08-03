@@ -79,6 +79,7 @@ from litestar_security.context import (
     SecurityContext,
 )
 from litestar_security.guards import requires_assurance
+from litestar_security.providers import _internal as providers_internal
 from litestar_security.providers.jwks import (
     AsyncJWKSFetcher,
     CachedJWKSProvider,
@@ -120,7 +121,6 @@ from litestar_security.providers.jwt import _keyring as jwt_keyring
 from litestar_security.providers.jwt import _workers as jwt_workers
 from litestar_security.providers.oidc import DiscoveryPolicy, OIDCDiscoveryClient, OIDCDiscoveryError, OIDCMetadata
 from litestar_security.providers.oidc import _discovery as oidc_discovery
-from litestar_security.providers.oidc import _urls as oidc_urls
 
 _JWT_NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
 _NAIVE_JWT_NOW = datetime(2026, 7, 26)  # noqa: DTZ001 - explicit rejection fixture
@@ -4270,6 +4270,11 @@ async def test_oidc_discovery_classifies_literal_public_ip_without_resolving() -
     assert resolver_calls == []
 
 
+def test_shared_ssrf_primitives_live_in_providers_internal() -> None:
+    assert callable(providers_internal.public_address)
+    assert callable(providers_internal.resolve_addresses)
+
+
 @pytest.mark.anyio
 async def test_oidc_discovery_default_resolver_deduplicates_getaddrinfo_answers(
     monkeypatch: pytest.MonkeyPatch,
@@ -4281,7 +4286,7 @@ async def test_oidc_discovery_default_resolver_deduplicates_getaddrinfo_answers(
         address = (_OIDC_PUBLIC_IP, port)
         return [(object(), object(), object(), "", address), (object(), object(), object(), "", address)]
 
-    monkeypatch.setattr(oidc_urls, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(providers_internal, "getaddrinfo", fake_getaddrinfo)
     transport = _RecordingMockTransport(lambda _request: _oidc_response())
     client = OIDCDiscoveryClient(
         policy=DiscoveryPolicy(allowed_issuers=frozenset({_OIDC_ISSUER})),
@@ -4292,7 +4297,7 @@ async def test_oidc_discovery_default_resolver_deduplicates_getaddrinfo_answers(
     metadata = await _discover_and_close(client)
 
     assert metadata.issuer == _OIDC_ISSUER
-    assert calls == [("issuer.example", 443, oidc_urls.socket.SOCK_STREAM)]
+    assert calls == [("issuer.example", 443, providers_internal.socket.SOCK_STREAM)]
 
 
 @pytest.mark.anyio
