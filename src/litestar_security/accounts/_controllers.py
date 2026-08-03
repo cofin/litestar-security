@@ -35,7 +35,7 @@ from litestar_security.accounts._records import (
     RegistrationMode,
 )
 from litestar_security.accounts._refresh_tokens import RefreshTokenResponse
-from litestar_security.accounts._schemas import (
+from litestar_security.accounts.schemas import (
     LocalAccountResponse,
     LocalCredentials,
     LocalIdentifierRequest,

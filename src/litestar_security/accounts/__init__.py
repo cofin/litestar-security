@@ -26,20 +26,6 @@ from litestar_security.accounts._mfa import (
     TOTPPolicy,
 )
 from litestar_security.accounts._mfa_controllers import build_mfa_routes
-from litestar_security.accounts._mfa_schemas import (
-    PasskeyAuthenticationOptionsRequest,
-    PasskeyOptionsResponse,
-    PasskeyRegistrationOptionsRequest,
-    PasskeySummaryResponse,
-    PasskeyVerifyRequest,
-    RecoveryCodesResponse,
-    StepUpAuthorizedRequest,
-    StepUpRequest,
-    StepUpResponse,
-    TOTPEnrollmentRequest,
-    TOTPEnrollmentResponse,
-    TOTPVerificationRequest,
-)
 from litestar_security.accounts._passkeys import (
     AssertionRecordResult,
     AttestationTrustMapper,
@@ -142,19 +128,6 @@ from litestar_security.accounts._refresh_tokens import (
     RefreshTokenResponse,
 )
 from litestar_security.accounts._registration import RegistrationService, VerificationTokenService
-from litestar_security.accounts._schemas import (
-    LocalAccountResponse,
-    LocalCredentials,
-    LocalIdentifierRequest,
-    LocalInvitationRegistrationRequest,
-    LocalPasswordChangeRequest,
-    LocalPasswordResetRequest,
-    LocalRegistrationRequest,
-    LocalSessionListResponse,
-    LocalSessionResponse,
-    LocalTokenRequest,
-    RouteStatusResponse,
-)
 from litestar_security.accounts._sessions import (
     CreateSessionCommand,
     NativeSessionAuth,
@@ -178,6 +151,31 @@ from litestar_security.accounts._stores import (
     SecurityEpochStore,
     SecurityEpochValidator,
     VerificationTokenStore,
+)
+from litestar_security.accounts.schemas import (
+    LocalAccountResponse,
+    LocalCredentials,
+    LocalIdentifierRequest,
+    LocalInvitationRegistrationRequest,
+    LocalPasswordChangeRequest,
+    LocalPasswordResetRequest,
+    LocalRegistrationRequest,
+    LocalSessionListResponse,
+    LocalSessionResponse,
+    LocalTokenRequest,
+    PasskeyAuthenticationOptionsRequest,
+    PasskeyOptionsResponse,
+    PasskeyRegistrationOptionsRequest,
+    PasskeySummaryResponse,
+    PasskeyVerifyRequest,
+    RecoveryCodesResponse,
+    RouteStatusResponse,
+    StepUpAuthorizedRequest,
+    StepUpRequest,
+    StepUpResponse,
+    TOTPEnrollmentRequest,
+    TOTPEnrollmentResponse,
+    TOTPVerificationRequest,
 )
 from litestar_security.guards import AssuranceRequirement, AssuranceTrait
 

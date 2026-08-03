@@ -24,20 +24,6 @@ from litestar.status_codes import (
 
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa import MFAService, RecoveryCodes, StepUpGrant, StepUpService
-from litestar_security.accounts._mfa_schemas import (
-    PasskeyAuthenticationOptionsRequest,
-    PasskeyOptionsResponse,
-    PasskeyRegistrationOptionsRequest,
-    PasskeySummaryResponse,
-    PasskeyVerifyRequest,
-    RecoveryCodesResponse,
-    StepUpAuthorizedRequest,
-    StepUpRequest,
-    StepUpResponse,
-    TOTPEnrollmentRequest,
-    TOTPEnrollmentResponse,
-    TOTPVerificationRequest,
-)
 from litestar_security.accounts._operations import (
     MFA_RECOVERY_CONSUME,
     MFA_RECOVERY_REPLACE,
@@ -56,8 +42,22 @@ from litestar_security.accounts._records import (
     RevokeLoginMethodResult,
     RevokeLoginMethodStatus,
 )
-from litestar_security.accounts._schemas import RouteStatusResponse
 from litestar_security.accounts._stores import SecurityEpochStore
+from litestar_security.accounts.schemas import (
+    PasskeyAuthenticationOptionsRequest,
+    PasskeyOptionsResponse,
+    PasskeyRegistrationOptionsRequest,
+    PasskeySummaryResponse,
+    PasskeyVerifyRequest,
+    RecoveryCodesResponse,
+    RouteStatusResponse,
+    StepUpAuthorizedRequest,
+    StepUpRequest,
+    StepUpResponse,
+    TOTPEnrollmentRequest,
+    TOTPEnrollmentResponse,
+    TOTPVerificationRequest,
+)
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, optional, public, required
 from litestar_security.context import AuthenticationEvidence, Principal
 

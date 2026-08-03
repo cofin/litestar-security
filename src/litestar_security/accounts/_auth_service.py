@@ -27,9 +27,9 @@ from litestar_security.accounts._recovery import PasswordChangeService, Recovery
 from litestar_security.accounts._refresh import RefreshTokenService
 from litestar_security.accounts._refresh_tokens import RefreshTokenResponse
 from litestar_security.accounts._registration import RegistrationService, VerificationTokenService
-from litestar_security.accounts._schemas import LocalAccountResponse, LocalCredentials, LocalPasswordChangeRequest
 from litestar_security.accounts._sessions import NativeSessionAuth, SessionAuthentication
 from litestar_security.accounts._stores import LocalAccountCapabilities
+from litestar_security.accounts.schemas import LocalAccountResponse, LocalCredentials, LocalPasswordChangeRequest
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
 
