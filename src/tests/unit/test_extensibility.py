@@ -4,6 +4,7 @@ import ast
 import inspect
 import sys
 from dataclasses import FrozenInstanceError
+from datetime import datetime, timedelta, timezone
 from importlib.metadata import metadata
 from pathlib import Path
 from subprocess import run
@@ -16,9 +17,12 @@ from anyio import CancelScope, CapacityLimiter, Event, create_task_group, from_t
 from anyio.lowlevel import checkpoint
 
 import litestar_security.config as config_module
+import litestar_security.testing as testing_module
 import litestar_security.workers as workers_module
 from litestar_security.accounts import (
     LoginMethodStore,
+    MFALoginChallenge,
+    MFALoginChallengeStore,
     MFAStore,
     PasskeyStore,
     PasswordCredentialStore,
@@ -52,6 +56,7 @@ _ATOMIC_METHODS = {
     LoginMethodStore: ("revoke_login_method",),
     RefreshTokenFamilyStore: ("rotate",),
     MFAStore: ("advance_totp_counter", "consume_recovery_code"),
+    MFALoginChallengeStore: ("consume",),
     WebAuthnChallengeStore: ("consume",),
     PasskeyStore: ("record_assertion",),
     OAuthTransactionStore: ("consume",),
@@ -108,6 +113,47 @@ def test_atomic_protocols_are_feature_owned_and_async() -> None:
 def test_capability_protocols_do_not_expose_generic_persistence_methods() -> None:
     for protocol in _ATOMIC_METHODS:
         assert not {"add", "update", "delete", "query", "transaction", "connection"}.intersection(protocol.__dict__)
+
+
+@pytest.mark.anyio
+async def test_mfa_login_challenge_reference_store_is_atomic_and_burns_mismatches() -> None:
+    now = datetime(2026, 8, 3, tzinfo=timezone.utc)
+    challenge = MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key="client-1",
+        issued_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+    store = testing_module.InMemoryMFALoginChallengeStore()
+
+    assert isinstance(store, MFALoginChallengeStore)
+    await store.put(challenge)
+
+    assert await store.consume(b"d" * 32, account_id="other-account", security_epoch=0, now=now) is None
+    assert await store.consume(b"d" * 32, account_id="account-1", security_epoch=0, now=now) is None
+
+    winning_challenge = MFALoginChallenge(
+        challenge_digest=b"e" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key="client-1",
+        issued_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+    await store.put(winning_challenge)
+    outcomes: list[MFALoginChallenge | None] = []
+
+    async def consume() -> None:
+        outcomes.append(await store.consume(b"e" * 32, account_id="account-1", security_epoch=0, now=now))
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(consume)
+        task_group.start_soon(consume)
+
+    assert sum(outcome is winning_challenge for outcome in outcomes) == 1
+    assert outcomes.count(None) == 1
 
 
 def test_blocking_integration_marker_is_public_configuration() -> None:

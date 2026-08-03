@@ -107,6 +107,7 @@ def test_testing_surface_is_explicit_and_stable() -> None:
         "FakeOAuthHTTPTransport",
         "FakeOAuthProvider",
         "InMemoryAPIKeyStore",
+        "InMemoryMFALoginChallengeStore",
         "InMemoryMFAStore",
         "InMemoryPasskeyStore",
         "InMemorySecurityBackend",

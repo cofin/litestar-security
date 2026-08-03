@@ -16,6 +16,7 @@ from anyio import Event, Lock, create_task_group
 from litestar_security.accounts import (
     AssertionRecordResult,
     LoginMethod,
+    MFALoginChallenge,
     PasskeyCredential,
     PendingTOTPEnrollment,
     RecoveryCodeDigest,
@@ -46,6 +47,7 @@ __all__ = (
     "FakeOAuthHTTPTransport",
     "FakeOAuthProvider",
     "InMemoryAPIKeyStore",
+    "InMemoryMFALoginChallengeStore",
     "InMemoryMFAStore",
     "InMemoryPasskeyStore",
     "InMemorySecurityBackend",
@@ -308,6 +310,7 @@ class InMemorySecurityBackend:
         "api_keys",
         "challenges",
         "mfa",
+        "mfa_login",
         "oauth_accounts",
         "oauth_tokens",
         "oauth_transactions",
@@ -369,6 +372,7 @@ class InMemorySecurityBackend:
         self.password_hash = password_hash
         selected_protector = _DeterministicProtector() if protector is None else protector
         self.mfa = InMemoryMFAStore()
+        self.mfa_login = InMemoryMFALoginChallengeStore()
         self.challenges = InMemoryWebAuthnChallengeStore()
         self.passkeys = InMemoryPasskeyStore()
         self.step_up = InMemoryStepUpStore()
@@ -895,6 +899,51 @@ class InMemoryPasskeyStore:
             updated = replace(credential, display_name=display_name, version=credential.version + 1)
             self.credentials[credential_id] = updated
             return updated
+
+
+class InMemoryMFALoginChallengeStore:
+    """Atomic in-memory digest-only MFA login challenge store."""
+
+    __slots__ = ("_lock", "challenges")
+
+    def __init__(self) -> None:
+        """Initialize isolated mutable state."""
+        self._lock = Lock()
+        self.challenges: dict[bytes, MFALoginChallenge] = {}
+
+    async def put(self, challenge: MFALoginChallenge) -> None:
+        """Store one pending digest-only challenge.
+
+        Args:
+            challenge: Pending second-factor state.
+        """
+        async with self._lock:
+            self.challenges[challenge.challenge_digest] = challenge
+
+    async def consume(
+        self, challenge_digest: bytes, *, account_id: str, security_epoch: int, now: datetime
+    ) -> MFALoginChallenge | None:
+        """Atomically burn and return one exact, current challenge.
+
+        Args:
+            challenge_digest: Presented challenge digest.
+            account_id: Expected local account.
+            security_epoch: Expected current account epoch.
+            now: Consumption time.
+
+        Returns:
+            The record only for the winning exact, unexpired match.
+        """
+        async with self._lock:
+            challenge = self.challenges.pop(challenge_digest, None)
+            if (
+                challenge is None
+                or challenge.account_id != account_id
+                or challenge.security_epoch != security_epoch
+                or challenge.expires_at <= now
+            ):
+                return None
+            return challenge
 
 
 class InMemoryStepUpStore:

@@ -8727,6 +8727,8 @@ def test_public_testing_helpers_are_isolated_structural_conformance_ports() -> N
     clock = testing_module.FakeClock(now)
 
     assert isinstance(testing_module.InMemoryMFAStore(), accounts_module.MFAStore)
+    assert isinstance(testing_module.InMemoryMFALoginChallengeStore(), accounts_module.MFALoginChallengeStore)
+    assert isinstance(testing_module.InMemorySecurityBackend().mfa_login, accounts_module.MFALoginChallengeStore)
     assert isinstance(testing_module.InMemoryWebAuthnChallengeStore(), accounts_module.WebAuthnChallengeStore)
     assert isinstance(testing_module.InMemoryPasskeyStore(), accounts_module.PasskeyStore)
     assert isinstance(testing_module.InMemoryStepUpStore(), accounts_module.StepUpStore)
@@ -8949,6 +8951,24 @@ def test_mfa_value_and_service_configuration_rejects_invalid_contracts() -> None
             traits=frozenset(),
             authenticated_at=now,
             expires_at=now + timedelta(minutes=1),
+        )
+    with pytest.raises(ValueError, match="MFA login challenge"):
+        accounts_module.MFALoginChallenge(
+            challenge_digest=bytearray(b"d" * 32),
+            account_id="a1",
+            security_epoch=1,
+            client_key=None,
+            issued_at=now,
+            expires_at=now + timedelta(minutes=5),
+        )
+    with pytest.raises(ValueError, match="MFA login challenge"):
+        accounts_module.MFALoginChallenge(
+            challenge_digest=b"d" * 32,
+            account_id="a1",
+            security_epoch=1,
+            client_key=None,
+            issued_at=now,
+            expires_at=now + timedelta(minutes=11),
         )
     with pytest.raises(ImproperlyConfiguredException, match="store"):
         accounts_module.MFAService(cast("Any", object()), _MFAProtector())
