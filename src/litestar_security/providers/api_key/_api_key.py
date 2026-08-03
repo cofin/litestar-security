@@ -431,7 +431,19 @@ class APIKeyGenerationError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class APIKeyCodec:
-    """Issue and parse strict opaque API keys without persistence access."""
+    """Issue and parse strict opaque API keys without persistence access.
+
+    Args:
+        pepper: Secret mixed into every stored digest; at least 32 bytes.
+        prefix: Version-carrying key prefix accepted and issued by this codec.
+        entropy: Source of key-id and secret bytes.
+        comparator: Digest equality used by :meth:`matches`. A supplied
+            comparator **must** compare in constant time over equal-length
+            digests, as the default :func:`hmac.compare_digest` does; a
+            variable-time comparator reintroduces a timing side channel on the
+            stored digest. This contract is documented rather than
+            runtime-enforceable, so construction only verifies callability.
+    """
 
     pepper: bytes = field(repr=False, metadata={"sensitive": True})
     prefix: str = "lsk"
@@ -439,7 +451,11 @@ class APIKeyCodec:
     comparator: Callable[[bytes, bytes], bool] = field(default=compare_digest, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Require a strong pepper, safe prefix, entropy, and comparator."""
+        """Require a strong pepper, safe prefix, entropy, and comparator.
+
+        Callability is the only property of the comparator that can be checked
+        here; its constant-time contract rests with the implementer.
+        """
         if (
             self.pepper.__class__ is not bytes
             or len(self.pepper) < _MINIMUM_PEPPER_BYTES
@@ -505,6 +521,10 @@ class APIKeyCodec:
 
     def matches(self, proof: APIKeyProof, record: APIKeyRecord) -> bool:
         """Compare one computed digest with a record through the configured comparator.
+
+        The comparator receives two equal-length digests and must compare them
+        in constant time; see :class:`APIKeyCodec` for the contract an override
+        honors.
 
         Args:
             proof: The storage-safe proof derived from a presented key.
