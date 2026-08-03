@@ -1,15 +1,18 @@
 """Unit tests for the framework-neutral public conformance kit."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 import pytest
+from anyio import Event, fail_after
 
 import litestar_security.testing as testing_module
-from litestar_security.providers.api_key import APIKeyRecord
+from litestar_security.providers.api_key import APIKeyRecord, APIKeyStore
 from litestar_security.testing import (
     InMemorySecurityBackend,
     StoreConformanceFactories,
+    _single_winner,  # pyright: ignore[reportPrivateUsage] - T1 verifies the private contender harness directly
     assert_api_key_store_conformance,
     assert_security_backend_conformance,
 )
@@ -48,6 +51,26 @@ class _ControlledStore:
 
 
 @pytest.mark.anyio
+async def test_single_winner_counts_only_successful_contenders() -> None:
+    release = Event()
+    started = 0
+
+    def contender(*, outcome: bool) -> Callable[[], Awaitable[bool]]:
+        async def attempt() -> bool:
+            nonlocal started
+            started += 1
+            if started == 3:
+                release.set()
+            await release.wait()
+            return outcome
+
+        return attempt
+
+    with fail_after(1):
+        assert await _single_winner((contender(outcome=True), contender(outcome=False), contender(outcome=True))) == 2
+
+
+@pytest.mark.anyio
 async def test_api_key_conformance_accepts_the_reference_store_in_isolation() -> None:
     await assert_api_key_store_conformance(lambda: InMemorySecurityBackend(clock=lambda: _NOW).api_keys)
 
@@ -82,7 +105,7 @@ async def test_api_key_conformance_names_a_non_atomic_rotation_invariant() -> No
 async def test_aggregate_conformance_runs_only_supplied_feature_factories() -> None:
     calls: list[str] = []
 
-    def api_keys() -> object:
+    def api_keys() -> APIKeyStore:
         calls.append("api-key")
         return InMemorySecurityBackend(clock=lambda: _NOW).api_keys
 

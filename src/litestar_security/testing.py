@@ -465,9 +465,7 @@ class StoreConformanceFactories:
     api_key_store: Callable[[], APIKeyStore] | None = None
 
 
-async def assert_api_key_store_conformance(  # noqa: C901 - one scenario keeps each API-key invariant in order
-    factory: Callable[[], APIKeyStore],
-) -> None:
+async def assert_api_key_store_conformance(factory: Callable[[], APIKeyStore]) -> None:
     """Assert API-key isolation and atomic rotation behavior.
 
     Args:
@@ -490,28 +488,23 @@ async def assert_api_key_store_conformance(  # noqa: C901 - one scenario keeps e
     if await store.get(current.key_id) != current or await isolated.get(current.key_id) is not None:
         message = "APIKeyStore.create/get isolation invariant: created records must be exact and factory-local"
         raise AssertionError(message)
-    outcomes: list[bool] = []
 
-    async def rotate(replacement: APIKeyRecord) -> None:
-        try:
-            await store.rotate(
+    async def rotate(replacement: APIKeyRecord) -> bool:
+        return await _won_unless_raised(
+            lambda: store.rotate(
                 current_key_id=current.key_id,
                 replacement=replacement,
                 overlap_until=_DEFAULT_NOW + timedelta(seconds=30),
                 now=_DEFAULT_NOW,
             )
-        except Exception:  # noqa: BLE001 - conformance accepts implementation-specific conflict exceptions
-            outcomes.append(False)
-        else:
-            outcomes.append(True)
+        )
 
-    async with create_task_group() as task_group:
-        for replacement in replacements:
-            task_group.start_soon(rotate, replacement)
-    if outcomes.count(True) != 1:
+    contenders = tuple(lambda replacement=replacement: rotate(replacement) for replacement in replacements)
+    winners = await _single_winner(contenders)
+    if winners != 1:
         message = (
             "APIKeyStore.rotate atomicity invariant: two contenders must produce one atomic winner "
-            f"(observed {outcomes.count(True)})"
+            f"(observed {winners})"
         )
         raise AssertionError(message)
     persisted_records: list[APIKeyRecord | None] = []
@@ -547,6 +540,43 @@ async def assert_security_backend_conformance(factories: StoreConformanceFactori
 
 def _conformance_api_key_record(key_id: str) -> APIKeyRecord:
     return APIKeyRecord(key_id=key_id, subject_id="conformance-subject", digest=b"d" * 32)
+
+
+async def _single_winner(contenders: tuple[Callable[[], Awaitable[bool]], ...]) -> int:
+    """Run every contender concurrently and count the ones that won."""
+    outcomes: list[bool] = []
+    async with create_task_group() as task_group:
+        for attempt in contenders:
+            task_group.start_soon(_record, attempt, outcomes)
+    return outcomes.count(True)
+
+
+async def _record(attempt: Callable[[], Awaitable[bool]], outcomes: list[bool]) -> None:
+    outcomes.append(_won_by_status(await attempt(), winning=True))
+
+
+def _won_by_return(result: object) -> bool:
+    """Return whether a boolean-result contender won."""
+    return result is True
+
+
+def _won_by_presence(result: object | None) -> bool:
+    """Return whether an optional-result contender produced a record."""
+    return _won_by_return(result is not None)
+
+
+def _won_by_status(result: object, *, winning: object) -> bool:
+    """Return whether a status-result contender produced its winning status."""
+    return _won_by_presence(result if result == winning else None)
+
+
+async def _won_unless_raised(operation: Callable[[], Awaitable[object]]) -> bool:
+    """Return whether a contender completed without an implementation conflict."""
+    try:
+        await operation()
+    except Exception:  # noqa: BLE001 - conformance accepts implementation-specific conflict exceptions
+        return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)
