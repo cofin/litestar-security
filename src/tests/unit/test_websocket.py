@@ -117,6 +117,7 @@ def test_websocket_config_rejects_malformed_origin_collections(allowed_origins: 
         ({"connect_token_store": object()}, "connect token store"),
         ({"snapshot_refresher": object()}, "snapshot refresher"),
         ({"revocation_source": object()}, "revocation source"),
+        ({"current_security_epoch": object()}, "current security epoch"),
     ],
 )
 def test_websocket_config_rejects_invalid_lifetime_and_query_settings(kwargs: dict[str, object], match: str) -> None:
@@ -645,6 +646,70 @@ def test_websocket_policy_fingerprint_uses_canonical_versioned_json_primitives()
                 alternatives=(),
             )
         )
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        SimpleNamespace(
+            authenticate=True,
+            required=True,
+            allow_anonymous=False,
+            participant_names=("bearer",),
+            alternatives=(),
+        ),
+        SimpleNamespace(
+            authenticate=True,
+            required=True,
+            allow_anonymous=False,
+            participant_names=frozenset({""}),
+            alternatives=(),
+        ),
+        SimpleNamespace(
+            authenticate=True,
+            required=True,
+            allow_anonymous=False,
+            participant_names=frozenset({"bearer"}),
+            alternatives=[],
+        ),
+        SimpleNamespace(
+            authenticate=True,
+            required=True,
+            allow_anonymous=False,
+            participant_names=frozenset({"bearer"}),
+            alternatives=([],),
+        ),
+        SimpleNamespace(
+            authenticate=True,
+            required=True,
+            allow_anonymous=False,
+            participant_names=frozenset({"bearer"}),
+            alternatives=((SimpleNamespace(name="bearer", scopes=["reports:read"]),),),
+        ),
+        SimpleNamespace(
+            authenticate=True,
+            required=True,
+            allow_anonymous=False,
+            participant_names=frozenset({"bearer"}),
+            alternatives=((SimpleNamespace(name="", scopes=()),),),
+        ),
+    ],
+)
+def test_websocket_policy_fingerprint_rejects_malformed_plan_shapes(plan: object) -> None:
+    with pytest.raises(ValueError, match="policy fingerprint"):
+        websocket_module.websocket_policy_fingerprint(plan)
+
+
+def test_websocket_policy_fingerprint_accepts_an_absent_participant_set() -> None:
+    plan = SimpleNamespace(
+        authenticate=False,
+        required=False,
+        allow_anonymous=True,
+        participant_names=None,
+        alternatives=(),
+    )
+
+    assert len(websocket_module.websocket_policy_fingerprint(plan)) == 64
 
 
 @pytest.mark.anyio
