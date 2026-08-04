@@ -267,6 +267,17 @@ class APIKeyUsageSink(Protocol):
         Args:
             key_id: The public lookup only, never raw key material.
             used_at: The timezone-aware observation time.
+
+        Returns:
+            ``None`` after accepting the best-effort observation.
+
+        Raises:
+            Exception: When the sink cannot persist the observation.
+
+        Notes:
+            ``BufferedAPIKeyUsage.flush()`` catches every sink exception,
+            increments ``security.api_key.usage_failure``, drops the pending
+            observation, and never changes authentication or API-key validity.
         """
         ...  # pragma: no cover
 

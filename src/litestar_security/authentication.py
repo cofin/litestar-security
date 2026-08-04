@@ -432,8 +432,14 @@ class IdentityResolver(Protocol[_ResolverClaimsT_contra, _UserT]):
             claims: The claims produced by the paired authenticator.
 
         Returns:
-            The application principal, or a sanitized outcome when the claims
-            cannot be mapped to one.
+            The application principal; ``InvalidCredentials`` for an expected
+            unknown or inactive identity; or ``VerificationUnavailable`` for
+            expected dependency trouble.
+
+        Raises:
+            Exception: For an unexpected resolver error or outage. The
+                evaluator catches this boundary in ``_resolve()`` and maps it
+                to one sanitized 503 response.
         """
         ...  # pragma: no cover
 
@@ -448,7 +454,14 @@ class AuthorizationResolver(Protocol[_UserT]):
             principal: The same-subject principal established by authentication.
 
         Returns:
-            Application authorization or a sanitized rejection/outage outcome.
+            The immutable application authorization snapshot;
+            ``InvalidCredentials`` for an expected authorization denial; or
+            ``VerificationUnavailable`` for expected dependency trouble.
+
+        Raises:
+            Exception: For an unexpected resolver error or outage. The
+                evaluator catches this boundary in ``_resolve_authorization()``
+                and maps it to one sanitized 503 response.
         """
         ...  # pragma: no cover
 

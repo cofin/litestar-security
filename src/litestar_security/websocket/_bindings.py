@@ -51,10 +51,21 @@ class WebSocketBinding:
 
 @runtime_checkable
 class WebSocketRevocationSource(Protocol):
-    """Event-driven application hook that returns when a binding is revoked."""
+    """Event-driven, secret-free application hook for one binding's revocation."""
 
     async def wait(self, binding: WebSocketBinding) -> None:
-        """Wait without polling until the supplied connection binding is revoked."""
+        """Block without polling until the supplied connection binding is revoked.
+
+        Args:
+            binding: The secret-free identity and route binding to supervise.
+
+        Returns:
+            ``None`` only after a genuine revocation of ``binding``.
+
+        Raises:
+            Exception: When supervision fails. The connection lifetime treats
+                this as unavailable and closes the connection.
+        """
         ...  # pragma: no cover
 
 
@@ -65,5 +76,19 @@ class AuthorizationSnapshotRefresher(Protocol[UserT]):
     async def refresh(
         self, *, principal: Principal[UserT], previous: AuthorizationSnapshot, route_name: str
     ) -> AuthorizationSnapshot:
-        """Resolve and return the next detached snapshot."""
+        """Resolve and return a new detached authorization snapshot.
+
+        Args:
+            principal: The authenticated principal for the connection.
+            previous: The prior immutable snapshot, which is never mutated.
+            route_name: The bound application route name.
+
+        Returns:
+            A new detached ``AuthorizationSnapshot``; any other runtime type
+            is treated as unavailable by connection lifetime supervision.
+
+        Raises:
+            Exception: When refresh fails. Connection lifetime supervision
+                treats this as unavailable and closes the connection.
+        """
         ...  # pragma: no cover
