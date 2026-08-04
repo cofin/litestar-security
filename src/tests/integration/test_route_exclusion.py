@@ -190,6 +190,21 @@ def test_route_declaring_auth_and_matching_an_exclusion_pattern_is_rejected(hand
         )
 
 
+def test_excluded_operation_documents_anonymous_access_while_others_document_schemes() -> None:
+    app = Litestar(
+        route_handlers=[_api_thing, _assets_manifest],
+        plugins=[SecurityPlugin(_api_team_config(exclude=["^/assets"]))],
+        openapi_config=OpenAPIConfig(title="Exclusion", version="1.0"),
+    )
+    excluded = app.openapi_schema.paths["/assets/manifest"].get
+    included = app.openapi_schema.paths["/api/thing"].get
+    assert excluded is not None
+    assert included is not None
+
+    assert excluded.security == [{}]
+    assert included.security == [{"api-key": []}, {"service-jwt": []}]
+
+
 def test_router_level_exclude_from_auth_is_still_rejected(static_directory: Path) -> None:
     static_router = create_static_files_router(
         path="/static", directories=[static_directory], opt={"exclude_from_auth": True}
