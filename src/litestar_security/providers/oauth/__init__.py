@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from litestar_security.providers.oauth._accounts import (
     AccountLinkError,
+    InMemoryOAuthRevocationRetryStore,
     LinkedProviderAccount,
     MemoryOAuthAccountStore,
     MemoryTokenVault,
@@ -85,6 +86,7 @@ __all__ = (
     "AESGCMOAuthTransactionProtector",
     "AccountLinkError",
     "GitHubOAuthProvider",
+    "InMemoryOAuthRevocationRetryStore",
     "InvalidOAuthCallback",
     "InvalidProviderGrantError",
     "LinkedProviderAccount",

@@ -52,6 +52,7 @@ from litestar_security.accounts import (
     SecurityEvent,
     SessionRecord,
     SessionRegistry,
+    StepUpRecord,
     StoreRateLimiter,
     TokenIssue,
     WebAuthnChallenge,
@@ -61,10 +62,12 @@ from litestar_security.providers.oauth import (
     AESGCMOAuthTransactionProtector,
     MemoryOAuthAccountStore,
     MemoryOAuthTransactionStore,
+    MemoryTokenVault,
     OAuthTransaction,
     OAuthTransactionProtectorKey,
     OIDCLogoutIdentity,
     ProtectedOAuthSecret,
+    ProviderTokenSet,
     UnlinkResult,
     UnlinkStatus,
 )
@@ -86,6 +89,8 @@ from litestar_security.testing import (
     assert_secret_protector_conformance,
     assert_security_backend_conformance,
     assert_session_registry_conformance,
+    assert_step_up_store_conformance,
+    assert_token_vault_conformance,
     assert_webauthn_challenge_store_conformance,
     assert_websocket_connect_token_store_conformance,
 )
@@ -238,6 +243,103 @@ class _BrokenOIDCBindingStore(testing_module.InMemoryOIDCSessionLogoutStore):
         return await super().revoke_frontchannel(
             provider, issuer, session_id, binding="conformance-browser-binding", now=now
         )
+
+
+class _BrokenStepUpStore(testing_module.InMemoryStepUpStore):
+    """Ignore one bound step-up value during consumption."""
+
+    def __init__(self, *, ignored_binding: str) -> None:
+        super().__init__()
+        self.ignored_binding = ignored_binding
+
+    async def consume(  # noqa: PLR0913 - mirrors the exact atomic public protocol
+        self,
+        grant_digest: bytes,
+        *,
+        principal_id: str,
+        security_epoch: int,
+        purpose: str,
+        transport_digest: bytes,
+        now: datetime,
+    ) -> StepUpRecord | None:
+        record = self.grants.get(grant_digest)
+        if record is None:
+            return None
+        if self.ignored_binding == "principal":
+            principal_id = record.principal_id
+        elif self.ignored_binding == "epoch":
+            security_epoch = record.security_epoch
+        elif self.ignored_binding == "purpose":
+            purpose = record.purpose
+        elif self.ignored_binding == "transport":
+            transport_digest = record.transport_digest
+        elif self.ignored_binding == "expiry":
+            now = record.authenticated_at
+        return await super().consume(
+            grant_digest,
+            principal_id=principal_id,
+            security_epoch=security_epoch,
+            purpose=purpose,
+            transport_digest=transport_digest,
+            now=now,
+        )
+
+
+@dataclass
+class _YieldingStepUpStore:
+    """Deliberately yield between reading and burning a step-up grant."""
+
+    grants: dict[bytes, StepUpRecord] = field(default_factory=dict[bytes, StepUpRecord])
+    release: Event = field(default_factory=Event)
+    contenders: int = 0
+
+    async def put(self, record: StepUpRecord) -> None:
+        self.grants[record.grant_digest] = record
+
+    async def consume(  # noqa: PLR0913 - mirrors the exact atomic public protocol
+        self,
+        grant_digest: bytes,
+        *,
+        principal_id: str,
+        security_epoch: int,
+        purpose: str,
+        transport_digest: bytes,
+        now: datetime,
+    ) -> StepUpRecord | None:
+        record = self.grants.get(grant_digest)
+        if (
+            record is None
+            or record.principal_id != principal_id
+            or record.security_epoch != security_epoch
+            or record.purpose != purpose
+            or record.transport_digest != transport_digest
+            or record.expires_at <= now
+        ):
+            return None
+        self.contenders += 1
+        if self.contenders == 2:
+            self.release.set()
+        await self.release.wait()
+        self.grants.pop(grant_digest, None)
+        return record
+
+
+class _BrokenTokenVault(MemoryTokenVault):
+    """Report stale compare-and-swap attempts as successful."""
+
+    def __init__(self, *, provider: str, client_id: str, protector: testing_module.OAuthTransactionProtector) -> None:
+        super().__init__(provider=provider, client_id=client_id, protector=protector)
+        self.replaced = False
+
+    async def replace(
+        self, provider_account_id: str, *, expected_version: int, tokens: ProviderTokenSet, now: datetime
+    ) -> bool:
+        if not self.replaced:
+            self.replaced = await super().replace(
+                provider_account_id, expected_version=expected_version, tokens=tokens, now=now
+            )
+            return self.replaced
+        return True
 
 
 @dataclass
@@ -1153,6 +1255,49 @@ async def test_oidc_session_logout_store_allows_exactly_one_backchannel_contende
 
 
 @pytest.mark.anyio
+async def test_step_up_store_conformance_accepts_the_reference_store() -> None:
+    await assert_step_up_store_conformance(testing_module.InMemoryStepUpStore)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("binding", ["principal", "epoch", "purpose", "transport", "expiry"])
+async def test_step_up_store_conformance_names_each_bound_value(binding: str) -> None:
+    with pytest.raises(AssertionError, match=rf"StepUpStore\.consume {binding} invariant"):
+        await assert_step_up_store_conformance(lambda: _BrokenStepUpStore(ignored_binding=binding))
+
+
+@pytest.mark.anyio
+async def test_step_up_store_conformance_detects_yielding_double_consume() -> None:
+    with pytest.raises(AssertionError, match=r"StepUpStore\.consume atomicity invariant"):
+        await assert_step_up_store_conformance(_YieldingStepUpStore)
+
+
+def _token_vault() -> MemoryTokenVault:
+    return MemoryTokenVault(
+        provider="conformance-provider",
+        client_id="conformance-client",
+        protector=_ConformanceTransactionProtector(),
+    )
+
+
+@pytest.mark.anyio
+async def test_token_vault_conformance_accepts_the_reference_vault() -> None:
+    await assert_token_vault_conformance(_token_vault)
+
+
+@pytest.mark.anyio
+async def test_token_vault_conformance_rejects_stale_cas_success() -> None:
+    with pytest.raises(AssertionError, match=r"TokenVault\.replace stale-CAS invariant"):
+        await assert_token_vault_conformance(
+            lambda: _BrokenTokenVault(
+                provider="conformance-provider",
+                client_id="conformance-client",
+                protector=_ConformanceTransactionProtector(),
+            )
+        )
+
+
+@pytest.mark.anyio
 async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # noqa: C901 - one complete dispatch matrix
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1172,6 +1317,12 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
 
     def oidc_session_logout_store() -> testing_module.InMemoryOIDCSessionLogoutStore:
         return _oidc_logout_store()
+
+    def step_up_store() -> testing_module.InMemoryStepUpStore:
+        return testing_module.InMemoryStepUpStore()
+
+    def token_vault() -> MemoryTokenVault:
+        return _token_vault()
 
     def oauth_accounts() -> MemoryOAuthAccountStore:
         return MemoryOAuthAccountStore()
@@ -1216,6 +1367,8 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
         ("assert_refresh_family_store_conformance", "refresh_family_store"),
         ("assert_secret_protector_conformance", "secret_protector"),
         ("assert_session_registry_conformance", "session_registry"),
+        ("assert_step_up_store_conformance", "step_up_store"),
+        ("assert_token_vault_conformance", "token_vault"),
         ("assert_webauthn_challenge_store_conformance", "webauthn_challenge_store"),
         ("assert_websocket_connect_token_store_conformance", "websocket_connect_token_store"),
     ):
@@ -1235,6 +1388,8 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
             refresh_family_store=accounts,
             secret_protector=secret_protector,
             session_registry=sessions,
+            step_up_store=step_up_store,
+            token_vault=token_vault,
             webauthn_challenge_store=webauthn_challenges,
             websocket_connect_token_store=websocket_connect_tokens,
         )
@@ -1253,6 +1408,8 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
         "refresh_family_store",
         "secret_protector",
         "session_registry",
+        "step_up_store",
+        "token_vault",
         "webauthn_challenge_store",
         "websocket_connect_token_store",
     ]
@@ -1276,6 +1433,7 @@ def test_testing_surface_is_explicit_and_stable() -> None:
         "InMemoryLocalAccountStore",
         "InMemoryMFALoginChallengeStore",
         "InMemoryMFAStore",
+        "InMemoryOAuthRevocationRetryStore",
         "InMemoryOIDCSessionLogoutStore",
         "InMemoryPasskeyStore",
         "InMemorySecurityBackend",
@@ -1294,16 +1452,18 @@ def test_testing_surface_is_explicit_and_stable() -> None:
         "assert_local_account_store_conformance",
         "assert_mfa_login_challenge_store_conformance",
         "assert_mfa_store_conformance",
-        "assert_oidc_session_logout_store_conformance",
         "assert_oauth_account_store_conformance",
         "assert_oauth_transaction_protector_conformance",
         "assert_oauth_transaction_store_conformance",
+        "assert_oidc_session_logout_store_conformance",
         "assert_passkey_store_conformance",
         "assert_rate_limiter_conformance",
         "assert_refresh_family_store_conformance",
         "assert_secret_protector_conformance",
         "assert_security_backend_conformance",
         "assert_session_registry_conformance",
+        "assert_step_up_store_conformance",
+        "assert_token_vault_conformance",
         "assert_webauthn_challenge_store_conformance",
         "assert_websocket_connect_token_store_conformance",
     )
@@ -1351,6 +1511,8 @@ async def test_remaining_reference_store_conformance() -> None:
     await assert_oauth_transaction_store_conformance(
         lambda: MemoryOAuthTransactionStore(protector=_ConformanceTransactionProtector())
     )
+    await assert_step_up_store_conformance(testing_module.InMemoryStepUpStore)
+    await assert_token_vault_conformance(_token_vault)
 
 
 @pytest.mark.anyio

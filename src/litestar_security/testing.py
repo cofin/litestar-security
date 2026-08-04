@@ -62,6 +62,7 @@ from litestar_security.accounts import (
     SessionRecord,
     SessionRegistry,
     StepUpRecord,
+    StepUpStore,
     TokenIssue,
     TokenPurpose,
     TOTPMethod,
@@ -74,6 +75,7 @@ from litestar_security.authentication import AuthorizationResolution, IdentityRe
 from litestar_security.context import AuthorizationSnapshot, CredentialRestrictions, Principal
 from litestar_security.providers.api_key import APIKeyRecord, APIKeyStore
 from litestar_security.providers.oauth import (
+    InMemoryOAuthRevocationRetryStore,
     MemoryOAuthAccountStore,
     MemoryOAuthTransactionStore,
     MemoryTokenVault,
@@ -90,6 +92,7 @@ from litestar_security.providers.oauth import (
     ProviderIdentity,
     ProviderTokenSet,
     SecretStr,
+    TokenVault,
     UnlinkStatus,
 )
 from litestar_security.websocket import (
@@ -109,6 +112,7 @@ __all__ = (
     "InMemoryLocalAccountStore",
     "InMemoryMFALoginChallengeStore",
     "InMemoryMFAStore",
+    "InMemoryOAuthRevocationRetryStore",
     "InMemoryOIDCSessionLogoutStore",
     "InMemoryPasskeyStore",
     "InMemorySecurityBackend",
@@ -137,6 +141,8 @@ __all__ = (
     "assert_secret_protector_conformance",
     "assert_security_backend_conformance",
     "assert_session_registry_conformance",
+    "assert_step_up_store_conformance",
+    "assert_token_vault_conformance",
     "assert_webauthn_challenge_store_conformance",
     "assert_websocket_connect_token_store_conformance",
 )
@@ -1234,6 +1240,8 @@ class StoreConformanceFactories:
     refresh_family_store: "Callable[[], _ConformanceRefreshFamilyStore] | None" = None
     secret_protector: Callable[[], SecretProtector] | None = None
     session_registry: Callable[[], SessionRegistry] | None = None
+    step_up_store: Callable[[], StepUpStore] | None = None
+    token_vault: Callable[[], TokenVault] | None = None
     webauthn_challenge_store: Callable[[], WebAuthnChallengeStore] | None = None
     websocket_connect_token_store: Callable[[], WebSocketConnectTokenStore] | None = None
 
@@ -2837,6 +2845,104 @@ async def assert_oidc_session_logout_store_conformance(factory: Callable[[], OID
         )
 
 
+async def assert_step_up_store_conformance(factory: Callable[[], StepUpStore]) -> None:
+    """Assert one-time exact-binding step-up grant consumption.
+
+    Args:
+        factory: Isolated zero-argument step-up store factory.
+
+    Returns:
+        None when the store has one winner and rejects every distinct binding mismatch.
+
+    Raises:
+        AssertionError: If a grant can be replayed, double-consumed, or accepted with an altered binding.
+    """
+    record = _conformance_step_up_record()
+    store = factory()
+    await store.put(record)
+
+    async def consume() -> StepUpRecord | None:
+        return await store.consume(
+            record.grant_digest,
+            principal_id=record.principal_id,
+            security_epoch=record.security_epoch,
+            purpose=record.purpose,
+            transport_digest=record.transport_digest,
+            now=record.authenticated_at,
+        )
+
+    if await _single_winner((lambda: _presence(consume()), lambda: _presence(consume()))) != 1:
+        message = "StepUpStore.consume atomicity invariant: exactly one concurrent consume must return the grant"
+        raise AssertionError(message)
+    if await consume() is not None:
+        raise AssertionError("StepUpStore.consume replay invariant: a consumed grant must return None")
+    for name, values in (
+        ("principal", {"principal_id": "other-principal"}),
+        ("epoch", {"security_epoch": record.security_epoch + 1}),
+        ("purpose", {"purpose": "other-purpose"}),
+        ("transport", {"transport_digest": b"u" * 32}),
+        ("expiry", {"now": record.expires_at}),
+    ):
+        mismatched = factory()
+        await mismatched.put(record)
+        arguments: dict[str, object] = {
+            "principal_id": record.principal_id,
+            "security_epoch": record.security_epoch,
+            "purpose": record.purpose,
+            "transport_digest": record.transport_digest,
+            "now": record.authenticated_at,
+        }
+        arguments.update(values)
+        if await mismatched.consume(record.grant_digest, **arguments) is not None:  # type: ignore[arg-type]  # conformance matrix preserves named protocol arguments
+            message = f"StepUpStore.consume {name} invariant: altered {name} must return None"
+            raise AssertionError(message)
+
+
+async def assert_token_vault_conformance(factory: Callable[[], TokenVault]) -> None:
+    """Assert isolated encrypted provider-token storage and optimistic replacement.
+
+    Args:
+        factory: Isolated zero-argument token vault factory.
+
+    Returns:
+        None when token round-trips, compare-and-swap, and deletion obey the public protocol.
+
+    Raises:
+        AssertionError: If factory state leaks or token versioning and replacement are incorrect.
+    """
+    provider_account_id = "conformance-provider-account"
+    original = _conformance_provider_tokens("original")
+    replacement = _conformance_provider_tokens("replacement")
+    vault = factory()
+    if await factory().get_for_refresh(provider_account_id, now=_DEFAULT_NOW) is not None:
+        message = "TokenVault factory isolation invariant: a fresh factory must not retain another vault's tokens"
+        raise AssertionError(message)
+    reference = await vault.put(provider_account_id, original, now=_DEFAULT_NOW)
+    if reference.version != 1:
+        raise AssertionError("TokenVault.put version invariant: a first write must return version one")
+    stored = await vault.get_for_refresh(provider_account_id, now=_DEFAULT_NOW)
+    if stored is None or stored.reference != reference or stored.tokens != original:
+        message = "TokenVault.get_for_refresh round-trip invariant: the exact stored token set must round-trip"
+        raise AssertionError(message)
+    if not await vault.replace(provider_account_id, expected_version=1, tokens=replacement, now=_DEFAULT_NOW):
+        raise AssertionError("TokenVault.replace CAS invariant: a current version must replace exactly once")
+    replaced = await vault.get_for_refresh(provider_account_id, now=_DEFAULT_NOW)
+    expected_replacement_version = 2
+    if replaced is None or replaced.reference.version != expected_replacement_version or replaced.tokens != replacement:
+        message = "TokenVault.replace state invariant: a successful CAS must persist exactly one new version"
+        raise AssertionError(message)
+    if await vault.replace(provider_account_id, expected_version=1, tokens=original, now=_DEFAULT_NOW):
+        message = "TokenVault.replace stale-CAS invariant: a stale version must return False without overwriting"
+        raise AssertionError(message)
+    current = await vault.get_for_refresh(provider_account_id, now=_DEFAULT_NOW)
+    if current != replaced:
+        message = "TokenVault.replace stale-CAS state invariant: a rejected CAS must not overwrite the token set"
+        raise AssertionError(message)
+    await vault.delete(provider_account_id)
+    if await vault.get_for_refresh(provider_account_id, now=_DEFAULT_NOW) is not None:
+        raise AssertionError("TokenVault.delete invariant: deleted tokens must not be returned for refresh")
+
+
 async def assert_oauth_account_store_conformance(factory: Callable[[], OAuthAccountStore]) -> None:
     """Assert final-method protection and atomic OAuth identity unlinking.
 
@@ -2969,6 +3075,10 @@ async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit
         await assert_secret_protector_conformance(factories.secret_protector)
     if factories.session_registry is not None:
         await assert_session_registry_conformance(factories.session_registry)
+    if factories.step_up_store is not None:
+        await assert_step_up_store_conformance(factories.step_up_store)
+    if factories.token_vault is not None:
+        await assert_token_vault_conformance(factories.token_vault)
     if factories.webauthn_challenge_store is not None:
         await assert_webauthn_challenge_store_conformance(factories.webauthn_challenge_store)
     if factories.websocket_connect_token_store is not None:
@@ -3244,6 +3354,18 @@ def _conformance_provider_grant() -> ProviderGrant:
     return ProviderGrant(scopes=frozenset({"profile"}), expires_at=_DEFAULT_NOW + timedelta(hours=1))
 
 
+def _conformance_provider_tokens(marker: str) -> ProviderTokenSet:
+    """Build one exact OAuth token set without exposing it from a conformance helper."""
+    return ProviderTokenSet(
+        access_token=SecretStr(f"conformance-access-{marker}"),
+        token_type="Bearer",  # noqa: S106 - standardized OAuth token type, not a credential
+        scopes=frozenset({"profile"}),
+        expires_at=_DEFAULT_NOW + timedelta(hours=1),
+        refresh_token=SecretStr(f"conformance-refresh-{marker}"),
+        id_token=SecretStr(f"conformance-id-{marker}"),
+    )
+
+
 def _conformance_oidc_logout_identity(token_id: str) -> OIDCLogoutIdentity:
     """Build one fixed verified OIDC logout identity for a seeded store."""
     return OIDCLogoutIdentity(
@@ -3252,6 +3374,21 @@ def _conformance_oidc_logout_identity(token_id: str) -> OIDCLogoutIdentity:
         subject="conformance-subject",
         session_id="conformance-session",
         token_id=f"conformance-{token_id}",
+        expires_at=_DEFAULT_NOW + timedelta(minutes=5),
+    )
+
+
+def _conformance_step_up_record() -> StepUpRecord:
+    """Build one fixed exact-binding step-up grant."""
+    return StepUpRecord(
+        grant_digest=b"g" * 32,
+        transport_digest=b"t" * 32,
+        principal_id="conformance-principal",
+        security_epoch=7,
+        purpose="conformance-purpose",
+        methods=frozenset({"passkey"}),
+        traits=frozenset({"verified"}),
+        authenticated_at=_DEFAULT_NOW,
         expires_at=_DEFAULT_NOW + timedelta(minutes=5),
     )
 

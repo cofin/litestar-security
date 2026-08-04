@@ -28,6 +28,7 @@ from litestar_security.accounts import (
     PasswordCredentialStore,
     RefreshTokenFamilyStore,
     RegistrationStore,
+    StepUpStore,
     WebAuthnChallengeStore,
 )
 from litestar_security.providers.api_key import APIKeyStore
@@ -63,6 +64,7 @@ _ATOMIC_METHODS = {
     OAuthTransactionStore: ("consume",),
     OAuthAccountStore: ("unlink_identity",),
     APIKeyStore: ("rotate",),
+    StepUpStore: ("consume",),
     WebSocketConnectTokenStore: ("consume",),
 }
 
