@@ -265,8 +265,10 @@ class SecurityConfig(Generic[UserT]):
             raise ImproperlyConfiguredException(detail=msg)
         self.slots = tuple(self.slots)
         self.mechanisms = tuple(self.mechanisms)
-        if self.local_auth is not None and self.websocket.current_security_epoch is None:
-            self.websocket = replace(self.websocket, current_security_epoch=self.local_auth.accounts.current_epoch)
+        local_accounts = getattr(self.local_auth, "accounts", None)
+        local_epoch = getattr(local_accounts, "current_epoch", None)
+        if self.websocket.current_security_epoch is None and callable(local_epoch):
+            self.websocket = replace(self.websocket, current_security_epoch=local_epoch)
         jwks_providers = list(self.jwks_providers)
         for provider in (
             None if self.iap is None else self.iap.jwks,

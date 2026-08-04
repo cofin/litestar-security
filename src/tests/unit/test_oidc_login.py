@@ -501,6 +501,9 @@ def test_keycloak_constructor_requires_exact_realm_issuer() -> None:
 
 @pytest.mark.anyio
 async def test_oidc_provider_delegates_lifecycle_and_close() -> None:
+    async def resolver(_host: str, _port: int) -> tuple[str, ...]:
+        return ("93.184.216.34",)
+
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/revoke":
             return httpx.Response(200)
@@ -529,6 +532,7 @@ async def test_oidc_provider_delegates_lifecycle_and_close() -> None:
             required_scopes=frozenset({"openid"}),
         ),
         transport=httpx.MockTransport(handler),
+        resolver=resolver,
     )
     oidc = OIDCProvider(oauth=base, metadata=metadata(), verifier=verifier(InvalidCredentials()))  # type: ignore[arg-type]
     tx = transaction(requested_scopes=frozenset({"openid"}))
