@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from litestar import Litestar, Router, get
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar import Litestar, get
+from litestar.exceptions import ImproperlyConfiguredException, LitestarWarning
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import SecurityScheme
 from litestar.static_files import create_static_files_router
@@ -21,7 +21,6 @@ from litestar_security.authentication import (
     InvalidCredentials,
     NoCredentials,
     PresentedCredential,
-    public,
 )
 from litestar_security.context import Principal
 
@@ -99,9 +98,7 @@ def fixture_static_directory(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_excluded_static_assets_serve_anonymously_while_application_routes_authenticate(
-    static_directory: Path,
-) -> None:
+def test_excluded_static_assets_serve_anonymously_while_application_routes_authenticate(static_directory: Path) -> None:
     app = Litestar(
         route_handlers=[_api_thing, create_static_files_router(path="/static", directories=[static_directory])],
         plugins=[SecurityPlugin(_api_team_config(exclude=["^/static"]))],
@@ -111,3 +108,13 @@ def test_excluded_static_assets_serve_anonymously_while_application_routes_authe
     with TestClient(app) as client:
         assert client.get("/static/app.css").status_code == 200
         assert client.get("/api/thing").status_code == 401
+
+
+def test_uncompilable_exclusion_pattern_is_rejected_at_startup() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="exclude patterns"):
+        Litestar(route_handlers=[_api_thing], plugins=[SecurityPlugin(_api_team_config(exclude=["["]))])
+
+
+def test_exclusion_pattern_matching_every_path_warns() -> None:
+    with pytest.warns(LitestarWarning, match="greedily matches all paths"):
+        Litestar(route_handlers=[_api_thing], plugins=[SecurityPlugin(_api_team_config(exclude=["^/"]))])

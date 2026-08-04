@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from inspect import iscoroutine
 from itertools import combinations
 from math import comb
+from re import Pattern
 from types import MappingProxyType
 from typing import Generic, NoReturn, TypeVar, cast
 from warnings import catch_warnings, simplefilter
@@ -15,6 +16,9 @@ from litestar._openapi.plugin import OpenAPIPlugin
 from litestar.exceptions import ImproperlyConfiguredException, LitestarDeprecationWarning
 from litestar.handlers.base import BaseRouteHandler
 from litestar.handlers.http_handlers import HTTPRouteHandler
+from litestar.middleware._utils import (
+    build_exclude_path_pattern,  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized re.Pattern
+)
 from litestar.openapi.config import OpenAPIConfig
 from litestar.openapi.controller import OpenAPIController
 from litestar.openapi.plugins import OpenAPIRenderPlugin
@@ -290,14 +294,17 @@ class RouteCompiler(Generic[UserT]):
     csrf_exclude_key: str | None = None
     external_csrf: ExternalCSRF | None = None
     websocket_config: WebSocketSecurityConfig = field(default_factory=WebSocketSecurityConfig)
+    exclude: Sequence[str] | str | None = None
     _policy_compiler: PolicyCompiler[UserT] = field(init=False, repr=False)
     _schemes: OpenAPISchemeSet | None = field(init=False, repr=False)
+    _exclude_pattern: Pattern[str] | None = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Create one per-registry policy compiler."""
         if self.csrf_exclude_key in _RESERVED_OPT_KEYS:
             message = "Native CSRF exclusion opt key collides with reserved Litestar Security metadata"
             raise ImproperlyConfiguredException(detail=message)
+        self._exclude_pattern = build_exclude_path_pattern(exclude=self.exclude, middleware_cls=type(self))
         self._policy_compiler = PolicyCompiler(self.registry, max_openapi_combinations=self.max_openapi_combinations)
         self._schemes = (
             OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", self.registry))

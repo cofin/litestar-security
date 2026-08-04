@@ -166,6 +166,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 ),
                 external_csrf=self.config.external_csrf,
                 websocket_config=self.config.websocket,
+                exclude=self.config.exclude,
             )
         app_config.dependencies.update(self._providers)
         for name, value in _SIGNATURE_NAMESPACE.items():
