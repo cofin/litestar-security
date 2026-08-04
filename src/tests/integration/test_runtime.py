@@ -2033,6 +2033,7 @@ def _runtime_connect_token_record() -> WebSocketConnectTokenRecord:
         connect_token_id="aWlpaWlpaWlpaWlpaWlpaQ",  # noqa: S106 - a public record identifier, not a secret
         digest=b"d" * 32,
         subject_id="subject-1",
+        security_epoch=7,
         route_name="socket",
         origin="https://trusted.example",
         restrictions=CredentialRestrictions(scopes=frozenset({"reports:read"})),
@@ -2287,6 +2288,9 @@ async def test_matching_one_time_connect_token_authenticates_cross_origin_websoc
     slot = _Slot(NoCredentials())
     authenticator = _Authenticator(NoCredentials())
 
+    async def current_security_epoch(_subject_id: str) -> int:
+        return 7
+
     @websocket("/ws", name="reports.socket")
     async def handler(socket: WebSocket) -> None:
         await socket.accept()
@@ -2310,7 +2314,9 @@ async def test_matching_one_time_connect_token_authenticates_cross_origin_websoc
                         ),
                     ),
                     websocket=WebSocketSecurityConfig(
-                        allowed_origins=frozenset({"https://browser.example"}), connect_token_store=store
+                        allowed_origins=frozenset({"https://browser.example"}),
+                        connect_token_store=store,
+                        current_security_epoch=current_security_epoch,
                     ),
                 )
             )
@@ -2331,6 +2337,7 @@ async def test_matching_one_time_connect_token_authenticates_cross_origin_websoc
         route_name="reports.socket",
         origin="https://browser.example",
         policy_fingerprint=websocket_policy_fingerprint(plan),
+        security_epoch=7,
     )
     async with AsyncTestClient(app=app) as client:
         session = await client.websocket_connect(
@@ -2355,14 +2362,19 @@ async def test_websocket_connect_tokens_dependency_mints_by_route_name_end_to_en
     authenticator = _Authenticator(
         Authenticated(
             claims="subject-1",
-            evidence=AuthenticationEvidence(
-                mechanism="bearer", slot="authorization.bearer", authenticated_at=_NOW
-            ),
+            evidence=AuthenticationEvidence(mechanism="bearer", slot="authorization.bearer", authenticated_at=_NOW),
         )
     )
     now = datetime.now(timezone.utc)
+
+    async def current_security_epoch(_subject_id: str) -> int:
+        return 7
+
     websocket_config = WebSocketSecurityConfig(
-        allowed_origins=frozenset({"https://browser.example"}), connect_token_store=store, clock=lambda: now
+        allowed_origins=frozenset({"https://browser.example"}),
+        connect_token_store=store,
+        current_security_epoch=current_security_epoch,
+        clock=lambda: now,
     )
 
     @post("/tickets", name="tickets", auth=required("bearer"))
@@ -2376,6 +2388,7 @@ async def test_websocket_connect_tokens_dependency_mints_by_route_name_end_to_en
             principal=principal,
             context=security_context,
             origin="https://browser.example",
+            security_epoch=7,
         )
         return {"connect_token": issued.value}
 
@@ -2404,18 +2417,19 @@ async def test_websocket_connect_tokens_dependency_mints_by_route_name_end_to_en
         ],
     )
     issuer = WebSocketConnectTokenIssuer(
-        app=app,
-        store=store,
-        clock=websocket_config.clock,
-        ttl=websocket_config.connect_token_ttl,
+        app=app, store=store, clock=websocket_config.clock, ttl=websocket_config.connect_token_ttl
     )
     principal = Principal(id="subject-1")
     context = SecurityContext(session=NullSessionHandle())
 
     with pytest.raises(ImproperlyConfiguredException, match="does not resolve"):
-        await issuer.issue("missing", principal=principal, context=context, origin="https://browser.example")
+        await issuer.issue(
+            "missing", principal=principal, context=context, origin="https://browser.example", security_epoch=7
+        )
     with pytest.raises(ImproperlyConfiguredException, match="does not resolve"):
-        await issuer.issue("tickets", principal=principal, context=context, origin="https://browser.example")
+        await issuer.issue(
+            "tickets", principal=principal, context=context, origin="https://browser.example", security_epoch=7
+        )
 
     async with AsyncTestClient(app=app) as client:
         response = await client.post("/tickets")

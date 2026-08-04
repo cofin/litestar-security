@@ -6,7 +6,7 @@ route, origin, and policy, and consumed atomically at handshake.
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from binascii import Error as BinasciiError
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -55,6 +55,7 @@ class WebSocketConnectTokenRecord:
     connect_token_id: str
     digest: bytes = field(repr=False, metadata={"sensitive": True})
     subject_id: str
+    security_epoch: int
     route_name: str
     origin: str
     restrictions: CredentialRestrictions
@@ -76,6 +77,8 @@ class WebSocketConnectTokenRecord:
             or self.digest.__class__ is not bytes
             or len(self.digest) != _DIGEST_BYTES
             or not strict_text(self.subject_id)
+            or self.security_epoch.__class__ is not int
+            or self.security_epoch < 0
             or not strict_text(self.route_name)
             or canonical_origin(self.origin, configuration=True) != self.origin
             or self.restrictions.__class__ is not CredentialRestrictions
@@ -196,6 +199,7 @@ class WebSocketConnectTokenService:
         route_name: str,
         origin: str,
         policy_fingerprint: str,
+        security_epoch: int,
         restrictions: CredentialRestrictions | None = None,
     ) -> IssuedWebSocketConnectToken:
         """Issue one digest-only, exact-route connect token for an authenticated context."""
@@ -210,6 +214,7 @@ class WebSocketConnectTokenService:
             connect_token_id=connect_token_id,
             digest=_connect_token_digest(connect_token_id, secret),
             subject_id=cast("str", principal.id),
+            security_epoch=security_epoch,
             route_name=route_name,
             origin=origin,
             restrictions=selected_restrictions,
@@ -223,9 +228,15 @@ class WebSocketConnectTokenService:
         )
 
     async def consume(
-        self, value: object, *, route_name: str, origin: str, policy_fingerprint: str
+        self,
+        value: object,
+        *,
+        route_name: str,
+        origin: str,
+        policy_fingerprint: str,
+        current_security_epoch: Callable[[str], Awaitable[int | None]],
     ) -> WebSocketConnectTokenRecord | None:
-        """Atomically consume a connect token before validating later route bindings."""
+        """Atomically consume a connect token before authoritative epoch and route checks."""
         proof = _connect_token_proof(value)
         if proof is None:
             return None
@@ -236,9 +247,18 @@ class WebSocketConnectTokenService:
             )
         except Exception:  # noqa: BLE001 - application store failures fail closed at the connect token boundary
             raise WebSocketConnectTokenUnavailableError from None
+        if record is None:
+            return None
+        try:
+            current_epoch = cast("object", await current_security_epoch(record.subject_id))
+        except Exception:  # noqa: BLE001 - application epoch lookup failures are one sanitized transient outage
+            raise WebSocketConnectTokenUnavailableError from None
+        if current_epoch.__class__ is not int or cast("int", current_epoch) < 0:  # type: ignore[redundant-cast]
+            raise WebSocketConnectTokenUnavailableError
+        if current_epoch != record.security_epoch:
+            return None
         if (
-            record is None
-            or record.route_name != route_name
+            record.route_name != route_name
             or record.origin != origin
             or record.policy_fingerprint != policy_fingerprint
         ):
@@ -273,6 +293,7 @@ class WebSocketConnectTokenIssuer:
         principal: Principal[Any],
         context: SecurityContext,
         origin: str,
+        security_epoch: int,
         restrictions: CredentialRestrictions | None = None,
         ttl: timedelta | None = None,
     ) -> IssuedWebSocketConnectToken:
@@ -283,6 +304,7 @@ class WebSocketConnectTokenIssuer:
             principal: The authenticated principal minting the connect token.
             context: The current request's security context.
             origin: The exact canonical Origin the connect token is bound to.
+            security_epoch: The authoritative non-negative epoch bound to the token.
             restrictions: Optional narrowed authorization restrictions.
             ttl: Optional override for the configured connect token lifetime.
 
@@ -308,22 +330,19 @@ class WebSocketConnectTokenIssuer:
         if plan is None:
             message = f"WebSocket connect token route {route_name!r} has no compiled security runtime plan"
             raise ImproperlyConfiguredException(detail=message)
-        runtime_plan_type = cast(
-            "type[object]", import_module("litestar_security.authentication").SecurityRuntimePlan
-        )
+        runtime_plan_type = cast("type[object]", import_module("litestar_security.authentication").SecurityRuntimePlan)
         if not isinstance(plan, runtime_plan_type):
             message = f"WebSocket connect token route {route_name!r} has an invalid compiled security runtime plan"
             raise ImproperlyConfiguredException(detail=message)
         service = WebSocketConnectTokenService(
-            store=self.store,
-            clock=self.clock,
-            ttl=ttl if ttl is not None else self.ttl,
+            store=self.store, clock=self.clock, ttl=ttl if ttl is not None else self.ttl
         )
         return await service.issue(
             principal=principal,
             context=context,
             route_name=route_name,
             origin=origin,
+            security_epoch=security_epoch,
             policy_fingerprint=websocket_policy_fingerprint(plan),
             restrictions=restrictions,
         )
@@ -336,6 +355,7 @@ async def issue_websocket_connect_token(  # noqa: PLR0913 - the helper makes eve
     route_name: str,
     origin: str,
     policy_fingerprint: str,
+    security_epoch: int,
     restrictions: CredentialRestrictions,
     store: WebSocketConnectTokenStore,
     clock: Callable[[], datetime],
@@ -349,6 +369,7 @@ async def issue_websocket_connect_token(  # noqa: PLR0913 - the helper makes eve
         route_name: The single route the connect token authorizes; it is valid nowhere else.
         origin: The exact origin the handshake must present.
         policy_fingerprint: The compiled policy binding the handshake revalidates.
+        security_epoch: The authoritative non-negative epoch bound to the token.
         restrictions: The credential restrictions carried into the connection.
         store: The application store that persists the digest-only record.
         clock: The timezone-aware clock used for issuance and expiry.
@@ -368,6 +389,7 @@ async def issue_websocket_connect_token(  # noqa: PLR0913 - the helper makes eve
         route_name=route_name,
         origin=origin,
         policy_fingerprint=policy_fingerprint,
+        security_epoch=security_epoch,
         restrictions=restrictions,
     )
 

@@ -868,6 +868,9 @@ class SecurityMiddleware(Generic[UserT]):
             route_name=route_name,
             origin=handshake.origin,
             policy_fingerprint=websocket_policy_fingerprint(plan),
+            current_security_epoch=cast(
+                "Callable[[str], Awaitable[int | None]]", self.config.websocket.current_security_epoch
+            ),
         )
         if connect_token is None:
             raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)

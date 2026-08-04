@@ -1,11 +1,12 @@
 """Unit tests for WebSocket handshake transport policy."""
 
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import anyio
+import anyio.lowlevel
 import pytest
 from litestar.enums import HttpMethod
 from litestar.exceptions import (
@@ -22,6 +23,7 @@ import litestar_security.websocket._connect_tokens as connect_tokens_module
 from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
 from litestar_security.authentication import SecurityRuntimePlan
 from litestar_security.context import CredentialRestrictions, NullSessionHandle, Principal, SecurityContext
+from litestar_security.testing import InMemoryWebSocketRevocationSource
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,
     IssuedWebSocketConnectToken,
@@ -390,11 +392,42 @@ def test_websocket_binding_validates_and_freezes_identifiers(kwargs: dict[str, o
     assert binding.credential_ids == frozenset({"bearer:authorization"})
 
 
+@pytest.mark.anyio
+async def test_in_memory_websocket_revocation_source_releases_only_the_matching_binding() -> None:
+    source = InMemoryWebSocketRevocationSource()
+    first = WebSocketBinding(
+        connection_id="connection-1",
+        subject_id="subject-1",
+        credential_ids=frozenset({"bearer:authorization"}),
+        session_id="session-1",
+        route_name="reports.socket",
+    )
+    second = replace(first, connection_id="connection-2")
+    released: list[WebSocketBinding] = []
+
+    async def wait_for_revocation(binding: WebSocketBinding) -> None:
+        await source.wait(binding)
+        released.append(binding)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(wait_for_revocation, first)
+        task_group.start_soon(wait_for_revocation, second)
+        await anyio.lowlevel.checkpoint()
+        assert released == []
+
+        source.revoke(first)
+        await anyio.lowlevel.checkpoint()
+
+        assert released == [first]
+        task_group.cancel_scope.cancel()
+
+
 def _connect_token_record(**changes: object) -> WebSocketConnectTokenRecord:
     values = {
         "connect_token_id": "aWlpaWlpaWlpaWlpaWlpaQ",
         "digest": b"d" * 32,
         "subject_id": "subject-1",
+        "security_epoch": 7,
         "route_name": "reports.socket",
         "origin": "https://trusted.example",
         "restrictions": CredentialRestrictions(),
@@ -413,6 +446,8 @@ def _connect_token_record(**changes: object) -> WebSocketConnectTokenRecord:
         {"digest": bytearray(32)},
         {"digest": b"short"},
         {"subject_id": ""},
+        {"security_epoch": -1},
+        {"security_epoch": True},
         {"route_name": ""},
         {"restrictions": object()},
         {"policy_fingerprint": ""},
@@ -455,7 +490,12 @@ def test_websocket_connect_token_service_rejects_invalid_configuration(kwargs: d
 @pytest.mark.anyio
 async def test_websocket_connect_token_service_rejects_anonymous_invalid_and_unavailable_inputs() -> None:
     service = WebSocketConnectTokenService(store=InMemoryWebSocketConnectTokenStore(), clock=lambda: _NOW)
-    issue_kwargs = {"route_name": "reports.socket", "origin": "https://trusted.example", "policy_fingerprint": "f" * 64}
+    issue_kwargs = {
+        "route_name": "reports.socket",
+        "origin": "https://trusted.example",
+        "policy_fingerprint": "f" * 64,
+        "security_epoch": 7,
+    }
     with pytest.raises(ValueError, match="authenticated"):
         await service.issue(
             principal=Principal(id=None), context=SecurityContext(session=NullSessionHandle()), **issue_kwargs
@@ -468,7 +508,11 @@ async def test_websocket_connect_token_service_rejects_anonymous_invalid_and_una
         )
     assert (
         await service.consume(
-            object(), route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+            object(),
+            route_name="reports.socket",
+            origin="https://trusted.example",
+            policy_fingerprint="f" * 64,
+            current_security_epoch=_epoch(7),
         )
         is None
     )
@@ -488,6 +532,7 @@ async def test_websocket_connect_token_service_rejects_anonymous_invalid_and_una
             route_name="reports.socket",
             origin="https://trusted.example",
             policy_fingerprint="f" * 64,
+            current_security_epoch=_epoch(7),
         )
 
 
@@ -506,6 +551,7 @@ async def test_websocket_connect_token_service_rejects_invalid_entropy(entropy: 
             route_name="reports.socket",
             origin="https://trusted.example",
             policy_fingerprint="f" * 64,
+            security_epoch=7,
         )
 
 
@@ -524,6 +570,7 @@ async def test_websocket_connect_token_service_sanitizes_entropy_failure() -> No
             route_name="reports.socket",
             origin="https://trusted.example",
             policy_fingerprint="f" * 64,
+            security_epoch=7,
         )
 
 
@@ -535,6 +582,7 @@ async def test_issue_websocket_connect_token_helper_issues_bound_connect_token()
         route_name="reports.socket",
         origin="https://trusted.example",
         policy_fingerprint="f" * 64,
+        security_epoch=7,
         restrictions=CredentialRestrictions(),
         store=InMemoryWebSocketConnectTokenStore(),
         clock=lambda: _NOW,
@@ -570,6 +618,35 @@ def test_websocket_policy_fingerprint_is_stable_for_default_shape() -> None:
     assert websocket_module.websocket_policy_fingerprint(plan) == websocket_module.websocket_policy_fingerprint(plan)
 
 
+def test_websocket_policy_fingerprint_uses_canonical_versioned_json_primitives() -> None:
+    left = SimpleNamespace(
+        authenticate=True,
+        required=True,
+        allow_anonymous=False,
+        participant_names=frozenset({"cookie", "bearer"}),
+        alternatives=((SimpleNamespace(name="bearer", scopes=("reports:read",)),),),
+    )
+    right = SimpleNamespace(
+        authenticate=True,
+        required=True,
+        allow_anonymous=False,
+        participant_names=frozenset({"bearer", "cookie"}),
+        alternatives=((SimpleNamespace(name="bearer", scopes=("reports:read",)),),),
+    )
+
+    assert websocket_module.websocket_policy_fingerprint(left) == websocket_module.websocket_policy_fingerprint(right)
+    with pytest.raises(ValueError, match="policy fingerprint"):
+        websocket_module.websocket_policy_fingerprint(
+            SimpleNamespace(
+                authenticate=1,
+                required=True,
+                allow_anonymous=False,
+                participant_names=frozenset({"bearer"}),
+                alternatives=(),
+            )
+        )
+
+
 @pytest.mark.anyio
 async def test_connect_token_issuer_mints_by_route_name_and_rejects_invalid_targets() -> None:
     class App:
@@ -599,22 +676,25 @@ async def test_connect_token_issuer_mints_by_route_name_and_rejects_invalid_targ
     origin = "https://trusted.example"
 
     with pytest.raises(ImproperlyConfiguredException, match="does not resolve"):
-        await issuer.issue("missing", principal=principal, context=context, origin=origin)
+        await issuer.issue("missing", principal=principal, context=context, origin=origin, security_epoch=7)
     with pytest.raises(ImproperlyConfiguredException, match="does not resolve"):
-        await issuer.issue("reports.http", principal=principal, context=context, origin=origin)
+        await issuer.issue("reports.http", principal=principal, context=context, origin=origin, security_epoch=7)
     with pytest.raises(ImproperlyConfiguredException, match="has no compiled"):
-        await issuer.issue("reports.missing-plan", principal=principal, context=context, origin=origin)
+        await issuer.issue(
+            "reports.missing-plan", principal=principal, context=context, origin=origin, security_epoch=7
+        )
     with pytest.raises(ImproperlyConfiguredException, match="has an invalid"):
-        await issuer.issue("reports.mismatch", principal=principal, context=context, origin=origin)
+        await issuer.issue("reports.mismatch", principal=principal, context=context, origin=origin, security_epoch=7)
     with pytest.raises(ImproperlyConfiguredException, match="does not match"):
-        await issuer.issue("reports.alias", principal=principal, context=context, origin=origin)
+        await issuer.issue("reports.alias", principal=principal, context=context, origin=origin, security_epoch=7)
 
-    issued = await issuer.issue("reports.socket", principal=principal, context=context, origin=origin)
+    issued = await issuer.issue("reports.socket", principal=principal, context=context, origin=origin, security_epoch=7)
     consumed = await WebSocketConnectTokenService(store=store, clock=lambda: _NOW).consume(
         issued.value,
         route_name="reports.socket",
         origin="https://trusted.example",
         policy_fingerprint=websocket_module.websocket_policy_fingerprint(plan),
+        current_security_epoch=_epoch(7),
     )
 
     assert consumed is not None
@@ -649,6 +729,7 @@ async def test_websocket_connect_token_is_digest_only_one_time_and_exactly_bound
         route_name="reports.socket",
         origin="https://trusted.example",
         policy_fingerprint="f" * 64,
+        security_epoch=7,
         restrictions=restrictions,
     )
 
@@ -656,16 +737,87 @@ async def test_websocket_connect_token_is_digest_only_one_time_and_exactly_bound
     assert issued.value not in repr(issued)
     assert all(issued.value.encode() not in repr(record).encode() for record in store.records)
     consumed = await service.consume(
-        issued.value, route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+        issued.value,
+        route_name="reports.socket",
+        origin="https://trusted.example",
+        policy_fingerprint="f" * 64,
+        current_security_epoch=_epoch(7),
     )
     replay = await service.consume(
-        issued.value, route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+        issued.value,
+        route_name="reports.socket",
+        origin="https://trusted.example",
+        policy_fingerprint="f" * 64,
+        current_security_epoch=_epoch(7),
     )
 
     assert consumed is not None
     assert consumed.subject_id == "subject-1"
+    assert consumed.security_epoch == 7
     assert consumed.restrictions == restrictions
     assert replay is None
+
+
+def _epoch(value: object) -> Callable[[str], Awaitable[object]]:
+    async def current_security_epoch(_subject_id: str) -> object:
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    return current_security_epoch
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("current", [None, True, -1, RuntimeError("offline")])
+async def test_websocket_connect_token_epoch_verification_fails_unavailable_after_atomic_consume(
+    current: object,
+) -> None:
+    store = InMemoryWebSocketConnectTokenStore()
+    service = WebSocketConnectTokenService(store=store, clock=lambda: _NOW)
+    issued = await service.issue(
+        principal=Principal(id="subject-1"),
+        context=SecurityContext(session=NullSessionHandle()),
+        route_name="reports.socket",
+        origin="https://trusted.example",
+        policy_fingerprint="f" * 64,
+        security_epoch=7,
+    )
+
+    with pytest.raises(websocket_module.WebSocketConnectTokenUnavailableError):
+        await service.consume(
+            issued.value,
+            route_name="reports.socket",
+            origin="https://trusted.example",
+            policy_fingerprint="f" * 64,
+            current_security_epoch=_epoch(current),
+        )
+    assert store.records == ()
+
+
+@pytest.mark.anyio
+async def test_websocket_connect_token_epoch_mismatch_is_unauthorized_after_atomic_consume() -> None:
+    store = InMemoryWebSocketConnectTokenStore()
+    service = WebSocketConnectTokenService(store=store, clock=lambda: _NOW)
+    issued = await service.issue(
+        principal=Principal(id="subject-1"),
+        context=SecurityContext(session=NullSessionHandle()),
+        route_name="reports.socket",
+        origin="https://trusted.example",
+        policy_fingerprint="f" * 64,
+        security_epoch=7,
+    )
+
+    assert (
+        await service.consume(
+            issued.value,
+            route_name="reports.socket",
+            origin="https://trusted.example",
+            policy_fingerprint="f" * 64,
+            current_security_epoch=_epoch(8),
+        )
+        is None
+    )
+    assert store.records == ()
 
 
 @pytest.mark.anyio
@@ -681,13 +833,22 @@ async def test_websocket_connect_token_is_consumed_before_later_binding_failure(
         route_name="reports.socket",
         origin="https://trusted.example",
         policy_fingerprint="f" * 64,
+        security_epoch=7,
     )
 
     mismatch = await service.consume(
-        issued.value, route_name="other.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+        issued.value,
+        route_name="other.socket",
+        origin="https://trusted.example",
+        policy_fingerprint="f" * 64,
+        current_security_epoch=_epoch(7),
     )
     retry = await service.consume(
-        issued.value, route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+        issued.value,
+        route_name="reports.socket",
+        origin="https://trusted.example",
+        policy_fingerprint="f" * 64,
+        current_security_epoch=_epoch(7),
     )
 
     assert mismatch is None
@@ -699,7 +860,11 @@ async def test_websocket_connect_token_atomic_double_consume_has_one_winner() ->
     async def consume(service: WebSocketConnectTokenService, value: str, results: list[object]) -> None:
         results.append(
             await service.consume(
-                value, route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+                value,
+                route_name="reports.socket",
+                origin="https://trusted.example",
+                policy_fingerprint="f" * 64,
+                current_security_epoch=_epoch(7),
             )
         )
 
@@ -715,6 +880,7 @@ async def test_websocket_connect_token_atomic_double_consume_has_one_winner() ->
             route_name="reports.socket",
             origin="https://trusted.example",
             policy_fingerprint="f" * 64,
+            security_epoch=7,
         )
         results: list[object] = []
 
@@ -741,11 +907,16 @@ async def test_websocket_connect_token_expiry_boundary_is_exclusive_and_deletes_
         route_name="reports.socket",
         origin="https://trusted.example",
         policy_fingerprint="f" * 64,
+        security_epoch=7,
     )
     current[0] = issued.expires_at
 
     consumed = await service.consume(
-        issued.value, route_name="reports.socket", origin="https://trusted.example", policy_fingerprint="f" * 64
+        issued.value,
+        route_name="reports.socket",
+        origin="https://trusted.example",
+        policy_fingerprint="f" * 64,
+        current_security_epoch=_epoch(7),
     )
 
     assert consumed is None

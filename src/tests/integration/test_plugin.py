@@ -3926,6 +3926,8 @@ def test_local_session_native_backends_have_registry_and_openapi_parity(
     _, native_middleware = _native_session_backend(backend_kind)
     config = SecurityConfig(local_auth=local_auth)
 
+    assert config.websocket.current_security_epoch == local_auth.accounts.current_epoch
+
     @get("/session", auth=required("session"))
     async def session_handler() -> None:
         return None

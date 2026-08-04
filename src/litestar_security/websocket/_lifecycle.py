@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from json import dumps
 from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
 from anyio import Lock, create_task_group, sleep
@@ -18,6 +19,7 @@ from litestar_security.websocket._internal import DEFAULT_UNAUTHORIZED_CLOSE, DE
 __all__ = ("WebSocketCloseCoordinator", "close_websocket", "supervise_websocket_lifetime")
 
 UserT = TypeVar("UserT")
+_INVALID_POLICY_FINGERPRINT = "WebSocket policy fingerprint input is invalid"
 
 
 def websocket_policy_fingerprint(plan: object) -> str:
@@ -29,22 +31,56 @@ def websocket_policy_fingerprint(plan: object) -> str:
     Returns:
         A hexadecimal SHA-256 fingerprint.
     """
-    authenticate = bool(getattr(plan, "authenticate", False))
-    required = bool(getattr(plan, "required", False))
-    allow_anonymous = bool(getattr(plan, "allow_anonymous", False))
-    participant_names = sorted(cast("frozenset[str] | None", getattr(plan, "participant_names", None)) or ())
-    alternatives = cast("tuple[tuple[object, ...], ...]", getattr(plan, "alternatives", ()))
-    serialized_alternatives = tuple(
-        tuple(
-            (
-                cast("str", getattr(requirement, "name", "")),
-                tuple(cast("tuple[str, ...]", getattr(requirement, "scopes", ()))),
-            )
-            for requirement in alternative
-        )
-        for alternative in alternatives
-    )
-    payload = repr((authenticate, required, allow_anonymous, participant_names, serialized_alternatives)).encode()
+    authenticate = getattr(plan, "authenticate", False)
+    required = getattr(plan, "required", False)
+    allow_anonymous = getattr(plan, "allow_anonymous", False)
+    participant_names = getattr(plan, "participant_names", None)
+    alternatives = getattr(plan, "alternatives", ())
+    if (
+        authenticate.__class__ is not bool
+        or required.__class__ is not bool
+        or allow_anonymous.__class__ is not bool
+        or (participant_names is not None and participant_names.__class__ is not frozenset)
+        or alternatives.__class__ is not tuple
+    ):
+        raise ValueError(_INVALID_POLICY_FINGERPRINT)
+    participant_values = cast("frozenset[object]", participant_names or frozenset())
+    if any(value.__class__ is not str or not value for value in participant_values):
+        raise ValueError(_INVALID_POLICY_FINGERPRINT)
+    serialized_participants = sorted(cast("frozenset[str]", participant_values))
+    serialized_alternatives: list[list[dict[str, object]]] = []
+    for alternative in cast("tuple[object, ...]", alternatives):
+        if alternative.__class__ is not tuple:
+            raise ValueError(_INVALID_POLICY_FINGERPRINT)
+        serialized_alternative: list[dict[str, object]] = []
+        for requirement in cast("tuple[object, ...]", alternative):
+            name = cast("object", getattr(requirement, "name", None))
+            scopes = cast("object", getattr(requirement, "scopes", None))
+            if (
+                name.__class__ is not str
+                or not name
+                or scopes.__class__ is not tuple
+                or any(scope.__class__ is not str or not scope for scope in cast("tuple[object, ...]", scopes))
+            ):
+                raise ValueError(_INVALID_POLICY_FINGERPRINT)
+            serialized_alternative.append({
+                "name": cast("str", name),  # type: ignore[redundant-cast]  # pyright retains object narrowing
+                "scopes": list(cast("tuple[str, ...]", scopes)),
+            })
+        serialized_alternatives.append(serialized_alternative)
+    payload = dumps(
+        {
+            "allow_anonymous": allow_anonymous,
+            "alternatives": serialized_alternatives,
+            "authenticate": authenticate,
+            "participant_names": serialized_participants,
+            "required": required,
+            "v": 1,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
     return sha256(b"litestar-security/websocket-policy/v1\x00" + payload).hexdigest()
 
 

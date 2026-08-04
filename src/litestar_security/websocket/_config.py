@@ -43,6 +43,9 @@ class WebSocketSecurityConfig:
     connect_token_ttl: timedelta = timedelta(seconds=30)
     maximum_connect_token_ttl: timedelta = MAXIMUM_CONNECT_TOKEN_TTL
     connect_token_query_parameter: str = "connect_token"  # noqa: S105 - a query parameter name, not a secret
+    current_security_epoch: "Callable[[str], Awaitable[int | None]] | None" = field(
+        default=None, repr=False, compare=False
+    )
     refresh_interval: timedelta | None = None
     snapshot_refresher: "AuthorizationSnapshotRefresher[Any] | None" = field(default=None, repr=False)
     revocation_source: "WebSocketRevocationSource | None" = field(default=None, repr=False)
@@ -64,6 +67,8 @@ def _validate_connect_token_settings(config: WebSocketSecurityConfig) -> None:
     connect_token_store = cast("object | None", config.connect_token_store)
     if connect_token_store is not None and not isinstance(connect_token_store, WebSocketConnectTokenStore):
         configuration_error("WebSocket connect token store must implement atomic create and consume")
+    if config.current_security_epoch is not None and not callable(config.current_security_epoch):
+        configuration_error("WebSocket current security epoch must be an async callback")
     maximum_connect_token_ttl = duration(config.maximum_connect_token_ttl, "maximum connect token TTL")
     if maximum_connect_token_ttl > MAXIMUM_CONNECT_TOKEN_TTL:
         configuration_error("WebSocket maximum connect token TTL cannot exceed two minutes")
