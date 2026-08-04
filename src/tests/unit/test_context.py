@@ -3027,33 +3027,109 @@ for module_name in sys.modules:
     assert not result.stdout
 
 
-@pytest.mark.parametrize(
-    ("blocked_dependency", "export_name", "extras"),
-    [
-        ("pyotp", "MFAService", "mfa"),
-        ("webauthn", "PasskeyService", "passkeys"),
-        ("webauthn", "build_mfa_routes", "mfa,passkeys"),
-        ("argon2", "Argon2PasswordHasher", "argon2"),
-        ("argon2", "LocalAuth", "argon2,mfa"),
-    ],
-)
-def test_accounts_lazy_optional_exports_isolate_missing_dependencies(
-    blocked_dependency: str, export_name: str, extras: str
-) -> None:
+def test_oauth_boundary_keeps_provider_tree_unloaded_until_requested() -> None:
+    script = """
+import sys
+
+import litestar_security
+import litestar_security.accounts
+
+assert not any(module_name.startswith("litestar_security.providers.oauth") for module_name in sys.modules)
+"""
+    result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_lazy_extra_exports_preserve_eager_export_identity() -> None:
+    script = """
+from importlib import import_module
+
+import litestar_security
+import litestar_security.accounts as accounts
+
+for name in litestar_security.__all__:
+    resolved = getattr(litestar_security, name)
+    eager = (
+        getattr(import_module("litestar_security.providers"), name)
+        if name in litestar_security._OAUTH_EXPORTS
+        else litestar_security.__dict__[name]
+    )
+    assert resolved is eager, name
+
+for name in accounts.__all__:
+    resolved = getattr(accounts, name)
+    target = accounts._OPTIONAL_EXPORTS.get(name)
+    eager = (
+        getattr(import_module(target[0]), name)
+        if target is not None
+        else getattr(import_module("litestar_security.accounts.controllers"), name)
+        if name in accounts._CONTROLLER_EXPORTS
+        else accounts.__dict__[name]
+    )
+    assert resolved is eager, name
+"""
+    result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("blocked_dependency", ["pyotp", "webauthn", "argon2"])
+def test_accounts_lazy_extra_exports_isolate_missing_dependencies(blocked_dependency: str) -> None:
     script = f"""
 import sys
+from importlib import import_module
 
 sys.modules[{blocked_dependency!r}] = None
 import litestar_security.accounts as accounts
 
 assert accounts.RateLimiter
-try:
-    getattr(accounts, {export_name!r})
-except ImportError as error:
-    expected = "litestar-security feature requires the [{extras}] extra: pip install 'litestar-security[{extras}]'"
-    assert str(error) == expected, str(error)
-else:
-    raise AssertionError("expected an actionable optional-extra ImportError")
+for name in accounts.__all__:
+    target = accounts._OPTIONAL_EXPORTS.get(name)
+    if target is None and name in accounts._CONTROLLER_EXPORTS:
+        target = (
+            ("litestar_security.accounts.controllers", "argon2,mfa", frozenset({{"argon2", "pyotp"}}))
+            if name != "build_mfa_routes"
+            else (
+                "litestar_security.accounts.controllers",
+                "argon2,mfa,passkeys",
+                frozenset({{"argon2", "pyotp", "webauthn"}}),
+            )
+        )
+    if target is None or {blocked_dependency!r} not in target[2]:
+        getattr(accounts, name)
+        continue
+    try:
+        getattr(accounts, name)
+    except ImportError as error:
+        expected = (
+            f"litestar-security feature requires the [{{target[1]}}] extra: "
+            f"pip install 'litestar-security[{{target[1]}}]'"
+        )
+        assert str(error) == expected, (name, str(error))
+    else:
+        raise AssertionError(f"expected an actionable optional-extra ImportError for {{name}}")
+
+controllers = import_module("litestar_security.accounts.controllers")
+for name in controllers.__all__:
+    target = (
+        ("argon2,mfa", frozenset({{"argon2", "pyotp"}}))
+        if name in controllers._LOCAL_EXPORTS
+        else ("argon2,mfa,passkeys", frozenset({{"argon2", "pyotp", "webauthn"}}))
+    )
+    if {blocked_dependency!r} not in target[1]:
+        getattr(controllers, name)
+        continue
+    try:
+        getattr(controllers, name)
+    except ImportError as error:
+        expected = (
+            f"litestar-security feature requires the [{{target[0]}}] extra: "
+            f"pip install 'litestar-security[{{target[0]}}]'"
+        )
+        assert str(error) == expected, (name, str(error))
+    else:
+        raise AssertionError(f"expected an actionable optional-extra ImportError for {{name}}")
 """
 
     result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603

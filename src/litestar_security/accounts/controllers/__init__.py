@@ -34,8 +34,8 @@ def __getattr__(name: str) -> Any:  # noqa: ANN401 - module lazy-export hook is 
         return import_optional_attribute(
             "litestar_security.accounts.controllers._mfa",
             name,
-            extras="mfa,passkeys",
-            dependencies=frozenset({"pyotp", "webauthn"}),
+            extras="argon2,mfa,passkeys",
+            dependencies=frozenset({"argon2", "pyotp", "webauthn"}),
         )
     message = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(message)

@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 from litestar_security.__metadata__ import __project__, __version__
+from litestar_security._lazy import import_optional_attribute
 from litestar_security.authentication import (
     CSRF_REQUIRED_OPT_KEY,
     Authenticated,
@@ -204,8 +205,8 @@ _OAUTH_EXPORTS = frozenset({
 def __getattr__(name: str) -> Any:  # noqa: ANN401 - module lazy-export hooks are dynamically typed
     """Resolve curated OAuth exports without loading providers at root import."""
     if name in _OAUTH_EXPORTS:
-        from litestar_security import providers  # noqa: PLC0415 - preserve lightweight package-root imports
-
-        return getattr(providers, name)
+        return import_optional_attribute(
+            "litestar_security.providers", name, extras="oauth", dependencies=frozenset()
+        )
     message = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(message)
