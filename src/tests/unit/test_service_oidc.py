@@ -2,14 +2,16 @@
 
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
+from typing import Any, cast
 
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.authentication import Authenticated, InvalidCredentials, VerificationUnavailable
+from litestar_security.config import WorkerLimits
 from litestar_security.context import Principal, ResourcePermission
 from litestar_security.providers.jwt import JWTClaims, VerificationKey
 from litestar_security.providers.oidc import KeycloakClaims, ServiceTokenConfig, map_keycloak_claims
@@ -23,10 +25,17 @@ _JWKS_URI = "https://id.example.com/jwks"
 class _JWKS:
     def __init__(self, key: VerificationKey) -> None:
         self.outcome: object = key
+        self.expected_algorithm = key.algorithm
         self.calls = 0
 
     async def select_key(self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime) -> object:
-        assert (issuer, jwks_uri, kid, algorithm, now) == (_ISSUER, _JWKS_URI, "service-key", "ES256", _NOW)
+        assert (issuer, jwks_uri, kid, algorithm, now) == (
+            _ISSUER,
+            _JWKS_URI,
+            "service-key",
+            self.expected_algorithm,
+            _NOW,
+        )
         self.calls += 1
         return self.outcome
 
@@ -173,6 +182,55 @@ async def test_service_jwt_accepts_rotated_jwks_key(service_key_material: tuple[
 
 
 @pytest.mark.anyio
+async def test_service_jwt_multi_algorithm_config_uses_only_the_verified_header_algorithm() -> None:
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_pem = private.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    jwks = _JWKS(VerificationKey(key_id="service-key", algorithm="RS256", key=public_pem))
+    _, mechanism = ServiceTokenConfig(
+        issuer=_ISSUER,
+        audiences=frozenset({_AUDIENCE}),
+        allowed_algorithms=frozenset({"ES256", "RS256"}),
+        jwks=jwks,
+        jwks_uri=_JWKS_URI,
+    ).build(clock=lambda: _NOW)
+    token = jwt.encode(_service_claims(), private, algorithm="RS256", headers={"kid": "service-key", "typ": "at+jwt"})
+
+    outcome = await mechanism.authenticator.authenticate(token, type("Connection", (), {"scope": {"headers": []}})())
+
+    assert isinstance(outcome, Authenticated)
+
+
+@pytest.mark.anyio
+async def test_service_jwt_reuses_a_cached_verifier_with_the_shared_worker_limiter(
+    service_key_material: tuple[bytes, VerificationKey],
+) -> None:
+    private, key = service_key_material
+    jwks = _JWKS(key)
+    config = ServiceTokenConfig(
+        issuer=_ISSUER,
+        audiences=frozenset({_AUDIENCE}),
+        allowed_algorithms=frozenset({"ES256"}),
+        jwks=jwks,
+        jwks_uri=_JWKS_URI,
+        worker_limits=WorkerLimits(crypto_tokens=1),
+    )
+    _, mechanism = config.build(clock=lambda: _NOW)
+    verifier = cast("Any", mechanism.authenticator).config.slots[0].verifier
+    token = _service_token(private)
+
+    first = await mechanism.authenticator.authenticate(token, type("Connection", (), {"scope": {"headers": []}})())
+    cached = verifier._verifiers[("service-key", "ES256")]  # noqa: SLF001 - assert the internal cache contract
+    second = await mechanism.authenticator.authenticate(token, type("Connection", (), {"scope": {"headers": []}})())
+
+    assert isinstance(first, Authenticated)
+    assert isinstance(second, Authenticated)
+    assert verifier._verifiers[("service-key", "ES256")] is cached  # noqa: SLF001 - assert cache reuse
+    assert cached.limiter is config.worker_limits.crypto_limiter
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("state", ["malformed", "wrong-algorithm", "missing-kid", "bad-provider", "bad-signature"])
 async def test_service_jwt_rejects_malformed_routing_and_provider_boundaries(
     service_key_material: tuple[bytes, VerificationKey], state: str
@@ -268,6 +326,7 @@ async def test_service_jwt_rejects_invalid_custom_claim_shapes(
         {"scopes_claim": "bad-name"},
         {"actor_id_claim": ""},
         {"jwks": object()},
+        {"worker_limits": object()},
     ],
 )
 def test_service_token_config_rejects_invalid_boundaries(

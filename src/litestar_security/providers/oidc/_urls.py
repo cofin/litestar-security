@@ -4,15 +4,12 @@ URL handling is isolated because it decides whether a discovery request may leav
 the host at all: resolved addresses are checked before any request is issued.
 """
 
-import ipaddress
-import socket
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
 import httpx
-from anyio import getaddrinfo
 
-__all__ = ("NormalizedURL", "normalize_url", "optional_url_value", "public_address", "resolve_addresses")
+__all__ = ("NormalizedURL", "normalize_url", "optional_url_value")
 
 
 _DEFAULT_HTTPS_PORT = 443
@@ -68,17 +65,6 @@ def normalize_url(
     if allow_origin_only and path:
         raise ValueError
     return NormalizedURL(value=f"{origin}{path}", origin=origin, host=host, port=port)
-
-
-def public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
-    return address.is_global and not address.is_multicast
-
-
-async def resolve_addresses(host: str, port: int) -> tuple[str, ...]:
-    results = await getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    return tuple(dict.fromkeys(result[4][0] for result in results))
 
 
 def optional_url_value(value: NormalizedURL | None) -> str | None:

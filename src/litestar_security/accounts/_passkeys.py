@@ -81,6 +81,11 @@ _MAXIMUM_CHALLENGE_TTL = timedelta(minutes=10)
 _DEFAULT_CHALLENGE_TTL = timedelta(minutes=5)
 _DEFAULT_ALGORITHMS = (-8, -7, -257)
 _SUPPORTED_ALGORITHMS = frozenset(_DEFAULT_ALGORITHMS)
+_APPLICATION_ROOT_VERIFYING_FORMATS = frozenset({
+    AttestationFormat.FIDO_U2F,
+    AttestationFormat.PACKED,
+    AttestationFormat.TPM,
+})
 WorkerT = TypeVar("WorkerT")
 
 
@@ -592,7 +597,11 @@ class PyWebAuthnVerifier:
             user_verified=verified.user_verified,
             aaguid=verified.aaguid,
             attestation_format=verified.fmt.value,
-            attestation_chain_verified=bool(attestation.att_stmt.x5c) and bool(root_certificates.get(verified.fmt)),
+            attestation_chain_verified=(
+                verified.fmt in _APPLICATION_ROOT_VERIFYING_FORMATS
+                and bool(root_certificates.get(verified.fmt))
+                and bool(attestation.att_stmt.x5c)
+            ),
         )
 
     def verify_authentication(self, **kwargs: object) -> AuthenticationVerification:
@@ -604,7 +613,7 @@ class PyWebAuthnVerifier:
                 expected_rp_id=cast("str", kwargs["rp_id"]),
                 expected_origin=list(cast("Sequence[str]", kwargs["origins"])),
                 credential_public_key=cast("bytes", kwargs["public_key"]),
-                credential_current_sign_count=0,
+                credential_current_sign_count=cast("int", kwargs["current_sign_count"]),
                 require_user_verification=cast("bool", kwargs["require_user_verification"]),
             )
         except Exception as exc:
@@ -834,6 +843,7 @@ class PasskeyService:
                     rp_id=record.rp_id,
                     origins=record.origins,
                     public_key=credential.public_key,
+                    current_sign_count=credential.sign_count,
                     require_user_verification=record.user_verification is UserVerification.REQUIRED,
                 )
             )
@@ -843,13 +853,11 @@ class PasskeyService:
                 or (not verified.backup_eligible and verified.backup_state)
             ):
                 return InvalidCredentials()
-            clone_risk = (
-                credential.sign_count > 0 and verified.sign_count > 0 and verified.sign_count <= credential.sign_count
-            )
+            clone_risk = credential.sign_count > 0 and verified.sign_count <= credential.sign_count
             result = await self.store.record_assertion(
                 credential.credential_id,
                 expected_version=credential.version,
-                sign_count=verified.sign_count,
+                sign_count=max(credential.sign_count, verified.sign_count),
                 backup_eligible=verified.backup_eligible,
                 backup_state=verified.backup_state,
                 clone_risk=clone_risk,
@@ -897,7 +905,7 @@ class PasskeyService:
 
     async def rename_credential(
         self, account_id: str, credential_id: bytes, display_name: str
-    ) -> PasskeySummary | None | VerificationUnavailable:
+    ) -> PasskeySummary | VerificationUnavailable | None:
         """Rename one credential through its owner-checked store operation."""
         if not strict_context_text(display_name):
             return None

@@ -23,7 +23,7 @@ __all__ = (
     "SessionHandle",
     "SessionPersistenceUnavailableError",
     "SessionUnavailableError",
-    "intersect_authorization",
+    "resolve_authorization",
 )
 
 UserT = TypeVar("UserT")
@@ -371,7 +371,7 @@ class CredentialRestrictions:
         object.__setattr__(self, "resources", None if self.resources is None else frozenset(self.resources))
 
 
-def intersect_authorization(
+def resolve_authorization(
     snapshot: AuthorizationSnapshot, restrictions: Sequence[CredentialRestrictions]
 ) -> AuthorizationSnapshot:
     """Narrow application authorization by every credential-carried bound.
@@ -382,6 +382,11 @@ def intersect_authorization(
 
     Returns:
         One immutable effective snapshot that never expands ``snapshot``.
+
+    Notes:
+        A credential never expands or restates ``attributes``; they remain
+        application-authoritative, and guards must not read them as a
+        credential-granted authorization axis.
     """
     scopes = snapshot.scopes
     roles = snapshot.roles
@@ -399,6 +404,12 @@ def intersect_authorization(
         if restriction.team_ids is not None:
             team_roles = {
                 team_id: team_roles[team_id] for team_id in sorted(team_roles) if team_id in restriction.team_ids
+            }
+        if restriction.roles is not None:
+            team_roles = {
+                team_id: narrowed
+                for team_id in sorted(team_roles)
+                if (narrowed := team_roles[team_id] & restriction.roles)
             }
         if restriction.tenant_ids is not None:
             tenant_ids = tenant_ids & restriction.tenant_ids

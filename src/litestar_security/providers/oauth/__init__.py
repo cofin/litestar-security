@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from litestar_security.providers.oauth._accounts import (
     AccountLinkError,
+    InMemoryOAuthRevocationRetryStore,
     LinkedProviderAccount,
     MemoryOAuthAccountStore,
     MemoryTokenVault,
@@ -34,6 +35,7 @@ from litestar_security.providers.oauth._provider import (
     ProviderTokenSet,
 )
 from litestar_security.providers.oauth._routes import (
+    OIDC_FRONTCHANNEL_LOGOUT,
     OAuthAuthorization,
     OAuthConfig,
     OAuthLifecycleService,
@@ -52,16 +54,19 @@ from litestar_security.providers.oauth._routes import (
     OIDCLogoutLifecycleService,
     OIDCLogoutTokenConsumer,
     OIDCSessionLogoutStore,
+    StepUpOAuthAuthorizer,
     build_oauth_routes,
 )
 from litestar_security.providers.oauth._transactions import (
     OAUTH_BINDING_COOKIE_NAME,
+    AESGCMOAuthTransactionProtector,
     InvalidOAuthCallback,
     MemoryOAuthTransactionStore,
     OAuthOperation,
     OAuthRedirectPolicy,
     OAuthTransaction,
     OAuthTransactionProtector,
+    OAuthTransactionProtectorKey,
     OAuthTransactionService,
     OAuthTransactionStart,
     OAuthTransactionStore,
@@ -77,8 +82,11 @@ if TYPE_CHECKING:
 
 __all__ = (
     "OAUTH_BINDING_COOKIE_NAME",
+    "OIDC_FRONTCHANNEL_LOGOUT",
+    "AESGCMOAuthTransactionProtector",
     "AccountLinkError",
     "GitHubOAuthProvider",
+    "InMemoryOAuthRevocationRetryStore",
     "InvalidOAuthCallback",
     "InvalidProviderGrantError",
     "LinkedProviderAccount",
@@ -116,6 +124,7 @@ __all__ = (
     "OAuthStepUpRequest",
     "OAuthTransaction",
     "OAuthTransactionProtector",
+    "OAuthTransactionProtectorKey",
     "OAuthTransactionService",
     "OAuthTransactionStart",
     "OAuthTransactionStore",
@@ -131,6 +140,7 @@ __all__ = (
     "ProviderTokenReference",
     "ProviderTokenSet",
     "SecretStr",
+    "StepUpOAuthAuthorizer",
     "StoredProviderTokens",
     "TokenVault",
     "UnlinkResult",

@@ -3,7 +3,7 @@
 ####################
 [project]
 name = "litestar-security"
-version = "0.1.0"
+version = "0.2.0"
 description = "Authentication and authorization for Litestar applications"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -39,13 +39,17 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "argon2-cffi>=25.1,<26",
   "httpx>=0.28.1",
   "litestar>=2.24.0",
-  "PyOTP>=2.10,<3",
   "PyJWT[crypto]>=2.13",
-  "webauthn>=3,<4",
 ]
+
+[project.optional-dependencies]
+all = ["argon2-cffi>=25.1,<26", "PyOTP>=2.10,<3", "webauthn>=3,<4"]
+argon2 = ["argon2-cffi>=25.1,<26"]
+mfa = ["PyOTP>=2.10,<3"]
+oauth = []
+passkeys = ["webauthn>=3,<4"]
 
 [project.urls]
 Documentation = "https://cofin.github.io/litestar-security/"
@@ -66,7 +70,7 @@ build-backend = "hatchling.build"
 packages = ["src/litestar_security"]
 
 [tool.bumpversion]
-current_version = "0.1.0"
+current_version = "0.2.0"
 parse = """(?x)
     (?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)
     (-(?P<pre>alpha|beta|rc)\\.(?P<pre_n>\\d+))?
@@ -154,6 +158,10 @@ testpaths = ["src/tests"]
 [tool.coverage.run]
 branch = true
 source = ["src/litestar_security"]
+# The dependency shims are staged for the optional-extras work and nothing
+# imports them yet. Remove both entries when the capabilities move behind
+# extras and start resolving their dependencies through them.
+omit = ["src/litestar_security/_typing.py", "src/litestar_security/typing.py"]
 
 [tool.coverage.report]
 fail_under = 100

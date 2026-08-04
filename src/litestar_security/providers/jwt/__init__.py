@@ -7,6 +7,7 @@ from litestar_security.providers.jwt._bearer import (
     CompositeBearerConfig,
     extend_composite_bearer,
 )
+from litestar_security.providers.jwt._capabilities import VerifiedCapability
 from litestar_security.providers.jwt._claims import JWTAlgorithm as JWTAlgorithm
 from litestar_security.providers.jwt._claims import JWTClaims, JWTValidationConfig, build_access_token_claims
 from litestar_security.providers.jwt._keyring import (
@@ -41,6 +42,7 @@ __all__ = (
     "TokenSigner",
     "VerificationKey",
     "VerificationKeySet",
+    "VerifiedCapability",
     "build_access_token_claims",
     "build_local_jwks_handler",
     "extend_composite_bearer",

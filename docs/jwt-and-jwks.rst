@@ -15,10 +15,13 @@ secret-management boundary explicitly:
 
 .. code-block:: python
 
+   from collections.abc import Sequence
    from dataclasses import dataclass
    from datetime import datetime, timedelta, timezone
 
    from litestar import Litestar
+   from litestar.di import Provide
+   from litestar.types import ControllerRouterHandler
 
    from litestar_security import Principal, SecurityConfig, SecurityPlugin
    from litestar_security.config import SecurityMetrics, WorkerLimits
@@ -49,6 +52,7 @@ secret-management boundary explicitly:
    def create_app(
        private_key_pem: bytes,
        metrics: SecurityMetrics,
+       route_handlers: Sequence[ControllerRouterHandler] = (),
    ) -> tuple[Litestar, LocalKeyRing]:
        workers = WorkerLimits(network_tokens=8, crypto_tokens=32, timeout=10.0)
        ring = LocalKeyRing(
@@ -87,7 +91,11 @@ secret-management boundary explicitly:
                local_jwks=LocalJWKSConfig(ring.verification_key_set),
            )
        )
-       return Litestar(plugins=[plugin]), ring
+       return Litestar(
+           route_handlers=route_handlers,
+           plugins=[plugin],
+           dependencies={"ring": Provide(lambda: ring)},
+       ), ring
 
 
    async def issue_token(ring: LocalKeyRing, user_id: str) -> str:
@@ -113,6 +121,81 @@ Rotation is an explicit configuration replacement. Make the new key active and
 retain old public keys as ``VerificationKey`` instances for at least the
 maximum lifetime of tokens issued with them. ``HS256`` is limited to a single
 trust domain and cannot be published as JWKS.
+
+Capability tokens
+-----------------
+
+Capabilities are bounded, signed grants for one application-defined purpose.
+For example, an authenticated route can mint a short-lived download URL, while
+the download route remains ``public()`` and verifies the URL's token itself.
+Register the local key ring as the application's ``ring`` dependency:
+
+.. code-block:: python
+
+   from datetime import datetime, timedelta, timezone
+
+   from litestar import get
+   from litestar.di import NamedDependency
+   from litestar.exceptions import NotAuthorizedException, ServiceUnavailableException
+
+   from litestar_security import (
+       InvalidCredentials,
+       Principal,
+       VerificationUnavailable,
+       public,
+       required,
+   )
+   from litestar_security.providers import LocalKeyRing, VerifiedCapability
+
+
+   @get("/files/{file_id:str}/download-url", auth=required())
+   async def create_download_url(
+       file_id: str,
+       principal: NamedDependency[Principal[object]],
+       ring: NamedDependency[LocalKeyRing],
+   ) -> dict[str, str]:
+       token = await ring.mint_capability(
+           purpose="download",
+           subject=principal.id,
+           audience="files",
+           lifetime=timedelta(minutes=15),
+           claims={"file_id": file_id},
+       )
+       return {"url": f"/files/{file_id}/download?token={token}"}
+
+
+   @get("/files/{file_id:str}/download", auth=public())
+   async def download_file(
+       file_id: str,
+       token: str,
+       ring: NamedDependency[LocalKeyRing],
+   ) -> dict[str, str]:
+       result = await ring.verify_capability(
+           token,
+           purpose="download",
+           audience="files",
+           now=datetime.now(timezone.utc),
+       )
+       if isinstance(result, VerificationUnavailable):
+           raise ServiceUnavailableException(detail="Download verification is unavailable")
+       if isinstance(result, InvalidCredentials):
+           raise NotAuthorizedException(detail="Invalid download capability")
+       if not isinstance(result, VerifiedCapability) or result.claims.get("file_id") != file_id:
+           raise NotAuthorizedException(detail="Invalid download capability")
+       return {"file_id": file_id, "subject": result.subject}
+
+
+   app, _ = create_app(
+       private_key_pem,
+       metrics,
+       route_handlers=[create_download_url, download_file],
+   )
+
+The return value stands in for the application's file read after authorization.
+``VerifiedCapability`` contains only verified application claims and metadata;
+it never retains the compact token. Capabilities are stateless, so applications
+that need single-use links must atomically consume or reject the returned
+``token_id`` in their own durable store.
 
 Custom KMS and HSM operations
 -----------------------------
@@ -199,9 +282,8 @@ network, such as an isolated Keycloak development environment.
 JWKS cache lifecycle
 --------------------
 
-``CachedJWKSProvider`` is transport-neutral. Supply a bounded async or sync
-fetcher that returns ``JWKSFetchResponse`` and configure each trusted
-``(issuer, jwks_uri)`` pair explicitly:
+The example below supplies ``HttpxJWKSFetcher`` to ``CachedJWKSProvider``.
+Configure each trusted ``(issuer, jwks_uri)`` pair explicitly:
 
 .. code-block:: python
 
@@ -209,19 +291,11 @@ fetcher that returns ``JWKSFetchResponse`` and configure each trusted
 
    from litestar_security import SecurityConfig, SecurityPlugin
    from litestar_security.config import SecurityMetrics, WorkerLimits
-   from litestar_security.providers import (
-       AsyncJWKSFetcher,
-       CachedJWKSProvider,
-       JWKSCacheEntry,
-       JWKSCachePolicy,
-   )
+   from litestar_security.providers import CachedJWKSProvider, HttpxJWKSFetcher
+   from litestar_security.providers import JWKSCacheEntry, JWKSCachePolicy
 
 
-   def create_remote_app(
-       fetcher: AsyncJWKSFetcher,
-       workers: WorkerLimits,
-       metrics: SecurityMetrics,
-   ) -> Litestar:
+   def create_remote_app(workers: WorkerLimits, metrics: SecurityMetrics) -> Litestar:
        provider = CachedJWKSProvider(
            entries=(
                JWKSCacheEntry(
@@ -230,7 +304,7 @@ fetcher that returns ``JWKSFetchResponse`` and configure each trusted
                    algorithms=frozenset({"EdDSA", "RS256"}),
                ),
            ),
-           fetcher=fetcher,
+           fetcher=HttpxJWKSFetcher(),
            policy=JWKSCachePolicy(warm_on_startup=True),
            worker_limits=workers,
            metrics=metrics,
@@ -253,6 +327,9 @@ verification remains unavailable. Litestar's lifespan closes every configured
 provider. The provider closes its fetcher only when ``fetcher_owned=True``;
 otherwise the application that supplied the fetcher remains responsible for
 closing it.
+
+``AsyncJWKSFetcher`` and ``SyncJWKSFetcher`` remain the extension points when
+an application needs a custom transport.
 
 Fresh snapshots are immutable and selected without network I/O or lock
 acquisition. Expiry and unknown key IDs use per-entry single-flight refreshes;

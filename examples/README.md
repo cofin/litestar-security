@@ -43,8 +43,8 @@ redirect URI, and egress destination must be pinned explicitly.
 prohibits bearer credentials in URLs, and installs a bounded authorization
 snapshot refresher. Browser clients authenticate through the bound session
 cookie; non-browser clients use the `Authorization` header. Production socket
-handlers should also wire revocation events or one-time tickets where immediate
-disconnect is required.
+handlers should also wire revocation events or one-time connect tokens where
+immediate disconnect is required.
 
 `custom-admin` is intentionally application code. Its guarded controller shows
 where an application composes account disable, forced reset, and

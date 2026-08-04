@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 
 from litestar_security.accounts._internal import aware_utc_time, strict_text, valid_security_epoch
+from litestar_security.schema import WireStruct
 
 __all__ = (
     "ConsumeResult",
@@ -176,15 +177,22 @@ class LoginMethod:
 
 @dataclass(frozen=True, slots=True)
 class PasswordCredentialState:
-    """Atomic password hash and epoch snapshot used for reauthentication."""
+    """Atomic password hash, account-state, and epoch snapshot for reauthentication."""
 
     password_hash: str = field(repr=False)
     security_epoch: int
+    active: bool
+    verified: bool
 
     def __post_init__(self) -> None:
-        """Require one encoded hash bound to a strict current epoch."""
-        if not strict_text(self.password_hash) or not valid_security_epoch(self.security_epoch):
-            msg = "Password credential state requires a hash and valid security epoch"
+        """Require one encoded hash bound to an eligible account and strict current epoch."""
+        if (
+            not strict_text(self.password_hash)
+            or not valid_security_epoch(self.security_epoch)
+            or self.active.__class__ is not bool
+            or self.verified.__class__ is not bool
+        ):
+            msg = "Password credential state requires a hash, valid security epoch, and boolean account state"
             raise ValueError(msg)
 
 
@@ -267,11 +275,12 @@ class NoOpSecurityEventSink:
         del event
 
 
-@dataclass(frozen=True, slots=True)
-class LifecycleAccepted:
+class LifecycleAccepted(WireStruct, frozen=True):
     """Shared enumeration-resistant response body for lifecycle requests."""
 
-    detail: str = field(default="If eligible, the request will be processed.", init=False)
+    # One fixed wording: an eligible and an ineligible request answer identically,
+    # so a caller cannot probe for account existence. Handlers never override it.
+    detail: str = "If eligible, the request will be processed."
 
 
 @dataclass(frozen=True, slots=True)

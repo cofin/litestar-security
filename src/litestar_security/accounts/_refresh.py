@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast, runtime
 
 from litestar.exceptions import ImproperlyConfiguredException
 
+from litestar_security.accounts._access_tokens import LocalAccessToken
 from litestar_security.accounts._internal import (
     DIGEST_BYTES,
     LOOKUP_BYTES,
@@ -37,6 +38,7 @@ from litestar_security.accounts._operations import (
 )
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, validate_rate_limits
 from litestar_security.accounts._receipts import RefreshReceiptContext, RefreshReceiptReplay, RefreshReceiptSealer
+from litestar_security.accounts._records import LocalAccount, SecurityEvent
 from litestar_security.accounts._refresh_tokens import (
     RefreshFamilyContext,
     RefreshRotationStatus,
@@ -51,7 +53,6 @@ from litestar_security.context import AuthenticationEvidence
 
 if TYPE_CHECKING:
     from litestar_security.accounts._access_tokens import LocalAccessTokenIssuer
-    from litestar_security.accounts._records import LocalAccount, SecurityEvent
 
 __all__ = (
     "REFRESH_RESPONSE_HEADERS",
@@ -448,9 +449,6 @@ class RefreshTokenService(Generic[UserT]):
             The token pair, ``InvalidCredentials`` when the account may not be
             issued for, or ``VerificationUnavailable`` when a dependency failed.
         """
-        from litestar_security.accounts._access_tokens import LocalAccessToken  # noqa: PLC0415 - breaks an import cycle
-        from litestar_security.accounts._records import LocalAccount  # noqa: PLC0415 - breaks an import cycle
-
         account_value: object = account
         if (
             not isinstance(account_value, LocalAccount)  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
@@ -546,9 +544,6 @@ class RefreshTokenService(Generic[UserT]):
             ``InvalidCredentials`` when the token is rejected or was reused, or
             ``VerificationUnavailable`` when a dependency failed.
         """
-        from litestar_security.accounts._access_tokens import LocalAccessToken  # noqa: PLC0415 - breaks an import cycle
-        from litestar_security.accounts._records import LocalAccount  # noqa: PLC0415 - breaks an import cycle
-
         if self.rate_limits is not None:
             limited = await self.rate_limits.check(REFRESH_ROTATE, client_key=client_key)
             if limited is not None:
@@ -741,7 +736,6 @@ class RefreshTokenService(Generic[UserT]):
     async def _resolve_account(
         self, context: RefreshFamilyContext
     ) -> "LocalAccount[UserT] | InvalidCredentials | VerificationUnavailable":
-        from litestar_security.accounts._records import LocalAccount  # noqa: PLC0415 - breaks an import cycle
 
         try:
             account = await cast("Any", self.accounts).get_by_id(context.account_id)
@@ -804,7 +798,6 @@ class RefreshTokenService(Generic[UserT]):
     def _event(
         self, occurred_at: datetime, *, operation: str, outcome: str, account_id: str | None, family_id: str | None
     ) -> "SecurityEvent":
-        from litestar_security.accounts._records import SecurityEvent  # noqa: PLC0415 - breaks an import cycle
 
         event_id = self.event_ids()
         if not strict_context_text(event_id):

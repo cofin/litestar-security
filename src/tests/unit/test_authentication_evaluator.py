@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, cast
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
@@ -23,6 +24,7 @@ from litestar_security.authentication import (
     all_of,
     any_of,
     at_least,
+    exclude,
     mechanism,
     optional,
     public,
@@ -36,8 +38,10 @@ from litestar_security.context import (
     NullSessionHandle,
     Principal,
     ResourcePermission,
-    intersect_authorization,
+    resolve_authorization,
 )
+from litestar_security.guards import requires_team_role
+from litestar_security.testing import StaticAuthorizationResolver, StaticIdentityResolver
 
 if TYPE_CHECKING:
     from litestar.connection import ASGIConnection
@@ -285,6 +289,20 @@ def test_policy_compiler_is_deterministic_cached_and_preserves_forced_csrf() -> 
     )
     assert not public_plan.authenticate
     assert public_plan.csrf_required is True
+    assert [slot.calls for slot in slots] == [0, 0, 0]
+
+
+@pytest.mark.anyio
+async def test_exclude_compiled_plan_skips_all_credential_work() -> None:
+    evaluator, compiler, slots = _policy_evaluator({"a", "b", "c"})
+
+    plan = compiler.compile(exclude())
+    principal, context = await evaluator.evaluate(_CONNECTION, NullSessionHandle(), plan=plan)
+
+    assert plan.authenticate is False
+    assert plan.bypass_authentication is True
+    assert not principal.is_authenticated
+    assert context.evidence == ()
     assert [slot.calls for slot in slots] == [0, 0, 0]
 
 
@@ -635,9 +653,63 @@ def test_resource_restriction_truth_table(
         }
     )
 
-    effective = intersect_authorization(snapshot, (CredentialRestrictions(resources=bounds),))
+    effective = resolve_authorization(snapshot, (CredentialRestrictions(resources=bounds),))
 
     assert {permission.resource: set(permission.scopes) for permission in effective.resources} == expected
+
+
+@pytest.mark.parametrize(
+    ("role_bound", "expected"),
+    [
+        (frozenset({"member"}), {"team-1": frozenset({"member"}), "team-2": frozenset({"member"})}),
+        (frozenset({"auditor"}), {}),
+        (None, {"team-1": frozenset({"admin", "member"}), "team-2": frozenset({"member"})}),
+    ],
+    ids=["narrows-every-team", "drops-empty-grants", "unbounded-preserves-team-roles"],
+)
+def test_resolve_authorization_narrows_team_roles_with_credential_role_bound(
+    role_bound: frozenset[str] | None, expected: dict[str, frozenset[str]]
+) -> None:
+    snapshot = AuthorizationSnapshot(
+        roles=frozenset({"admin", "member"}),
+        team_roles={"team-2": frozenset({"member"}), "team-1": frozenset({"admin", "member"})},
+    )
+
+    effective = resolve_authorization(snapshot, (CredentialRestrictions(roles=role_bound),))
+
+    assert effective.team_roles == expected
+
+
+@pytest.mark.anyio
+async def test_team_role_guard_denies_role_removed_by_credential_ceiling() -> None:
+    events: list[str] = []
+    evaluator, _, _, _ = _evaluator(
+        [
+            (
+                "local",
+                PresentedCredential("token"),
+                _success("local", "slot-local", restrictions=CredentialRestrictions(roles=frozenset({"member"}))),
+                Principal(id="user-1"),
+            )
+        ],
+        events,
+        authorization_resolver=_AuthorizationResolver(
+            AuthorizationSnapshot(
+                roles=frozenset({"admin", "member"}), team_roles={"team-1": frozenset({"admin", "member"})}
+            ),
+            events,
+        ),
+    )
+    principal, context = await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True)
+    connection = cast(
+        "ASGIConnection[Any, Any, Any, Any]",
+        SimpleNamespace(user=principal, auth=context, path_params={"team_id": "team-1"}),
+    )
+
+    decision = requires_team_role(roles={"admin"}).decide(connection)
+
+    assert not decision.granted
+    assert decision.code == "missing_team_role"
 
 
 @pytest.mark.anyio
@@ -711,11 +783,36 @@ async def test_authorization_resolution_preserves_structured_failure(
     evaluator, _, _, _ = _evaluator(
         [("a", PresentedCredential("a"), _success("a", "slot-a"), Principal(id="user-1"))],
         events,
-        authorization_resolver=_AuthorizationResolver(resolution, events),
+        authorization_resolver=StaticAuthorizationResolver(resolution),  # type: ignore[arg-type]
     )
 
     with pytest.raises(error):
         await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True)
+
+
+@pytest.mark.anyio
+async def test_static_resolvers_supply_the_configured_happy_path() -> None:
+    events: list[str] = []
+    principal = Principal(id="user-1")
+    snapshot = AuthorizationSnapshot(scopes={"reports:read"})
+    identity_resolver: StaticIdentityResolver[str, object] = StaticIdentityResolver(principal)
+    authorization_resolver: StaticAuthorizationResolver[object] = StaticAuthorizationResolver(snapshot)
+    registry = AuthenticationRegistry(  # type: ignore[arg-type]
+        slots=[_Slot("slot-a", PresentedCredential("a"), events)],
+        mechanisms=[
+            AuthenticationMechanism(
+                authenticator=_Authenticator("a", "slot-a", _success("a", "slot-a"), events), resolver=identity_resolver
+            )
+        ],
+        authorization_resolver=authorization_resolver,
+    )
+
+    assert await identity_resolver.resolve("claims-not-retained") is principal
+    assert await authorization_resolver.resolve(principal) is snapshot
+    resolved_principal, context = await registry.evaluator().evaluate(_CONNECTION, NullSessionHandle(), required=True)
+
+    assert resolved_principal is principal
+    assert context.authorization == snapshot
 
 
 def test_registry_rejects_malformed_authorization_resolver() -> None:
@@ -754,3 +851,55 @@ async def test_identity_resolution_unavailable_wins_over_invalid_after_all_resol
         await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True)
 
     assert [resolver.calls for resolver in resolvers] == [1, 1]
+
+
+class _RaisingSlot:
+    name = "slot-local"
+
+    def extract(self, _connection: object) -> object:
+        raise RuntimeError
+
+
+class _RaisingAuthenticator:
+    name = "local"
+    slot = "slot-local"
+    participates_by_default = True
+
+    async def authenticate(self, _credential: str, _connection: object) -> object:
+        raise RuntimeError
+
+
+class _RaisingResolver:
+    async def resolve(self, _claims: str) -> object:
+        raise RuntimeError
+
+
+class _RaisingAuthorizationResolver:
+    async def resolve(self, _principal: Principal[object]) -> object:
+        raise RuntimeError
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("port", ["slot", "authenticator", "identity_resolver", "authorization_resolver"])
+async def test_raising_application_port_fails_closed_as_unavailable(port: str) -> None:
+    events: list[str] = []
+    slot: object = _Slot("slot-local", PresentedCredential("token"), events)
+    authenticator: object = _Authenticator("local", "slot-local", _success("local", "slot-local"), events)
+    resolver: object = _Resolver(Principal(id="user-1"), "local", events)
+    authorization_resolver: object | None = None
+    if port == "slot":
+        slot = _RaisingSlot()
+    elif port == "authenticator":
+        authenticator = _RaisingAuthenticator()
+    elif port == "identity_resolver":
+        resolver = _RaisingResolver()
+    else:
+        authorization_resolver = _RaisingAuthorizationResolver()
+    registry = AuthenticationRegistry(  # type: ignore[arg-type]
+        slots=[slot],
+        mechanisms=[AuthenticationMechanism(authenticator=authenticator, resolver=resolver)],  # type: ignore[arg-type]
+        authorization_resolver=authorization_resolver,
+    )
+
+    with pytest.raises(ServiceUnavailableException, match="Authentication service unavailable"):
+        await registry.evaluator().evaluate(_CONNECTION, NullSessionHandle(), required=True)

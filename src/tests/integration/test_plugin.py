@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib.metadata import entry_points
 from secrets import token_hex
@@ -14,27 +15,43 @@ import anyio.lowlevel
 import click
 import pytest
 from click.testing import CliRunner
-from litestar import Controller, Litestar, Router, WebSocket, asgi, get, post, route, websocket
+from litestar import Controller, Litestar, Response, Router, WebSocket, asgi, get, post, route, websocket
 from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
-from litestar.di import Provide
+from litestar.di import NamedDependency, Provide
 from litestar.enums import HttpMethod, ScopeType
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar.exceptions import (
+    ClientException,
+    HTTPException,
+    ImproperlyConfiguredException,
+    ServiceUnavailableException,
+    TooManyRequestsException,
+)
 from litestar.middleware import DefineMiddleware
+from litestar.middleware.csrf import generate_csrf_token
 from litestar.middleware.session.base import SessionMiddleware
 from litestar.middleware.session.client_side import CookieBackendConfig
 from litestar.middleware.session.server_side import ServerSideSessionConfig
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.controller import OpenAPIController
-from litestar.openapi.plugins import JsonRenderPlugin
+from litestar.openapi.plugins import JsonRenderPlugin, SwaggerRenderPlugin
 from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme, Tag
 from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
-from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
+from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED, HTTP_400_BAD_REQUEST
 from litestar.testing import TestClient
 
 import litestar_security.accounts as accounts_module
-from litestar_security import MFAConfig, PasskeyConfig, SecurityConfig, SecurityPlugin, csp_nonce
+from litestar_security import (
+    MFAConfig,
+    PasskeyConfig,
+    PublicController,
+    SecureController,
+    SecurityConfig,
+    SecurityPlugin,
+    __version__,
+    csp_nonce,
+)
 from litestar_security._cli import register, security_group
 from litestar_security.accounts import (
     LOCAL_AUTH_TAGS,
@@ -42,6 +59,7 @@ from litestar_security.accounts import (
     LocalAccountResponse,
     LocalAuth,
     LocalAuthSecrets,
+    LocalCredentials,
     PasskeySummary,
     PasswordReauthenticationProof,
     ProtectedSecret,
@@ -62,6 +80,8 @@ from litestar_security.accounts import (
     WebAuthnOptions,
     build_mfa_routes,
 )
+from litestar_security.accounts._mfa_login import MFARequired
+from litestar_security.accounts._records import LocalAccount
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -75,6 +95,7 @@ from litestar_security.authentication import (
     all_of,
     any_of,
     at_least,
+    exclude,
     mechanism,
     optional,
     public,
@@ -98,10 +119,14 @@ from litestar_security.providers.jwt import (
     VerificationKey,
 )
 from litestar_security.providers.oidc import ServiceTokenConfig
-from litestar_security.websocket import WebSocketSecurityConfig
+from litestar_security.websocket import (
+    InMemoryWebSocketConnectTokenStore,
+    WebSocketConnectTokenIssuer,
+    WebSocketSecurityConfig,
+)
 
 
-def test_static_security_headers_use_native_response_headers_without_hook() -> None:
+def test_static_security_headers_cover_success_and_error_responses_without_duplicates() -> None:
     @get("/", sync_to_thread=False)
     def handler() -> None:
         return None
@@ -118,10 +143,16 @@ def test_static_security_headers_use_native_response_headers_without_hook() -> N
 
     with TestClient(app) as client:
         response = client.get("/")
+        missing = client.get("/missing")
 
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["content-security-policy"] == "default-src 'self'"
-    assert app.before_send == []
+    assert len(response.headers.get_list("x-content-type-options")) == 1
+    assert len(response.headers.get_list("content-security-policy")) == 1
+    assert missing.status_code == 404
+    assert missing.headers["x-content-type-options"] == "nosniff"
+    assert missing.headers["content-security-policy"] == "default-src 'self'"
+    assert len(app.before_send) == 1
 
 
 def test_nonce_csp_dependency_matches_fresh_response_header() -> None:
@@ -177,7 +208,7 @@ def test_security_headers_reject_application_ownership_collisions() -> None:
 
 
 @pytest.mark.anyio
-async def test_nonce_csp_hook_is_idempotent_and_rejects_response_conflicts() -> None:
+async def test_nonce_csp_hook_is_idempotent_and_replaces_response_conflicts() -> None:
     plugin = SecurityPlugin[object](
         SecurityConfig[object](
             headers=SecurityHeadersConfig(
@@ -200,8 +231,8 @@ async def test_nonce_csp_hook_is_idempotent_and_rejects_response_conflicts() -> 
     assert message["headers"] == [header]
 
     message["headers"][0] = (header[0], b"script-src 'none'")
-    with pytest.raises(ImproperlyConfiguredException, match="conflicting Content-Security-Policy"):
-        await hook(message, scope)
+    await hook(message, scope)
+    assert message["headers"] == [header]
 
 
 if TYPE_CHECKING:
@@ -399,13 +430,13 @@ def test_generated_mfa_route_bundle_has_exact_paths_policies_and_secret_free_ope
         "/auth/mfa/recovery-codes",
         "/auth/mfa/totp/enroll",
         "/auth/mfa/totp/verify",
-        "/auth/mfa/totp/{method_id:str}",
+        "/auth/mfa/totp/{method_id:str}/remove",
         "/auth/passkeys",
         "/auth/passkeys/authentication/options",
         "/auth/passkeys/authentication/verify",
         "/auth/passkeys/registration/options",
         "/auth/passkeys/registration/verify",
-        "/auth/passkeys/{credential_id:str}",
+        "/auth/passkeys/{credential_id:str}/remove",
         "/auth/step-up/{purpose:str}",
     }
     assert router.cache_control is not None
@@ -601,6 +632,79 @@ def _route_options() -> WebAuthnOptions:
     )
 
 
+def test_generated_mfa_routes_document_the_status_they_actually_return() -> None:
+    router = build_mfa_routes(
+        step_up=cast("Any", _RouteStepUpService()),
+        epochs=cast("Any", _RouteEpochs()),
+        mfa=cast("Any", _RouteMFAService()),
+        passkeys=cast("Any", _RoutePasskeyService()),
+        local_auth=cast("Any", _RouteLocalAuth()),
+    )
+    app = Litestar(
+        route_handlers=[router],
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin(_compiler_config(names=("a",)))],
+    )
+    authenticated = {"x-auth-a": "valid", "authorization": "Bearer transport"}
+    calls: tuple[tuple[str, str, dict[str, object]], ...] = (
+        ("POST", "/auth/mfa/totp/enroll", {"label": "person@example.com", "step_up_grant": "grant"}),
+        ("POST", "/auth/mfa/totp/verify", {"enrollment_id": "enrollment-1", "code": "123456"}),
+        ("POST", "/auth/mfa/recovery-codes", {"step_up_grant": "grant"}),
+        ("POST", "/auth/passkeys/registration/options", {"user_name": "person@example.com", "step_up_grant": "grant"}),
+        ("POST", "/auth/passkeys/registration/verify", {"account_id": "user", "response": "{}"}),
+        ("POST", "/auth/passkeys/authentication/options", {"account_id": "user"}),
+    )
+
+    observed: dict[str, int] = {}
+    with TestClient(app) as client:
+        for method, path, payload in calls:
+            observed[path] = client.request(method, path, headers=authenticated, json=payload).status_code
+
+    documented = {
+        path: next(iter(app.openapi_schema.paths[path].post.responses))
+        for _method, path, _payload in calls
+        if app.openapi_schema.paths[path].post is not None
+    }
+
+    assert observed == {path: int(status) for path, status in documented.items()}
+
+
+def test_generated_mfa_bodies_are_snake_case_on_the_wire() -> None:
+    router = build_mfa_routes(
+        step_up=cast("Any", _RouteStepUpService()),
+        epochs=cast("Any", _RouteEpochs()),
+        mfa=cast("Any", _RouteMFAService()),
+        passkeys=cast("Any", _RoutePasskeyService()),
+        local_auth=cast("Any", _RouteLocalAuth()),
+    )
+    app = Litestar(
+        route_handlers=[router], openapi_config=None, plugins=[SecurityPlugin(_compiler_config(names=("a",)))]
+    )
+    authenticated = {"x-auth-a": "valid", "authorization": "Bearer transport"}
+
+    with TestClient(app) as client:
+        enrolled = client.post(
+            "/auth/mfa/totp/enroll",
+            headers=authenticated,
+            json={"label": "person@example.com", "step_up_grant": "grant"},
+        )
+        stepped_up = client.post(
+            "/auth/step-up/totp-enroll", headers=authenticated, json={"method": "password", "credential": "secret"}
+        )
+        options = client.post("/auth/passkeys/authentication/options", json={"account_id": "user"})
+        rejected_casing = client.post(
+            "/auth/mfa/totp/enroll", headers=authenticated, json={"label": "person@example.com", "stepUpGrant": "grant"}
+        )
+
+    assert enrolled.status_code == HTTP_201_CREATED, enrolled.text
+    assert {"enrollment_id", "method_id", "provisioning_uri", "expires_at"} <= set(enrolled.json())
+    assert stepped_up.status_code == HTTP_200_OK, stepped_up.text
+    assert {"grant", "purpose", "expires_at"} <= set(stepped_up.json())
+    assert options.status_code == HTTP_200_OK, options.text
+    assert {"options", "expires_at", "binding"} <= set(options.json())
+    assert rejected_casing.status_code == HTTP_400_BAD_REQUEST, rejected_casing.text
+
+
 def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_responses() -> None:
     local_auth = _RouteLocalAuth()
     router = build_mfa_routes(
@@ -619,16 +723,14 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
         local_auth.password_reauthentication.failure = True
         assert (
             client.post(
-                "/auth/step-up/settings", headers=authenticated, json={"method": "password", "credential": "bad"}
+                "/auth/step-up/recovery-codes", headers=authenticated, json={"method": "password", "credential": "bad"}
             ).status_code
             == 401
         )
         local_auth.password_reauthentication.failure = False
         assert (
             client.post(
-                "/auth/step-up/settings",
-                headers=authenticated,
-                json={"method": "totp", "credential": "123456", "methodId": "method-1"},
+                "/auth/step-up/recovery-codes", headers=authenticated, json={"method": "passkey", "credential": "{}"}
             ).status_code
             == HTTP_200_OK
         )
@@ -642,7 +744,7 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
             client.post(
                 "/auth/step-up/totp-enroll",
                 headers=authenticated,
-                json={"method": "totp", "credential": "123456", "methodId": "method-1"},
+                json={"method": "totp", "credential": "123456", "method_id": "method-1"},
             ).status_code
             == 401
         )
@@ -650,31 +752,31 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
             client.post(
                 "/auth/mfa/totp/enroll",
                 headers=authenticated,
-                json={"label": "person@example.com", "stepUpGrant": "grant"},
+                json={"label": "person@example.com", "step_up_grant": "grant"},
             ).status_code
             == HTTP_201_CREATED
         )
         assert (
             client.post(
-                "/auth/mfa/totp/verify", headers=authenticated, json={"enrollmentId": "enrollment-1", "code": "123456"}
+                "/auth/mfa/totp/verify", headers=authenticated, json={"enrollment_id": "enrollment-1", "code": "123456"}
             ).status_code
             == HTTP_200_OK
         )
         assert (
-            client.request(
-                "DELETE", "/auth/mfa/totp/method-1", headers=authenticated, json={"stepUpGrant": "grant"}
+            client.post(
+                "/auth/mfa/totp/method-1/remove", headers=authenticated, json={"step_up_grant": "grant"}
             ).status_code
             == HTTP_200_OK
         )
         assert (
-            client.post("/auth/mfa/recovery-codes", headers=authenticated, json={"stepUpGrant": "grant"}).status_code
+            client.post("/auth/mfa/recovery-codes", headers=authenticated, json={"step_up_grant": "grant"}).status_code
             == HTTP_200_OK
         )
         assert (
             client.post(
                 "/auth/passkeys/registration/options",
                 headers=authenticated,
-                json={"userName": "person@example.com", "stepUpGrant": "grant"},
+                json={"user_name": "person@example.com", "step_up_grant": "grant"},
             ).status_code
             == HTTP_200_OK
         )
@@ -682,16 +784,16 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
             client.post(
                 "/auth/passkeys/registration/verify",
                 headers=authenticated,
-                json={"accountId": "user", "response": "{}"},
+                json={"account_id": "user", "response": "{}"},
             ).status_code
             == HTTP_201_CREATED
         )
-        authentication_options = client.post("/auth/passkeys/authentication/options", json={"accountId": "user"})
+        authentication_options = client.post("/auth/passkeys/authentication/options", json={"account_id": "user"})
         assert authentication_options.status_code == HTTP_200_OK
         assert (
             client.post(
                 "/auth/passkeys/authentication/verify",
-                json={"accountId": "user", "response": "{}", "transport": "tokens"},
+                json={"account_id": "user", "response": "{}", "transport": "tokens"},
             ).status_code
             == 401
         )
@@ -699,7 +801,7 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
             client.post(
                 "/auth/passkeys/authentication/verify",
                 json={
-                    "accountId": "user",
+                    "account_id": "user",
                     "response": "{}",
                     "binding": authentication_options.json()["binding"],
                     "transport": "tokens",
@@ -711,8 +813,8 @@ def test_generated_mfa_handlers_delegate_every_success_path_and_shape_safe_respo
         assert inventory.status_code == HTTP_200_OK
         assert "public_key" not in inventory.text
         assert (
-            client.request(
-                "DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", headers=authenticated, json={"stepUpGrant": "grant"}
+            client.post(
+                "/auth/passkeys/Y3JlZGVudGlhbA/remove", headers=authenticated, json={"step_up_grant": "grant"}
             ).status_code
             == HTTP_200_OK
         )
@@ -741,22 +843,22 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
     with TestClient(app) as client:
         assert (
             client.post(
-                "/auth/step-up/settings", headers=headers, json={"method": "unknown", "credential": "x"}
+                "/auth/step-up/totp-enroll", headers=headers, json={"method": "unknown", "credential": "x"}
             ).status_code
             == 401
         )
-        mfa.failure = "factor"
+        passkeys.failure = "authentication"
         assert (
             client.post(
-                "/auth/step-up/settings", headers=headers, json={"method": "totp", "methodId": "m1", "credential": "x"}
+                "/auth/step-up/passkey-remove", headers=headers, json={"method": "passkey", "credential": "{}"}
             ).status_code
             == 401
         )
-        mfa.failure = None
+        passkeys.failure = None
         step_up.failure = "issue"
         assert (
             client.post(
-                "/auth/step-up/settings", headers=headers, json={"method": "recovery-code", "credential": "x"}
+                "/auth/step-up/recovery-codes", headers=headers, json={"method": "password", "credential": "x"}
             ).status_code
             == 401
         )
@@ -764,7 +866,7 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         epochs.value = False
         assert (
             client.post(
-                "/auth/step-up/settings", headers=headers, json={"method": "passkey", "credential": "{}"}
+                "/auth/step-up/passkey-register", headers=headers, json={"method": "passkey", "credential": "{}"}
             ).status_code
             == 503
         )
@@ -772,7 +874,7 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         step_up.failure = "consume"
         assert (
             client.post(
-                "/auth/mfa/totp/enroll", headers=headers, json={"label": "User", "stepUpGrant": "bad"}
+                "/auth/mfa/totp/enroll", headers=headers, json={"label": "User", "step_up_grant": "bad"}
             ).status_code
             == 401
         )
@@ -780,31 +882,30 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         mfa.failure = "enroll"
         assert (
             client.post(
-                "/auth/mfa/totp/enroll", headers=headers, json={"label": "User", "stepUpGrant": "grant"}
+                "/auth/mfa/totp/enroll", headers=headers, json={"label": "User", "step_up_grant": "grant"}
             ).status_code
             == 503
         )
         mfa.failure = "activate"
         assert (
             client.post(
-                "/auth/mfa/totp/verify", headers=headers, json={"enrollmentId": "e1", "code": "123456"}
+                "/auth/mfa/totp/verify", headers=headers, json={"enrollment_id": "e1", "code": "123456"}
             ).status_code
             == 401
         )
         mfa.failure = "recovery"
         assert (
             client.post(
-                "/auth/mfa/totp/verify", headers=headers, json={"enrollmentId": "e1", "code": "123456"}
+                "/auth/mfa/totp/verify", headers=headers, json={"enrollment_id": "e1", "code": "123456"}
             ).status_code
             == 503
         )
         assert (
-            client.post("/auth/mfa/recovery-codes", headers=headers, json={"stepUpGrant": "grant"}).status_code == 503
+            client.post("/auth/mfa/recovery-codes", headers=headers, json={"step_up_grant": "grant"}).status_code == 503
         )
         mfa.failure = "remove"
         assert (
-            client.request("DELETE", "/auth/mfa/totp/m1", headers=headers, json={"stepUpGrant": "grant"}).status_code
-            == 503
+            client.post("/auth/mfa/totp/m1/remove", headers=headers, json={"step_up_grant": "grant"}).status_code == 503
         )
         mfa.failure = None
         passkeys.failure = "options"
@@ -812,30 +913,30 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
             client.post(
                 "/auth/passkeys/registration/options",
                 headers=headers,
-                json={"userName": "User", "stepUpGrant": "grant"},
+                json={"user_name": "User", "step_up_grant": "grant"},
             ).status_code
             == 503
         )
         passkeys.failure = "registration"
         assert (
             client.post(
-                "/auth/passkeys/registration/verify", headers=headers, json={"accountId": "user", "response": "{}"}
+                "/auth/passkeys/registration/verify", headers=headers, json={"account_id": "user", "response": "{}"}
             ).status_code
             == 401
         )
         assert (
             client.post(
-                "/auth/passkeys/registration/verify", headers=headers, json={"accountId": "other", "response": "{}"}
+                "/auth/passkeys/registration/verify", headers=headers, json={"account_id": "other", "response": "{}"}
             ).status_code
             == 401
         )
         passkeys.failure = "options"
-        assert client.post("/auth/passkeys/authentication/options", json={"accountId": "user"}).status_code == 503
+        assert client.post("/auth/passkeys/authentication/options", json={"account_id": "user"}).status_code == 503
         passkeys.failure = "authentication"
         assert (
             client.post(
                 "/auth/passkeys/authentication/verify",
-                json={"accountId": "user", "response": "{}", "binding": "binding"},
+                json={"account_id": "user", "response": "{}", "binding": "binding"},
             ).status_code
             == 401
         )
@@ -844,7 +945,7 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         assert (
             client.post(
                 "/auth/passkeys/authentication/verify",
-                json={"accountId": "user", "response": "{}", "binding": "binding"},
+                json={"account_id": "user", "response": "{}", "binding": "binding"},
             ).status_code
             == 401
         )
@@ -852,24 +953,57 @@ def test_generated_mfa_handlers_sanitize_service_and_binding_failures() -> None:
         passkeys.failure = "list"
         assert client.get("/auth/passkeys", headers=headers).status_code == 503
         assert (
-            client.request("DELETE", "/auth/passkeys/a", headers=headers, json={"stepUpGrant": "grant"}).status_code
-            == 400
+            client.post("/auth/passkeys/a/remove", headers=headers, json={"step_up_grant": "grant"}).status_code == 400
         )
         passkeys.failure = "remove"
         assert (
-            client.request(
-                "DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", headers=headers, json={"stepUpGrant": "grant"}
+            client.post(
+                "/auth/passkeys/Y3JlZGVudGlhbA/remove", headers=headers, json={"step_up_grant": "grant"}
             ).status_code
             == 503
         )
         step_up.failure = "consume"
         for method, path, payload in (
-            ("DELETE", "/auth/mfa/totp/m1", {"stepUpGrant": "bad"}),
-            ("POST", "/auth/mfa/recovery-codes", {"stepUpGrant": "bad"}),
-            ("POST", "/auth/passkeys/registration/options", {"userName": "User", "stepUpGrant": "bad"}),
-            ("DELETE", "/auth/passkeys/Y3JlZGVudGlhbA", {"stepUpGrant": "bad"}),
+            ("POST", "/auth/mfa/totp/m1/remove", {"step_up_grant": "bad"}),
+            ("POST", "/auth/mfa/recovery-codes", {"step_up_grant": "bad"}),
+            ("POST", "/auth/passkeys/registration/options", {"user_name": "User", "step_up_grant": "bad"}),
+            ("POST", "/auth/passkeys/Y3JlZGVudGlhbA/remove", {"step_up_grant": "bad"}),
         ):
             assert client.request(method, path, headers=headers, json=payload).status_code == 401
+
+
+@pytest.mark.parametrize(
+    "purpose", ["totp-enroll", "totp-remove", "recovery-codes", "passkey-register", "passkey-remove"]
+)
+def test_generated_step_up_purposes_constrain_factors_deny_by_default(purpose: str) -> None:
+    router = build_mfa_routes(
+        step_up=cast("Any", _RouteStepUpService()),
+        epochs=cast("Any", _RouteEpochs()),
+        mfa=cast("Any", _RouteMFAService()),
+        passkeys=cast("Any", _RoutePasskeyService()),
+        local_auth=cast("Any", _RouteLocalAuth()),
+    )
+    app = Litestar(
+        route_handlers=[router], openapi_config=None, plugins=[SecurityPlugin(_compiler_config(names=("a",)))]
+    )
+    authenticated = {"x-auth-a": "valid", "authorization": "Bearer transport"}
+
+    with TestClient(app) as client:
+        strong = client.post(
+            f"/auth/step-up/{purpose}", headers=authenticated, json={"method": "password", "credential": "secret"}
+        )
+        weak = client.post(
+            f"/auth/step-up/{purpose}",
+            headers=authenticated,
+            json={"method": "totp", "method_id": "m1", "credential": "123456"},
+        )
+        unknown = client.post(
+            "/auth/step-up/settings", headers=authenticated, json={"method": "password", "credential": "secret"}
+        )
+
+    assert strong.status_code == HTTP_200_OK, strong.text
+    assert weak.status_code == 401
+    assert unknown.status_code == 401
 
 
 def test_generated_mfa_handlers_apply_shared_rate_limit_before_factor_work() -> None:
@@ -892,20 +1026,444 @@ def test_generated_mfa_handlers_apply_shared_rate_limit_before_factor_work() -> 
     )
     headers = {"x-auth-a": "valid", "authorization": "Bearer transport"}
     requests = (
-        ("POST", "/auth/step-up/settings", {"method": "totp", "methodId": "m1", "credential": "x"}, headers),
-        ("POST", "/auth/mfa/totp/enroll", {"label": "User", "stepUpGrant": "grant"}, headers),
-        ("POST", "/auth/mfa/totp/verify", {"enrollmentId": "e1", "code": "123456"}, headers),
-        ("POST", "/auth/mfa/recovery-codes", {"stepUpGrant": "grant"}, headers),
-        ("POST", "/auth/passkeys/registration/options", {"userName": "User", "stepUpGrant": "grant"}, headers),
-        ("POST", "/auth/passkeys/registration/verify", {"accountId": "user", "response": "{}"}, headers),
-        ("POST", "/auth/passkeys/authentication/options", {"accountId": "user"}, {}),
-        ("POST", "/auth/passkeys/authentication/verify", {"accountId": "user", "response": "{}"}, {}),
+        ("POST", "/auth/step-up/totp-enroll", {"method": "password", "credential": "x"}, headers),
+        ("POST", "/auth/mfa/totp/enroll", {"label": "User", "step_up_grant": "grant"}, headers),
+        ("POST", "/auth/mfa/totp/verify", {"enrollment_id": "e1", "code": "123456"}, headers),
+        ("POST", "/auth/mfa/totp/m1/remove", {"step_up_grant": "grant"}, headers),
+        ("POST", "/auth/mfa/recovery-codes", {"step_up_grant": "grant"}, headers),
+        ("POST", "/auth/passkeys/Y3JlZGVudGlhbA/remove", {"step_up_grant": "grant"}, headers),
+        ("POST", "/auth/passkeys/registration/options", {"user_name": "User", "step_up_grant": "grant"}, headers),
+        ("POST", "/auth/passkeys/registration/verify", {"account_id": "user", "response": "{}"}, headers),
+        ("POST", "/auth/passkeys/authentication/options", {"account_id": "user"}, {}),
+        ("POST", "/auth/passkeys/authentication/verify", {"account_id": "user", "response": "{}"}, {}),
     )
     with TestClient(app) as client:
         for method, path, payload, request_headers in requests:
             response = client.request(method, path, headers=request_headers, json=payload)
             assert response.status_code == 429
             assert response.headers["retry-after"] == "2"
+
+
+@pytest.mark.parametrize(
+    ("outcome_name", "status", "retry_after"),
+    [("unavailable", 503, None), ("rate_limited", 429, "7"), ("invalid", 400, None)],
+)
+def test_generated_local_route_errors_raise_interceptable_classified_exceptions(
+    outcome_name: str, status: int, retry_after: str | None
+) -> None:
+    outcome: object = {
+        "unavailable": VerificationUnavailable(),
+        "rate_limited": accounts_module.RateLimited(retry_after=7),
+        "invalid": InvalidCredentials(),
+    }[outcome_name]
+
+    class Service:
+        session_auth = None
+        refresh_tokens = None
+        registration = None
+
+        async def session_login(self, request: object, data: object) -> object:
+            del request, data
+            return outcome
+
+    config = SimpleNamespace(
+        local_auth_service=Service(),
+        mfa_login=None,
+        mode=accounts_module.LocalAuthMode.SESSION,
+        registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
+        route_prefix="/identity",
+    )
+    intercepted: list[int] = []
+
+    def record(request: Any, exc: HTTPException) -> Response[Any]:
+        del request
+        intercepted.append(exc.status_code)
+        return Response(content={"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
+
+    csrf_secret = token_hex()
+    app = Litestar(
+        route_handlers=[accounts_module.build_local_auth_routes(cast("Any", config))],
+        csrf_config=CSRFConfig(secret=csrf_secret),
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+        exception_handlers={
+            ServiceUnavailableException: record,
+            TooManyRequestsException: record,
+            ClientException: record,
+        },
+    )
+
+    with TestClient(app) as client:
+        csrf_token = generate_csrf_token(csrf_secret)
+        client.cookies.set("csrftoken", csrf_token)
+        response = client.post(
+            "/identity/login",
+            json={"identifier": "user@example.com", "password": "secret"},
+            headers={"x-csrftoken": csrf_token},
+        )
+
+    assert response.status_code == status, response.text
+    assert response.headers.get("retry-after") == retry_after
+    assert intercepted == [status]
+
+
+def test_generated_credential_bearing_route_errors_raise_unauthorized() -> None:
+    class Service:
+        session_auth = None
+        refresh_tokens = None
+        registration = None
+
+    config = SimpleNamespace(
+        local_auth_service=Service(),
+        mfa_login=None,
+        mode=accounts_module.LocalAuthMode.SESSION,
+        registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
+        route_prefix="/identity",
+    )
+    csrf_secret = token_hex()
+    app = Litestar(
+        route_handlers=[accounts_module.build_local_auth_routes(cast("Any", config))],
+        csrf_config=CSRFConfig(secret=csrf_secret),
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+    )
+
+    with TestClient(app) as client:
+        csrf_token = generate_csrf_token(csrf_secret)
+        client.cookies.set("csrftoken", csrf_token)
+        # An authenticated caller whose service graph cannot resolve sessions is
+        # a credential-path denial, not a malformed request.
+        revoked = client.request(
+            "DELETE", "/identity/sessions/sid", headers={"x-auth-session": "valid", "x-csrftoken": csrf_token}
+        )
+
+    assert revoked.status_code == 401, revoked.text
+
+
+def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() -> None:
+    """MFA-gated password login exposes only the configured completion transports."""
+
+    class Service:
+        session_auth = object()
+        refresh_tokens = object()
+        registration = None
+
+        def __init__(self) -> None:
+            self.completions: list[dict[str, object]] = []
+
+        async def session_login(self, _request: object, _data: object) -> MFARequired:
+            return MFARequired(
+                challenge="challenge-secret",
+                account_id="account-1",
+                expires_at=datetime(2026, 7, 26, 12, 5, tzinfo=timezone.utc),
+                methods=frozenset({"totp", "recovery-code"}),
+            )
+
+        async def token_login(self, request: object, data: object) -> MFARequired:
+            return await self.session_login(request, data)
+
+        async def complete_mfa_login(self, _request: object, _challenge: str, **kwargs: object) -> object:
+            self.completions.append(kwargs)
+            if kwargs["transport"] == "session":
+                return LocalAccountResponse(account_id="account-1")
+            return InvalidCredentials()
+
+    service = Service()
+    config = SimpleNamespace(
+        local_auth_service=service,
+        mfa_login=object(),
+        mode=accounts_module.LocalAuthMode.HYBRID,
+        registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
+        route_prefix="/identity",
+    )
+    csrf_secret = token_hex()
+    app = Litestar(
+        route_handlers=[accounts_module.build_local_auth_routes(cast("Any", config))],
+        csrf_config=CSRFConfig(secret=csrf_secret),
+        openapi_config=OpenAPIConfig(title="MFA login", version="1.0"),
+        plugins=[SecurityPlugin(_compiler_config(names=("session", "bearer"), session_names=frozenset({"session"})))],
+    )
+    paths = {route_value.path for route_value in app.routes if isinstance(route_value, HTTPRoute)}
+    assert {"/identity/login/mfa", "/identity/token/mfa"} <= paths
+    route_handlers = {
+        route_value.path: route_value.route_handler_map["POST"][0]
+        for route_value in app.routes
+        if isinstance(route_value, HTTPRoute) and route_value.path in {"/identity/login/mfa", "/identity/token/mfa"}
+    }
+    assert (route_handlers["/identity/login/mfa"].name, route_handlers["/identity/login/mfa"].operation_id) == (
+        "local.session.login.mfa",
+        "LocalSessionMFALogin",
+    )
+    assert (route_handlers["/identity/token/mfa"].name, route_handlers["/identity/token/mfa"].operation_id) == (
+        "local.token.login.mfa",
+        "LocalTokenMFALogin",
+    )
+    assert _http_plan(app, "/identity/login/mfa", "POST").csrf_required is True
+    assert _http_plan(app, "/identity/token/mfa", "POST").csrf_required is False
+    session_login = app.openapi_schema.paths["/identity/login"].post
+    token_login = app.openapi_schema.paths["/identity/token"].post
+    assert session_login is not None
+    assert session_login.responses is not None
+    assert token_login is not None
+    assert token_login.responses is not None
+    for responses, success_schema in (
+        (session_login.responses, "#/components/schemas/LocalAccountResponse"),
+        (token_login.responses, "#/components/schemas/RefreshTokenResponse"),
+    ):
+        success_content = responses["200"].content
+        required_content = responses["403"].content
+        assert success_content is not None
+        assert required_content is not None
+        assert success_content["application/json"].schema is not None
+        assert required_content["application/json"].schema is not None
+        assert success_content["application/json"].schema.ref == success_schema
+        assert required_content["application/json"].schema.ref == "#/components/schemas/LocalMFARequiredResponse"
+
+    with TestClient(app) as client:
+        csrf_token = generate_csrf_token(csrf_secret)
+        client.cookies.set("csrftoken", csrf_token)
+        required = client.post(
+            "/identity/login",
+            json={"identifier": "person@example.com", "password": "password"},
+            headers={"x-csrftoken": csrf_token},
+        )
+        completed = client.post(
+            "/identity/login/mfa",
+            json={
+                "challenge": "challenge-secret",
+                "account_id": "account-1",
+                "method": "totp",
+                "method_id": "method-1",
+                "code": "123456",
+            },
+            headers={"x-csrftoken": csrf_token},
+        )
+        token_completed = client.post(
+            "/identity/token/mfa",
+            json={
+                "challenge": "challenge-secret",
+                "account_id": "account-1",
+                "method": "recovery-code",
+                "code": "recovery-secret",
+            },
+        )
+
+    assert required.status_code == 403
+    assert required.headers["cache-control"] == "no-store"
+    assert required.headers["pragma"] == "no-cache"
+    assert required.json() == {
+        "challenge": "challenge-secret",
+        "account_id": "account-1",
+        "expires_at": "2026-07-26T12:05:00Z",
+        "methods": ["recovery-code", "totp"],
+        "code": "mfa_required",
+        "detail": "Multi-factor authentication is required.",
+    }
+    assert completed.status_code == 200
+    assert token_completed.status_code == 400
+    assert service.completions == [
+        {
+            "account_id": "account-1",
+            "method": "totp",
+            "method_id": "method-1",
+            "code": "123456",
+            "transport": "session",
+        },
+        {
+            "account_id": "account-1",
+            "method": "recovery-code",
+            "method_id": None,
+            "code": "recovery-secret",
+            "transport": "tokens",
+        },
+    ]
+
+
+def test_session_mfa_completion_translates_a_sanitized_failure() -> None:
+    """The public session completion route maps a failed factor to the normal bad-request response."""
+
+    class Service:
+        session_auth = object()
+        refresh_tokens = None
+        registration = None
+
+        async def session_login(self, _request: object, _data: object) -> MFARequired:
+            return MFARequired(
+                "challenge-secret", "account-1", datetime(2026, 7, 26, tzinfo=timezone.utc), frozenset({"totp"})
+            )
+
+        async def complete_mfa_login(self, *_args: object, **_kwargs: object) -> InvalidCredentials:
+            return InvalidCredentials()
+
+    csrf_secret = token_hex()
+    app = Litestar(
+        route_handlers=[
+            accounts_module.build_local_auth_routes(
+                cast(
+                    "Any",
+                    SimpleNamespace(
+                        local_auth_service=Service(),
+                        mfa_login=object(),
+                        mode=accounts_module.LocalAuthMode.SESSION,
+                        registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
+                        route_prefix="/identity",
+                    ),
+                )
+            )
+        ],
+        csrf_config=CSRFConfig(secret=csrf_secret),
+        plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+    )
+    with TestClient(app) as client:
+        csrf_token = generate_csrf_token(csrf_secret)
+        client.cookies.set("csrftoken", csrf_token)
+        response = client.post(
+            "/identity/login/mfa",
+            json={"challenge": "challenge-secret", "account_id": "account-1", "method": "totp", "code": "123456"},
+            headers={"x-csrftoken": csrf_token},
+        )
+
+    assert response.status_code == HTTP_400_BAD_REQUEST
+    assert "challenge-secret" not in response.text
+
+
+@pytest.mark.parametrize("mode", ["session", "tokens", "hybrid"])
+def test_generated_mfa_completion_routes_follow_local_auth_transport_and_csrf_mode(mode: str) -> None:
+    """MFA completion exposes each enabled issuer path and only sessions require native CSRF."""
+
+    class Service:
+        session_auth = object() if mode in {"session", "hybrid"} else None
+        refresh_tokens = object() if mode in {"tokens", "hybrid"} else None
+        registration = None
+
+        def __init__(self) -> None:
+            self.transports: list[str] = []
+
+        async def session_login(self, _request: object, _data: object) -> MFARequired:
+            return MFARequired(
+                challenge="challenge-secret",
+                account_id="account-1",
+                expires_at=datetime(2026, 7, 26, 12, 5, tzinfo=timezone.utc),
+                methods=frozenset({"totp"}),
+            )
+
+        async def token_login(self, request: object, data: object) -> MFARequired:
+            return await self.session_login(request, data)
+
+        async def complete_mfa_login(self, _request: object, _challenge: str, **kwargs: object) -> object:
+            transport = cast("str", kwargs["transport"])
+            self.transports.append(transport)
+            if transport == "session":
+                return LocalAccountResponse(account_id="account-1")
+            return accounts_module.RefreshTokenResponse(
+                access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
+                refresh_token="rt_aWlpaWlpaWlpaWlpaWlpaQ.c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",  # noqa: S106
+                expires_in=60,
+            )
+
+    service = Service()
+    csrf_secret = token_hex()
+    session_enabled = mode in {"session", "hybrid"}
+    mechanism_names = ("session", "bearer") if mode == "hybrid" else (("session",) if session_enabled else ("bearer",))
+    app = Litestar(
+        route_handlers=[
+            accounts_module.build_local_auth_routes(
+                cast(
+                    "Any",
+                    SimpleNamespace(
+                        local_auth_service=service,
+                        mfa_login=object(),
+                        mode=accounts_module.LocalAuthMode(mode),
+                        registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
+                        route_prefix="/identity",
+                    ),
+                )
+            )
+        ],
+        csrf_config=CSRFConfig(secret=csrf_secret) if session_enabled else None,
+        openapi_config=None,
+        plugins=[
+            SecurityPlugin(
+                _compiler_config(
+                    names=mechanism_names, session_names=frozenset({"session"}) if session_enabled else frozenset()
+                )
+            )
+        ],
+    )
+    expected = {"/identity/login/mfa" if session_enabled else "/identity/token/mfa"}
+    if mode == "hybrid":
+        expected.add("/identity/token/mfa")
+    completion_paths = {
+        route_value.path
+        for route_value in app.routes
+        if isinstance(route_value, HTTPRoute) and route_value.path.endswith("/mfa")
+    }
+    assert completion_paths == expected
+
+    with TestClient(app) as client:
+        if session_enabled:
+            blocked = client.post(
+                "/identity/login/mfa",
+                json={"challenge": "challenge-secret", "account_id": "account-1", "method": "totp", "code": "123456"},
+            )
+            assert blocked.status_code == 403
+            csrf_token = generate_csrf_token(csrf_secret)
+            client.cookies.set("csrftoken", csrf_token)
+            session_response = client.post(
+                "/identity/login/mfa",
+                json={"challenge": "challenge-secret", "account_id": "account-1", "method": "totp", "code": "123456"},
+                headers={"x-csrftoken": csrf_token},
+            )
+            assert session_response.status_code == 200
+        if mode in {"tokens", "hybrid"}:
+            token_response = client.post(
+                "/identity/token/mfa",
+                json={"challenge": "challenge-secret", "account_id": "account-1", "method": "totp", "code": "123456"},
+            )
+            assert token_response.status_code == 200
+
+    expected_transports = ([] if not session_enabled else ["session"]) + ([] if mode == "session" else ["tokens"])
+    assert service.transports == expected_transports
+
+
+def test_generated_token_mfa_completion_surfaces_controlled_login_mfa_rate_limit() -> None:
+    """The public token completion route preserves the shared LOGIN_MFA retry signal."""
+
+    class Service:
+        session_auth = None
+        refresh_tokens = object()
+        registration = None
+
+        async def complete_mfa_login(self, *_args: object, **_kwargs: object) -> accounts_module.RateLimited:
+            return accounts_module.RateLimited(retry_after=7)
+
+    app = Litestar(
+        route_handlers=[
+            accounts_module.build_local_auth_routes(
+                cast(
+                    "Any",
+                    SimpleNamespace(
+                        local_auth_service=Service(),
+                        mfa_login=object(),
+                        mode=accounts_module.LocalAuthMode.TOKENS,
+                        registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
+                        route_prefix="/identity",
+                    ),
+                )
+            )
+        ],
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config(names=("bearer",), session_names=frozenset()))],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/identity/token/mfa",
+            json={"challenge": "challenge-secret", "account_id": "account-1", "method": "totp", "code": "123456"},
+        )
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "7"
 
 
 def _feature_test_ports() -> tuple[object, object, object, object]:
@@ -1020,6 +1578,142 @@ def test_plugin_mfa_route_registration_validates_ownership_and_is_idempotent() -
     assert len(app_config.route_handlers) == 1
 
 
+@pytest.mark.anyio
+async def test_plugin_binds_login_mfa_before_local_route_caching_and_gates_password_login() -> None:
+    """The MFA-login service is installed before generated local routes can cache."""
+    mfa_store, protector, _passkey_store, _challenge_store = _feature_test_ports()
+    mfa = MFAConfig(
+        store=mfa_store,
+        secret_protector=protector,
+        recovery_peppers=(accounts_module.RecoveryCodePepper("v1", b"p" * 32),),
+        login_methods=cast("Any", mfa_store),
+        require_at_login=True,
+        register_routes=False,
+    )
+    local_auth = _local_session_auth()
+    plugin = SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa))
+
+    plugin._configure_mfa_login()  # noqa: SLF001 - assert composition order directly
+
+    assert local_auth.mfa_login is not None
+    assert local_auth.local_auth_service.mfa_login is local_auth.mfa_login
+    assert local_auth.build_route_handlers() == ()
+
+    account = LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=1,
+    )
+
+    class PasswordLogin:
+        async def authenticate(self, *_args: object, **_kwargs: object) -> LocalAccount[object]:
+            return account
+
+    service = replace(local_auth.local_auth_service, password_login=cast("Any", PasswordLogin()))
+    outcome = await service.session_login(
+        cast("Any", object()),
+        LocalCredentials(identifier="person@example.com", password="password"),  # noqa: S106
+    )
+    assert isinstance(outcome, MFARequired)
+
+
+def test_plugin_mfa_login_binding_validates_configuration_and_is_idempotent() -> None:
+    mfa_store, protector, _passkey_store, _challenge_store = _feature_test_ports()
+    peppers = (accounts_module.RecoveryCodePepper("v1", b"p" * 32),)
+    mfa = MFAConfig(
+        store=mfa_store,
+        secret_protector=protector,
+        recovery_peppers=peppers,
+        login_methods=cast("Any", mfa_store),
+        require_at_login=True,
+    )
+    local_auth = _local_session_auth()
+    plugin = SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa))
+
+    plugin._configure_mfa_login()  # noqa: SLF001 - plugin composition boundary
+    bound = local_auth.mfa_login
+    plugin._configure_mfa_login()  # noqa: SLF001 - same config is intentionally idempotent
+    assert local_auth.mfa_login is bound
+
+    cached_auth = LocalAuth.session(
+        accounts=cast("Any", _local_session_accounts()),
+        secrets=_local_auth_secrets(),
+        binding=SessionBindingConfig(pepper=b"binding-pepper-for-plugin-tests!", max_age=600),
+    )
+    cached_auth.build_route_handlers()
+    with pytest.raises(ImproperlyConfiguredException, match="route handlers"):
+        cached_auth.bind_mfa_login(mfa)
+
+    other = MFAConfig(
+        store=mfa_store,
+        secret_protector=protector,
+        recovery_peppers=peppers,
+        login_methods=cast("Any", mfa_store),
+        require_at_login=True,
+    )
+    with pytest.raises(ImproperlyConfiguredException, match="already bound"):
+        local_auth.bind_mfa_login(other)
+
+
+def test_local_auth_mfa_binding_rejects_disabled_or_incomplete_capabilities() -> None:
+    """A local profile may bind login MFA only from an enabled, fully configured MFA graph."""
+    mfa_store, protector, _passkey_store, _challenge_store = _feature_test_ports()
+    local_auth = _local_session_auth()
+    disabled = MFAConfig(store=mfa_store, secret_protector=protector, require_at_login=False, register_routes=False)
+
+    with pytest.raises(ImproperlyConfiguredException, match="require_at_login"):
+        local_auth.bind_mfa_login(disabled)
+
+    incomplete = SimpleNamespace(require_at_login=True, login_challenge_store=object(), mfa_service=object())
+    with pytest.raises(ImproperlyConfiguredException, match="configured challenge and MFA services"):
+        local_auth.bind_mfa_login(cast("Any", incomplete))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"require_at_login": cast("Any", 1)}, "require_at_login must be boolean"),
+        ({"require_at_login": True, "login_challenge_store": object()}, "MFALoginChallengeStore"),
+        ({"require_at_login": True}, "recovery-code peppers and a login-method store"),
+    ],
+)
+def test_mfa_login_config_requires_a_valid_challenge_store_and_dependencies(
+    kwargs: dict[str, object], match: str
+) -> None:
+    mfa_store, protector, _passkey_store, _challenge_store = _feature_test_ports()
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        MFAConfig(store=mfa_store, secret_protector=protector, register_routes=False, **kwargs)  # type: ignore[arg-type]
+
+
+def test_plugin_mfa_login_allows_explicit_store_override_and_requires_local_auth() -> None:
+    mfa_store, protector, _passkey_store, _challenge_store = _feature_test_ports()
+
+    class OverrideStore:
+        async def put(self, _challenge: object) -> None:
+            return None
+
+        async def consume(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    override = OverrideStore()
+    mfa = MFAConfig(
+        store=mfa_store,
+        secret_protector=protector,
+        login_challenge_store=override,
+        recovery_peppers=(accounts_module.RecoveryCodePepper("v1", b"p" * 32),),
+        login_methods=cast("Any", mfa_store),
+        require_at_login=True,
+        register_routes=False,
+    )
+    assert mfa.login_challenge_store is override
+
+    with pytest.raises(ImproperlyConfiguredException, match="local authentication"):
+        SecurityPlugin(SecurityConfig(mfa=mfa))._configure_mfa_login()  # noqa: SLF001
+
+
 def _local_session_accounts() -> Any:
     capability_names = (
         "compare_and_replace_password",
@@ -1033,6 +1727,7 @@ def _local_session_accounts() -> Any:
         "get_by_id",
         "get_password_state",
         "issue",
+        "issue_absent",
         "list_for_account",
         "prepare_rotation",
         "rebind",
@@ -1313,6 +2008,69 @@ def test_plugin_receives_routes_and_attaches_public_runtime_plan() -> None:
     assert app.openapi_schema.paths["/"].get.security == [{}]
 
 
+def test_typed_controller_auth_resolves_through_native_route_registration() -> None:
+    @get("/application")
+    async def application_handler() -> None:
+        return None
+
+    class Accounts(SecureController):
+        path = "/accounts"
+        auth = required("b")
+
+        @get("/owned")
+        async def owned(self) -> None:
+            return None
+
+        @get("/override", auth=required("a"))
+        async def handler_override(self) -> None:
+            return None
+
+    class Health(PublicController):
+        path = "/health"
+
+        @get("/")
+        async def health(self) -> None:
+            return None
+
+    app = Litestar(
+        route_handlers=[application_handler, Accounts, Health],
+        csrf_config=CSRFConfig(secret=token_hex()),
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        opt={"auth": required("a")},
+        plugins=[SecurityPlugin(_compiler_config(session_names=frozenset({"b"})))],
+    )
+
+    application_plan = _http_plan(app, "/application")
+    owned_plan = _http_plan(app, "/accounts/owned")
+    override_plan = _http_plan(app, "/accounts/override")
+    health_plan = _http_plan(app, "/health")
+
+    assert application_plan.participant_names == frozenset({"a"})
+    assert application_plan.authenticate is True
+    assert application_plan.csrf_required is False
+    assert owned_plan.participant_names == frozenset({"b"})
+    assert owned_plan.authenticate is True
+    assert owned_plan.csrf_required is True
+    assert owned_plan.csrf_enforcement == "native"
+    assert override_plan.participant_names == frozenset({"a"})
+    assert override_plan.authenticate is True
+    assert override_plan.csrf_required is False
+    assert health_plan.participant_names is None
+    assert health_plan.authenticate is False
+    assert health_plan.csrf_required is False
+
+    with TestClient(app) as client:
+        assert client.get("/application", headers={"x-auth-a": "valid"}).status_code == 200
+        assert client.get("/application").status_code == 401
+        assert client.get("/accounts/owned", headers={"x-auth-b": "valid"}).status_code == 200
+        assert client.get("/accounts/owned", headers={"x-auth-a": "valid"}).status_code == 401
+        assert client.get("/accounts/owned").status_code == 401
+        assert client.get("/accounts/override", headers={"x-auth-a": "valid"}).status_code == 200
+        assert client.get("/accounts/override", headers={"x-auth-b": "valid"}).status_code == 401
+        assert client.get("/accounts/override").status_code == 401
+        assert client.get("/health").status_code == 200
+
+
 def test_route_policy_uses_native_nearest_owner_inheritance() -> None:
     @get("/application")
     async def application_handler() -> None:
@@ -1381,6 +2139,37 @@ def test_route_policy_uses_native_nearest_owner_inheritance() -> None:
             assert client.get(path).status_code == 401
 
 
+def test_native_csrf_coverage_marks_public_required_and_public_cookie_routes_distinctly() -> None:
+    @post("/public", auth=public())
+    async def public_handler() -> None:
+        return None
+
+    @post("/required", auth=required("session"))
+    async def required_handler() -> None:
+        return None
+
+    @post("/public-cookie", auth=public(), csrf_required=True)
+    async def public_cookie_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[public_handler, required_handler, public_cookie_handler],
+        csrf_config=CSRFConfig(secret=token_hex()),
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+    )
+
+    def marker(path: str) -> bool:
+        route_value = next(
+            route_value for route_value in app.routes if isinstance(route_value, HTTPRoute) and route_value.path == path
+        )
+        return cast("bool", route_value.route_handler_map["POST"][0].opt["litestar_security_csrf"])
+
+    assert marker("/public") is True
+    assert marker("/required") is False
+    assert marker("/public-cookie") is False
+
+
 def test_http_methods_and_options_receive_distinct_compiled_plans() -> None:
     @get("/resource", auth=public())
     async def read_resource() -> None:
@@ -1434,6 +2223,230 @@ def test_websocket_and_asgi_compile_native_auth_runtime_plans() -> None:
     )
 
     assert not anonymous_route.route_handler.opt["litestar_security_plan"].authenticate
+
+
+def test_exclude_policy_and_native_handler_alias_compile_without_authentication() -> None:
+    @get("/typed", auth=exclude())
+    async def typed_handler() -> None:
+        return None
+
+    @get("/native", opt={"exclude_from_auth": True})
+    async def native_handler() -> None:
+        return None
+
+    @websocket("/socket", auth=exclude())
+    async def socket_handler(socket: WebSocket) -> None:
+        del socket
+
+    @websocket("/native-socket", opt={"exclude_from_auth": True})
+    async def native_socket_handler(socket: WebSocket) -> None:
+        del socket
+
+    @asgi("/mount", auth=exclude(), copy_scope=True)
+    async def mounted_app(scope: Scope, receive: Receive, send: Send) -> None:
+        del scope, receive, send
+
+    @asgi("/native-mount", opt={"exclude_from_auth": True}, copy_scope=True)
+    async def native_mounted_app(scope: Scope, receive: Receive, send: Send) -> None:
+        del scope, receive, send
+
+    app = Litestar(
+        route_handlers=[
+            typed_handler,
+            native_handler,
+            socket_handler,
+            native_socket_handler,
+            mounted_app,
+            native_mounted_app,
+        ],
+        csrf_config=CSRFConfig(secret=token_hex()),
+        openapi_config=OpenAPIConfig(title="Test", version="1.0"),
+        plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+    )
+
+    typed_plan = _http_plan(app, "/typed")
+    native_plan = _http_plan(app, "/native")
+    socket_route = next(
+        route_value
+        for route_value in app.routes
+        if isinstance(route_value, WebSocketRoute) and route_value.path == "/socket"
+    )
+    native_socket_route = next(
+        route_value
+        for route_value in app.routes
+        if isinstance(route_value, WebSocketRoute) and route_value.path == "/native-socket"
+    )
+    asgi_route = next(
+        route_value for route_value in app.routes if isinstance(route_value, ASGIRoute) and route_value.path == "/mount"
+    )
+    native_asgi_route = next(
+        route_value
+        for route_value in app.routes
+        if isinstance(route_value, ASGIRoute) and route_value.path == "/native-mount"
+    )
+
+    assert (
+        typed_plan
+        == native_plan
+        == SecurityRuntimePlan(
+            authenticate=False, bypass_authentication=True, csrf_required=True, csrf_enforcement="native"
+        )
+    )
+    assert _operation_security(app, "/typed") == _operation_security(app, "/native") == [{}]
+    assert socket_route.route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(
+        authenticate=False, bypass_authentication=True
+    )
+    assert native_socket_route.route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(
+        authenticate=False, bypass_authentication=True
+    )
+    assert asgi_route.route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(
+        authenticate=False, bypass_authentication=True
+    )
+    assert native_asgi_route.route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(
+        authenticate=False, bypass_authentication=True
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "auth", "opt"),
+    [("/typed", exclude(), None), ("/native", None, {"exclude_from_auth": True})],
+    ids=["typed-policy", "native-alias"],
+)
+def test_exclude_preserves_native_csrf_enforcement_for_unsafe_http(
+    path: str, auth: AuthenticationPolicy | None, opt: dict[str, object] | None
+) -> None:
+    csrf_config = CSRFConfig(secret=token_hex())
+
+    @get("/csrf", auth=exclude())
+    async def csrf_seed() -> None:
+        return None
+
+    async def unsafe_handler() -> dict[str, bool]:
+        return {"ok": True}
+
+    unsafe_handler = post(path, auth=auth)(unsafe_handler) if auth is not None else post(path, opt=opt)(unsafe_handler)
+
+    app = Litestar(
+        route_handlers=[csrf_seed, unsafe_handler],
+        csrf_config=csrf_config,
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config(names=("session",), session_names=frozenset({"session"})))],
+    )
+
+    with TestClient(app) as client:
+        missing = client.post(path, headers={"x-auth-session": "invalid"})
+        assert client.get("/csrf").status_code == 200
+        token = client.cookies[csrf_config.cookie_name]
+        accepted = client.post(path, headers={"x-auth-session": "invalid", csrf_config.header_name: token})
+
+    assert missing.status_code == 403
+    assert accepted.status_code == 201
+    assert accepted.json() == {"ok": True}
+
+
+def test_exclude_honors_explicit_http_csrf_requirement_without_session_credentials() -> None:
+    csrf_config = CSRFConfig(secret=token_hex())
+
+    @get("/csrf", auth=exclude(), csrf_required=True)
+    async def csrf_seed() -> None:
+        return None
+
+    @post("/unsafe", auth=exclude(), csrf_required=True)
+    async def unsafe_handler() -> dict[str, bool]:
+        return {"ok": True}
+
+    app = Litestar(
+        route_handlers=[csrf_seed, unsafe_handler],
+        csrf_config=csrf_config,
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config(names=("bearer",)))],
+    )
+
+    with TestClient(app) as client:
+        missing = client.post("/unsafe", headers={"x-auth-bearer": "invalid"})
+        assert client.get("/csrf").status_code == 200
+        token = client.cookies[csrf_config.cookie_name]
+        accepted = client.post("/unsafe", headers={"x-auth-bearer": "invalid", csrf_config.header_name: token})
+
+    assert missing.status_code == 403
+    assert accepted.status_code == 201
+    assert accepted.json() == {"ok": True}
+
+
+@pytest.mark.parametrize("value", [False, None, 1, "yes"])
+def test_exclude_from_auth_alias_requires_true_on_individual_handlers(value: object) -> None:
+    @get("/invalid", opt={"exclude_from_auth": value})
+    async def invalid_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"exclude_from_auth must be exactly True.*GET /invalid"):
+        Litestar(route_handlers=[invalid_handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+
+    @get("/owned")
+    async def owned_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"only on individual route handlers.* /owned"):
+        Litestar(
+            route_handlers=[Router(path="/", route_handlers=[owned_handler], opt={"exclude_from_auth": True})],
+            openapi_config=None,
+            plugins=[SecurityPlugin(_compiler_config())],
+        )
+
+
+def test_exclude_rejects_competing_authentication_policy() -> None:
+    @get("/conflict", auth=public(), opt={"exclude_from_auth": True})
+    async def conflicting_handler() -> None:
+        return None
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"both auth and exclude_from_auth.*GET /conflict"):
+        Litestar(
+            route_handlers=[conflicting_handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())]
+        )
+
+    @websocket("/socket-conflict", auth=public(), opt={"exclude_from_auth": True})
+    async def conflicting_socket(socket: WebSocket) -> None:
+        del socket
+
+    with pytest.raises(
+        ImproperlyConfiguredException, match=r"both auth and exclude_from_auth.*websocket /socket-conflict"
+    ):
+        Litestar(route_handlers=[conflicting_socket], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+
+    @asgi("/asgi-conflict", auth=public(), opt={"exclude_from_auth": True}, copy_scope=True)
+    async def conflicting_asgi(scope: Scope, receive: Receive, send: Send) -> None:
+        del scope, receive, send
+
+    with pytest.raises(ImproperlyConfiguredException, match=r"both auth and exclude_from_auth.*asgi /asgi-conflict"):
+        Litestar(route_handlers=[conflicting_asgi], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+
+
+def test_exclude_follows_nearest_owner_precedence() -> None:
+    class Excluded(SecureController):
+        path = "/excluded"
+        auth: ClassVar[AuthenticationPolicy] = exclude()
+
+        @get("/owned")
+        async def owned(self) -> None:
+            return None
+
+        @get("/override", auth=required("b"))
+        async def overridden(self) -> None:
+            return None
+
+    app = Litestar(
+        route_handlers=[Excluded],
+        opt={"auth": required("a")},
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config())],
+    )
+
+    owned_plan = _http_plan(app, "/excluded/owned")
+    overridden_plan = _http_plan(app, "/excluded/override")
+
+    assert owned_plan == SecurityRuntimePlan(authenticate=False, bypass_authentication=True, csrf_required=False)
+    assert overridden_plan.participant_names == frozenset({"b"})
+    assert overridden_plan.authenticate is True
 
 
 def test_csrf_required_is_rejected_outside_http_routes() -> None:
@@ -1564,6 +2577,59 @@ def test_openapi_routes_use_default_configured_and_custom_router_policy(
 
 
 @pytest.mark.parametrize(
+    ("openapi_config", "application_path"),
+    [
+        pytest.param(
+            OpenAPIConfig(title="Test", version="1.0", path="/api", render_plugins=[JsonRenderPlugin()]),
+            "/api/orders",
+            id="openapi_base_path_shadows_the_api",
+        ),
+        pytest.param(
+            OpenAPIConfig(title="Test", version="1.0", path="/", render_plugins=[JsonRenderPlugin()]),
+            "/orders",
+            id="openapi_base_path_shadows_the_root",
+        ),
+        pytest.param(
+            OpenAPIConfig(title="Test", version="1.0", render_plugins=[JsonRenderPlugin()]),
+            "/schema-report",
+            id="openapi_base_path_shares_only_a_string_boundary",
+        ),
+    ],
+)
+def test_application_route_under_the_openapi_base_path_keeps_its_own_auth(
+    openapi_config: OpenAPIConfig, application_path: str
+) -> None:
+    @get(application_path, opt={"auth": required("a")})
+    async def application_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[application_handler],
+        openapi_config=openapi_config,
+        plugins=[SecurityPlugin(_compiler_config(names=("a",)))],
+    )
+    plan = _http_plan(app, application_path)
+
+    assert plan.authenticate is True
+    assert plan.participant_names == frozenset({"a"})
+
+
+@pytest.mark.parametrize(
+    "schema_path", ["/schema/openapi.json", "/schema/swagger", "/schema/oauth2-redirect.html", "/schema/{path:str}"]
+)
+def test_every_generated_schema_route_stays_public_whatever_module_defines_it(schema_path: str) -> None:
+    app = Litestar(
+        route_handlers=[],
+        openapi_config=OpenAPIConfig(
+            title="Test", version="1.0", render_plugins=[SwaggerRenderPlugin(), JsonRenderPlugin()]
+        ),
+        plugins=[SecurityPlugin(_compiler_config(names=("a",)))],
+    )
+
+    assert _http_plan(app, schema_path).authenticate is False
+
+
+@pytest.mark.parametrize(
     ("policy", "expected", "accepted", "rejected"),
     [
         (public(), [{}], (frozenset(), frozenset({"a"})), ()),
@@ -1691,6 +2757,7 @@ def test_disabled_registration_adds_no_route_and_lifecycle_response_uses_native_
             "get_by_id",
             "get_password_state",
             "issue",
+            "issue_absent",
             "prepare_rotation",
             "register_login_method",
             "replace_password_and_bump_epoch",
@@ -1842,14 +2909,14 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
         token_operation = app.openapi_schema.paths["/identity/token"].post
         revoke_operation = app.openapi_schema.paths["/identity/token/revoke"].post
         assert token_operation.security == [{}]
-        assert set(token_operation.responses) == {"200", "400", "429", "503"}
+        assert set(token_operation.responses) == {"200", "400", "403", "429", "503"}
         assert revoke_operation.security == [{"bearer": []}]
         assert set(revoke_operation.responses) == {"200", "400", "401", "503"}
     if mode in {"session", "hybrid"}:
         login_operation = app.openapi_schema.paths["/identity/login"].post
         logout_operation = app.openapi_schema.paths["/identity/logout"].post
         assert login_operation.security == [{}]
-        assert set(login_operation.responses) == {"200", "400", "429", "503"}
+        assert set(login_operation.responses) == {"200", "400", "403", "429", "503"}
         assert logout_operation.security == [{"LocalSession": []}]
         assert set(logout_operation.responses) == {"200", "401", "503"}
 
@@ -1909,7 +2976,7 @@ def test_generated_local_routes_are_grouped_documented_and_uniquely_identified(
 
     schemas = app.openapi_schema.components.schemas if app.openapi_schema.components is not None else None
     assert schemas is not None
-    documented = ("LocalCredentials", "LocalPasswordChangeRequest", "LocalSessionResponse", "LocalRouteResponse")
+    documented = ("LocalCredentials", "LocalPasswordChangeRequest", "LocalSessionResponse", "RouteStatusResponse")
     # LocalSessionResponse is only named when the nested annotation resolves, which a
     # quoted reference does not do on Python 3.10.
     assert set(documented) <= set(schemas)
@@ -2516,7 +3583,7 @@ def test_plugin_traverses_constructed_controller_ownership_without_collisions() 
 
     app_config = SecurityPlugin().on_app_init(AppConfig(route_handlers=[router]))
 
-    assert set(app_config.dependencies) == {"current_user", "principal", "security_context"}
+    assert set(app_config.dependencies) == {"current_user", "principal", "security_context", "websocket_connect_tokens"}
 
 
 def test_plugin_traverses_direct_controller_and_leaves_unknown_handlers_to_litestar() -> None:
@@ -2529,7 +3596,7 @@ def test_plugin_traverses_direct_controller_and_leaves_unknown_handlers_to_lites
 
     app_config = SecurityPlugin().on_app_init(AppConfig(route_handlers=[TestController, cast("Any", object())]))
 
-    assert set(app_config.dependencies) == {"current_user", "principal", "security_context"}
+    assert set(app_config.dependencies) == {"current_user", "principal", "security_context", "websocket_connect_tokens"}
 
 
 def test_plugin_registers_runtime_contract_idempotently() -> None:
@@ -2541,7 +3608,7 @@ def test_plugin_registers_runtime_contract_idempotently() -> None:
     middleware = list(app_config.middleware)
     namespace = dict(app_config.signature_namespace)
 
-    assert set(providers) == {"current_user", "principal", "security_context"}
+    assert set(providers) == {"current_user", "principal", "security_context", "websocket_connect_tokens"}
     assert len(middleware) == 1
     assert isinstance(middleware[0], DefineMiddleware)
     assert middleware[0].middleware is SecurityMiddlewareWrapper
@@ -2553,7 +3620,64 @@ def test_plugin_registers_runtime_contract_idempotently() -> None:
     assert app_config.signature_namespace == namespace
 
 
-@pytest.mark.parametrize("reserved_name", ["principal", "security_context", "current_user"])
+def test_plugin_injects_websocket_connect_token_issuer_from_scope() -> None:
+    store = InMemoryWebSocketConnectTokenStore()
+
+    def clock() -> datetime:
+        return datetime(2026, 8, 4, tzinfo=timezone.utc)
+
+    @get("/connect-token-issuer", sync_to_thread=False)
+    def handler(websocket_connect_tokens: NamedDependency[WebSocketConnectTokenIssuer]) -> dict[str, bool]:
+        return {
+            "app": websocket_connect_tokens.app is app,
+            "clock": websocket_connect_tokens.clock is clock,
+            "store": websocket_connect_tokens.store is store,
+            "ttl": websocket_connect_tokens.ttl == timedelta(seconds=45),
+        }
+
+    app = Litestar(
+        route_handlers=[handler],
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(
+                    websocket=WebSocketSecurityConfig(
+                        connect_token_store=store, connect_token_ttl=timedelta(seconds=45), clock=clock
+                    )
+                )
+            )
+        ],
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/connect-token-issuer")
+
+    assert response.status_code == HTTP_200_OK
+    assert response.json() == {"app": True, "clock": True, "store": True, "ttl": True}
+
+
+def test_plugin_defers_missing_websocket_connect_token_store_until_dependency_injection() -> None:
+    @get("/public", sync_to_thread=False)
+    def public() -> str:
+        return "available"
+
+    @get("/connect-token-issuer", sync_to_thread=False)
+    def requires_issuer(websocket_connect_tokens: NamedDependency[WebSocketConnectTokenIssuer]) -> None:
+        del websocket_connect_tokens
+
+    app = Litestar(route_handlers=[public, requires_issuer], plugins=[SecurityPlugin()])
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        public_response = client.get("/public")
+        injection_response = client.get("/connect-token-issuer")
+
+    assert public_response.status_code == HTTP_200_OK
+    assert injection_response.status_code == 500
+    provider = cast("Provide", app.dependencies["websocket_connect_tokens"])
+    with pytest.raises(ImproperlyConfiguredException, match="connect_token_store"):
+        provider.dependency({"litestar_app": app})
+
+
+@pytest.mark.parametrize("reserved_name", ["principal", "security_context", "current_user", "websocket_connect_tokens"])
 @pytest.mark.parametrize("owner", ["application", "router", "controller", "handler"])
 def test_plugin_rejects_reserved_dependency_collisions(reserved_name: str, owner: str) -> None:
     provider = Provide(object, sync_to_thread=False, use_cache=False)
@@ -2801,6 +3925,8 @@ def test_local_session_native_backends_have_registry_and_openapi_parity(
     local_auth = _local_session_auth(binding=binding)
     _, native_middleware = _native_session_backend(backend_kind)
     config = SecurityConfig(local_auth=local_auth)
+
+    assert config.websocket.current_security_epoch == local_auth.accounts.current_epoch
 
     @get("/session", auth=required("session"))
     async def session_handler() -> None:
@@ -3211,7 +4337,7 @@ def test_cli_entry_point_and_lazy_plugin_registration() -> None:
     ("arguments", "expected"),
     [
         (["security", "--help"], "Litestar Security operations."),
-        (["security", "--version"], "litestar-security, version 0.1.0"),
+        (["security", "--version"], f"litestar-security, version {__version__}"),
     ],
 )
 def test_cli_output(arguments: list[str], expected: str) -> None:

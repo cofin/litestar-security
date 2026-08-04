@@ -14,19 +14,24 @@ bucket ever receives a raw identifier, password, or token.
 
 :class:`RateLimiter` is a port. :class:`StoreRateLimiter` is the bundled
 implementation over a native Litestar :class:`~litestar.stores.base.Store`,
-resolved by name from the application store registry, so pointing that name at a
-shared backend makes limiting correct across worker processes.
+resolved by name from the application store registry. A shared backend shares
+bucket values, but the native store contract has no compare-and-increment, so
+the bundled read-modify-write implementation is exact only within one process.
 """
 
+from _thread import LockType
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha256
 from hmac import digest as hmac_digest
 from logging import getLogger
 from math import ceil
+from threading import Lock
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from anyio import sleep
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.stores.base import Store
 
@@ -39,19 +44,25 @@ from litestar_security.accounts._internal import (
 )
 from litestar_security.accounts._operations import (
     LOGIN,
+    LOGIN_MFA,
     MFA_RECOVERY_CONSUME,
     MFA_RECOVERY_REPLACE,
     MFA_TOTP_ENROLL,
+    MFA_TOTP_REMOVE,
     MFA_TOTP_VERIFY,
     OUTCOME_RATE_LIMITED,
     PASSKEY_ASSERT,
     PASSKEY_AUTH_OPTIONS,
     PASSKEY_REGISTER_OPTIONS,
     PASSKEY_REGISTER_VERIFY,
+    PASSKEY_REMOVE,
     PASSWORD_RESET,
+    PASSWORD_VERIFY,
+    RATE_LIMITED_OPERATIONS,
     RECOVERY,
     REFRESH_ROTATE,
     REGISTRATION,
+    VERIFICATION_CONSUME,
     VERIFICATION_RESEND,
 )
 from litestar_security.accounts._records import (
@@ -63,7 +74,7 @@ from litestar_security.accounts._records import (
 from litestar_security.authentication import VerificationUnavailable
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import AsyncGenerator, Callable, Mapping
 
 
 __all__ = (
@@ -89,6 +100,18 @@ _MAXIMUM_WINDOW = timedelta(days=1)
 _MAXIMUM_LIMIT = 1_000_000
 _MAXIMUM_COST = 1_000
 _MAXIMUM_KEY_TEXT = 512
+_PROCESS_LOCK_POLL_INTERVAL = 0.001
+_PROCESS_RATE_LIMIT_LOCK: LockType = Lock()
+
+
+@asynccontextmanager
+async def _hold_process_rate_limit_lock(lock: LockType) -> "AsyncGenerator[None, None]":
+    while not lock.acquire(blocking=False):  # noqa: ASYNC110 - a threading lock has no async notification
+        await sleep(_PROCESS_LOCK_POLL_INTERVAL)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,20 +145,31 @@ class RateLimitPolicy:
 
 DEFAULT_RATE_LIMIT_POLICIES: "Mapping[str, RateLimitPolicy]" = MappingProxyType({
     LOGIN: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
+    LOGIN_MFA: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     MFA_RECOVERY_CONSUME: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     MFA_RECOVERY_REPLACE: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     MFA_TOTP_ENROLL: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
+    MFA_TOTP_REMOVE: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     MFA_TOTP_VERIFY: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     PASSKEY_ASSERT: RateLimitPolicy(limit=20, window=timedelta(minutes=5)),
     PASSKEY_AUTH_OPTIONS: RateLimitPolicy(limit=20, window=timedelta(minutes=5)),
     PASSKEY_REGISTER_OPTIONS: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     PASSKEY_REGISTER_VERIFY: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
+    PASSKEY_REMOVE: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     REGISTRATION: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     RECOVERY: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     PASSWORD_RESET: RateLimitPolicy(limit=10, window=timedelta(hours=1)),
+    # Second-factor re-verifications of an already-authenticated principal share
+    # MFA_TOTP_VERIFY's cadence; VERIFICATION_CONSUME mirrors it for the same reason.
+    PASSWORD_VERIFY: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     VERIFICATION_RESEND: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
+    VERIFICATION_CONSUME: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     REFRESH_ROTATE: RateLimitPolicy(limit=60, window=timedelta(minutes=5)),
 })
+
+assert DEFAULT_RATE_LIMIT_POLICIES.keys() == RATE_LIMITED_OPERATIONS, (  # noqa: S101 - import-time coverage guard
+    "DEFAULT_RATE_LIMIT_POLICIES must map exactly RATE_LIMITED_OPERATIONS"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,9 +251,11 @@ class RateLimited:
 class RateLimiter(Protocol):
     """Application-owned budget for one abuse-prone operation.
 
-    Implementations should consume atomically where their backend allows it. A
-    limiter that raises is treated as unavailable and fails closed, so raising is
-    the correct response to a backend outage.
+    Implementations MUST consume atomically: ``N`` concurrent
+    :meth:`acquire` calls against the same bucket under a policy limit of ``k``
+    must admit exactly ``k``, never more or fewer. A limiter that raises is
+    treated as unavailable and fails closed, so raising is the correct response
+    to a backend outage.
     """
 
     async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
@@ -260,14 +296,13 @@ class StoreRateLimiter:
     """Fixed-window limiter over a native Litestar store.
 
     The store is resolved by name from the application registry during startup,
-    so an unconfigured name yields Litestar's in-memory default and registering a
-    shared backend under the same name makes counting correct across worker
-    processes.
-
-    Counting is read-modify-write rather than atomic, because the native store
-    contract exposes no compare-and-increment. Concurrent attempts can therefore
-    undercount slightly; supply a limiter backed by an atomic primitive through
-    :class:`RateLimiter` where exactness matters.
+    so an unconfigured name yields Litestar's in-memory default. A process-wide
+    lock serializes every bundled limiter instance's read-modify-write operation,
+    making counting exact within one process. Native stores expose no
+    compare-and-increment, however, so a shared backend is not atomic across
+    worker processes or machines. Multi-process deployments must supply a
+    :class:`RateLimiter` backed by an atomic primitive and verify it with
+    :func:`litestar_security.testing.assert_rate_limiter_conformance`.
 
     Args:
         policies: Budget per operation. Operations absent from the mapping are
@@ -281,6 +316,7 @@ class StoreRateLimiter:
     store_name: str = RATE_LIMIT_STORE_NAME
     store: Store | None = field(default=None, repr=False)
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
+    _lock: LockType = field(default_factory=lambda: _PROCESS_RATE_LIMIT_LOCK, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate the store name, policies, and clock, then freeze the mapping."""
@@ -305,8 +341,9 @@ class StoreRateLimiter:
         """Attach the store resolved from the application registry at startup.
 
         Args:
-            store: The store to count in. Point its registered name at a shared
-                backend to make counting correct across worker processes.
+            store: The store to count in. A shared backend shares bucket values,
+                but cannot make this read-modify-write implementation atomic
+                across worker processes.
 
         Raises:
             ImproperlyConfiguredException: If the value is not a Litestar store.
@@ -320,9 +357,11 @@ class StoreRateLimiter:
     async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
         """Consume one attempt from every configured bucket for the operation.
 
-        Counting is a read-modify-write cycle, because the native store contract
-        exposes no compare-and-increment, so concurrent attempts can undercount
-        slightly.
+        A process-wide lock makes the complete multi-bucket accounting operation
+        exact across bundled limiter instances in this process. The underlying
+        store has no compare-and-increment, so deployments spanning multiple
+        processes or machines must provide an atomic :class:`RateLimiter` and
+        verify it with :func:`litestar_security.testing.assert_rate_limiter_conformance`.
 
         Args:
             request: The operation, buckets, and cost to charge.
@@ -342,17 +381,18 @@ class StoreRateLimiter:
         if store is None:
             msg = "Rate limit store has not been resolved"
             raise RuntimeError(msg)
-        now = self.clock()
-        retry_after = 0
-        for kind, value in (("c", request.client_key), ("s", request.subject_digest)):
-            if value is None:
-                continue
-            exhausted = await self._consume(store, request, policy, kind=kind, value=value, now=now)
-            if exhausted is not None:
-                retry_after = max(retry_after, exhausted)
-        if retry_after:
-            return RateLimitDecision(allowed=False, retry_after=retry_after)
-        return RateLimitDecision(allowed=True)
+        async with _hold_process_rate_limit_lock(self._lock):
+            now = self.clock()
+            retry_after = 0
+            for kind, value in (("c", request.client_key), ("s", request.subject_digest)):
+                if value is None:
+                    continue
+                exhausted = await self._consume(store, request, policy, kind=kind, value=value, now=now)
+                if exhausted is not None:
+                    retry_after = max(retry_after, exhausted)
+            if retry_after:
+                return RateLimitDecision(allowed=False, retry_after=retry_after)
+            return RateLimitDecision(allowed=True)
 
     async def _consume(  # noqa: PLR0913 - one bucket read/write; every input is named
         self, store: Store, request: RateLimitRequest, policy: RateLimitPolicy, *, kind: str, value: str, now: datetime

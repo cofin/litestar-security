@@ -14,9 +14,9 @@ from typing import Protocol, cast, runtime_checkable
 
 from anyio import CapacityLimiter, fail_after, to_thread
 
-from litestar_security.config import NoOpSecurityMetrics, SecurityMetrics
 from litestar_security.providers._internal import raise_config, safe_increment, safe_observe
 from litestar_security.providers.jwks._internal import empty_headers
+from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics
 
 __all__ = ("AsyncJWKSFetcher", "JWKSFetchRequest", "JWKSFetchResponse", "SyncJWKSFetcher", "normalize_fetcher")
 
@@ -76,16 +76,26 @@ class AsyncJWKSFetcher(Protocol):
     """Async transport boundary for one exact configured JWKS source."""
 
     async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
-        """Return one bounded response without following redirects.
+        """Return one finite-byte response without following redirects.
 
         Redirects are not followed, because a redirect could move key fetching to
         a host the operator never configured.
 
         Args:
-            request: The configured source, conditional headers, and byte ceiling.
+            request: The issuer, configured JWKS URI, and optional ETag only;
+                it carries no byte ceiling.
 
         Returns:
-            The bounded response.
+            A response with a finite ``bytes`` body.
+
+        Raises:
+            Exception: When the configured source cannot be fetched.
+
+        Notes:
+            The cache parser enforces
+            ``JWKSCachePolicy.maximum_document_bytes`` after fetch. The
+            optional HTTPX fetcher separately enforces its configured
+            transport response ceiling.
         """
         ...  # pragma: no cover
 
@@ -95,16 +105,26 @@ class SyncJWKSFetcher(Protocol):
     """Blocking transport boundary normalized once into a bounded worker."""
 
     def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
-        """Return one bounded response without following redirects.
+        """Return one finite-byte response without following redirects.
 
         Redirects are not followed, because a redirect could move key fetching to
         a host the operator never configured.
 
         Args:
-            request: The configured source, conditional headers, and byte ceiling.
+            request: The issuer, configured JWKS URI, and optional ETag only;
+                it carries no byte ceiling.
 
         Returns:
-            The bounded response.
+            A response with a finite ``bytes`` body.
+
+        Raises:
+            Exception: When the configured source cannot be fetched.
+
+        Notes:
+            The cache parser enforces
+            ``JWKSCachePolicy.maximum_document_bytes`` after fetch. The
+            optional HTTPX fetcher separately enforces its configured
+            transport response ceiling.
         """
         ...  # pragma: no cover
 

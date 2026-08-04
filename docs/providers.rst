@@ -16,6 +16,53 @@ decides where it is accepted, and an application ``authorization_resolver``
 loads scopes, roles, capabilities, teams, and tenants for the verified
 principal.
 
+OAuth transaction and token protection
+--------------------------------------
+
+The in-memory OAuth references require an ``OAuthTransactionProtector`` so
+that the PKCE verifier, nonce, and refreshable provider tokens are not kept as
+plaintext. The first-party AES-256-GCM protector supplies that port to both
+stores:
+
+.. code-block:: python
+
+   from litestar_security.providers.oauth import (
+       AESGCMOAuthTransactionProtector,
+       MemoryOAuthTransactionStore,
+       MemoryTokenVault,
+       OAuthTransactionProtectorKey,
+   )
+
+
+   protector = AESGCMOAuthTransactionProtector(
+       active_key=OAuthTransactionProtectorKey(
+           "v2",
+           application_secret_store.get_bytes("oauth-transaction-protector/v2"),
+       ),
+       retained_keys=(
+           OAuthTransactionProtectorKey(
+               "v1",
+               application_secret_store.get_bytes("oauth-transaction-protector/v1"),
+           ),
+       ),
+   )
+   transactions = MemoryOAuthTransactionStore(protector=protector)
+   token_vault = MemoryTokenVault(
+       provider="github",
+       client_id="github-client-id",
+       protector=protector,
+   )
+
+The values returned by ``application_secret_store`` are application-owned,
+exactly 32-byte key material from a KMS or secret store, never hard-coded
+literals. During rotation, retain the previous key before making the new key
+active, then remove it only after envelopes under the earlier version have
+expired or been replaced.
+
+An application may instead supply its own protector. Run
+:func:`~litestar_security.testing.assert_oauth_transaction_protector_conformance`
+against a fresh instance factory to verify the public protection contract.
+
 Team authorization
 ------------------
 

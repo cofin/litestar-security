@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
 import jwt
 import pytest
@@ -16,6 +17,7 @@ from litestar_security.authentication import (
     PresentedCredential,
     VerificationUnavailable,
 )
+from litestar_security.config import WorkerLimits
 from litestar_security.context import Principal
 from litestar_security.providers.iap import GoogleIAPClaims, GoogleIAPConfig
 from litestar_security.providers.jwt import VerificationKey
@@ -210,6 +212,29 @@ async def test_iap_valid_assertion_uses_pinned_jwks_and_preserves_identity_evide
 
 
 @pytest.mark.anyio
+async def test_iap_reuses_a_cached_verifier_with_the_shared_worker_limiter(
+    iap_key_material: tuple[bytes, VerificationKey],
+) -> None:
+    private, key = iap_key_material
+    jwks = _JWKS(key)
+    config = GoogleIAPConfig(
+        audience=_AUDIENCE, identity_resolver=_Resolver(), jwks=jwks, worker_limits=WorkerLimits(crypto_tokens=1)
+    )
+    _, mechanism = config.build(clock=lambda: _NOW)
+    authenticator = cast("Any", mechanism.authenticator)
+    token = _token(private)
+
+    first = await authenticator.authenticate(token, type("Connection", (), {"scope": {"headers": []}})())
+    cached = authenticator._verifiers["iap-key"]  # noqa: SLF001 - assert the internal cache contract
+    second = await authenticator.authenticate(token, type("Connection", (), {"scope": {"headers": []}})())
+
+    assert isinstance(first, Authenticated)
+    assert isinstance(second, Authenticated)
+    assert authenticator._verifiers["iap-key"] is cached  # noqa: SLF001 - assert cache reuse
+    assert cached.limiter is config.worker_limits.crypto_limiter
+
+
+@pytest.mark.anyio
 async def test_iap_optional_evidence_claims_default_to_none(iap_key_material: tuple[bytes, VerificationKey]) -> None:
     private, key = iap_key_material
     _, mechanism, _, _ = _runtime(key)
@@ -252,6 +277,7 @@ async def test_iap_preserves_jwks_structured_outcomes(
         {"header_name": "bad header"},
         {"header_name": 1},
         {"clock_skew": timedelta(microseconds=-1)},
+        {"worker_limits": object()},
     ],
 )
 def test_iap_config_rejects_unsafe_trust_profiles(

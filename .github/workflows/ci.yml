@@ -24,7 +24,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv python install 3.14
-      - run: uv sync --all-groups --python 3.14
+      - run: uv sync --all-groups --all-extras --python 3.14
       - run: make lint
 
   mypy:
@@ -37,7 +37,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv python install 3.14
-      - run: uv sync --all-groups --python 3.14
+      - run: uv sync --all-groups --all-extras --python 3.14
       - run: make mypy
 
   pyright:
@@ -50,7 +50,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv python install 3.14
-      - run: uv sync --all-groups --python 3.14
+      - run: uv sync --all-groups --all-extras --python 3.14
       - run: make pyright
 
   slotscheck:
@@ -63,7 +63,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv python install 3.14
-      - run: uv sync --all-groups --python 3.14
+      - run: uv sync --all-groups --all-extras --python 3.14
       - run: make slotscheck
 
   property:
@@ -118,7 +118,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv python install 3.14
-      - run: uv sync --group docs --python 3.14
+      - run: uv sync --group docs --all-extras --python 3.14
       - run: make docs
       - run: make docs-linkcheck
 
@@ -145,7 +145,6 @@ jobs:
           from litestar_security import SecurityConfig, SecurityPlugin
 
           assert litestar_security.__project__ == "litestar-security"
-          assert litestar_security.__version__ == "0.1.0"
           assert SecurityConfig is not None
           assert SecurityPlugin is not None
           assert files("litestar_security").joinpath("py.typed").is_file()

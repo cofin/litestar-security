@@ -1,38 +1,72 @@
 """Native Litestar route bundle for interactive OAuth provider lifecycles."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Annotated, Any, Protocol, cast, runtime_checkable
-from urllib.parse import urlencode
+from logging import getLogger
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast, runtime_checkable
+from urllib.parse import urlencode, urlsplit
 
 import msgspec
-from litestar import Controller, Request, Response, Router, delete, get, post
+from litestar import Controller, Request, Response, Router, get, post
 from litestar.datastructures import CacheControlHeader, Cookie
 from litestar.di import NamedDependency, Provide
 from litestar.enums import RequestEncodingType
-from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
+from litestar.exceptions import (
+    ClientException,
+    HTTPException,
+    ImproperlyConfiguredException,
+    NotAuthorizedException,
+    ServiceUnavailableException,
+    TooManyRequestsException,
+)
+from litestar.exceptions.responses import (
+    create_exception_response,  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized Response
+)
+from litestar.openapi.datastructures import ResponseSpec
 from litestar.params import Body, FromPath, FromQuery, JSONBody, QueryParameter, SkipValidation
-from litestar.status_codes import HTTP_200_OK, HTTP_302_FOUND
+from litestar.response import Redirect
+from litestar.status_codes import (
+    HTTP_200_OK,
+    HTTP_302_FOUND,
+    HTTP_400_BAD_REQUEST,
+    HTTP_401_UNAUTHORIZED,
+    HTTP_409_CONFLICT,
+    HTTP_429_TOO_MANY_REQUESTS,
+    HTTP_503_SERVICE_UNAVAILABLE,
+)
 
-from litestar_security.authentication import public, required
+from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import Principal
 from litestar_security.providers.oauth._accounts import (
+    AccountLinkError,
     OAuthAccountError,
     OAuthAccountService,
     OAuthLinkProof,
     UnlinkStatus,
 )
-from litestar_security.providers.oauth._provider import OAuthProvider, ProviderGrant, ProviderIdentity
+from litestar_security.providers.oauth._provider import (
+    OAuthProvider,
+    OAuthProviderError,
+    ProviderGrant,
+    ProviderIdentity,
+)
 from litestar_security.providers.oauth._transactions import (
     OAUTH_BINDING_COOKIE_NAME,
+    InvalidOAuthCallback,
     OAuthOperation,
     OAuthTransactionService,
+    OAuthTransactionUnavailable,
     SecretStr,
     oauth_binding_cookie,
 )
+from litestar_security.schema import WireStruct
+
+if TYPE_CHECKING:
+    from litestar_security.accounts import RateLimitGuard, StepUpService
 
 __all__ = (
+    "OIDC_FRONTCHANNEL_LOGOUT",
     "OAuthAuthorization",
     "OAuthConfig",
     "OAuthLifecycleService",
@@ -51,18 +85,34 @@ __all__ = (
     "OIDCLogoutLifecycleService",
     "OIDCLogoutTokenConsumer",
     "OIDCSessionLogoutStore",
+    "StepUpOAuthAuthorizer",
     "build_oauth_routes",
 )
 
+OIDC_FRONTCHANNEL_LOGOUT = "oidc.logout.frontchannel"
+"""Rate-limit operation name consumed by each front-channel logout attempt."""
 
-class OAuthRouteResponse(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True, kw_only=True):
-    """Secret-free provider lifecycle response."""
+_LOGGER = getLogger(__name__)
+_MAXIMUM_TCP_PORT = 65_535
+_MAXIMUM_SECURITY_EPOCH = 9_223_372_036_854_775_807
+
+
+class OAuthRouteResponse(WireStruct, frozen=True, kw_only=True, omit_defaults=True):
+    """Secret-free provider lifecycle response.
+
+    Each identifier has its own member, and a response carries only the members
+    its operation actually resolved. Linking reports the provider account it
+    bound, establishing a local session reports the local account, and a logout
+    reports how many sessions it revoked.
+    """
 
     detail: str
     provider_account_id: str | None = None
+    account_id: str | None = None
+    revoked_sessions: int | None = None
 
 
-class OAuthLinkRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True, kw_only=True):
+class OAuthLinkRequest(WireStruct, frozen=True, kw_only=True):
     """Purpose-bound link request."""
 
     step_up_grant: str
@@ -73,7 +123,7 @@ class OAuthLinkRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unkno
         return f"{type(self).__name__}(step_up_grant=<redacted>, return_to={self.return_to!r})"
 
 
-class OAuthScopeRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True, kw_only=True):
+class OAuthScopeRequest(WireStruct, frozen=True, kw_only=True):
     """Incremental provider-scope request."""
 
     provider_account_id: str
@@ -89,7 +139,7 @@ class OAuthScopeRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unkn
         )
 
 
-class OAuthStepUpRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unknown_fields=True, kw_only=True):
+class OAuthStepUpRequest(WireStruct, frozen=True, kw_only=True):
     """Provider-account action requiring fresh step-up."""
 
     step_up_grant: str
@@ -99,8 +149,8 @@ class OAuthStepUpRequest(msgspec.Struct, frozen=True, rename="camel", forbid_unk
         return f"{type(self).__name__}(step_up_grant=<redacted>)"
 
 
-class OIDCBackchannelLogoutRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    """OIDC back-channel logout token form."""
+class OIDCBackchannelLogoutRequest(WireStruct, frozen=True, kw_only=True):
+    """OIDC back-channel logout token form, decoded from a form-encoded body."""
 
     logout_token: str
 
@@ -128,6 +178,25 @@ class OAuthLogoutResult(msgspec.Struct, frozen=True, kw_only=True):
         return f"{type(self).__name__}(detail={self.detail!r}, redirect_url={redirect})"
 
 
+_OAUTH_PUBLIC_RESPONSES = {
+    HTTP_400_BAD_REQUEST: ResponseSpec(OAuthRouteResponse, description="The provider request is invalid."),
+    HTTP_401_UNAUTHORIZED: ResponseSpec(OAuthRouteResponse, description="The provider exchange was rejected."),
+    HTTP_503_SERVICE_UNAVAILABLE: ResponseSpec(OAuthRouteResponse, description="The provider is unavailable."),
+}
+
+
+_OAUTH_AUTHENTICATED_RESPONSES = {
+    **_OAUTH_PUBLIC_RESPONSES,
+    HTTP_401_UNAUTHORIZED: ResponseSpec(OAuthRouteResponse, description="Authentication or step-up is required."),
+}
+
+
+_OIDC_FRONTCHANNEL_RESPONSES = {
+    **_OAUTH_PUBLIC_RESPONSES,
+    HTTP_429_TOO_MANY_REQUESTS: ResponseSpec(OAuthRouteResponse, description="The request exceeded its rate limit."),
+}
+
+
 @dataclass(frozen=True, slots=True)
 class OAuthProviderRegistration:
     """Static routing and protocol metadata for one interactive provider."""
@@ -144,14 +213,14 @@ class OAuthProviderRegistration:
         """Require immutable registration metadata matching the provider."""
         if (
             not isinstance(cast("object", self.provider), OAuthProvider)
-            or not self.redirect_uri.startswith("https://")
+            or not _exact_https_url(self.redirect_uri)
             or self.default_scopes.__class__ is not frozenset
             or not self.default_scopes
             or any(not scope.strip() for scope in self.default_scopes)
-            or (self.expected_issuer is not None and not self.expected_issuer.startswith("https://"))
+            or (self.expected_issuer is not None and not _exact_https_url(self.expected_issuer))
             or self.include_nonce.__class__ is not bool
-            or (self.end_session_endpoint is not None and not self.end_session_endpoint.startswith("https://"))
-            or (self.post_logout_redirect_uri is not None and not self.post_logout_redirect_uri.startswith("https://"))
+            or (self.end_session_endpoint is not None and not _exact_https_url(self.end_session_endpoint))
+            or (self.post_logout_redirect_uri is not None and not _exact_https_url(self.post_logout_redirect_uri))
             or ((self.end_session_endpoint is None) != (self.post_logout_redirect_uri is None))
         ):
             message = "OAuth provider registration is invalid"
@@ -168,7 +237,7 @@ class OAuthStepUpAuthorization:
 
 @dataclass(frozen=True, slots=True)
 class OIDCLogoutIdentity:
-    """Verified logout-token identity after atomic replay consumption."""
+    """Verified logout-token identity whose ``jti`` awaits store consumption."""
 
     provider: str
     issuer: str
@@ -180,23 +249,43 @@ class OIDCLogoutIdentity:
 
 @runtime_checkable
 class OIDCLogoutTokenConsumer(Protocol):
-    """Verify logout-token signature/claims/events and atomically consume jti."""
+    """Verify logout-token signature, claims, and events, yielding its ``jti``."""
 
     async def consume(self, provider: str, logout_token: str, *, now: datetime) -> OIDCLogoutIdentity:
-        """Return one verified non-replayed logout identity."""
+        """Return one verified logout identity without consuming its ``jti``."""
         ...  # pragma: no cover
 
 
 @runtime_checkable
 class OIDCSessionLogoutStore(Protocol):
-    """Atomically consume logout jti and revoke mapped local sessions."""
+    """Atomically consume a verified logout ``jti`` and revoke mapped sessions."""
 
     async def consume_backchannel(self, identity: OIDCLogoutIdentity, *, now: datetime) -> int | None:
         """Consume jti and revoke sessions atomically, returning none on replay."""
         ...  # pragma: no cover
 
-    async def revoke_frontchannel(self, provider: str, issuer: str, session_id: str, *, now: datetime) -> int:
-        """Revoke sessions for one exact issuer and provider session id."""
+    async def revoke_frontchannel(
+        self, provider: str, issuer: str, session_id: str, *, binding: str, now: datetime
+    ) -> int | None:
+        """Atomically consume the one-shot front-channel marker and revoke owned sessions.
+
+        An implementation must revoke only the sessions that the presented
+        browser binding owns for the exact ``(provider, issuer, session_id)``
+        tuple, and must consume the replay marker in the same operation, so a
+        repeated or unowned request observes ``None`` instead of a second
+        revocation.
+
+        Args:
+            provider: Configured provider name.
+            issuer: The already-validated configured issuer.
+            session_id: The provider session identifier being revoked.
+            binding: The browser-binding value presented by the caller.
+            now: The aware revocation time.
+
+        Returns:
+            The revoked-session count, or ``None`` for a replayed or unowned
+            request.
+        """
         ...  # pragma: no cover
 
 
@@ -217,6 +306,100 @@ class OAuthStepUpAuthorizer(Protocol):
     def session_binding(self, request: Request[Any, Any, Any]) -> str | None:
         """Return the current transport binding used by callback validation."""
         ...  # pragma: no cover
+
+
+@dataclass(frozen=True, slots=True)
+class StepUpOAuthAuthorizer:
+    """Adapt ``StepUpService`` grants to OAuth lifecycle authorization."""
+
+    service: "StepUpService"
+    current_epoch: Callable[[str], Awaitable[int | None]]
+    transport_binding: Callable[[Request[Any, Any, Any]], bytes | None]
+    session_binding: Callable[[Request[Any, Any, Any]], str | None]
+
+    def __post_init__(self) -> None:
+        """Require the concrete service and application-owned callbacks."""
+        if (
+            not callable(getattr(self.service, "consume", None))
+            or not callable(self.current_epoch)
+            or not callable(self.transport_binding)
+            or not callable(self.session_binding)
+        ):
+            message = "OAuth step-up authorizer configuration is invalid"
+            raise ImproperlyConfiguredException(detail=message)
+
+    async def authorize(
+        self, *, grant: str, account_id: str, purpose: str, request: Request[Any, Any, Any]
+    ) -> OAuthStepUpAuthorization:
+        """Consume one exact step-up grant for the current OAuth operation.
+
+        Args:
+            grant: One-time step-up grant presented by the authenticated account.
+            account_id: Account the grant must belong to.
+            purpose: Exact OAuth operation the grant authorizes.
+            request: Request from which application callbacks derive bindings.
+
+        Returns:
+            The current epoch and optional callback-session binding.
+
+        Raises:
+            NotAuthorizedException: If the grant or transport binding is absent or invalid.
+            ServiceUnavailableException: If the epoch or step-up service is unavailable.
+        """
+        security_epoch = await self.current_security_epoch(account_id)
+        try:
+            binding = self.transport_binding(request)
+        except Exception:  # noqa: BLE001 - application-owned binding failures fail closed
+            raise _step_up_unavailable() from None
+        if binding is None or binding.__class__ is not bytes or not binding:
+            raise NotAuthorizedException(detail="Fresh step-up authentication required")
+        try:
+            result = await self.service.consume(
+                grant,
+                principal_id=account_id,
+                security_epoch=security_epoch,
+                purpose=purpose,
+                transport_binding=binding,
+            )
+        except Exception:  # noqa: BLE001 - a service failure must not escape as an OAuth decision
+            raise _step_up_unavailable() from None
+        if isinstance(result, InvalidCredentials):
+            raise NotAuthorizedException(detail="Fresh step-up authentication required")
+        if isinstance(result, VerificationUnavailable):
+            raise _step_up_unavailable()
+        try:
+            session_binding = self.session_binding(request)
+        except Exception:  # noqa: BLE001 - application-owned binding failures fail closed
+            raise _step_up_unavailable() from None
+        if session_binding is not None and (session_binding.__class__ is not str or not session_binding):
+            raise _step_up_unavailable()
+        return OAuthStepUpAuthorization(security_epoch=security_epoch, session_binding=session_binding)
+
+    async def current_security_epoch(self, account_id: str) -> int:
+        """Return the application callback's current valid epoch.
+
+        Args:
+            account_id: Account whose security epoch must be read.
+
+        Returns:
+            The current valid non-negative security epoch.
+
+        Raises:
+            ServiceUnavailableException: If the callback fails or returns no valid epoch.
+        """
+        try:
+            epoch = await self.current_epoch(account_id)
+        except Exception:  # noqa: BLE001 - epoch lookups are application-owned availability boundaries
+            raise _step_up_unavailable() from None
+        if not isinstance(epoch, int) or isinstance(epoch, bool):
+            raise _step_up_unavailable()
+        if epoch < 0 or epoch > _MAXIMUM_SECURITY_EPOCH:
+            raise _step_up_unavailable()
+        return epoch
+
+
+def _step_up_unavailable() -> ServiceUnavailableException:
+    return ServiceUnavailableException(detail="Step-up authentication is unavailable")
 
 
 @runtime_checkable
@@ -354,7 +537,7 @@ class OAuthLifecycleService:
             authorization = await self._authorize(step_up_grant, account_id, purpose, request)
         requested_scopes = registration.default_scopes | (scopes or frozenset())
         cookie_value = request.cookies.get(OAUTH_BINDING_COOKIE_NAME)
-        existing_binding = SecretStr(cookie_value) if cookie_value is not None else None
+        existing_binding = SecretStr(cookie_value) if cookie_value else None
         start = await self.transactions.start(
             operation=operation,
             provider=provider,
@@ -381,6 +564,8 @@ class OAuthLifecycleService:
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
     ) -> OAuthRouteResponse | Response[Any]:
         """Consume one callback and complete its stored login, link, or scope purpose."""
+        if not code or not state:
+            raise InvalidOAuthCallback
         registration = self._registration(provider)
         transaction = await self.transactions.consume(
             state=state,
@@ -507,17 +692,35 @@ class OAuthLifecycleService:
 class OIDCLogoutLifecycleService:
     """Concrete verified OIDC front- and back-channel local logout workflow."""
 
-    __slots__ = ("clock", "consumer", "provider_issuers", "sessions")
+    __slots__ = ("client_key", "clock", "consumer", "provider_issuers", "rate_limits", "sessions")
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - logout dependencies remain explicit and independently replaceable
         self,
         *,
         provider_issuers: Mapping[str, str],
         consumer: OIDCLogoutTokenConsumer,
         sessions: OIDCSessionLogoutStore,
+        rate_limits: "RateLimitGuard | None" = None,
+        client_key: Callable[[Request[Any, Any, Any]], str | None] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
-        """Build one fixed-issuer logout service."""
+        """Build one fixed-issuer logout service.
+
+        Args:
+            provider_issuers: Exact configured issuer per provider.
+            consumer: Logout-token verifier that yields a verified identity and ``jti``.
+            sessions: Store that atomically consumes that ``jti`` and revokes mapped sessions.
+            rate_limits: Optional budget consumed by each front-channel attempt.
+            client_key: Trusted client identity extractor for the rate-limit
+                client bucket, defaulting to the peer address without trusting
+                any forwarding header.
+            clock: Source of the current aware time.
+        """
+        from litestar_security.accounts import (  # noqa: PLC0415 - a module import would cycle back through providers
+            RateLimitGuard,
+            trusted_client_key,
+        )
+
         if (
             not provider_issuers
             or any(
@@ -526,6 +729,8 @@ class OIDCLogoutLifecycleService:
             )
             or not isinstance(cast("object", consumer), OIDCLogoutTokenConsumer)
             or not isinstance(cast("object", sessions), OIDCSessionLogoutStore)
+            or (rate_limits is not None and rate_limits.__class__ is not RateLimitGuard)
+            or (client_key is not None and not callable(client_key))
             or not callable(clock)
         ):
             message = "OIDC logout service configuration is invalid"
@@ -533,6 +738,8 @@ class OIDCLogoutLifecycleService:
         self.provider_issuers = dict(provider_issuers)
         self.consumer = consumer
         self.sessions = sessions
+        self.rate_limits = rate_limits
+        self.client_key = trusted_client_key if client_key is None else client_key
         self.clock = clock
 
     @property
@@ -541,7 +748,7 @@ class OIDCLogoutLifecycleService:
         return frozenset(self.provider_issuers)
 
     async def backchannel(self, provider: str, logout_token: str) -> OAuthRouteResponse:
-        """Verify and atomically consume a logout token before local revocation."""
+        """Verify a logout token, check its issuer, then consume and revoke through the store."""
         self._issuer(provider)
         now = self._now()
         identity = await self.consumer.consume(provider, logout_token, now=now)
@@ -550,20 +757,73 @@ class OIDCLogoutLifecycleService:
         revoked = await self.sessions.consume_backchannel(identity, now=now)
         if revoked is None:
             raise NotAuthorizedException(detail="OIDC logout token is invalid")
-        return OAuthRouteResponse(detail="OIDC sessions revoked.", provider_account_id=str(revoked))
+        return OAuthRouteResponse(detail="OIDC sessions revoked.", revoked_sessions=revoked)
 
-    async def frontchannel(self, provider: str, issuer: str, session_id: str) -> OAuthRouteResponse:
-        """Validate fixed issuer and revoke one exact provider-session mapping."""
-        if issuer != self._issuer(provider) or not session_id.strip():
+    async def frontchannel(
+        self, provider: str, issuer: str, session_id: str, *, request: Request[Any, Any, Any]
+    ) -> OAuthRouteResponse:
+        """Revoke one exact provider-session mapping the caller's binding owns.
+
+        Args:
+            provider: Configured provider route segment.
+            issuer: The ``iss`` query value, which must equal the configured issuer.
+            session_id: The ``sid`` query value naming the provider session.
+            request: The request whose browser-binding cookie proves ownership.
+
+        Returns:
+            The revoked-session count response.
+
+        Raises:
+            NotAuthorizedException: If the issuer, session id, binding, ownership,
+                or replay marker is rejected. Every refusal shares one shape.
+            TooManyRequestsException: If the attempt exhausted its budget. The
+                budget is consumed before any validation, so a rejected sid pays
+                exactly as much as a revoking one.
+            ServiceUnavailableException: If the session store or the limiter is
+                unavailable. An outage never removes the limit or the binding.
+        """
+        if self.rate_limits is not None:
+            from litestar_security.accounts import (  # noqa: PLC0415 - a module import would cycle back through providers
+                RateLimited,
+            )
+
+            limited = await self.rate_limits.check(
+                OIDC_FRONTCHANNEL_LOGOUT,
+                client_key=self._client_key_for(request),
+                identifier=session_id.strip() or None,
+            )
+            if isinstance(limited, RateLimited):
+                headers = {"Retry-After": str(limited.retry_after)} if limited.retry_after is not None else None
+                raise TooManyRequestsException(detail="Too many requests", headers=headers)
+            if limited is not None:
+                raise ServiceUnavailableException(detail="OIDC logout is unavailable")
+        configured_issuer = self._issuer(provider)
+        binding = request.cookies.get(OAUTH_BINDING_COOKIE_NAME)
+        if issuer != configured_issuer or not session_id.strip() or binding is None or not binding.strip():
             raise NotAuthorizedException(detail="OIDC logout request is invalid")
-        revoked = await self.sessions.revoke_frontchannel(provider, issuer, session_id, now=self._now())
-        return OAuthRouteResponse(detail="OIDC sessions revoked.", provider_account_id=str(revoked))
+        now = self._now()
+        try:
+            revoked = await self.sessions.revoke_frontchannel(provider, issuer, session_id, binding=binding, now=now)
+        except Exception:  # noqa: BLE001 - an unavailable store must answer 503 without leaking store internals
+            raise ServiceUnavailableException(detail="OIDC logout is unavailable") from None
+        if revoked is None:
+            raise NotAuthorizedException(detail="OIDC logout request is invalid")
+        return OAuthRouteResponse(detail="OIDC sessions revoked.", revoked_sessions=revoked)
 
     def _issuer(self, provider: str) -> str:
         issuer = self.provider_issuers.get(provider)
         if issuer is None:
             raise NotAuthorizedException(detail="OIDC logout provider is not configured")
         return issuer
+
+    def _client_key_for(self, request: Request[Any, Any, Any]) -> str | None:
+        # A failing extractor degrades to sid-only limiting rather than failing
+        # the request, because the subject bucket still bounds the attempt.
+        try:
+            return self.client_key(request)
+        except Exception:  # noqa: BLE001 - application-supplied code may raise anything; degrade, do not fail
+            _LOGGER.error("OIDC logout client key extractor failed")  # noqa: TRY400 - omit untrusted details
+            return None
 
     def _now(self) -> datetime:
         value = self.clock()
@@ -670,11 +930,47 @@ def build_oauth_routes(config: OAuthConfig) -> Router:
         route_handlers=[_OAuthController, *([_OIDCLogoutController] if config.oidc_service is not None else [])],
         cache_control=CacheControlHeader(no_store=True),
         response_headers={"Pragma": "no-cache"},
+        exception_handlers=_oauth_exception_handlers(),
         dependencies={
             "oauth_service": Provide(provide_oauth_service, sync_to_thread=False, use_cache=False),
             **oidc_dependencies,
         },
     )
+
+
+def _oauth_exception_handlers() -> (
+    "dict[int | type[Exception], Callable[[Request[Any, Any, Any], Any], Response[Any]]]"
+):
+    def _classified(request: Request[Any, Any, Any], mapped: HTTPException) -> Response[Any]:
+        # The cast is redundant to mypy yet required by pyright, which sees the
+        # native helper return an unparameterized Response.
+        return cast("Response[Any]", create_exception_response(request=request, exc=mapped))  # type: ignore[redundant-cast]
+
+    def _invalid_callback(request: Request[Any, Any, Any], exc: InvalidOAuthCallback) -> Response[Any]:
+        return _classified(request, NotAuthorizedException(detail=str(exc)))
+
+    def _provider_unavailable(request: Request[Any, Any, Any], exc: OAuthProviderError) -> Response[Any]:
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after is not None else None
+        mapped = ServiceUnavailableException(detail="OAuth provider is unavailable", headers=headers)
+        return _classified(request, mapped)
+
+    def _store_unavailable(request: Request[Any, Any, Any], exc: OAuthTransactionUnavailable) -> Response[Any]:
+        return _classified(request, ServiceUnavailableException(detail=str(exc)))
+
+    def _link_conflict(request: Request[Any, Any, Any], exc: AccountLinkError) -> Response[Any]:
+        return _classified(request, HTTPException(detail=str(exc), status_code=HTTP_409_CONFLICT))
+
+    def _account_denied(request: Request[Any, Any, Any], exc: OAuthAccountError) -> Response[Any]:
+        return _classified(request, ClientException(detail=str(exc)))
+
+    # Subclasses precede their bases so the intended MRO resolution stays legible.
+    return {
+        InvalidOAuthCallback: _invalid_callback,  # 401
+        OAuthProviderError: _provider_unavailable,  # 503, InvalidProviderGrantError included via MRO
+        OAuthTransactionUnavailable: _store_unavailable,  # 503
+        AccountLinkError: _link_conflict,  # 409
+        OAuthAccountError: _account_denied,  # 400
+    }
 
 
 def _account_id(principal: Principal[Any]) -> str:
@@ -683,24 +979,35 @@ def _account_id(principal: Principal[Any]) -> str:
     return cast("str", principal.id)
 
 
-def _authorization_response(result: OAuthAuthorization) -> Response[None]:
-    return Response(
-        content=None, status_code=HTTP_302_FOUND, headers={"Location": result.url}, cookies=[result.binding_cookie]
-    )
+def _authorization_response(result: OAuthAuthorization) -> Redirect:
+    return Redirect(result.url, status_code=HTTP_302_FOUND, cookies=[result.binding_cookie])
 
 
 class _OAuthController(Controller):
     path = "/oauth/{provider:str}"
     tags = ("OAuth providers",)
 
-    @get("/login", operation_id="OAuthLogin", status_code=HTTP_302_FOUND, auth=public())
+    @get(
+        "/login",
+        name="oauth.login",
+        operation_id="OAuthLogin",
+        summary="Begin provider login",
+        description=(
+            "Start a public login transaction and redirect to the provider. A dedicated browser-binding "
+            "cookie is set so the callback can only be completed by the browser that began the flow."
+        ),
+        response_description="A redirect to the provider authorization endpoint.",
+        status_code=HTTP_302_FOUND,
+        responses=_OAUTH_PUBLIC_RESPONSES,
+        auth=public(),
+    )
     async def login(
         self,
         provider: FromPath[str],
         request: Request[Any, Any, Any],
         oauth_service: NamedDependency[SkipValidation[OAuthRouteService]],
         return_to: FromQuery[str] = "/",
-    ) -> Response[None]:
+    ) -> Redirect:
         """Create a public login transaction."""
         result = await oauth_service.begin(
             provider=provider,
@@ -714,7 +1021,20 @@ class _OAuthController(Controller):
         )
         return _authorization_response(result)
 
-    @get("/callback", operation_id="OAuthCallback", auth=public())
+    @get(
+        "/callback",
+        name="oauth.callback",
+        operation_id="OAuthCallback",
+        summary="Complete a provider transaction",
+        description=(
+            "Consume one transaction-bound callback and establish the configured local transport. The "
+            "stored transaction, its browser binding, and the parameters the provider returned must all agree."
+        ),
+        response_description="The authenticated local account, or the issued token pair.",
+        status_code=HTTP_200_OK,
+        responses=_OAUTH_PUBLIC_RESPONSES,
+        auth=public(),
+    )
     async def callback(
         self,
         provider: FromPath[str],
@@ -726,7 +1046,17 @@ class _OAuthController(Controller):
         """Consume a transaction-bound callback and issue local authentication."""
         return await oauth_service.callback(provider=provider, code=code, state=oauth_state, request=request)
 
-    @post("/link", operation_id="OAuthLink", status_code=HTTP_302_FOUND, auth=required())
+    @post(
+        "/link",
+        name="oauth.link",
+        operation_id="OAuthLink",
+        summary="Link a provider account",
+        description="Start a step-up-authorized transaction that links a provider identity to the caller's account.",
+        response_description="A redirect to the provider authorization endpoint.",
+        status_code=HTTP_302_FOUND,
+        responses=_OAUTH_AUTHENTICATED_RESPONSES,
+        auth=required(),
+    )
     async def link(
         self,
         provider: FromPath[str],
@@ -734,7 +1064,7 @@ class _OAuthController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         oauth_service: NamedDependency[SkipValidation[OAuthRouteService]],
-    ) -> Response[None]:
+    ) -> Redirect:
         """Begin an authenticated provider link."""
         result = await oauth_service.begin(
             provider=provider,
@@ -748,9 +1078,23 @@ class _OAuthController(Controller):
         )
         return _authorization_response(result)
 
-    @delete("/links/{provider_account_id:str}", operation_id="OAuthUnlink", status_code=HTTP_200_OK, auth=required())
+    @post(
+        "/links/{provider_account_id:str}/unlink",
+        name="oauth.unlink",
+        operation_id="OAuthUnlink",
+        summary="Unlink a provider account",
+        description=(
+            "Unlink one provider identity after exact step-up. An unlink that would leave the account with "
+            "no login method is refused."
+        ),
+        response_description="The unlink outcome.",
+        status_code=HTTP_200_OK,
+        responses=_OAUTH_AUTHENTICATED_RESPONSES,
+        auth=required(),
+    )
     async def unlink(  # noqa: PLR0913 - Litestar injects each route binding explicitly
         self,
+        *,
         provider: FromPath[str],
         provider_account_id: FromPath[str],
         data: JSONBody[OAuthStepUpRequest],
@@ -767,7 +1111,17 @@ class _OAuthController(Controller):
             request=request,
         )
 
-    @post("/scopes", operation_id="OAuthScopeUpgrade", status_code=HTTP_302_FOUND, auth=required())
+    @post(
+        "/scopes",
+        name="oauth.scopes",
+        operation_id="OAuthScopeUpgrade",
+        summary="Request additional provider scopes",
+        description="Start a step-up-authorized transaction that requests further scopes for a linked account.",
+        response_description="A redirect to the provider authorization endpoint.",
+        status_code=HTTP_302_FOUND,
+        responses=_OAUTH_AUTHENTICATED_RESPONSES,
+        auth=required(),
+    )
     async def scopes(
         self,
         provider: FromPath[str],
@@ -775,7 +1129,7 @@ class _OAuthController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         oauth_service: NamedDependency[SkipValidation[OAuthRouteService]],
-    ) -> Response[None]:
+    ) -> Redirect:
         """Begin allowlisted incremental provider consent."""
         result = await oauth_service.begin(
             provider=provider,
@@ -789,7 +1143,20 @@ class _OAuthController(Controller):
         )
         return _authorization_response(result)
 
-    @post("/revoke", operation_id="OAuthRevoke", auth=required())
+    @post(
+        "/revoke",
+        name="oauth.revoke",
+        operation_id="OAuthRevoke",
+        summary="Revoke stored provider tokens",
+        description=(
+            "Delete the locally stored provider tokens for the caller. The deletion is local and final "
+            "regardless of whether the upstream revocation call succeeds."
+        ),
+        response_description="The revocation outcome.",
+        status_code=HTTP_200_OK,
+        responses=_OAUTH_AUTHENTICATED_RESPONSES,
+        auth=required(),
+    )
     async def revoke(
         self,
         provider: FromPath[str],
@@ -803,7 +1170,20 @@ class _OAuthController(Controller):
             provider=provider, account_id=_account_id(principal), step_up_grant=data.step_up_grant, request=request
         )
 
-    @post("/logout", operation_id="OAuthLogout", auth=required())
+    @post(
+        "/logout",
+        name="oauth.logout",
+        operation_id="OAuthLogout",
+        summary="Log out of the provider session",
+        description=(
+            "End the local session and, when the provider registration supplies an end-session endpoint, "
+            "redirect onward to it."
+        ),
+        response_description="The logout outcome, or a redirect to the provider end-session endpoint.",
+        status_code=HTTP_200_OK,
+        responses=_OAUTH_AUTHENTICATED_RESPONSES,
+        auth=required(),
+    )
     async def logout(
         self,
         provider: FromPath[str],
@@ -814,6 +1194,8 @@ class _OAuthController(Controller):
         """Complete local logout, then optionally redirect to a validated RP endpoint."""
         result = await oauth_service.logout(provider=provider, account_id=_account_id(principal), request=request)
         if result.redirect_url is not None:
+            # Response rather than litestar.response.Redirect: this 302 carries
+            # the logout detail as its JSON body, which Redirect cannot express.
             return Response(
                 content=OAuthRouteResponse(detail=result.detail),
                 status_code=HTTP_302_FOUND,
@@ -826,18 +1208,46 @@ class _OIDCLogoutController(Controller):
     path = "/oidc/{provider:str}"
     tags = ("OIDC logout",)
 
-    @get("/frontchannel-logout", operation_id="OIDCFrontchannelLogout", auth=public())
+    @get(
+        "/frontchannel-logout",
+        name="oidc.logout.frontchannel",
+        operation_id="OIDCFrontchannelLogout",
+        summary="Front-channel logout",
+        description=(
+            "Revoke the local sessions that the caller's browser binding owns for one exact issuer and "
+            "provider session identifier. The revocation consumes a one-shot marker, so a repeated request "
+            "is rejected."
+        ),
+        response_description="How many local sessions were revoked.",
+        status_code=HTTP_200_OK,
+        responses=_OIDC_FRONTCHANNEL_RESPONSES,
+        auth=public(),
+    )
     async def frontchannel_logout(
         self,
         provider: FromPath[str],
         issuer: Annotated[str, QueryParameter(name="iss")],
         session_id: Annotated[str, QueryParameter(name="sid")],
+        request: Request[Any, Any, Any],
         oidc_service: NamedDependency[SkipValidation[OIDCLogoutLifecycleService]],
     ) -> OAuthRouteResponse:
-        """Revoke local sessions mapped to one exact issuer and provider sid."""
-        return await oidc_service.frontchannel(provider, issuer, session_id)
+        """Revoke local sessions the caller's binding owns for one exact issuer and sid."""
+        return await oidc_service.frontchannel(provider, issuer, session_id, request=request)
 
-    @post("/backchannel-logout", operation_id="OIDCBackchannelLogout", status_code=HTTP_200_OK, auth=public())
+    @post(
+        "/backchannel-logout",
+        name="oidc.logout.backchannel",
+        operation_id="OIDCBackchannelLogout",
+        summary="Back-channel logout",
+        description=(
+            "Verify a logout token, consume its identifier so it cannot be replayed, and revoke the local "
+            "sessions it maps to."
+        ),
+        response_description="How many local sessions were revoked.",
+        status_code=HTTP_200_OK,
+        responses=_OAUTH_PUBLIC_RESPONSES,
+        auth=public(),
+    )
     async def backchannel_logout(
         self,
         provider: FromPath[str],
@@ -846,3 +1256,23 @@ class _OIDCLogoutController(Controller):
     ) -> OAuthRouteResponse:
         """Verify a logout token, consume its jti, and revoke mapped sessions."""
         return await oidc_service.backchannel(provider, data.logout_token)
+
+
+def _exact_https_url(value: str) -> bool:
+    if value.__class__ is not str or value != value.strip() or "*" in value or "\\" in value:
+        return False
+    try:
+        split = urlsplit(value)
+        port = split.port
+    except ValueError:
+        return False
+    return (
+        split.scheme == "https"
+        and bool(split.netloc)
+        and split.hostname is not None
+        and split.username is None
+        and split.password is None
+        and not split.query
+        and not split.fragment
+        and (port is None or 1 <= port <= _MAXIMUM_TCP_PORT)
+    )

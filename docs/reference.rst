@@ -13,6 +13,13 @@ Configuration
 
 .. automodule:: litestar_security.config
    :members:
+   :exclude-members: BlockingIntegration, NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
+
+Workers
+-------
+
+.. automodule:: litestar_security.workers
+   :members:
 
 Plugin
 ------
@@ -36,6 +43,12 @@ Security context
 ----------------
 
 .. automodule:: litestar_security.context
+   :members:
+
+Wire schemas
+------------
+
+.. automodule:: litestar_security.schema
    :members:
 
 Authorization guards
@@ -73,6 +86,7 @@ Providers
 
 .. automodule:: litestar_security.providers.jwks
    :members:
+   :exclude-members: NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 
 .. automodule:: litestar_security.providers.oauth
    :members:

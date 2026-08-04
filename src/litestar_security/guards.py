@@ -374,8 +374,9 @@ class _AssurancePredicate(AuthorizationPredicate):
         now = now.astimezone(timezone.utc)
         evidence = cast("SecurityContext", connection.auth).evidence
         purpose_trait = f"purpose:{self.requirement.purpose}" if self.requirement.purpose is not None else None
-        available_methods = frozenset(method for item in evidence for method in item.methods)
-        available_traits = frozenset(trait for item in evidence for trait in item.traits)
+        live_evidence = tuple(item for item in evidence if item.expires_at is None or item.expires_at > now)
+        available_methods = frozenset(method for item in live_evidence for method in item.methods)
+        available_traits = frozenset(trait for item in live_evidence for trait in item.traits)
         required_traits = frozenset(trait.value for trait in self.requirement.traits)
         if purpose_trait is not None and purpose_trait not in available_traits:
             code = (
@@ -389,13 +390,13 @@ class _AssurancePredicate(AuthorizationPredicate):
         if self.requirement.max_age is not None:
             relevant = tuple(
                 item
-                for item in evidence
+                for item in live_evidence
                 if item.methods.intersection(self.requirement.methods)
                 or item.traits.intersection(required_traits)
                 or (purpose_trait is not None and purpose_trait in item.traits)
             )
             if not relevant:
-                relevant = evidence
+                relevant = live_evidence
             current = tuple(
                 item
                 for item in relevant

@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 
 import httpx
 import pytest
@@ -10,6 +11,7 @@ from litestar.exceptions import ImproperlyConfiguredException
 from litestar_security.providers import oauth as oauth_module
 from litestar_security.providers.oauth import (
     AccountLinkError,
+    InMemoryOAuthRevocationRetryStore,
     InvalidProviderGrantError,
     LinkedProviderAccount,
     MemoryOAuthAccountStore,
@@ -55,6 +57,26 @@ class ReversingProtector:
     async def unprotect(self, protected: ProtectedOAuthSecret, *, associated_data: bytes) -> bytes:
         assert associated_data == self.associated_data
         return protected.ciphertext[::-1]
+
+
+@dataclass
+class BoundRecordingProtector:
+    """Record encrypted retry material while authenticating associated data."""
+
+    active_key_version: str = "v1"
+    last_ciphertext: bytes | None = None
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedOAuthSecret:
+        ciphertext = sha256(associated_data).digest() + secret[::-1]
+        self.last_ciphertext = ciphertext
+        return ProtectedOAuthSecret(ciphertext=ciphertext, key_version=self.active_key_version)
+
+    async def unprotect(self, protected: ProtectedOAuthSecret, *, associated_data: bytes) -> bytes:
+        prefix = sha256(associated_data).digest()
+        if not protected.ciphertext.startswith(prefix):
+            message = "associated data did not match"
+            raise ValueError(message)
+        return protected.ciphertext[len(prefix) :][::-1]
 
 
 @dataclass
@@ -597,6 +619,55 @@ async def test_revoke_attempts_every_token_and_schedules_secret_retry_before_loc
     )
     assert retries.scheduled[0][1].access_token.get_secret_value() == "access"
     assert await vault.get_for_refresh("provider-account", now=NOW) is None
+
+
+@pytest.mark.anyio
+async def test_in_memory_revocation_retry_store_encrypts_secret_material_and_replaces_metadata() -> None:
+    protector = BoundRecordingProtector()
+    retries = InMemoryOAuthRevocationRetryStore(protector)
+    first = OAuthRevocationFailure("provider-account", frozenset({"access_token"}), NOW)
+    second = OAuthRevocationFailure("provider-account", frozenset({"refresh_token"}), NOW + timedelta(minutes=1))
+
+    await retries.schedule(first, tokens(access="access-secret", refresh="refresh-secret"))
+
+    assert protector.last_ciphertext is not None
+    assert b"access-secret" not in protector.last_ciphertext
+    assert b"refresh-secret" not in protector.last_ciphertext
+    assert b"access-secret" not in repr(retries.failures).encode()
+    assert b"refresh-secret" not in repr(retries.failures).encode()
+    with pytest.raises(ValueError, match="associated data"):
+        await protector.unprotect(
+            ProtectedOAuthSecret(ciphertext=protector.last_ciphertext, key_version=protector.active_key_version),
+            associated_data=b"altered-associated-data",
+        )
+
+    await retries.schedule(second, tokens(access="new-access", refresh="new-refresh"))
+
+    assert dict(retries.failures) == {"provider-account": second}
+    with pytest.raises(TypeError):
+        retries.failures["other-account"] = first  # type: ignore[index]  # proves inspection is immutable
+
+
+@pytest.mark.anyio
+async def test_revocation_retry_store_rejects_invalid_input_and_retains_metadata_on_encryption_failure() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="retry store configuration"):
+        InMemoryOAuthRevocationRetryStore(object())  # type: ignore[arg-type]
+
+    protector = FaultProtector()
+    retries = InMemoryOAuthRevocationRetryStore(protector)
+    original = OAuthRevocationFailure("provider-account", frozenset({"access_token"}), NOW)
+    replacement = OAuthRevocationFailure("provider-account", frozenset({"refresh_token"}), NOW + timedelta(minutes=1))
+    await retries.schedule(original, tokens())
+
+    with pytest.raises(OAuthAccountError):
+        await retries.schedule(replacement, object())  # type: ignore[arg-type]
+
+    protector.fail_protect = True
+    with pytest.raises(OAuthAccountError) as captured:
+        await retries.schedule(replacement, tokens())
+
+    assert captured.value.code == "oauth_vault_unavailable"
+    assert dict(retries.failures) == {"provider-account": original}
 
 
 @pytest.mark.anyio

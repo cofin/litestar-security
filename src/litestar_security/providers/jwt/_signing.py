@@ -11,16 +11,21 @@ from functools import partial
 from inspect import iscoroutinefunction
 from typing import Protocol, cast, runtime_checkable
 
-from litestar_security.config import SecurityMetrics, WorkerLimits
 from litestar_security.providers._internal import JSONValue, raise_config
 from litestar_security.providers.jwt._workers import metric_sink, run_worker
+from litestar_security.workers import SecurityMetrics, WorkerLimits
 
 __all__ = ("SyncTokenSigner", "TokenSigner", "normalize_signer")
 
 
 @runtime_checkable
 class TokenSigner(Protocol):
-    """Sign caller-built local claims without owning application persistence."""
+    """Sign caller-built local claims without owning application persistence.
+
+    Implementations emit access JWTs whose protected header has a non-empty
+    ``kid``, a supported non-``none`` ``alg``, and ``typ="at+jwt"``. Untrusted
+    caller claims must not choose those headers.
+    """
 
     async def sign(self, claims: Mapping[str, JSONValue], *, now: datetime) -> str:
         """Return one compact signed access token.
@@ -30,14 +35,22 @@ class TokenSigner(Protocol):
             now: The signing timestamp.
 
         Returns:
-            The compact JWT.
+            A compact access JWT with the required protected-header profile.
+
+        Raises:
+            Exception: When signing cannot produce that access JWT.
         """
         ...  # pragma: no cover
 
 
 @runtime_checkable
 class SyncTokenSigner(Protocol):
-    """Blocking custom signer normalized once into the crypto worker."""
+    """Blocking custom access-JWT signer normalized once into the crypto worker.
+
+    Implementations emit access JWTs whose protected header has a non-empty
+    ``kid``, a supported non-``none`` ``alg``, and ``typ="at+jwt"``. Untrusted
+    caller claims must not choose those headers.
+    """
 
     def sign(self, claims: Mapping[str, JSONValue], *, now: datetime) -> str:
         """Return one compact signed access token.
@@ -47,7 +60,10 @@ class SyncTokenSigner(Protocol):
             now: The signing timestamp.
 
         Returns:
-            The compact JWT.
+            A compact access JWT with the required protected-header profile.
+
+        Raises:
+            Exception: When signing cannot produce that access JWT.
         """
         ...  # pragma: no cover
 

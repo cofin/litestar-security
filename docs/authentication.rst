@@ -40,6 +40,23 @@ native ``opt`` mapping:
    class AccountController(Controller):
        opt = {"auth": required("session")}
 
+Prefer the typed base classes when a controller's default policy is known at
+class-definition time:
+
+.. code-block:: python
+
+   from typing import ClassVar
+
+   from litestar_security import AuthenticationPolicy, SecureController, required
+
+
+   class AccountController(SecureController):
+       auth: ClassVar[AuthenticationPolicy] = required("session")
+
+``PublicController`` is ``SecureController`` defaulting to ``public()``.
+Both compile into the same ``opt["auth"]`` key, and the nearest native owner
+still wins, including a handler-level ``auth=`` override.
+
 Custom controller class attributes are not propagated by Litestar; put
 ``auth`` in ``opt``. The nearest native owner wins. With configured mechanisms
 and no inherited policy, the plugin uses implicit ``required()``; without
@@ -56,6 +73,14 @@ Keep authorization in Litestar's native ``guards=[...]``. Litestar's
 ``security=`` parameter remains reserved for the OpenAPI requirements projected
 from ``auth``. To protect schema endpoints, supply a custom OpenAPI router or
 controller with ``opt={"auth": ...}``.
+
+Schema endpoints are recognized by the handler Litestar generated for them, not
+by their URL. An application route is authenticated by its own ``auth`` even
+when it sits under the configured OpenAPI base path, so ``path="/api"`` on
+:class:`~litestar.openapi.OpenAPIConfig` never relaxes ``/api/orders``. A route
+served by an application handler is always treated as an application route; to
+serve documentation from your own handlers, declare ``opt={"auth": public()}``
+on the router or controller that owns them.
 
 Authorization guards compose separately:
 

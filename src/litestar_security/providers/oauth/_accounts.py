@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from hashlib import sha256
+from types import MappingProxyType
 from typing import Protocol, cast, runtime_checkable
 
 from anyio import Lock
@@ -23,6 +24,7 @@ from litestar_security.providers.oauth._transactions import OAuthTransactionProt
 
 __all__ = (
     "AccountLinkError",
+    "InMemoryOAuthRevocationRetryStore",
     "InvalidProviderGrantError",
     "LinkedProviderAccount",
     "MemoryOAuthAccountStore",
@@ -454,6 +456,83 @@ class MemoryTokenVault:
 
     def _associated_data(self, provider_account_id: str, key_version: str) -> bytes:
         return f"oauth-vault-v1\0{self.provider}\0{self.client_id}\0{provider_account_id}\0{key_version}".encode()
+
+
+@dataclass(frozen=True, slots=True)
+class _OAuthRevocationRetryRecord:
+    """One encrypted retry payload paired with secret-free metadata."""
+
+    failure: OAuthRevocationFailure
+    protected: ProtectedOAuthSecret = field(repr=False)
+
+
+class InMemoryOAuthRevocationRetryStore:
+    """Lock-protected encrypted reference persistence for OAuth revocation retries."""
+
+    __slots__ = ("_lock", "_protector", "_records")
+
+    def __init__(self, protector: OAuthTransactionProtector) -> None:
+        """Initialize an isolated retry store with the caller's AEAD protector.
+
+        Args:
+            protector: Protector used to encrypt each provider-account token set.
+
+        Raises:
+            ImproperlyConfiguredException: If ``protector`` does not implement the transaction protection protocol.
+        """
+        protector_value = cast("object", protector)
+        if not isinstance(protector_value, OAuthTransactionProtector):
+            raise ImproperlyConfiguredException(detail="OAuth revocation retry store configuration is invalid")
+        self._protector = protector
+        self._records: dict[str, _OAuthRevocationRetryRecord] = {}
+        self._lock = Lock()
+
+    @property
+    def failures(self) -> Mapping[str, OAuthRevocationFailure]:
+        """Return immutable, secret-free metadata for the current retry records.
+
+        Returns:
+            A copy of the current metadata indexed by provider account id.
+        """
+        return MappingProxyType({
+            provider_account_id: record.failure for provider_account_id, record in self._records.items()
+        })
+
+    async def schedule(self, failure: OAuthRevocationFailure, tokens: ProviderTokenSet) -> None:
+        """Encrypt and atomically replace retry material for one provider account.
+
+        Args:
+            failure: Secret-free upstream revocation failure metadata.
+            tokens: The token set to retain only in encrypted form.
+
+        Raises:
+            OAuthAccountError: If encryption cannot preserve retry material.
+        """
+        provider_account_id = failure.provider_account_id
+        if not _strict_text(provider_account_id) or tokens.__class__ is not ProviderTokenSet:
+            raise OAuthAccountError
+        key_version = self._protector.active_key_version
+        try:
+            protected = await self._protector.protect(
+                _encode_tokens(tokens), associated_data=self._associated_data(provider_account_id, key_version)
+            )
+        except Exception as exc:
+            raise OAuthAccountError(_VAULT_UNAVAILABLE) from exc
+        async with self._lock:
+            self._records[provider_account_id] = _OAuthRevocationRetryRecord(failure, protected)
+
+    @staticmethod
+    def _associated_data(provider_account_id: str, key_version: str) -> bytes:
+        """Return provider-account-bound associated data for retry material.
+
+        Args:
+            provider_account_id: Exact provider account owning the retry material.
+            key_version: Version of the key that protects the token set.
+
+        Returns:
+            Stable domain-separated associated data.
+        """
+        return f"oauth-revocation-retry-v1\0{provider_account_id}\0{key_version}".encode()
 
 
 @dataclass(slots=True)

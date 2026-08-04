@@ -44,6 +44,9 @@ What is limited
    * - ``local.login``
      - 10 / 5 min
      - client + identifier
+   * - ``local.login.mfa``
+     - 10 / 5 min
+     - client + account
    * - ``local.registration``
      - 5 / hour
      - client + identifier
@@ -53,21 +56,52 @@ What is limited
    * - ``local.verification.resend``
      - 5 / hour
      - client + identifier
+   * - ``local.verification.consume``
+     - 10 / 5 min
+     - client
    * - ``local.password.reset``
      - 10 / hour
      - client
+   * - ``local.password.verify``
+     - 10 / 5 min
+     - client + account
    * - ``local.refresh.rotate``
      - 60 / 5 min
      - client
+   * - ``local.mfa.totp.remove``
+     - 5 / hour
+     - client + account
+   * - ``local.passkey.remove``
+     - 5 / hour
+     - client + account
 
 Session and token login share one ``local.login`` budget on purpose. They
 present the same credential to the same account store, so separate budgets would
 let an attacker double their allowance by alternating between ``/auth/login``
 and ``/auth/token``.
 
-Password reset and refresh rotation are keyed on the client only. The value they
-present is a token, not an identifier, and digesting it into a bucket key would
-let the limiter backend become a record of which tokens were attempted.
+MFA-login completion uses its own ``local.login.mfa`` budget. Its challenge is
+already bound to one account, so the limiter uses client and account buckets;
+the password-login allowance cannot be reused to make extra factor guesses.
+
+Password reset, verification confirmation, and refresh rotation are keyed on
+the client only. The value they present is a token, not an identifier, and
+digesting it into a bucket key would let the limiter backend become a record of
+which tokens were attempted.
+
+``local.password.verify`` is the step-up password factor: re-verifying the
+password of an already-authenticated principal. It shares the TOTP verification
+cadence because both are second-factor checks, and it is keyed on the account so
+a stolen session cannot brute-force the password from many addresses. Factor
+and credential removal consume a budget before the step-up grant is even
+examined, so guessing at removals is bounded the same way as guessing at
+credentials.
+
+The MFA and passkey ceremonies — enrollment, verification, recovery-code
+consumption and replacement, and the registration and authentication options —
+carry budgets of their own under ``local.mfa.*`` and ``local.passkey.*``. Every
+operation the generated routes limit appears in
+:data:`~litestar_security.accounts.DEFAULT_RATE_LIMIT_POLICIES`.
 
 Responses
 =========
@@ -78,15 +112,16 @@ closed** with ``503`` — an outage must not silently remove the limit.
 
 Both statuses appear in the generated OpenAPI document.
 
-Making it correct across processes
-==================================
+Choosing a limiter for your deployment
+=======================================
 
 The bundled limiter holds a store *name*, not a store, and resolves it from the
 application store registry at startup. An unregistered name yields Litestar's
 in-memory default, which is correct for a single process and multiplies by your
 worker count if you do not change it.
 
-Point the name at a shared backend and counting becomes correct everywhere:
+Point the name at a shared backend when every process must see the same bucket
+values:
 
 .. code-block:: python
 
@@ -100,10 +135,13 @@ Point the name at a shared backend and counting becomes correct everywhere:
        stores={RATE_LIMIT_STORE_NAME: RedisStore.with_client("redis://localhost:6379")},
    )
 
-The bundled limiter counts with a read-modify-write cycle, because the native
-store contract exposes no compare-and-increment. Concurrent attempts can
-therefore undercount slightly. Where exactness matters, supply a limiter backed
-by an atomic primitive.
+``StoreRateLimiter`` is exact across its instances and event loops *within one
+process*: it serializes its complete read-modify-write operation with a
+process-wide lock. A shared store makes bucket values visible to other
+processes, but it cannot make that cycle atomic between processes or machines.
+For a multi-process deployment, provide an application limiter backed by an
+atomic backend primitive, then validate it with
+:func:`~litestar_security.testing.assert_rate_limiter_conformance`.
 
 Trusting the right client key
 =============================
@@ -113,27 +151,39 @@ honour ``X-Forwarded-For``. Those headers are attacker-controlled unless a proxy
 you operate rewrote them, so trusting them by default would let anyone mint
 unlimited buckets by varying one header.
 
-Behind a proxy, supply an extractor that knows which hops you trust:
+Behind a proxy, use :func:`~litestar_security.accounts.forwarded_client_key`
+and configure the exact CIDR ranges and number of forwarding hops that you
+operate:
 
 .. code-block:: python
 
-   from litestar_security.accounts import LocalAuth
-
-
-   def client_key(connection):
-       forwarded = connection.headers.get("X-Forwarded-For")
-       return forwarded.split(",")[0].strip() if forwarded else None
+   from litestar_security.accounts import LocalAuth, forwarded_client_key
 
 
    local_auth = LocalAuth.session(
        accounts=accounts,
        secrets=secrets,
        binding=binding,
-       client_key=client_key,
+       client_key=forwarded_client_key(
+           trusted_proxies={"198.51.100.0/28", "2001:db8:1234:5::/64"},
+           max_hops=2,
+       ),
    )
 
-Only do this when a proxy you control overwrites the header. Returning ``None``
-disables the client bucket and leaves the identifier bucket in force.
+Only do this when a proxy you control overwrites the header. The extractor
+accepts forwarding data only from a directly connected address in those CIDRs,
+then walks no more than ``max_hops`` entries from right to left and returns the
+first address outside the trusted proxy ranges. An untrusted direct peer, a
+missing or malformed header, or a chain whose inspected hops are all trusted
+falls back to the direct peer.
+
+Do not configure a broad network or too many hops merely to make a deployment
+work. A shared-NAT proxy or an over-broad forwarding trust boundary can collapse
+many unrelated clients into one client bucket, causing collateral ``429``
+responses. Conversely, when ``client_key`` is absent or returns ``None`` there
+is no client bucket at all; client-only operations lose their client limit and
+combined operations retain only their identifier/account bucket. Do not replace
+an unavailable client key with a shared sentinel value.
 
 Supplying your own limiter
 ==========================
@@ -180,7 +230,15 @@ Tuning the budgets
        }
    )
 
-An operation absent from the mapping is not limited by that limiter.
+An operation absent from the mapping is not limited by that limiter. That is
+why the shipped default map is provably exhaustive: an import-time assertion
+requires :data:`~litestar_security.accounts.DEFAULT_RATE_LIMIT_POLICIES` to map
+exactly ``RATE_LIMITED_OPERATIONS``, the canonical set of operations the
+library's own routes hand to a limiter. A new library operation without a
+default budget fails immediately rather than shipping unlimited. When you
+replace the mapping wholesale, keep every operation you did not mean to
+unlimit — starting from ``DEFAULT_RATE_LIMIT_POLICIES`` as above preserves the
+guarantee.
 
 Audit events
 ============

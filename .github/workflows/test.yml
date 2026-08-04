@@ -46,7 +46,7 @@ jobs:
         run: uv python install "$PYTHON_VERSION"
 
       - name: Install test dependencies
-        run: uv sync --group tests --python "$PYTHON_VERSION"
+        run: uv sync --group tests --all-extras --python "$PYTHON_VERSION"
 
       - name: Test
         if: ${{ !inputs.coverage }}
@@ -76,10 +76,11 @@ jobs:
           import litestar_security
 
           for module in walk_packages(litestar_security.__path__, "litestar_security."):
-              if not any(part.startswith("_") for part in module.name.split(".")):
+              if module.name != "litestar_security.testing" and not any(
+                  part.startswith("_") for part in module.name.split(".")
+              ):
                   importlib.import_module(module.name)
 
-          assert litestar_security.__version__ == "0.1.0"
           assert files("litestar_security").joinpath("py.typed").is_file()
           assert "pytest" not in sys.modules
           PY

@@ -14,6 +14,7 @@ from litestar_security.providers.oauth import OIDCLogoutIdentity
 __all__ = ("OIDCJWTLogoutTokenConsumer",)
 
 _BACKCHANNEL_EVENT = "http://schemas.openid.net/event/backchannel-logout"
+_LOGOUT_TOKEN_TYPES = frozenset({"logout+jwt"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,7 @@ class OIDCJWTLogoutTokenConsumer:
             not provider.strip()
             or not isinstance(cast("object", verifier), JWTVerifier)
             or verifier.config.subject_required
+            or verifier.config.token_types != _LOGOUT_TOKEN_TYPES
             for provider, verifier in self.verifiers.items()
         ):
             message = "OIDC logout token consumer configuration is invalid"

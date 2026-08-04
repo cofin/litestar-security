@@ -17,6 +17,42 @@ profile receives neither a session backend nor a session store; configure
 ``CookieBackendConfig`` or ``ServerSideSessionConfig`` directly on
 ``Litestar``.
 
+Wire format
+===========
+
+Every request and response body in the generated tree uses ``snake_case``
+members, spelled exactly as the Python attribute is spelled, and rejects a
+member it does not model. A body carrying an unrecognized field is a
+``400``, not a silently discarded key.
+
+Rejecting the member is what keeps a stale or misspelled optional field from
+resolving to its default. A client sending ``returnTo`` where the schema
+declares ``return_to`` gets an error naming the field, rather than a successful
+request that quietly redirected somewhere else.
+
+Two surfaces are snake_case because their specifications say so rather than
+because of this convention: the JWKS document (:rfc:`7517`), the OIDC
+back-channel logout body, and the ``token_type``/``expires_in``/
+``refresh_token`` members of the token response (:rfc:`6749`, section 5.1).
+Their member names are fixed by the specification and are not ours to rename.
+
+Applications defining their own schemas alongside the generated routes can
+inherit :class:`~litestar_security.WireStruct` to hold the same convention
+across the whole tree:
+
+.. code-block:: python
+
+    from litestar_security import WireStruct
+
+
+    class TeamInvitation(WireStruct, frozen=True):
+        team_id: str
+        invited_identifier: str
+
+A schema that must tolerate members it does not model - a specification-defined
+body whose sender may legitimately add them - overrides the policy for itself
+with ``forbid_unknown_fields=False`` rather than relaxing the shared base.
+
 Tag groups
 ==========
 
@@ -32,9 +68,10 @@ nobody can sign in to:
      - Operations
    * - ``Local sessions``
      - ``LocalSessionLogin``, ``LocalSessionLogout``, ``LocalSessionList``,
-       ``LocalSessionRevoke``
+       ``LocalSessionRevoke``, ``LocalSessionMFALogin``
    * - ``Local tokens``
-     - ``LocalTokenLogin``, ``LocalTokenRefresh``, ``LocalTokenRevoke``
+     - ``LocalTokenLogin``, ``LocalTokenRefresh``, ``LocalTokenRevoke``,
+       ``LocalTokenMFALogin``
    * - ``Local registration``
      - ``LocalRegister``
    * - ``Local passwords``
@@ -94,6 +131,11 @@ success case:
    * - ``401``
      - Authentication is required, or the presented credential no longer
        satisfies the account security epoch.
+   * - ``403``
+     - A password was verified but a configured second factor is still owed.
+       The typed ``LocalMFARequiredResponse`` contains ``code="mfa_required"``,
+       ``detail``, ``account_id``, ``challenge``, ``expires_at``, and
+       ``methods``.
    * - ``429``
      - The operation exceeded its rate limit. Carries ``Retry-After`` when the
        limiter reports one. See :doc:`rate-limiting`.
@@ -105,6 +147,23 @@ Enumeration resistance shows up in the schema as well. Recovery, verification,
 and registration answer ``202`` with the same body for every identifier, so a
 client cannot tell an existing account from an absent one by reading the
 response.
+
+Notification destinations reject control characters before the application
+delivery command is created. In particular, a recovery or verification request
+containing CRLF characters still receives the same ``202`` response but emits
+no notification, preventing mail-header injection without becoming an account
+enumeration signal.
+
+The same guarantee extends to timing, and part of it is a store obligation.
+On recovery request and verification resend, an eligible account commits
+through :meth:`~litestar_security.accounts.RecoveryTokenStore.issue` while any
+other identifier performs one equivalent durable round trip through
+:meth:`~litestar_security.accounts.RecoveryTokenStore.issue_absent`, which must
+cost the same and commit nothing — a store that answers quickly for unknown
+accounts makes a present account measurably slower to probe. Registration
+carries the matching obligation on
+:meth:`~litestar_security.accounts.RegistrationStore.register`: a taken and a
+new identifier must cost the same.
 
 Turning them off
 ================
@@ -128,6 +187,23 @@ generated to file under them.
 MFA, passkeys, and step-up
 ==========================
 
+When ``MFAConfig.require_at_login=True``, a successful password login can
+return the documented ``403`` instead of establishing its transport. The
+``challenge`` is reveal-once, bound to the returned ``account_id`` and client,
+and expires after five minutes by default (never more than ten minutes). A
+found challenge is burned before its account, epoch, expiry, or client binding
+is checked; retrying a completion after any failed reveal attempt therefore
+requires a new password login.
+
+Session-capable profiles add ``POST /auth/login/mfa`` with operation ID
+``LocalSessionMFALogin``. It establishes the native session and is CSRF
+protected. Token-capable profiles add ``POST /auth/token/mfa`` with operation
+ID ``LocalTokenMFALogin`` and issue the access/refresh pair. Both accept the
+typed completion body: ``challenge``, ``account_id``, ``method``, ``code``,
+and optional ``method_id``. They accept ``totp`` and ``recovery-code`` methods;
+TOTP requires the ``method_id`` returned when that factor was enrolled. There
+is no factor-discovery port, so clients must retain that identifier.
+
 ``MFAConfig`` and ``PasskeyConfig`` add a second route bundle under the same
 ``/auth`` prefix. It contains TOTP enrollment and activation, recovery-code
 replacement, passkey registration and authentication, safe credential
@@ -143,10 +219,17 @@ record contains only a digest and is bound to the authenticated principal,
 current security epoch, exact purpose, and current session or token transport.
 A grant for one operation cannot authorize another operation.
 
-All secret- and challenge-bearing responses set ``Cache-Control: no-store`` and
-``Pragma: no-cache``. Generated schemas describe the typed camel-case JSON
-models without embedding sample TOTP secrets, recovery codes, browser
-credential responses, or public verification keys.
+The ``{purpose}`` path segment is deny-by-default. Every purpose a generated
+route consumes maps to an explicit allowlist of factors strong enough to
+authorize it — password or passkey re-verification, never a second submission
+of the factor being managed — and a purpose outside that map, or a factor the
+purpose does not allow, receives the same sanitized ``401`` as a wrong
+credential. An unrecognized purpose never mints a grant.
+
+All secret- and challenge-bearing responses, including the login ``403``, set
+``Cache-Control: no-store`` and ``Pragma: no-cache``. Generated schemas describe
+the typed JSON models without embedding sample TOTP secrets, recovery codes,
+browser credential responses, or public verification keys.
 
 Passkey authentication options include a reveal-once ``binding`` alongside the
 browser options. Return that value unchanged in the verification request; it is

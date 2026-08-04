@@ -10,12 +10,13 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import anyio
 import jwt
 import pytest
-from litestar import Controller, Litestar, Request, Response, Router, WebSocket, get, post, websocket
+from litestar import Controller, Litestar, Request, Response, Router, WebSocket, asgi, get, post, websocket
 from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
 from litestar.di import NamedDependency, Provide
 from litestar.enums import ScopeType
 from litestar.exceptions import (
+    ImproperlyConfiguredException,
     NotAuthorizedException,
     PermissionDeniedException,
     ServiceUnavailableException,
@@ -27,11 +28,12 @@ from litestar.middleware.session.base import BaseSessionBackend, SessionMiddlewa
 from litestar.middleware.session.client_side import CookieBackendConfig
 from litestar.middleware.session.server_side import ServerSideSessionConfig
 from litestar.params import FromPath  # noqa: TC002 - Litestar resolves handler annotations at runtime
-from litestar.status_codes import HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAILABLE
+from litestar.routes import HTTPRoute
+from litestar.status_codes import HTTP_400_BAD_REQUEST, HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAILABLE
 from litestar.stores.memory import MemoryStore
 from litestar.testing import AsyncTestClient, TestClient
 
-from litestar_security import SecurityConfig, SecurityPlugin, authentication
+from litestar_security import MFAConfig, SecurityConfig, SecurityPlugin, authentication
 from litestar_security.accounts import (
     ConsumeResult,
     ConsumeStatus,
@@ -40,6 +42,7 @@ from litestar_security.accounts import (
     LocalAccount,
     LocalAuth,
     LocalAuthSecrets,
+    LoginMethod,
     NotificationCommand,
     PasswordChangeResult,
     PasswordChangeStatus,
@@ -48,7 +51,10 @@ from litestar_security.accounts import (
     PasswordResetStatus,
     PasswordVerificationResult,
     PasswordVerificationStatus,
+    ProtectedSecret,
     PurposeTokenCodec,
+    RecoveryCodePepper,
+    RecoveryCodes,
     RefreshFamilyContext,
     RefreshReceiptKey,
     RefreshReceiptSealer,
@@ -58,8 +64,11 @@ from litestar_security.accounts import (
     RegistrationPolicy,
     RegistrationResult,
     RegistrationStatus,
+    RevokeLoginMethodResult,
+    RevokeLoginMethodStatus,
     RotateRefreshCommand,
     RotateRefreshResult,
+    SecurityEvent,
     SessionBindingConfig,
     SessionRecord,
     TokenIssue,
@@ -78,6 +87,7 @@ from litestar_security.authentication import (
     SecurityRuntimeConfig,
     SecurityRuntimePlan,
     VerificationUnavailable,
+    exclude,
     public,
     required,
 )
@@ -92,6 +102,7 @@ from litestar_security.context import (
     SessionPersistenceUnavailableError,
 )
 from litestar_security.guards import requires_scope
+from litestar_security.headers import SecurityHeadersConfig
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
     BearerTokenSlot,
@@ -103,11 +114,13 @@ from litestar_security.providers.jwt import (
     PyJWTVerifier,
     SigningKey,
 )
+from litestar_security.testing import InMemoryMFALoginChallengeStore, InMemoryMFAStore
 from litestar_security.websocket import (
-    InMemoryWebSocketTicketStore,
+    InMemoryWebSocketConnectTokenStore,
+    WebSocketConnectTokenIssuer,
+    WebSocketConnectTokenRecord,
+    WebSocketConnectTokenService,
     WebSocketSecurityConfig,
-    WebSocketTicketRecord,
-    WebSocketTicketService,
     websocket_policy_fingerprint,
 )
 
@@ -362,7 +375,8 @@ async def test_generated_options_initializes_scope_without_extracting() -> None:
     def options_handler() -> None:
         return None
 
-    options_handler.__module__ = "litestar.routes.http"
+    options_handler.__module__ = HTTPRoute.create_options_handler.__module__
+    options_handler.__qualname__ = f"{HTTPRoute.create_options_handler.__qualname__}.<locals>.options_handler"
     route_handler = _RouteHandler(fn=options_handler)
 
     async def app(scope: Scope, _receive: Receive, _send: Send) -> None:
@@ -376,6 +390,29 @@ async def test_generated_options_initializes_scope_without_extracting() -> None:
     assert isinstance(observed[0]["auth"], SecurityContext)
     assert slot is not None
     assert slot.calls == 0
+
+
+@pytest.mark.anyio
+async def test_lookalike_options_handler_is_authenticated_not_bypassed() -> None:
+    config, slot, _ = _runtime(InvalidCredentials())
+
+    def options_handler() -> None:
+        return None
+
+    # Same module and name as a generated OPTIONS handler, but a foreign
+    # qualname: an application handler must never inherit the bypass.
+    options_handler.__module__ = "litestar.routes.http"
+    route_handler = _RouteHandler(fn=options_handler)
+
+    async def app(scope: Scope, _receive: Receive, _send: Send) -> None:
+        del scope
+
+    with pytest.raises(NotAuthorizedException):
+        await SecurityMiddleware(app=app, config=config)(
+            _scope(method="OPTIONS", route_handler=route_handler), _receive, _send
+        )
+    assert slot is not None
+    assert slot.calls == 1
 
 
 @pytest.mark.anyio
@@ -682,6 +719,7 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  #
             account_id=command.account_id,
             security_epoch=command.security_epoch,
             created_at=command.created_at,
+            authenticated_at=command.authenticated_at,
             last_seen_at=command.created_at,
             expires_at=command.expires_at,
             display_metadata=command.display_metadata,
@@ -717,6 +755,7 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  #
             account_id=record.account_id,
             security_epoch=record.security_epoch,
             created_at=record.created_at,
+            authenticated_at=record.authenticated_at,
             last_seen_at=cast("datetime", kwargs["now"]),
             expires_at=record.expires_at,
             display_metadata=record.display_metadata,
@@ -765,6 +804,7 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  #
             get_by_id=get_account,
             get_password_state=unused,
             issue=unused,
+            issue_absent=unused,
             list_for_account=list_for_account,
             prepare_rotation=unused,
             rebind=rebind,
@@ -800,6 +840,36 @@ class _RoutePasswordHasher:
 
 
 @dataclass(slots=True)
+class _RouteMFASecretProtector:
+    """Minimal reversible protector for generated-route MFA integration journeys."""
+
+    active_key_version: str = "test-mfa"
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedSecret:
+        return ProtectedSecret(ciphertext=associated_data + secret, key_version=self.active_key_version)
+
+    async def unprotect(self, protected: ProtectedSecret, *, associated_data: bytes) -> bytes:
+        assert protected.ciphertext.startswith(associated_data)
+        return protected.ciphertext.removeprefix(associated_data)
+
+
+class _RouteMFAStore(InMemoryMFAStore):
+    """Add the login-method port to the reusable in-memory MFA store for route setup."""
+
+    __slots__ = ()
+
+    async def register_login_method(self, _account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
+        self.login_methods[method.method_id] = method
+        self.events.append(event)
+
+    async def revoke_login_method(
+        self, _account_id: str, _method_id: str, *, require_remaining: bool = True, event: SecurityEvent
+    ) -> RevokeLoginMethodResult:
+        del require_remaining, event
+        return RevokeLoginMethodResult(RevokeLoginMethodStatus.NOT_FOUND)
+
+
+@dataclass(slots=True)
 class _RouteRefreshState:
     token_id: str
     token_digest: bytes
@@ -821,6 +891,7 @@ class _GeneratedRouteAccounts:
     refresh_tokens: dict[str, _RouteRefreshState] = field(default_factory=dict)
     verification_token: str | None = None
     recovery_token: str | None = None
+    absent_probes: int = 0
 
     async def find_for_login(self, normalized_identifier: str) -> LocalAccount[object] | None:
         if self.account is None or self.account.normalized_identifier != normalized_identifier:
@@ -838,7 +909,12 @@ class _GeneratedRouteAccounts:
         account = await self.get_by_id(account_id)
         if account is None or self.password_hash is None:
             return None
-        return PasswordCredentialState(password_hash=self.password_hash, security_epoch=account.security_epoch)
+        return PasswordCredentialState(
+            password_hash=self.password_hash,
+            security_epoch=account.security_epoch,
+            active=account.active,
+            verified=account.verified,
+        )
 
     async def compare_and_replace_password(
         self, account_id: str, expected_hash: str, password_hash: str, **_kwargs: object
@@ -885,6 +961,9 @@ class _GeneratedRouteAccounts:
         elif issue.purpose is TokenPurpose.RECOVERY:
             self.recovery_token = notification.token
 
+    async def issue_absent(self) -> None:
+        self.absent_probes += 1
+
     async def consume_and_verify(self, token_id: str, digest: bytes, **_kwargs: object) -> ConsumeResult:
         issue = self.purpose_tokens.pop(token_id, None)
         if issue is None or issue.digest != digest or self.account is None:
@@ -916,6 +995,7 @@ class _GeneratedRouteAccounts:
             account_id=command.account_id,
             security_epoch=command.security_epoch,
             created_at=command.created_at,
+            authenticated_at=command.authenticated_at,
             last_seen_at=command.created_at,
             expires_at=command.expires_at,
             display_metadata=command.display_metadata,
@@ -1037,6 +1117,36 @@ class _GeneratedRouteAccounts:
         for state in matches:
             state.revoked = True
         return len(matches)
+
+
+def _mfa_at_login_config(*, required: bool = True) -> MFAConfig:
+    """Build the minimal MFA capability graph needed by local-login route tests."""
+    store = _RouteMFAStore()
+    return MFAConfig(
+        store=store,
+        secret_protector=_RouteMFASecretProtector(),
+        recovery_peppers=(RecoveryCodePepper("test-mfa", b"m" * 32),),
+        login_methods=store,
+        login_challenge_store=InMemoryMFALoginChallengeStore(),
+        require_at_login=required,
+        register_routes=False,
+    )
+
+
+def _verified_route_accounts(password: str) -> _GeneratedRouteAccounts:
+    """Return a direct, verified account suitable for password-login journeys."""
+    return _GeneratedRouteAccounts(
+        account=LocalAccount(
+            account_id="account-1",
+            normalized_identifier="user@example.com",
+            display_name="User",
+            active=True,
+            verified=True,
+            security_epoch=1,
+            user=object(),
+        ),
+        password_hash=f"test-hash:{password}",
+    )
 
 
 @pytest.mark.anyio
@@ -1379,6 +1489,235 @@ def test_generated_token_routes_register_verify_login_refresh_and_revoke(
     assert any(state.revoked for state in accounts.refresh_tokens.values())
 
 
+@pytest.mark.anyio
+async def test_generated_session_login_requires_and_completes_mfa() -> None:
+    password = "initial password 123"  # noqa: S105 - test-only credential
+    accounts = _verified_route_accounts(password)
+    mfa = _mfa_at_login_config()
+    recovery_codes = await cast("Any", mfa.mfa_service).generate_recovery_codes("account-1")
+    assert isinstance(recovery_codes, RecoveryCodes)
+    csrf = CSRFConfig(secret="s" * 32)
+    local_auth: Any = LocalAuth.session(
+        accounts=cast("Any", accounts),
+        secrets=_local_auth_secrets(),
+        binding=SessionBindingConfig(
+            pepper=b"b" * 32, cookie_name="binding", secure=False, allow_insecure=True, max_age=600
+        ),
+        password_hasher=_RoutePasswordHasher(),
+    )
+    session_config = CookieBackendConfig(
+        secret=bytes(range(16)),
+        key="native-session",
+        max_age=600,
+        scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+        secure=False,
+    )
+
+    @get("/csrf", auth=public(), csrf_required=True)
+    async def csrf_seed() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[csrf_seed],
+        csrf_config=csrf,
+        middleware=[session_config.middleware],
+        openapi_config=None,
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa))],
+    )
+    async with AsyncTestClient(app=app) as client:
+        assert (await client.get("/csrf")).status_code == 200
+        csrf_headers = {csrf.header_name: cast("str", client.cookies.get(csrf.cookie_name))}
+        pending = await client.post(
+            "/auth/login", json={"identifier": "user@example.com", "password": password}, headers=csrf_headers
+        )
+        challenge = pending.json()
+        before_completion = await client.get("/auth/sessions")
+        completed = await client.post(
+            "/auth/login/mfa",
+            json={
+                "account_id": challenge["account_id"],
+                "challenge": challenge["challenge"],
+                "method": "recovery-code",
+                "code": recovery_codes.codes[0],
+            },
+            headers=csrf_headers,
+        )
+        sessions = await client.get("/auth/sessions")
+
+    assert pending.status_code == 403
+    assert challenge["code"] == "mfa_required"
+    assert challenge["methods"] == ["recovery-code", "totp"]
+    assert before_completion.status_code == HTTP_401_UNAUTHORIZED
+    assert completed.status_code == 200
+    assert completed.json() == {"account_id": "account-1", "display_name": "User"}
+    assert sessions.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_generated_token_login_requires_and_completes_mfa(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    password = "initial password 123"  # noqa: S105 - test-only credential
+    accounts = _verified_route_accounts(password)
+    mfa = _mfa_at_login_config()
+    recovery_codes = await cast("Any", mfa.mfa_service).generate_recovery_codes("account-1")
+    assert isinstance(recovery_codes, RecoveryCodes)
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth: Any = LocalAuth.tokens(
+        accounts=cast("Any", accounts),
+        secrets=_local_auth_secrets(refresh=True),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-api",  # noqa: S106 - public JWT audience
+        password_hasher=_RoutePasswordHasher(),
+    )
+    app = Litestar(
+        route_handlers=[], openapi_config=None, plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa))]
+    )
+    async with AsyncTestClient(app=app) as client:
+        pending = await client.post("/auth/token", json={"identifier": "user@example.com", "password": password})
+        challenge = pending.json()
+        issued_before_completion = dict(accounts.refresh_tokens)
+        completed = await client.post(
+            "/auth/token/mfa",
+            json={
+                "account_id": challenge["account_id"],
+                "challenge": challenge["challenge"],
+                "method": "recovery-code",
+                "code": recovery_codes.codes[0],
+            },
+        )
+
+    assert pending.status_code == 403
+    assert challenge["code"] == "mfa_required"
+    assert issued_before_completion == {}
+    assert completed.status_code == 200
+    assert {"access_token", "refresh_token"} <= completed.json().keys()
+
+
+@pytest.mark.anyio
+async def test_require_at_login_false_preserves_unchallenged_token_login(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    password = "initial password 123"  # noqa: S105 - test-only credential
+    accounts = _verified_route_accounts(password)
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth: Any = LocalAuth.tokens(
+        accounts=cast("Any", accounts),
+        secrets=_local_auth_secrets(refresh=True),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-api",  # noqa: S106 - public JWT audience
+        password_hasher=_RoutePasswordHasher(),
+    )
+    app = Litestar(
+        route_handlers=[],
+        openapi_config=None,
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=_mfa_at_login_config(required=False)))],
+    )
+    async with AsyncTestClient(app=app) as client:
+        login = await client.post("/auth/token", json={"identifier": "user@example.com", "password": password})
+        completion = await client.post("/auth/token/mfa", json={})
+
+    assert login.status_code == 200
+    assert {"access_token", "refresh_token"} <= login.json().keys()
+    assert completion.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_require_at_login_false_preserves_unchallenged_session_login() -> None:
+    password = "initial password 123"  # noqa: S105 - test-only credential
+    accounts = _verified_route_accounts(password)
+    csrf = CSRFConfig(secret="s" * 32)
+    local_auth: Any = LocalAuth.session(
+        accounts=cast("Any", accounts),
+        secrets=_local_auth_secrets(),
+        binding=SessionBindingConfig(
+            pepper=b"b" * 32, cookie_name="binding", secure=False, allow_insecure=True, max_age=600
+        ),
+        password_hasher=_RoutePasswordHasher(),
+    )
+    session_config = CookieBackendConfig(
+        secret=bytes(range(16)),
+        key="native-session",
+        max_age=600,
+        scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+        secure=False,
+    )
+
+    @get("/csrf", auth=public(), csrf_required=True)
+    async def csrf_seed() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[csrf_seed],
+        csrf_config=csrf,
+        middleware=[session_config.middleware],
+        openapi_config=None,
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=_mfa_at_login_config(required=False)))],
+    )
+    async with AsyncTestClient(app=app) as client:
+        assert (await client.get("/csrf")).status_code == 200
+        csrf_headers = {csrf.header_name: cast("str", client.cookies.get(csrf.cookie_name))}
+        login = await client.post(
+            "/auth/login", json={"identifier": "user@example.com", "password": password}, headers=csrf_headers
+        )
+        sessions = await client.get("/auth/sessions")
+        completion = await client.post("/auth/login/mfa", json={}, headers=csrf_headers)
+
+    assert login.status_code == 200
+    assert login.json() == {"account_id": "account-1", "display_name": "User"}
+    assert sessions.status_code == 200
+    assert completion.status_code == 404
+
+
+def test_generated_token_routes_reject_unknown_and_camel_case_body_members(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    accounts = _GeneratedRouteAccounts()
+    private_key, _public_key = jwt_key_material["EdDSA"]
+    local_auth = LocalAuth.tokens(
+        accounts=accounts,
+        secrets=_local_auth_secrets(refresh=True),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-api",  # noqa: S106 - public JWT audience
+        password_hasher=_RoutePasswordHasher(),
+        registration=RegistrationPolicy.public(),
+    )
+    app = Litestar(
+        route_handlers=[], openapi_config=None, plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))]
+    )
+    password = "initial password 123"  # noqa: S105
+
+    with TestClient(app) as client:
+        unknown_member = client.post(
+            "/auth/register", json={"identifier": "user@example.com", "password": password, "role": "admin"}
+        )
+        # A camelCase spelling of an optional field must not resolve to its default,
+        # which would register the account with no display name.
+        stale_casing = client.post(
+            "/auth/register", json={"identifier": "user@example.com", "password": password, "displayName": "User"}
+        )
+        assert client.post("/auth/register", json={"identifier": "user@example.com", "password": password}).status_code
+        assert accounts.verification_token is not None
+        confirm = client.post("/auth/verification/confirm", json={"token": accounts.verification_token, "extra": 1})
+        credentials = client.post(
+            "/auth/token", json={"identifier": "user@example.com", "password": password, "remember": True}
+        )
+
+    assert unknown_member.status_code == HTTP_400_BAD_REQUEST, unknown_member.text
+    assert stale_casing.status_code == HTTP_400_BAD_REQUEST, stale_casing.text
+    assert confirm.status_code == HTTP_400_BAD_REQUEST, confirm.text
+    assert credentials.status_code == HTTP_400_BAD_REQUEST, credentials.text
+
+
 def test_native_guard_layers_remain_cumulative_for_http_and_websocket_with_child_policy() -> None:
     events: list[str] = []
 
@@ -1542,7 +1881,7 @@ def test_websocket_native_guard_denial_closes_before_handler_and_di() -> None:
             "origin_denied",
         ),
         (
-            {"headers": [(b"origin", b"https://trusted.example")], "query_string": b"ticket=not-configured"},
+            {"headers": [(b"origin", b"https://trusted.example")], "query_string": b"connect_token=not-configured"},
             WebSocketSecurityConfig(allowed_origins=frozenset({"https://trusted.example"})),
             4401,
             "authentication_required",
@@ -1689,11 +2028,12 @@ async def test_websocket_handler_authorization_exceptions_map_to_4403(error: Exc
     assert messages == [{"type": "websocket.close", "code": 4403, "reason": "authorization_denied"}]
 
 
-def _runtime_ticket_record() -> WebSocketTicketRecord:
-    return WebSocketTicketRecord(
-        ticket_id="aWlpaWlpaWlpaWlpaWlpaQ",
+def _runtime_connect_token_record() -> WebSocketConnectTokenRecord:
+    return WebSocketConnectTokenRecord(
+        connect_token_id="aWlpaWlpaWlpaWlpaWlpaQ",  # noqa: S106 - a public record identifier, not a secret
         digest=b"d" * 32,
         subject_id="subject-1",
+        security_epoch=7,
         route_name="socket",
         origin="https://trusted.example",
         restrictions=CredentialRestrictions(scopes=frozenset({"reports:read"})),
@@ -1704,7 +2044,7 @@ def _runtime_ticket_record() -> WebSocketTicketRecord:
 
 
 @pytest.mark.anyio
-async def test_websocket_ticket_merge_requires_the_same_authenticated_subject() -> None:
+async def test_websocket_connect_token_merge_requires_the_same_authenticated_subject() -> None:
     runtime, _, _ = _runtime()
 
     async def app(_scope: Scope, _receive: Receive, _send: Send) -> None:
@@ -1714,15 +2054,18 @@ async def test_websocket_ticket_merge_requires_the_same_authenticated_subject() 
     context = SecurityContext(
         session=NullSessionHandle(), authorization=AuthorizationSnapshot(scopes={"reports:read", "reports:write"})
     )
-    principal, merged = await middleware._merge_ticket(  # noqa: SLF001 - exercises the ticket/runtime merge boundary
-        _runtime_ticket_record(), principal=Principal(id="subject-1"), context=context, session=context.session
+    principal, merged = await middleware._merge_connect_token(  # noqa: SLF001 - exercises the connect token/runtime merge boundary
+        _runtime_connect_token_record(), principal=Principal(id="subject-1"), context=context, session=context.session
     )
 
     assert principal.id == "subject-1"
     assert merged.authorization.scopes == frozenset({"reports:read"})
     with pytest.raises(NotAuthorizedException):
-        await middleware._merge_ticket(  # noqa: SLF001 - exercises the ticket/runtime merge boundary
-            _runtime_ticket_record(), principal=Principal(id="other-subject"), context=context, session=context.session
+        await middleware._merge_connect_token(  # noqa: SLF001 - exercises the connect token/runtime merge boundary
+            _runtime_connect_token_record(),
+            principal=Principal(id="other-subject"),
+            context=context,
+            session=context.session,
         )
 
 
@@ -1733,13 +2076,16 @@ async def test_websocket_ticket_merge_requires_the_same_authenticated_subject() 
         (AuthorizationSnapshot(scopes={"reports:read", "reports:write"}), None),
         (VerificationUnavailable(), ServiceUnavailableException),
         (InvalidCredentials(), NotAuthorizedException),
+        (RuntimeError(), ServiceUnavailableException),
     ],
 )
-async def test_anonymous_websocket_ticket_uses_authorization_resolver(
+async def test_anonymous_websocket_connect_token_uses_authorization_resolver(
     resolution: object, expected_error: type[Exception] | None
 ) -> None:
     class Resolver:
         async def resolve(self, _principal: Principal[object]) -> object:
+            if isinstance(resolution, Exception):
+                raise resolution
             return resolution
 
     runtime = SecurityRuntimeConfig(registry=AuthenticationRegistry(authorization_resolver=Resolver()))
@@ -1751,13 +2097,13 @@ async def test_anonymous_websocket_ticket_uses_authorization_resolver(
     context = SecurityContext(session=NullSessionHandle())
     if expected_error is not None:
         with pytest.raises(expected_error):
-            await middleware._merge_ticket(  # noqa: SLF001 - exercises the ticket/runtime merge boundary
-                _runtime_ticket_record(), principal=Principal(id=None), context=context, session=context.session
+            await middleware._merge_connect_token(  # noqa: SLF001 - exercises the connect token/runtime merge boundary
+                _runtime_connect_token_record(), principal=Principal(id=None), context=context, session=context.session
             )
         return
 
-    principal, merged = await middleware._merge_ticket(  # noqa: SLF001 - exercises the ticket/runtime merge boundary
-        _runtime_ticket_record(), principal=Principal(id=None), context=context, session=context.session
+    principal, merged = await middleware._merge_connect_token(  # noqa: SLF001 - exercises the connect token/runtime merge boundary
+        _runtime_connect_token_record(), principal=Principal(id=None), context=context, session=context.session
     )
     assert principal.id == "subject-1"
     assert merged.authorization.scopes == frozenset({"reports:read"})
@@ -1793,6 +2139,57 @@ async def test_public_websocket_and_http_install_the_same_anonymous_context_with
     assert all(
         isinstance(principal, Principal) and isinstance(context, SecurityContext) for principal, context in observed
     )
+
+
+def test_exclude_bypasses_http_websocket_and_asgi_credential_work() -> None:
+    slot = _Slot(PresentedCredential("credential"))
+    authenticator = _Authenticator(NoCredentials())
+    observed: list[tuple[Principal[object], SecurityContext]] = []
+
+    @get("/http", auth=exclude())
+    async def http_handler(request: Request) -> None:
+        observed.append((request.user, request.auth))
+
+    @websocket("/ws", auth=exclude())
+    async def websocket_handler(socket: WebSocket) -> None:
+        observed.append((socket.user, socket.auth))
+        await socket.accept()
+        await socket.close()
+
+    @asgi("/mount", auth=exclude(), copy_scope=True)
+    async def mounted_app(scope: Scope, receive: Receive, send: Send) -> None:
+        del receive
+        observed.append((cast("Principal[object]", scope["user"]), cast("SecurityContext", scope["auth"])))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    config = SecurityConfig(
+        slots=(slot,),  # type: ignore[arg-type]
+        mechanisms=(
+            AuthenticationMechanism(
+                authenticator=authenticator,  # type: ignore[arg-type]
+                resolver=_Resolver(),
+            ),
+        ),
+        headers=SecurityHeadersConfig(static={"X-Content-Type-Options": "nosniff"}),
+    )
+    app = Litestar(
+        route_handlers=[http_handler, websocket_handler, mounted_app],
+        openapi_config=None,
+        plugins=[SecurityPlugin(config)],
+    )
+
+    with TestClient(app) as client:
+        http_response = client.get("/http", headers={"Authorization": "Bearer credential"})
+        asgi_response = client.get("/mount", headers={"Authorization": "Bearer credential"})
+        with client.websocket_connect("/ws", headers={"Authorization": "Bearer credential"}):
+            pass
+
+    assert http_response.status_code == asgi_response.status_code == 200
+    assert http_response.headers["x-content-type-options"] == "nosniff"
+    assert slot.calls == authenticator.calls == 0
+    assert len(observed) == 3
+    assert all(not principal.is_authenticated and context.evidence == () for principal, context in observed)
 
 
 def test_websocket_native_session_is_read_only_and_never_persisted() -> None:
@@ -1886,10 +2283,13 @@ def test_websocket_message_loop_performs_security_work_once() -> None:
 
 
 @pytest.mark.anyio
-async def test_matching_one_time_ticket_authenticates_cross_origin_websocket_once() -> None:
-    store = InMemoryWebSocketTicketStore()
+async def test_matching_one_time_connect_token_authenticates_cross_origin_websocket_once() -> None:
+    store = InMemoryWebSocketConnectTokenStore()
     slot = _Slot(NoCredentials())
     authenticator = _Authenticator(NoCredentials())
+
+    async def current_security_epoch(_subject_id: str) -> int:
+        return 7
 
     @websocket("/ws", name="reports.socket")
     async def handler(socket: WebSocket) -> None:
@@ -1914,14 +2314,16 @@ async def test_matching_one_time_ticket_authenticates_cross_origin_websocket_onc
                         ),
                     ),
                     websocket=WebSocketSecurityConfig(
-                        allowed_origins=frozenset({"https://browser.example"}), ticket_store=store
+                        allowed_origins=frozenset({"https://browser.example"}),
+                        connect_token_store=store,
+                        current_security_epoch=current_security_epoch,
                     ),
                 )
             )
         ],
     )
     now = datetime.now(timezone.utc)
-    service = WebSocketTicketService(store=store, clock=lambda: now)
+    service = WebSocketConnectTokenService(store=store, clock=lambda: now)
     compiled_handler = next(
         route.route_handler
         for route in app.routes
@@ -1935,20 +2337,116 @@ async def test_matching_one_time_ticket_authenticates_cross_origin_websocket_onc
         route_name="reports.socket",
         origin="https://browser.example",
         policy_fingerprint=websocket_policy_fingerprint(plan),
+        security_epoch=7,
     )
     async with AsyncTestClient(app=app) as client:
         session = await client.websocket_connect(
-            f"/ws?ticket={issued.value}", headers={"Origin": "https://browser.example"}
+            f"/ws?connect_token={issued.value}", headers={"Origin": "https://browser.example"}
         )
         with session as socket:
             message = socket.receive_json()
         replay_session = await client.websocket_connect(
-            f"/ws?ticket={issued.value}", headers={"Origin": "https://browser.example"}
+            f"/ws?connect_token={issued.value}", headers={"Origin": "https://browser.example"}
         )
         with pytest.raises(WebSocketDisconnect) as replay, replay_session:
             pass
 
-    assert message == {"subject": "subject-1", "mechanisms": ["websocket-ticket"]}
+    assert message == {"subject": "subject-1", "mechanisms": ["websocket-connect-token"]}
+    assert replay.value.code == 4401
+
+
+@pytest.mark.anyio
+async def test_websocket_connect_tokens_dependency_mints_by_route_name_end_to_end() -> None:
+    store = InMemoryWebSocketConnectTokenStore()
+    slot = _Slot(PresentedCredential("subject-1"))
+    authenticator = _Authenticator(
+        Authenticated(
+            claims="subject-1",
+            evidence=AuthenticationEvidence(mechanism="bearer", slot="authorization.bearer", authenticated_at=_NOW),
+        )
+    )
+    now = datetime.now(timezone.utc)
+
+    async def current_security_epoch(_subject_id: str) -> int:
+        return 7
+
+    websocket_config = WebSocketSecurityConfig(
+        allowed_origins=frozenset({"https://browser.example"}),
+        connect_token_store=store,
+        current_security_epoch=current_security_epoch,
+        clock=lambda: now,
+    )
+
+    @post("/tickets", name="tickets", auth=required("bearer"))
+    async def mint(
+        websocket_connect_tokens: NamedDependency[WebSocketConnectTokenIssuer],
+        principal: NamedDependency[Principal[Any]],
+        security_context: NamedDependency[SecurityContext],
+    ) -> dict[str, str]:
+        issued = await websocket_connect_tokens.issue(
+            "reports.socket",
+            principal=principal,
+            context=security_context,
+            origin="https://browser.example",
+            security_epoch=7,
+        )
+        return {"connect_token": issued.value}
+
+    @websocket("/ws", name="reports.socket", auth=required("bearer"))
+    async def handler(socket: WebSocket) -> None:
+        await socket.accept()
+        await socket.send_json({"subject": socket.user.id})
+        await socket.close()
+
+    app = Litestar(
+        route_handlers=[mint, handler],
+        openapi_config=None,
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(
+                    slots=(slot,),  # type: ignore[arg-type]
+                    mechanisms=(
+                        AuthenticationMechanism(
+                            authenticator=authenticator,  # type: ignore[arg-type]
+                            resolver=_Resolver(),
+                        ),
+                    ),
+                    websocket=websocket_config,
+                )
+            )
+        ],
+    )
+    issuer = WebSocketConnectTokenIssuer(
+        app=app, store=store, clock=websocket_config.clock, ttl=websocket_config.connect_token_ttl
+    )
+    principal = Principal(id="subject-1")
+    context = SecurityContext(session=NullSessionHandle())
+
+    with pytest.raises(ImproperlyConfiguredException, match="does not resolve"):
+        await issuer.issue(
+            "missing", principal=principal, context=context, origin="https://browser.example", security_epoch=7
+        )
+    with pytest.raises(ImproperlyConfiguredException, match="does not resolve"):
+        await issuer.issue(
+            "tickets", principal=principal, context=context, origin="https://browser.example", security_epoch=7
+        )
+
+    async with AsyncTestClient(app=app) as client:
+        response = await client.post("/tickets")
+        assert response.status_code == 201
+        connect_token = response.json()["connect_token"]
+        session = await client.websocket_connect(
+            f"/ws?connect_token={connect_token}", headers={"Origin": "https://browser.example"}
+        )
+        with session as socket:
+            message = socket.receive_json()
+        replay_session = await client.websocket_connect(
+            f"/ws?connect_token={connect_token}", headers={"Origin": "https://browser.example"}
+        )
+        with pytest.raises(WebSocketDisconnect) as replay, replay_session:
+            pass
+
+    assert message == {"subject": "subject-1"}
     assert replay.value.code == 4401
 
 

@@ -20,7 +20,7 @@ from litestar_security.providers._internal import JSONValue, raise_config
 from litestar_security.providers.jwt._claims import JWTAlgorithm
 from litestar_security.providers.jwt._internal import freeze_json, reject, strict_key_id
 
-__all__ = ("SigningKey", "VerificationKey")
+__all__ = ("SigningKey", "VerificationKey", "prepared_verification_key")
 
 
 VerificationKeyInput: TypeAlias = bytes | str | PyJWK | Mapping[str, JSONValue]
@@ -96,6 +96,18 @@ class VerificationKey:
         object.__setattr__(self, "key_id", key_id)
         object.__setattr__(self, "public_jwk", public_jwk)
         object.__setattr__(self, "_prepared_key", prepared)
+
+
+def prepared_verification_key(key: VerificationKey) -> PreparedVerificationKey:
+    """Return validated key material already prepared during construction.
+
+    Args:
+        key: The validated verification-key record.
+
+    Returns:
+        The prepared public or symmetric key used for signature verification.
+    """
+    return key._prepared_key  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001 - module-owned boundary
 
 
 def prepare_key(key: VerificationKeyInput, algorithm: JWTAlgorithm) -> PreparedVerificationKey:

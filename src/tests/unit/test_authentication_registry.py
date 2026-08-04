@@ -4,14 +4,16 @@ import asyncio
 import base64
 import gzip
 import hmac
+import importlib
 import json
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 from math import inf, nan
 from threading import Event as ThreadEvent
 from threading import Lock as ThreadLock
+from threading import Thread
 from time import perf_counter, perf_counter_ns, sleep
 from types import SimpleNamespace
 from typing import Any, cast
@@ -21,25 +23,40 @@ import jwt
 import pyotp
 import pytest
 from anyio import CancelScope, CapacityLimiter, Event, create_task_group, fail_after, get_cancelled_exc_class, to_thread
+from anyio import run as anyio_run
 from anyio.lowlevel import checkpoint
 from argon2 import PasswordHasher as Argon2Engine
 from argon2 import extract_parameters as extract_argon2_parameters
 from argon2.exceptions import VerificationError
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from litestar.connection import ASGIConnection
-from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
+from litestar.exceptions import (
+    ClientException,
+    HTTPException,
+    ImproperlyConfiguredException,
+    NotAuthorizedException,
+    ServiceUnavailableException,
+    TooManyRequestsException,
+)
 from litestar.openapi.spec import SecurityScheme
+from litestar.stores.base import Store
 from litestar.stores.memory import MemoryStore
 
 import litestar_security.accounts as accounts_module
 import litestar_security.accounts._access_tokens as access_tokens_module
-import litestar_security.accounts._controllers as controllers_module
-import litestar_security.accounts._mfa_controllers as mfa_controllers_module
+import litestar_security.accounts._mfa as mfa_module
+import litestar_security.accounts._mfa_login as mfa_login_module
 import litestar_security.accounts._passkeys as passkeys_module
 import litestar_security.accounts._rate_limits as rate_limits_module
 import litestar_security.accounts._sessions as sessions_module
+import litestar_security.accounts.controllers._local as controllers_module
+import litestar_security.accounts.controllers._mfa as mfa_controllers_module
 import litestar_security.testing as testing_module
+from litestar_security import AESGCMOAuthTransactionProtector, OAuthTransactionProtectorKey
+from litestar_security.accounts._mfa_login import MFARequired
+from litestar_security.accounts._operations import LOGIN_MFA
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -67,9 +84,12 @@ from litestar_security.context import (
     Principal,
     SecurityContext,
 )
+from litestar_security.guards import requires_assurance
+from litestar_security.providers import _internal as providers_internal
 from litestar_security.providers.jwks import (
     AsyncJWKSFetcher,
     CachedJWKSProvider,
+    HttpxJWKSFetcher,
     JWKSCacheEntry,
     JWKSCachePolicy,
     JWKSFetchRequest,
@@ -81,6 +101,7 @@ from litestar_security.providers.jwks import (
     normalize_fetcher,
 )
 from litestar_security.providers.jwks import _documents as jwks_documents
+from litestar_security.providers.jwks import _httpx as jwks_httpx
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
     BearerTokenSlot,
@@ -102,12 +123,14 @@ from litestar_security.providers.jwt import (
     normalize_verifier,
     parse_unverified_jwt_route,
 )
+from litestar_security.providers.jwt import _capabilities as jwt_capabilities
 from litestar_security.providers.jwt import _claims as jwt_claims
 from litestar_security.providers.jwt import _keyring as jwt_keyring
 from litestar_security.providers.jwt import _workers as jwt_workers
+from litestar_security.providers.oauth import MemoryOAuthTransactionStore, OAuthOperation, OAuthTransaction, SecretStr
+from litestar_security.providers.oauth import _transactions as oauth_transactions_module
 from litestar_security.providers.oidc import DiscoveryPolicy, OIDCDiscoveryClient, OIDCDiscoveryError, OIDCMetadata
 from litestar_security.providers.oidc import _discovery as oidc_discovery
-from litestar_security.providers.oidc import _urls as oidc_urls
 
 _JWT_NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
 _NAIVE_JWT_NOW = datetime(2026, 7, 26)  # noqa: DTZ001 - explicit rejection fixture
@@ -120,6 +143,787 @@ _JWKS_URI = f"{_JWT_ISSUER}/.well-known/jwks.json"
 _MFA_VECTOR_NOW = datetime.fromtimestamp(59, tz=timezone.utc)
 _MFA_ENCODED_SEED = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
 _MFA_POLICY = accounts_module.TOTPPolicy()
+
+
+def test_mfa_login_outcome_is_secret_safe_and_rate_limited() -> None:
+    """The pre-authentication MFA outcome never exposes its challenge in repr."""
+    outcome = MFARequired(
+        challenge="reveal-once-challenge",
+        account_id="account-1",
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+        methods=frozenset({"totp", "recovery-code"}),
+    )
+
+    assert outcome.code == "mfa_required"
+    assert outcome.account_id == "account-1"
+    assert "reveal-once-challenge" not in repr(outcome)
+    with pytest.raises(FrozenInstanceError):
+        outcome.challenge = "replacement"  # type: ignore[misc]
+    assert rate_limits_module.DEFAULT_RATE_LIMIT_POLICIES[LOGIN_MFA] == rate_limits_module.RateLimitPolicy(
+        limit=10, window=timedelta(minutes=5)
+    )
+
+
+@pytest.mark.parametrize(
+    ("lifetime", "valid"),
+    [
+        (timedelta(microseconds=1), True),
+        (timedelta(minutes=10), True),
+        (timedelta(), False),
+        (timedelta(minutes=10, microseconds=1), False),
+    ],
+)
+def test_mfa_login_challenge_enforces_exact_positive_ten_minute_lifetime(lifetime: timedelta, *, valid: bool) -> None:
+    """The persisted challenge contract accepts only positive lifetimes up to ten minutes."""
+    values = {
+        "challenge_digest": b"d" * 32,
+        "account_id": "account-1",
+        "security_epoch": 0,
+        "client_key": "client",
+        "issued_at": _JWT_NOW,
+        "expires_at": _JWT_NOW + lifetime,
+    }
+
+    if valid:
+        assert accounts_module.MFALoginChallenge(**values).expires_at == _JWT_NOW + lifetime
+    else:
+        with pytest.raises(ValueError, match="lifetime bindings"):
+            accounts_module.MFALoginChallenge(**values)
+
+
+@pytest.mark.anyio
+async def test_mfa_login_issue_derives_a_domain_separated_digest_and_consumes_once() -> None:
+    """Login-MFA challenges are HMAC-bound opaque, reveal-once credentials."""
+    now = _JWT_NOW
+    secrets = accounts_module.LocalAuthSecrets.session(purpose_token_pepper=b"p" * 32)
+    store = testing_module.InMemoryMFALoginChallengeStore()
+    service = mfa_login_module.MFALoginService(
+        store=store,
+        mfa=_mfa_service(_MFAStore(), _MFAProtector(), now=now),
+        pepper=secrets.mfa_login_pepper,
+        clock=lambda: now,
+        entropy=lambda size: b"x" * size,
+    )
+
+    issued = await service.issue(
+        accounts_module.LocalAccount(
+            account_id="account-1",
+            normalized_identifier="person@example.com",
+            display_name="Person",
+            active=True,
+            verified=True,
+            security_epoch=0,
+            user={"id": "account-1"},
+        ),
+        client_key="127.0.0.1",
+    )
+
+    assert isinstance(issued, MFARequired)
+    assert issued.account_id == "account-1"
+    assert issued.challenge == "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg"
+    assert len(store.challenges) == 1
+    expected_digest = hmac.digest(secrets.mfa_login_pepper, issued.challenge.encode("ascii"), "sha256")
+    assert tuple(store.challenges) == (expected_digest,)
+    record = await service.consume(issued.challenge, account_id="account-1", security_epoch=0, client_key="127.0.0.1")
+    assert isinstance(record, accounts_module.MFALoginChallenge)
+    assert (
+        await service.consume(issued.challenge, account_id="account-1", security_epoch=0, client_key="127.0.0.1")
+        == InvalidCredentials()
+    )
+
+
+@pytest.mark.anyio
+async def test_mfa_login_store_burns_expired_and_missing_challenges() -> None:
+    """The atomic store returns no record for expired or absent digest proofs and retains neither."""
+    store = testing_module.InMemoryMFALoginChallengeStore()
+    expired = accounts_module.MFALoginChallenge(
+        challenge_digest=b"e" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key=None,
+        issued_at=_JWT_NOW - timedelta(minutes=1),
+        expires_at=_JWT_NOW,
+    )
+    await store.put(expired)
+
+    assert await store.consume(b"e" * 32, account_id="account-1", security_epoch=0, now=_JWT_NOW) is None
+    assert await store.consume(b"m" * 32, account_id="account-1", security_epoch=0, now=_JWT_NOW) is None
+    assert store.challenges == {}
+
+
+@pytest.mark.anyio
+async def test_mfa_login_rejects_malformed_challenges_and_burns_client_key_mismatches() -> None:
+    """Malformed input does not reach the store, while a binding mismatch burns it."""
+    now = _JWT_NOW
+    store = testing_module.InMemoryMFALoginChallengeStore()
+    service = mfa_login_module.MFALoginService(
+        store=store,
+        mfa=_mfa_service(_MFAStore(), _MFAProtector(), now=now),
+        pepper=b"p" * 32,
+        clock=lambda: now,
+        entropy=lambda size: b"x" * size,
+    )
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=0,
+    )
+    assert (
+        await service.consume("not-ascii-\u00e9", account_id="account-1", security_epoch=0, client_key="client")
+        == InvalidCredentials()
+    )
+    issued = await service.issue(account, client_key="client")
+    assert isinstance(issued, MFARequired)
+    assert (
+        await service.consume(issued.challenge, account_id="account-1", security_epoch=0, client_key="other-client")
+        == InvalidCredentials()
+    )
+    assert (
+        await service.consume(issued.challenge, account_id="account-1", security_epoch=0, client_key="client")
+        == InvalidCredentials()
+    )
+    unicode_issued = await service.issue(account, client_key="client")
+    assert isinstance(unicode_issued, MFARequired)
+    assert (
+        await service.consume(
+            unicode_issued.challenge, account_id="account-1", security_epoch=0, client_key="bad-\ud800"
+        )
+        == InvalidCredentials()
+    )
+    assert (
+        await service.consume(unicode_issued.challenge, account_id="account-1", security_epoch=0, client_key="client")
+        == InvalidCredentials()
+    )
+
+
+class _MFALoginVerificationService(accounts_module.MFAService):
+    """MFA port double recording exact MFA-login factor dispatch."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        super().__init__(store=_MFAStore(), secret_protector=_MFAProtector())
+        self.calls: list[tuple[str, str, str | None, str]] = []
+        self.fail = fail
+
+    async def verify_totp(
+        self, account_id: str, method_id: str, code: str
+    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        self.calls.append(("totp", account_id, method_id, code))
+        if self.fail:
+            raise OSError
+        return AuthenticationEvidence(
+            mechanism="totp", slot="mfa", authenticated_at=_JWT_NOW, methods=frozenset({"totp"})
+        )
+
+    async def consume_recovery_code(
+        self, account_id: str, code: str
+    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        self.calls.append(("recovery-code", account_id, None, code))
+        if self.fail:
+            raise OSError
+        return AuthenticationEvidence(
+            mechanism="recovery-code", slot="mfa", authenticated_at=_JWT_NOW, methods=frozenset({"recovery-code"})
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("method", "method_id", "expected_call"),
+    [
+        ("totp", "method-1", ("totp", "account-1", "method-1", "123456")),
+        ("recovery-code", None, ("recovery-code", "account-1", None, "123456")),
+    ],
+)
+async def test_mfa_login_verifies_only_the_selected_factor(
+    method: str, method_id: str | None, expected_call: tuple[str, str, str | None, str]
+) -> None:
+    """TOTP and recovery code dispatch retain their exact account and method binding."""
+    mfa = _MFALoginVerificationService()
+    service = mfa_login_module.MFALoginService(
+        store=testing_module.InMemoryMFALoginChallengeStore(), mfa=mfa, pepper=b"p" * 32
+    )
+    record = accounts_module.MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key=None,
+        issued_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+    )
+
+    assert isinstance(
+        await service.verify(record, method=method, method_id=method_id, code="123456"), AuthenticationEvidence
+    )
+    assert mfa.calls == [expected_call]
+    assert await service.verify(record, method="unknown", method_id=None, code="123456") == InvalidCredentials()
+
+    unavailable = mfa_login_module.MFALoginService(
+        store=testing_module.InMemoryMFALoginChallengeStore(),
+        mfa=_MFALoginVerificationService(fail=True),
+        pepper=b"p" * 32,
+    )
+    assert (
+        await unavailable.verify(record, method=method, method_id=method_id, code="123456") == VerificationUnavailable()
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"store": object()}, "store"),
+        ({"mfa": object()}, "MFA capability"),
+        ({"pepper": b"short"}, "pepper"),
+        ({"methods": frozenset()}, "methods"),
+        ({"ttl": timedelta()}, "lifetime"),
+        ({"clock": object()}, "callable"),
+    ],
+)
+def test_mfa_login_service_rejects_incomplete_or_unbounded_dependencies(kwargs: dict[str, object], match: str) -> None:
+    """The challenge service accepts only concrete, bounded security collaborators."""
+    values: dict[str, object] = {
+        "store": testing_module.InMemoryMFALoginChallengeStore(),
+        "mfa": _mfa_service(_MFAStore(), _MFAProtector()),
+        "pepper": b"p" * 32,
+    }
+    values.update(kwargs)
+
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        mfa_login_module.MFALoginService(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_mfa_login_service_fail_closes_invalid_inputs_and_collaborators() -> None:
+    """Invalid challenge context, entropy, clocks, stores, and factor input never leak through."""
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=0,
+    )
+    service = mfa_login_module.MFALoginService(
+        store=testing_module.InMemoryMFALoginChallengeStore(),
+        mfa=_mfa_service(_MFAStore(), _MFAProtector()),
+        pepper=b"p" * 32,
+        entropy=lambda _size: b"short",
+    )
+    assert await service.issue(account, client_key="client") == VerificationUnavailable()
+    assert await service.issue(replace(account, account_id="\ud800"), client_key="client") == VerificationUnavailable()
+    assert (
+        await service.consume("challenge", account_id="account-1", security_epoch=0, client_key="\ud800")
+        == InvalidCredentials()
+    )
+
+    class FailingStore:
+        async def put(self, _challenge: object) -> None:
+            raise OSError
+
+        async def consume(self, *_args: object, **_kwargs: object) -> None:
+            raise OSError
+
+    failing = mfa_login_module.MFALoginService(
+        store=cast("Any", FailingStore()), mfa=_mfa_service(_MFAStore(), _MFAProtector()), pepper=b"p" * 32
+    )
+    assert await failing.issue(account, client_key=None) == VerificationUnavailable()
+    assert (
+        await failing.consume("challenge", account_id="account-1", security_epoch=0, client_key=None)
+        == VerificationUnavailable()
+    )
+
+    record = accounts_module.MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key="client",
+        issued_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+    )
+    assert await service.verify(record, method="totp", method_id=None, code="123456") == InvalidCredentials()
+    assert await service.verify(record, method="other", method_id=None, code="123456") == InvalidCredentials()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["limit", "account", "consume", "verify"])
+async def test_local_auth_mfa_completion_fail_closes_collaborator_failures(failure: str) -> None:
+    """Every completion boundary returns the sanitized unavailable outcome on collaborator faults."""
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=0,
+    )
+
+    class Accounts:
+        async def get_by_id(self, _account_id: str) -> object:
+            if failure == "account":
+                raise OSError
+            return account
+
+    class Limits:
+        async def check(self, *_args: object, **_kwargs: object) -> None:
+            if failure == "limit":
+                raise OSError
+
+    class MFA:
+        async def consume(self, *_args: object, **_kwargs: object) -> object:
+            if failure == "consume":
+                raise OSError
+            return accounts_module.MFALoginChallenge(
+                challenge_digest=b"d" * 32,
+                account_id=account.account_id,
+                security_epoch=account.security_epoch,
+                client_key="client",
+                issued_at=_JWT_NOW,
+                expires_at=_JWT_NOW + timedelta(minutes=5),
+            )
+
+        async def verify(self, *_args: object, **_kwargs: object) -> object:
+            if failure == "verify":
+                raise OSError
+            return InvalidCredentials()
+
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", Accounts()),
+        password_login=cast("Any", object()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        rate_limits=cast("Any", Limits()),
+        mfa_login=cast("Any", MFA()),
+        client_key=lambda _request: "client",
+    )
+
+    assert (
+        await service.complete_mfa_login(
+            cast("Any", object()),
+            "challenge",
+            account_id=account.account_id,
+            method="totp",
+            method_id="method-1",
+            code="123456",
+        )
+        == VerificationUnavailable()
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("limited", "account", "expected"),
+    [
+        (accounts_module.RateLimited(retry_after=3), object(), accounts_module.RateLimited(retry_after=3)),
+        (None, None, InvalidCredentials()),
+        (
+            None,
+            accounts_module.LocalAccount(
+                account_id="account-1",
+                normalized_identifier="person@example.com",
+                display_name="Person",
+                active=False,
+                verified=True,
+                security_epoch=0,
+            ),
+            InvalidCredentials(),
+        ),
+    ],
+)
+async def test_local_auth_mfa_completion_stops_before_challenge_for_limited_or_inactive_accounts(
+    limited: object, account: object, expected: object
+) -> None:
+    """Rate limits and inactive/missing accounts are returned before consuming an MFA challenge."""
+
+    class Accounts:
+        async def get_by_id(self, _account_id: str) -> object:
+            return account
+
+    class Limits:
+        async def check(self, *_args: object, **_kwargs: object) -> object:
+            return limited
+
+    class MFA:
+        async def consume(self, *_args: object, **_kwargs: object) -> object:
+            pytest.fail("a rate limit or invalid account must not consume the challenge")
+
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", Accounts()),
+        password_login=cast("Any", object()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        rate_limits=cast("Any", Limits()),
+        mfa_login=cast("Any", MFA()),
+    )
+
+    assert (
+        await service.complete_mfa_login(
+            cast("Any", object()),
+            "challenge",
+            account_id="account-1",
+            method="totp",
+            method_id="method-1",
+            code="123456",
+        )
+        == expected
+    )
+
+
+@pytest.mark.anyio
+async def test_mfa_login_helper_boundaries_fail_closed_without_secret_processing() -> None:
+    """Malformed contextual inputs and exact helper contracts take their explicit fail-closed branches."""
+    service = mfa_login_module.MFALoginService(
+        store=testing_module.InMemoryMFALoginChallengeStore(),
+        mfa=_mfa_service(_MFAStore(), _MFAProtector()),
+        pepper=b"p" * 32,
+    )
+    invalid_account = SimpleNamespace(account_id="\ud800", security_epoch=0)
+    valid_account = SimpleNamespace(account_id="account-1", security_epoch=0)
+    assert await service.issue(cast("Any", invalid_account), client_key=None) == VerificationUnavailable()
+    assert await service.issue(cast("Any", valid_account), client_key="\ud800") == VerificationUnavailable()
+    assert mfa_login_module._strict_ascii_context("\ud800") is False  # noqa: SLF001
+    assert mfa_login_module._valid_methods({"totp"}) is False  # noqa: SLF001
+    assert mfa_login_module._client_keys_match(None, "client") is False  # noqa: SLF001
+    assert mfa_login_module._client_keys_match("client", 1) is False  # noqa: SLF001
+    assert mfa_login_module._client_keys_match("client", "\ud800") is False  # noqa: SLF001
+
+    record = accounts_module.MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key=None,
+        issued_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+    )
+    object.__setattr__(service, "methods", frozenset({"unimplemented"}))
+    assert await service.verify(record, method="unimplemented", method_id=None, code="123456") == InvalidCredentials()
+
+
+def test_local_mfa_wire_representations_redact_challenge_and_factor_proof() -> None:
+    """Typed MFA transport values cannot disclose either reusable secret through diagnostics."""
+    required = accounts_module.LocalMFARequiredResponse(
+        challenge="challenge-secret", account_id="account-1", expires_at=_JWT_NOW, methods=("totp",)
+    )
+    completion = accounts_module.LocalMFACompletionRequest(
+        challenge="challenge-secret", account_id="account-1", method="totp", code="factor-secret", method_id="method-1"
+    )
+
+    assert "challenge-secret" not in repr(required)
+    assert "challenge-secret" not in repr(completion)
+    assert "factor-secret" not in repr(completion)
+
+
+@pytest.mark.anyio
+async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_key() -> None:
+    """MFA login burns before factor verification and delegates with merged evidence."""
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=2,
+        user={"id": "account-1"},
+    )
+    challenge = accounts_module.MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id=account.account_id,
+        security_epoch=account.security_epoch,
+        client_key="client-complete",
+        issued_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+    )
+    calls: list[str] = []
+
+    class PasswordLogin:
+        async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccount[dict[str, str]]:
+            assert _kwargs["client_key"] in {"client-session", "client-token"}
+            calls.append("password")
+            return account
+
+    class Accounts:
+        async def get_by_id(self, account_id: str) -> accounts_module.LocalAccount[dict[str, str]]:
+            assert account_id == account.account_id
+            calls.append("account")
+            return account
+
+    class Guard:
+        async def check(self, operation: str, *, client_key: str | None, identifier: str | None) -> None:
+            assert operation == LOGIN_MFA
+            assert client_key == "client-complete"
+            assert identifier == account.account_id
+            calls.append("limit")
+
+    class MFA:
+        async def issue(self, issued: object, *, client_key: str | None) -> MFARequired:
+            assert issued is account
+            assert client_key in {"client-session", "client-token"}
+            calls.append("issue-challenge")
+            return MFARequired("challenge", account.account_id, _JWT_NOW + timedelta(minutes=5), frozenset({"totp"}))
+
+        async def consume(self, value: str, **kwargs: object) -> accounts_module.MFALoginChallenge:
+            assert value == "challenge"
+            assert kwargs == {
+                "account_id": account.account_id,
+                "security_epoch": account.security_epoch,
+                "client_key": "client-complete",
+            }
+            calls.append("consume")
+            return challenge
+
+        async def verify(self, consumed: object, **kwargs: object) -> AuthenticationEvidence:
+            assert consumed is challenge
+            assert kwargs == {"method": "totp", "method_id": "method-1", "code": "123456"}
+            calls.append("verify")
+            return AuthenticationEvidence(
+                mechanism="totp", slot="mfa", authenticated_at=_JWT_NOW, methods=frozenset({"totp"})
+            )
+
+    class Sessions:
+        async def establish(
+            self, _request: object, established: object, *, evidence: AuthenticationEvidence
+        ) -> accounts_module.SessionAuthentication:
+            assert established is account
+            assert evidence.methods == frozenset({"password", "totp"})
+            assert evidence.amr == ("pwd", "otp")
+            calls.append("establish")
+            return accounts_module.SessionAuthentication(
+                session_id="c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",
+                binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+                account_id=account.account_id,
+                security_epoch=account.security_epoch,
+                authenticated_at=_JWT_NOW,
+                expires_at=_JWT_NOW + timedelta(hours=1),
+            )
+
+    class Tokens:
+        async def issue(self, *_args: object, **_kwargs: object) -> object:
+            calls.append("token-issue")
+            return object()
+
+    # Each initial login and completion may derive its key once. Reusing a key
+    # within either request is required because extractors can be stateful.
+    client_keys = iter(("client-session", "client-token", "client-complete", "wrong-if-read-twice"))
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", Accounts()),
+        password_login=cast("Any", PasswordLogin()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        session_auth=cast("Any", Sessions()),
+        refresh_tokens=cast("Any", Tokens()),
+        rate_limits=cast("Any", Guard()),
+        mfa_login=cast("Any", MFA()),
+        client_key=lambda _request: next(client_keys),
+    )
+    request = cast("Any", object())
+    credentials = accounts_module.LocalCredentials(identifier="person@example.com", password="password")  # noqa: S106
+
+    assert isinstance(await service.session_login(request, credentials), MFARequired)
+    assert calls == ["password", "issue-challenge"]
+    assert isinstance(await service.token_login(request, credentials), MFARequired)
+    assert calls == ["password", "issue-challenge", "password", "issue-challenge"]
+    assert isinstance(
+        await service.complete_mfa_login(
+            request,
+            "challenge",
+            account_id=account.account_id,
+            method="totp",
+            method_id="method-1",
+            code="123456",
+            transport="session",
+        ),
+        accounts_module.LocalAccountResponse,
+    )
+    assert calls == [
+        "password",
+        "issue-challenge",
+        "password",
+        "issue-challenge",
+        "limit",
+        "account",
+        "consume",
+        "verify",
+        "account",
+        "establish",
+    ]
+    assert isinstance(
+        await replace(service, rate_limits=None).complete_mfa_login(
+            request, "challenge", account_id=account.account_id, method="totp", code="123456"
+        ),
+        VerificationUnavailable,
+    )
+    assert calls[-1] == "establish"
+
+
+@pytest.mark.anyio
+async def test_local_auth_mfa_completion_rejects_an_epoch_advance_before_issuance() -> None:
+    """A reset racing completion invalidates the final authoritative account read."""
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=2,
+    )
+    challenge = accounts_module.MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id=account.account_id,
+        security_epoch=account.security_epoch,
+        client_key=None,
+        issued_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+    )
+
+    class Accounts:
+        reads = 0
+
+        async def get_by_id(self, _account_id: str) -> accounts_module.LocalAccount[object]:
+            self.reads += 1
+            return account if self.reads == 1 else replace(account, security_epoch=account.security_epoch + 1)
+
+    class Guard:
+        async def check(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class MFA:
+        async def consume(self, *_args: object, **_kwargs: object) -> accounts_module.MFALoginChallenge:
+            return challenge
+
+        async def verify(self, *_args: object, **_kwargs: object) -> AuthenticationEvidence:
+            return AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=_JWT_NOW)
+
+    class Sessions:
+        issued = False
+
+        async def establish(self, *_args: object, **_kwargs: object) -> object:
+            self.issued = True
+            return object()
+
+    sessions = Sessions()
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", Accounts()),
+        password_login=cast("Any", object()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        session_auth=cast("Any", sessions),
+        rate_limits=cast("Any", Guard()),
+        mfa_login=cast("Any", MFA()),
+    )
+
+    assert isinstance(
+        await service.complete_mfa_login(
+            cast("Any", object()),
+            "challenge",
+            account_id=account.account_id,
+            method="totp",
+            code="123456",
+            transport="session",
+        ),
+        InvalidCredentials,
+    )
+    assert not sessions.issued
+
+
+@pytest.mark.anyio
+async def test_local_auth_mfa_completion_burns_a_wrong_factor_before_a_retry() -> None:
+    """A failed factor consumes the opaque login challenge, so a later correct code cannot replay it."""
+    account = accounts_module.LocalAccount(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=0,
+    )
+
+    class Accounts:
+        async def get_by_id(self, _account_id: str) -> accounts_module.LocalAccount[object]:
+            return account
+
+    class Guard:
+        async def check(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class MFA(accounts_module.MFAService):
+        def __init__(self) -> None:
+            super().__init__(store=_MFAStore(), secret_protector=_MFAProtector())
+            self.codes: list[str] = []
+
+        async def verify_totp(
+            self, _account_id: str, _method_id: str, code: str
+        ) -> AuthenticationEvidence | InvalidCredentials:
+            self.codes.append(code)
+            if code != "correct":
+                return InvalidCredentials()
+            return AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=_JWT_NOW)
+
+    class Sessions:
+        async def establish(self, *_args: object, **_kwargs: object) -> accounts_module.SessionAuthentication:
+            return accounts_module.SessionAuthentication(
+                session_id="c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",
+                binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+                account_id=account.account_id,
+                security_epoch=account.security_epoch,
+                authenticated_at=_JWT_NOW,
+                expires_at=_JWT_NOW + timedelta(hours=1),
+            )
+
+    factors = MFA()
+    mfa_login = mfa_login_module.MFALoginService(
+        store=testing_module.InMemoryMFALoginChallengeStore(),
+        mfa=factors,
+        pepper=b"p" * 32,
+        clock=lambda: _JWT_NOW,
+        entropy=lambda _size: b"x" * 32,
+    )
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", Accounts()),
+        password_login=cast("Any", object()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        session_auth=cast("Any", Sessions()),
+        rate_limits=cast("Any", Guard()),
+        mfa_login=mfa_login,
+        client_key=lambda _request: "client",
+    )
+    issued = await mfa_login.issue(account, client_key="client")
+    assert isinstance(issued, MFARequired)
+
+    for code in ("wrong", "correct"):
+        assert isinstance(
+            await service.complete_mfa_login(
+                cast("Any", object()),
+                issued.challenge,
+                account_id=account.account_id,
+                method="totp",
+                method_id="method-1",
+                code=code,
+                transport="session",
+            ),
+            InvalidCredentials,
+        )
+    assert factors.codes == ["wrong"]
+
+
+async def _assert_http_exception(
+    awaitable: Awaitable[object], exception_type: type[HTTPException], *, status_code: int, detail: str
+) -> HTTPException:
+    with pytest.raises(exception_type) as exc_info:
+        await awaitable
+    assert exc_info.value.status_code == status_code
+    assert exc_info.value.detail == detail
+    return exc_info.value
 
 
 def test_jwks_worker_and_metrics_contracts_are_safe_by_default() -> None:
@@ -2135,6 +2939,311 @@ def test_access_token_claim_builder_is_deterministic_minimal_and_validated() -> 
     assert "scope" not in random_one
 
 
+def test_capability_claims_reject_reserved_claim_names() -> None:
+    capabilities = importlib.import_module("litestar_security.providers.jwt._capabilities")
+
+    with pytest.raises(ValueError, match="reserved"):
+        capabilities.build_capability_claims(
+            issuer=_JWT_ISSUER,
+            purpose="download",
+            subject="user-1",
+            audience="files",
+            lifetime=timedelta(minutes=5),
+            claims={"aud": "hijack"},
+            now=_JWT_NOW,
+        )
+
+
+def test_capability_claim_builder_returns_detached_json_payload() -> None:
+    capabilities = importlib.import_module("litestar_security.providers.jwt._capabilities")
+    application_claims = {"resource": {"parts": ["one"]}, "weight": 1.5}
+
+    payload = capabilities.build_capability_claims(
+        issuer=_JWT_ISSUER,
+        purpose="download",
+        subject="user-1",
+        audience="files",
+        lifetime=timedelta(minutes=5),
+        claims=application_claims,
+        now=_JWT_NOW,
+    )
+    application_claims["resource"]["parts"].append("two")
+
+    assert isinstance(payload, dict)
+    assert payload["resource"] == {"parts": ["one"]}
+    assert payload["weight"] == 1.5
+    assert json.loads(json.dumps(payload))["resource"] == {"parts": ["one"]}
+
+
+def test_capability_claim_builder_rejects_non_json_application_values() -> None:
+    capabilities = importlib.import_module("litestar_security.providers.jwt._capabilities")
+
+    with pytest.raises(ValueError, match="JSON"):
+        capabilities.build_capability_claims(
+            issuer=_JWT_ISSUER,
+            purpose="download",
+            subject="user-1",
+            audience="files",
+            lifetime=timedelta(minutes=5),
+            claims={"created_at": _JWT_NOW},
+            now=_JWT_NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("claims", "lifetime", "match"),
+    [
+        ({1: "value"}, timedelta(minutes=5), "object keys"),
+        ({"nested": {1: "value"}}, timedelta(minutes=5), "object keys"),
+        ({"value": nan}, timedelta(minutes=5), "finite"),
+        ({"value": inf}, timedelta(minutes=5), "finite"),
+        ({}, timedelta(milliseconds=500), "whole second"),
+    ],
+)
+def test_capability_claim_builder_rejects_noncanonical_json_values(
+    claims: Mapping[object, object], lifetime: timedelta, match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        jwt_capabilities.build_capability_claims(
+            issuer=_JWT_ISSUER,
+            purpose="download",
+            subject="user-1",
+            audience="files",
+            lifetime=lifetime,
+            claims=cast("Mapping[str, jwt_capabilities.JSONValue]", claims),
+            now=_JWT_NOW,
+        )
+
+
+def test_capability_claim_builder_rejects_excessive_json_depth() -> None:
+    nested: object = "value"
+    for _ in range(33):
+        nested = [nested]
+
+    with pytest.raises(ValueError, match="bounded"):
+        jwt_capabilities.build_capability_claims(
+            issuer=_JWT_ISSUER,
+            purpose="download",
+            subject="user-1",
+            audience="files",
+            lifetime=timedelta(minutes=5),
+            claims={"nested": cast("jwt_capabilities.JSONValue", nested)},
+            now=_JWT_NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "now"),
+    [
+        ("missing", _JWT_NOW),
+        ("invalid-numeric", _JWT_NOW),
+        ("overflow-numeric", _JWT_NOW),
+        ("expired-lifetime", _JWT_NOW),
+        ("not-before-after-expiry", _JWT_NOW),
+        ("invalid-now", cast("datetime", None)),
+    ],
+)
+def test_normalize_capability_claims_rejects_malformed_temporal_claims(mutation: str, now: datetime) -> None:
+    payload: dict[str, jwt_capabilities.JSONValue] = {
+        "iss": _JWT_ISSUER,
+        "sub": "user-1",
+        "aud": "files",
+        "purpose": "download",
+        "jti": "capability-1",
+        "iat": int(_JWT_NOW.timestamp()),
+        "exp": int((_JWT_NOW + timedelta(minutes=5)).timestamp()),
+    }
+    if mutation == "missing":
+        del payload["jti"]
+    elif mutation == "invalid-numeric":
+        payload["iat"] = True
+    elif mutation == "overflow-numeric":
+        payload["exp"] = inf
+    elif mutation == "expired-lifetime":
+        payload["exp"] = payload["iat"]
+    elif mutation == "not-before-after-expiry":
+        payload["nbf"] = payload["exp"]
+
+    assert (
+        jwt_capabilities.normalize_capability_claims(
+            payload, purpose="download", audience="files", issuer=_JWT_ISSUER, now=now
+        )
+        == InvalidCredentials()
+    )
+
+
+@pytest.mark.anyio
+async def test_mint_capability_header_is_never_accepted_by_the_access_verifier(local_key_ring: LocalKeyRing) -> None:
+    with pytest.raises(ValueError, match="24 hours"):
+        await local_key_ring.mint_capability(
+            purpose="download", subject="user-1", audience="files", lifetime=timedelta(hours=25)
+        )
+
+    token = await local_key_ring.mint_capability(
+        purpose="download", subject="user-1", audience="files", lifetime=timedelta(minutes=5)
+    )
+
+    assert jwt.get_unverified_header(token)["typ"] == "capability+jwt"
+    verifier = local_key_ring.build_verifier(
+        JWTValidationConfig(
+            issuer=local_key_ring.issuer,
+            audiences=frozenset({"files"}),
+            algorithms=frozenset(key.algorithm for key in local_key_ring.all_verification_keys),
+        )
+    )
+    assert isinstance(await verifier.verify(token, now=_JWT_NOW), InvalidCredentials)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("case", ["access-token", "purpose", "audience", "expired", "naive-now"])
+async def test_verify_capability_rejects_untrusted_or_mismatched_tokens_as_one_outcome(
+    case: str, local_key_ring: LocalKeyRing
+) -> None:
+    now = datetime.now(timezone.utc)
+    capability = await local_key_ring.mint_capability(
+        purpose="download", subject="user-1", audience="files", lifetime=timedelta(minutes=1)
+    )
+    if case == "access-token":
+        token = await local_key_ring.build_signer().sign(
+            build_access_token_claims(
+                issuer=local_key_ring.issuer,
+                audience="files",
+                subject="user-1",
+                client_id="client-1",
+                security_epoch=0,
+                scopes=frozenset(),
+                now=now,
+                lifetime=timedelta(minutes=1),
+                jti="access-token-1",
+            ),
+            now=now,
+        )
+        purpose, audience, verification_now = "download", "files", now
+    elif case == "purpose":
+        token, purpose, audience, verification_now = capability, "upload", "files", now
+    elif case == "audience":
+        token, purpose, audience, verification_now = capability, "download", "images", now
+    elif case == "expired":
+        token, purpose, audience, verification_now = (
+            capability,
+            "download",
+            "files",
+            now + timedelta(minutes=1, seconds=31),
+        )
+    else:
+        token, purpose, audience, verification_now = capability, "download", "files", _NAIVE_JWT_NOW
+
+    assert (
+        await local_key_ring.verify_capability(token, purpose=purpose, audience=audience, now=verification_now)
+        == InvalidCredentials()
+    )
+
+
+@pytest.mark.anyio
+async def test_verify_capability_accepts_a_retained_rotation_key(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    old_private, old_public = jwt_key_material["RS256"]
+    new_private, _new_public = jwt_key_material["RS256_ALT"]
+    old_ring = LocalKeyRing(
+        issuer=_JWT_ISSUER, active_signing_key=SigningKey(key_id="old", algorithm="RS256", private_key=old_private)
+    )
+    token = await old_ring.mint_capability(
+        purpose="download", subject="user-1", audience="files", lifetime=timedelta(minutes=5)
+    )
+    rotated_ring = LocalKeyRing(
+        issuer=_JWT_ISSUER,
+        active_signing_key=SigningKey(key_id="new", algorithm="RS256", private_key=new_private),
+        verification_keys=(VerificationKey(key_id="old", algorithm="RS256", key=old_public),),
+    )
+
+    result = await rotated_ring.verify_capability(
+        token, purpose="download", audience="files", now=datetime.now(timezone.utc)
+    )
+
+    assert isinstance(result, jwt_capabilities.VerifiedCapability)
+    assert result.subject == "user-1"
+
+
+@pytest.mark.anyio
+async def test_capability_worker_failures_are_sanitized(
+    local_key_ring: LocalKeyRing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capability = await local_key_ring.mint_capability(
+        purpose="download", subject="user-1", audience="files", lifetime=timedelta(minutes=5)
+    )
+
+    async def failure(*_args: object, **_kwargs: object) -> object:
+        message = "internal failure"
+        raise OSError(message)
+
+    monkeypatch.setattr(jwt_keyring, "run_worker", failure)
+    with pytest.raises(RuntimeError, match="Capability minting unavailable") as exc_info:
+        await local_key_ring.mint_capability(
+            purpose="download", subject="user-1", audience="files", lifetime=timedelta(minutes=5)
+        )
+    assert "internal failure" not in str(exc_info.value)
+
+    outcome = await local_key_ring.verify_capability(
+        capability, purpose="download", audience="files", now=datetime.now(timezone.utc)
+    )
+
+    assert isinstance(outcome, VerificationUnavailable)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("raw", "failure", "outcome_type"),
+    [("not-a-jwt", None, InvalidCredentials), (None, jwt.InvalidTokenError(), InvalidCredentials)],
+)
+async def test_verify_capability_sanitizes_untrusted_routes_and_crypto_failures(
+    raw: str | None,
+    failure: Exception | None,
+    outcome_type: type[InvalidCredentials],
+    local_key_ring: LocalKeyRing,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if raw is None:
+        raw = await local_key_ring.mint_capability(
+            purpose="download", subject="user-1", audience="files", lifetime=timedelta(minutes=5)
+        )
+
+        async def fail_worker(*_args: object, **_kwargs: object) -> object:
+            raise cast("Exception", failure)
+
+        monkeypatch.setattr(jwt_keyring, "run_worker", fail_worker)
+
+    outcome = await local_key_ring.verify_capability(
+        raw, purpose="download", audience="files", now=datetime.now(timezone.utc)
+    )
+
+    assert isinstance(outcome, outcome_type)
+
+
+@pytest.mark.anyio
+async def test_verify_capability_rejects_an_unknown_key_id(local_key_ring: LocalKeyRing) -> None:
+    now = datetime.now(timezone.utc)
+    payload = jwt_capabilities.build_capability_claims(
+        issuer=local_key_ring.issuer,
+        purpose="download",
+        subject="user-1",
+        audience="files",
+        lifetime=timedelta(minutes=5),
+        claims={},
+        now=now,
+    )
+    raw = jwt.encode(
+        dict(payload),
+        cast("Any", local_key_ring.active_signing_key)._prepared_key,  # noqa: SLF001 - exercise untrusted key routing
+        algorithm=local_key_ring.active_signing_key.algorithm,
+        headers={"kid": "unknown", "typ": jwt_capabilities.CAPABILITY_TOKEN_TYPE},
+    )
+
+    outcome = await local_key_ring.verify_capability(raw, purpose="download", audience="files", now=now)
+
+    assert isinstance(outcome, InvalidCredentials)
+
+
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [
@@ -3171,6 +4280,11 @@ async def test_oidc_discovery_classifies_literal_public_ip_without_resolving() -
     assert resolver_calls == []
 
 
+def test_shared_ssrf_primitives_live_in_providers_internal() -> None:
+    assert callable(providers_internal.public_address)
+    assert callable(providers_internal.resolve_addresses)
+
+
 @pytest.mark.anyio
 async def test_oidc_discovery_default_resolver_deduplicates_getaddrinfo_answers(
     monkeypatch: pytest.MonkeyPatch,
@@ -3182,7 +4296,7 @@ async def test_oidc_discovery_default_resolver_deduplicates_getaddrinfo_answers(
         address = (_OIDC_PUBLIC_IP, port)
         return [(object(), object(), object(), "", address), (object(), object(), object(), "", address)]
 
-    monkeypatch.setattr(oidc_urls, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(providers_internal, "getaddrinfo", fake_getaddrinfo)
     transport = _RecordingMockTransport(lambda _request: _oidc_response())
     client = OIDCDiscoveryClient(
         policy=DiscoveryPolicy(allowed_issuers=frozenset({_OIDC_ISSUER})),
@@ -3193,7 +4307,7 @@ async def test_oidc_discovery_default_resolver_deduplicates_getaddrinfo_answers(
     metadata = await _discover_and_close(client)
 
     assert metadata.issuer == _OIDC_ISSUER
-    assert calls == [("issuer.example", 443, oidc_urls.socket.SOCK_STREAM)]
+    assert calls == [("issuer.example", 443, providers_internal.socket.SOCK_STREAM)]
 
 
 @pytest.mark.anyio
@@ -3328,6 +4442,210 @@ async def test_oidc_discovery_rejects_compressed_response_before_decoding() -> N
         await _discover_and_close(client)
 
     assert stream.was_iterated is False
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "/jwks.json",
+        "http://issuer.example/jwks.json",
+        "https://user@issuer.example/jwks.json",
+        "",
+        " https://issuer.example/jwks.json",
+        "https://issuer.example:bad-port/jwks.json",
+        cast("str", 7),
+    ],
+    ids=["relative", "http", "userinfo", "empty", "whitespace", "invalid-port", "non-string"],
+)
+@pytest.mark.anyio
+async def test_httpx_jwks_fetcher_rejects_non_absolute_https_uri_before_resolution(uri: str) -> None:
+    async def resolver(_host: str, _port: int) -> tuple[str, ...]:
+        message = "Invalid JWKS URI must not reach DNS"
+        raise AssertionError(message)
+
+    transport = _RecordingMockTransport(lambda _request: httpx.Response(200))
+    fetcher = HttpxJWKSFetcher(transport=transport, resolver=resolver)
+
+    with pytest.raises(jwks_httpx._FetchGuardError):  # noqa: SLF001 - assert the private transport boundary failure
+        await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=uri))
+
+    assert transport.requests == []
+    await fetcher.aclose()
+
+
+@pytest.mark.anyio
+async def test_httpx_jwks_fetcher_rejects_encoded_response_before_decoding() -> None:
+    async def resolver(_host: str, _port: int) -> tuple[str, ...]:
+        return (_OIDC_PUBLIC_IP,)
+
+    stream = _ChunkedOIDCStream(b"encoded")
+    response = httpx.Response(200, headers={"content-encoding": "gzip"}, stream=stream)
+    fetcher = HttpxJWKSFetcher(transport=_RecordingMockTransport(lambda _request: response), resolver=resolver)
+
+    with pytest.raises(jwks_httpx._FetchGuardError):  # noqa: SLF001 - assert the private transport boundary failure
+        await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI))
+
+    assert stream.was_iterated is False
+    await fetcher.aclose()
+
+
+@pytest.mark.anyio
+async def test_httpx_jwks_fetcher_sends_if_none_match_returns_unfollowed_redirect_and_closes_idempotently() -> None:
+    """The transport preserves conditional and non-success responses for the cache layer."""
+
+    async def resolver(_host: str, _port: int) -> tuple[str, ...]:
+        return (_OIDC_PUBLIC_IP,)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["if-none-match"] == '"v1"'
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(304, headers={"etag": '"v1"'})
+
+    transport = _RecordingMockTransport(handler)
+    fetcher = HttpxJWKSFetcher(transport=transport, resolver=resolver)
+
+    response = await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, etag='"v1"'))
+
+    assert response == JWKSFetchResponse(status_code=304, body=b"", headers={"etag": '"v1"'})
+    await fetcher.aclose()
+    await fetcher.aclose()
+    assert transport.was_closed is True
+
+
+@pytest.mark.anyio
+async def test_httpx_jwks_fetcher_returns_redirect_verbatim_without_following_location() -> None:
+    """A redirect remains a response for the cache layer to classify as unavailable."""
+
+    async def resolver(_host: str, _port: int) -> tuple[str, ...]:
+        return (_OIDC_PUBLIC_IP,)
+
+    transport = _RecordingMockTransport(
+        lambda _request: httpx.Response(301, headers={"location": "https://private.example/jwks.json"})
+    )
+    fetcher = HttpxJWKSFetcher(transport=transport, resolver=resolver)
+
+    response = await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI))
+
+    assert response.status_code == 301
+    assert response.headers["location"] == "https://private.example/jwks.json"
+    assert len(transport.requests) == 1
+    await fetcher.aclose()
+
+
+@pytest.mark.anyio
+async def test_httpx_jwks_fetcher_checks_byte_ceiling_before_extending(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A streaming oversized chunk is rejected before allocating it into the body buffer."""
+
+    class _CapacityCheckedBytearray(bytearray):
+        def extend(self, chunk: bytes) -> None:
+            if len(self) + len(chunk) > 64:
+                message = "Streaming chunk was appended before its size was checked"
+                raise AssertionError(message)
+            super().extend(chunk)
+
+    async def resolver(_host: str, _port: int) -> tuple[str, ...]:
+        return (_OIDC_PUBLIC_IP,)
+
+    monkeypatch.setattr(jwks_httpx, "bytearray", _CapacityCheckedBytearray, raising=False)
+    response = httpx.Response(200, stream=_ChunkedOIDCStream(b"x" * 40, b"x" * 40))
+    fetcher = HttpxJWKSFetcher(
+        maximum_response_bytes=64, transport=_RecordingMockTransport(lambda _request: response), resolver=resolver
+    )
+
+    with pytest.raises(jwks_httpx._FetchGuardError):  # noqa: SLF001 - assert the private transport boundary failure
+        await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI))
+
+    await fetcher.aclose()
+
+
+@pytest.mark.anyio
+async def test_httpx_jwks_fetcher_enforces_ssrf_boundary_unless_private_hosts_are_explicitly_allowed() -> None:
+    """Private resolved addresses require an explicit operator opt-in."""
+
+    async def private_resolver(_host: str, _port: int) -> tuple[str, ...]:
+        return ("127.0.0.1",)
+
+    request = JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
+    denied = HttpxJWKSFetcher(
+        transport=_RecordingMockTransport(lambda _request: httpx.Response(200)), resolver=private_resolver
+    )
+    allowed_transport = _RecordingMockTransport(lambda _request: httpx.Response(200, content=b'{"keys":[]}'))
+    allowed = HttpxJWKSFetcher(transport=allowed_transport, resolver=private_resolver, allow_private_hosts=True)
+
+    with pytest.raises(jwks_httpx._FetchGuardError):  # noqa: SLF001 - assert the private transport boundary failure
+        await denied.fetch(request)
+    response = await allowed.fetch(request)
+
+    assert response.body == b'{"keys":[]}'
+    assert len(allowed_transport.requests) == 1
+    await denied.aclose()
+    await allowed.aclose()
+
+
+@pytest.mark.anyio
+async def test_httpx_jwks_fetcher_maps_resolution_failures_and_rejects_invalid_dns_answers() -> None:
+    """Resolver failures, empty results, and malformed answers cannot leave the boundary."""
+
+    async def failed_resolver(_host: str, _port: int) -> tuple[str, ...]:
+        message = "private resolver failure"
+        raise OSError(message)
+
+    async def empty_resolver(_host: str, _port: int) -> tuple[str, ...]:
+        return ()
+
+    async def malformed_resolver(_host: str, _port: int) -> tuple[str, ...]:
+        return ("not-an-ip",)
+
+    request = JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
+    fetchers = tuple(
+        HttpxJWKSFetcher(transport=_RecordingMockTransport(lambda _request: httpx.Response(200)), resolver=resolver)
+        for resolver in (failed_resolver, empty_resolver, malformed_resolver)
+    )
+
+    for fetcher in fetchers:
+        with pytest.raises(jwks_httpx._FetchGuardError):  # noqa: SLF001 - assert the private transport boundary failure
+            await fetcher.fetch(request)
+        await fetcher.aclose()
+
+
+@pytest.mark.anyio
+async def test_httpx_jwks_fetcher_accepts_a_public_literal_without_dns() -> None:
+    """Literal public IP endpoints are classified directly instead of resolved again."""
+
+    async def fail_resolution(_host: str, _port: int) -> tuple[str, ...]:
+        message = "Literal public IP must not reach DNS"
+        raise AssertionError(message)
+
+    fetcher = HttpxJWKSFetcher(
+        transport=_RecordingMockTransport(lambda _request: httpx.Response(200, content=b'{"keys":[]}')),
+        resolver=fail_resolution,
+    )
+
+    response = await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri="https://93.184.216.34/jwks.json"))
+
+    assert response.status_code == 200
+    await fetcher.aclose()
+
+
+@pytest.mark.anyio
+async def test_httpx_jwks_fetcher_uses_the_exact_configured_timeout() -> None:
+    """The bounded client preserves the configured timeout."""
+    fetcher = HttpxJWKSFetcher(timeout=5)
+
+    assert fetcher._client.timeout == httpx.Timeout(5.0)  # noqa: SLF001 - assert the configured client boundary
+    await fetcher.aclose()
+
+
+@pytest.mark.parametrize("timeout", [True, 0, -1, float("inf"), float("nan"), cast("float", "5")])
+def test_httpx_jwks_fetcher_rejects_invalid_timeout(timeout: float) -> None:
+    with pytest.raises(ImproperlyConfiguredException):
+        HttpxJWKSFetcher(timeout=timeout)
+
+
+@pytest.mark.parametrize("maximum_response_bytes", [False, 0, -1, cast("int", 1.5), cast("int", "1024")])
+def test_httpx_jwks_fetcher_rejects_invalid_byte_ceiling(maximum_response_bytes: int) -> None:
+    with pytest.raises(ImproperlyConfiguredException):
+        HttpxJWKSFetcher(maximum_response_bytes=maximum_response_bytes)
 
 
 @pytest.mark.anyio
@@ -3487,17 +4805,27 @@ async def test_oidc_discovery_rejects_unsafe_optional_endpoint_urls(
 
 
 @pytest.mark.anyio
-async def test_oidc_discovery_allows_public_cross_origin_optional_endpoints() -> None:
+async def test_oidc_discovery_requires_explicit_cross_origin_oauth_endpoint_trust() -> None:
     endpoints = {
         "authorization_endpoint": "https://login.example/authorize",
         "token_endpoint": "https://login.example/token",
         "end_session_endpoint": "https://login.example/logout",
     }
-    client, _transport, resolver = _oidc_client(
-        lambda _request: _oidc_response(_oidc_document(**endpoints)),
-        answers={"issuer.example": (_OIDC_PUBLIC_IP,), "login.example": (_OIDC_PUBLIC_IP,)},
+    answers = {"issuer.example": (_OIDC_PUBLIC_IP,), "login.example": (_OIDC_PUBLIC_IP,)}
+    client, _transport, _resolver = _oidc_client(
+        lambda _request: _oidc_response(_oidc_document(**endpoints)), answers=answers
     )
 
+    with pytest.raises(OIDCDiscoveryError):
+        await _discover_and_close(client)
+
+    client, _transport, resolver = _oidc_client(
+        lambda _request: _oidc_response(_oidc_document(**endpoints)),
+        policy=DiscoveryPolicy(
+            allowed_issuers=frozenset({_OIDC_ISSUER}), allowed_oauth_origins=frozenset({"https://login.example"})
+        ),
+        answers=answers,
+    )
     metadata = await _discover_and_close(client)
 
     assert metadata.authorization_endpoint == endpoints["authorization_endpoint"]
@@ -4794,6 +6122,8 @@ class _PasswordStore:
         fail_bump: bool = False,
         replace_result: object = True,
         security_epoch: int = 1,
+        active: bool = True,
+        verified: bool = True,
         bump_result: accounts_module.PasswordChangeResult | None = None,
     ) -> None:
         self.encoded_hash = encoded_hash
@@ -4802,6 +6132,8 @@ class _PasswordStore:
         self.fail_bump = fail_bump
         self.replace_result = replace_result
         self.security_epoch = security_epoch
+        self.active = active
+        self.verified = verified
         self.bump_result = bump_result
         self.replacements: list[tuple[str, str, str, accounts_module.SecurityEvent]] = []
         self.bump_calls: list[tuple[str, str, int, accounts_module.SecurityEvent]] = []
@@ -4811,7 +6143,9 @@ class _PasswordStore:
         if self.fail_read:
             raise OSError
         return (
-            accounts_module.PasswordCredentialState(self.encoded_hash, self.security_epoch)
+            accounts_module.PasswordCredentialState(
+                self.encoded_hash, self.security_epoch, active=self.active, verified=self.verified
+            )
             if self.encoded_hash is not None
             else None
         )
@@ -4919,6 +6253,33 @@ async def test_password_reauthentication_collapses_credential_failures_without_r
     outcome = await service.verify("account-1", "presented secret", now=_JWT_NOW)
 
     assert isinstance(outcome, InvalidCredentials)
+    assert store.replacements == []
+
+
+@pytest.mark.parametrize(
+    ("active", "verified", "outcome_type"),
+    [
+        (False, True, InvalidCredentials),
+        (True, False, InvalidCredentials),
+        (True, True, accounts_module.PasswordReauthenticationProof),
+    ],
+)
+@pytest.mark.anyio
+async def test_password_reauthentication_rejects_inactive_or_unverified_accounts_after_hash_verification(
+    active: bool,  # noqa: FBT001 - parametrized account-state matrix
+    verified: bool,  # noqa: FBT001 - parametrized account-state matrix
+    outcome_type: type[object],
+) -> None:
+    store = _PasswordStore(active=active, verified=verified)
+    hasher = _PasswordHasher(
+        accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.VERIFIED)
+    )
+    service = accounts_module.PasswordReauthenticationService(accounts=store, hasher=hasher)
+
+    outcome = await service.verify("account-1", "presented secret", now=_JWT_NOW)
+
+    assert isinstance(outcome, outcome_type)
+    assert hasher.calls == [("current-hash", "presented secret")]
     assert store.replacements == []
 
 
@@ -5225,6 +6586,7 @@ def _replacement_session(*, security_epoch: int = 1) -> accounts_module.CreateSe
         account_id="account-1",
         security_epoch=security_epoch,
         created_at=_JWT_NOW,
+        authenticated_at=_JWT_NOW,
         expires_at=_JWT_NOW + timedelta(hours=1),
     )
 
@@ -5561,6 +6923,7 @@ class _LifecycleStore:
         self.reset_status = reset_status
         self.fail = fail
         self.registrations: list[tuple[object, ...]] = []
+        self.absent_probes: list[None] = []
         self.issues: list[
             tuple[accounts_module.TokenIssue, accounts_module.NotificationCommand, accounts_module.SecurityEvent]
         ] = []
@@ -5611,6 +6974,11 @@ class _LifecycleStore:
         if self.fail:
             raise OSError
 
+    async def issue_absent(self) -> None:
+        self.absent_probes.append(None)
+        if self.fail:
+            raise OSError
+
     async def consume_and_verify(
         self, token_id: str, digest: bytes, *, now: datetime, event: accounts_module.SecurityEvent
     ) -> accounts_module.ConsumeResult:
@@ -5636,6 +7004,16 @@ class _LifecycleStore:
         if self.reset_status is accounts_module.PasswordResetStatus.RESET:
             return accounts_module.PasswordResetResult(self.reset_status, "account-1", 2)
         return accounts_module.PasswordResetResult(self.reset_status)
+
+
+def test_notification_destination_rejects_control_characters() -> None:
+    with pytest.raises(ValueError, match="destination"):
+        accounts_module.NotificationCommand(
+            template="local.recovery",
+            destination="victim@example.com\r\nBcc: attacker@example.com",
+            token="opaque-token",  # noqa: S106 - opaque test fixture, not a credential
+            expires_at=_JWT_NOW + timedelta(minutes=30),
+        )
 
 
 def _lifecycle_account(*, active: bool = True, verified: bool = False) -> "accounts_module.LocalAccount[object]":
@@ -5946,6 +7324,23 @@ async def test_recovery_request_is_generic_and_emits_only_atomic_outbox_commands
         assert "Recovery token request failed" in caplog.text
 
 
+@pytest.mark.anyio
+async def test_recovery_request_with_control_character_destination_stays_generic_and_does_not_emit() -> None:
+    store = _LifecycleStore(account=_lifecycle_account())
+    service = accounts_module.RecoveryTokenService(
+        accounts=store,
+        store=store,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        hasher=_PasswordHasher(),
+        event_ids=lambda: "event-1",
+    )
+
+    outcome = await service.request("victim@example.com\r\nBcc: attacker@example.com", now=_JWT_NOW)
+
+    assert outcome == accounts_module.LifecycleAccepted()
+    assert store.issues == []
+
+
 @pytest.mark.parametrize(
     "status",
     [
@@ -6152,6 +7547,7 @@ class _NativeSessionStore:
             account_id=command.account_id,
             security_epoch=command.security_epoch,
             created_at=command.created_at,
+            authenticated_at=command.authenticated_at,
             last_seen_at=command.created_at,
             expires_at=command.expires_at,
             display_metadata=command.display_metadata,
@@ -6173,6 +7569,7 @@ class _NativeSessionStore:
                 account_id=record.account_id,
                 security_epoch=record.security_epoch,
                 created_at=record.created_at,
+                authenticated_at=record.authenticated_at,
                 last_seen_at=record.last_seen_at,
                 expires_at=record.expires_at,
             )
@@ -6213,6 +7610,7 @@ class _NativeSessionStore:
             account_id=record.account_id,
             security_epoch=record.security_epoch,
             created_at=record.created_at,
+            authenticated_at=record.authenticated_at,
             last_seen_at=now,
             expires_at=record.expires_at,
             display_metadata=record.display_metadata,
@@ -6317,6 +7715,105 @@ def _copy_native_session(session: dict[str, object]) -> dict[str, object]:
     return {key: dict(value) if isinstance(value, dict) else value for key, value in session.items()}
 
 
+def test_native_session_legacy_v1_decode_does_not_synthesize_password_assurance() -> None:
+    authentication = sessions_module.NativeSessionAuth._decode_authentication(  # noqa: SLF001 - decode contract regression
+        {
+            "version": 1,
+            "session_id": "bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4",
+            "binding_id": "sb_aWlpaWlpaWlpaWlpaWlpaQ",
+            "account_id": "account-1",
+            "security_epoch": 1,
+            "authenticated_at": _JWT_NOW.isoformat(),
+            "expires_at": (_JWT_NOW + timedelta(hours=1)).isoformat(),
+        }
+    )
+
+    assert authentication is not None
+    assert authentication.methods == frozenset()
+    assert authentication.amr == ()
+    assert authentication.traits == frozenset({"session"})
+    evidence = AuthenticationEvidence(
+        mechanism="session",
+        slot="session",
+        authenticated_at=authentication.authenticated_at,
+        expires_at=authentication.expires_at,
+        methods=authentication.methods,
+        traits=authentication.traits,
+        amr=authentication.amr,
+    )
+    decision = requires_assurance(methods={"password"}, clock=lambda: _JWT_NOW).decide(
+        cast(
+            "Any",
+            SimpleNamespace(
+                user=Principal(id=authentication.account_id),
+                auth=SecurityContext(session=NullSessionHandle(), evidence=(evidence,)),
+            ),
+        )
+    )
+    assert not decision.granted
+    assert decision.code == "missing_assurance"
+
+
+def test_native_session_payload_preserves_independent_assurance_expiry() -> None:
+    """Session serialization retains a step-up expiry shorter than the session lifetime."""
+    assurance_expires_at = _JWT_NOW + timedelta(minutes=5)
+    authentication = accounts_module.SessionAuthentication(
+        session_id="bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4",
+        binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+        account_id="account-1",
+        security_epoch=1,
+        authenticated_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(hours=1),
+        assurance_expires_at=assurance_expires_at,
+        methods=frozenset({"totp"}),
+    )
+
+    payload = sessions_module.NativeSessionAuth._encode_authentication(authentication)  # noqa: SLF001
+    restored = sessions_module.NativeSessionAuth._decode_authentication(payload)  # noqa: SLF001
+
+    assert restored is not None
+    assert restored.assurance_expires_at == assurance_expires_at
+
+
+@pytest.mark.anyio
+async def test_native_session_remains_authenticated_after_step_up_assurance_expires() -> None:
+    """A short step-up expiry does not shorten the underlying native session."""
+    store = _NativeSessionStore()
+    current = [_JWT_NOW]
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: current[0],
+        entropy=_SessionEntropy(),
+    )
+    session: dict[str, object] = {}
+    connection = _native_session_connection(session)
+    evidence = AuthenticationEvidence(
+        mechanism="totp",
+        slot="mfa",
+        authenticated_at=_JWT_NOW,
+        expires_at=_JWT_NOW + timedelta(minutes=5),
+        methods=frozenset({"totp"}),
+    )
+    established = await auth.establish(
+        connection, cast("accounts_module.LocalAccount[object]", store.account), evidence=evidence
+    )
+    assert isinstance(established, accounts_module.SessionAuthentication)
+    token = _queued_binding_token(connection)
+    current[0] += timedelta(minutes=6)
+    authenticated_connection = _native_session_connection(session, binding_token=token)
+    extraction = auth.extract(authenticated_connection)
+    assert isinstance(extraction, PresentedCredential)
+
+    outcome = await auth.authenticate(extraction.value, authenticated_connection)
+
+    assert isinstance(outcome, Authenticated)
+    authenticated_connection.scope["user"] = Principal(id="account-1")
+    authenticated_connection.scope["auth"] = SecurityContext(session=NullSessionHandle(), evidence=(outcome.evidence,))
+    decision = requires_assurance(methods={"totp"}, clock=lambda: current[0]).decide(authenticated_connection)
+    assert decision.code == "missing_assurance"
+
+
 @pytest.mark.anyio
 async def test_native_session_establish_authenticate_touch_and_rebind_are_fixation_safe(
     monkeypatch: pytest.MonkeyPatch,
@@ -6341,13 +7838,14 @@ async def test_native_session_establish_authenticate_touch_and_rebind_are_fixati
     assert session == {
         "cart": "anonymous",
         "_litestar_security": {
-            "version": 2,
+            "version": 3,
             "session_id": authentication.session_id,
             "binding_id": authentication.binding_id,
             "account_id": "account-1",
             "security_epoch": 1,
             "authenticated_at": _JWT_NOW.isoformat(),
             "expires_at": (_JWT_NOW + timedelta(days=14)).isoformat(),
+            "assurance_expires_at": None,
             "methods": ["password"],
             "traits": ["session"],
             "amr": ["pwd"],
@@ -6405,6 +7903,50 @@ async def test_native_session_establish_authenticate_touch_and_rebind_are_fixati
     replacement_extraction = auth.extract(replacement_connection)
     assert isinstance(replacement_extraction, PresentedCredential)
     assert isinstance(await auth.authenticate(replacement_extraction.value, replacement_connection), Authenticated)
+
+
+@pytest.mark.anyio
+async def test_native_session_binds_evidence_authentication_time_to_durable_record() -> None:
+    store = _NativeSessionStore()
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        clock=lambda: _JWT_NOW,
+        entropy=_SessionEntropy(),
+    )
+    session: dict[str, object] = {}
+    establishing_connection = _native_session_connection(session)
+    evidence_authenticated_at = _JWT_NOW - timedelta(minutes=5)
+    established = await auth.establish(
+        establishing_connection,
+        cast("accounts_module.LocalAccount[object]", store.account),
+        evidence=AuthenticationEvidence(
+            mechanism="local",
+            slot="password",
+            authenticated_at=evidence_authenticated_at,
+            expires_at=_JWT_NOW + timedelta(hours=1),
+            methods=frozenset({"password"}),
+            traits=frozenset(),
+            amr=("pwd",),
+        ),
+    )
+
+    assert isinstance(established, accounts_module.SessionAuthentication)
+    assert established.authenticated_at == evidence_authenticated_at
+    assert store.records[established.session_id].created_at == _JWT_NOW
+    token = _queued_binding_token(establishing_connection)
+    connection = _native_session_connection(session, binding_token=token)
+    extraction = auth.extract(connection)
+    assert isinstance(extraction, PresentedCredential)
+    assert isinstance(await auth.authenticate(extraction.value, connection), Authenticated)
+
+    payload = cast("dict[str, object]", session["_litestar_security"])
+    payload["authenticated_at"] = (_JWT_NOW - timedelta(minutes=4)).isoformat()
+    tampered_connection = _native_session_connection(session, binding_token=token)
+    tampered_extraction = auth.extract(tampered_connection)
+    assert isinstance(tampered_extraction, PresentedCredential)
+    assert isinstance(await auth.authenticate(tampered_extraction.value, tampered_connection), InvalidCredentials)
+    assert "_litestar_security" not in session
 
 
 @pytest.mark.parametrize(
@@ -6501,6 +8043,7 @@ async def test_native_session_current_state_mismatch_is_invalid_and_cleared(inva
             account_id=record.account_id,
             security_epoch=record.security_epoch,
             created_at=record.created_at,
+            authenticated_at=record.authenticated_at,
             last_seen_at=record.last_seen_at,
             expires_at=record.expires_at,
         )
@@ -6542,6 +8085,7 @@ async def test_native_session_logout_and_account_qualified_revoke_are_explicit_a
             account_id="account-1",
             security_epoch=1,
             created_at=_JWT_NOW,
+            authenticated_at=_JWT_NOW,
             expires_at=_JWT_NOW + timedelta(hours=1),
         )
     )
@@ -6831,7 +8375,7 @@ async def test_native_session_rejects_canonical_length_malformed_binding_and_pay
     else:
         payload = cast("dict[str, object]", session["_litestar_security"])
         if mutation in {"version", "boolean_version"}:
-            payload["version"] = True if mutation == "boolean_version" else 3
+            payload["version"] = True if mutation == "boolean_version" else 4
         else:
             payload["authenticated_at"] = "not-a-timestamp"
     connection = _native_session_connection(session, binding_token=token)
@@ -6885,6 +8429,7 @@ async def test_native_session_current_revoke_clears_browser_state_and_list_filte
         account_id="account-2",
         security_epoch=1,
         created_at=_JWT_NOW,
+        authenticated_at=_JWT_NOW,
         last_seen_at=_JWT_NOW,
         expires_at=_JWT_NOW + timedelta(hours=1),
     )
@@ -7140,6 +8685,118 @@ async def test_local_access_token_preserves_passkey_assurance(local_key_ring: Lo
         access_tokens_module._claim_authentication_time(10**30, fallback=_JWT_NOW)  # noqa: SLF001
         is None
     )
+
+
+@pytest.mark.anyio
+async def test_legacy_local_access_assurance_falls_back_to_issued_at(local_key_ring: LocalKeyRing) -> None:
+    """Legacy access tokens without auth_time retain their frozen issuance time."""
+    validation = JWTValidationConfig(
+        issuer=local_key_ring.issuer,
+        audiences=frozenset({_JWT_AUDIENCE}),
+        algorithms=frozenset(key.algorithm for key in local_key_ring.all_verification_keys),
+        required_claims=frozenset({"se"}),
+        maximum_lifetime=timedelta(minutes=10),
+    )
+    issued_at = _JWT_NOW
+    verified_at = issued_at + timedelta(minutes=5)
+    claims = build_access_token_claims(
+        issuer=local_key_ring.issuer,
+        audience=_JWT_AUDIENCE,
+        subject="account-1",
+        client_id="local",
+        security_epoch=3,
+        now=issued_at,
+        lifetime=timedelta(minutes=10),
+        methods=frozenset({"password"}),
+    )
+    token = await local_key_ring.build_signer().sign(claims, now=issued_at)
+    verifier = access_tokens_module.LocalAccessVerifier(
+        config=validation,
+        verifier=local_key_ring.build_verifier(validation, mechanism_name="bearer", slot_name="local"),
+    )
+
+    outcome = await verifier.verify(token, now=verified_at)
+
+    assert isinstance(outcome, Authenticated)
+    assert outcome.evidence.authenticated_at == issued_at
+
+
+@pytest.mark.anyio
+async def test_token_login_preserves_password_assurance_at_refresh_issuance() -> None:
+    """Password token login carries its original assurance into the refresh family."""
+    account = _local_access_account()
+    issued_at = _JWT_NOW + timedelta(minutes=1)
+    response = accounts_module.RefreshTokenResponse(
+        access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
+        refresh_token=(
+            accounts_module.RefreshTokenCodec(pepper=b"p" * 32, entropy=_RefreshEntropy()).issue().refresh_token
+        ),
+        expires_in=600,
+    )
+
+    class PasswordLogin:
+        async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccount[object]:
+            return account
+
+    class RefreshTokens:
+        clock = staticmethod(lambda: issued_at)
+        evidence: AuthenticationEvidence | None = None
+
+        async def issue(
+            self, issued_for: object, *, evidence: AuthenticationEvidence | None = None, now: datetime | None = None
+        ) -> accounts_module.RefreshTokenResponse:
+            assert issued_for is account
+            assert now == issued_at
+            self.evidence = evidence
+            return response
+
+    refresh_tokens = RefreshTokens()
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", object()),
+        password_login=cast("Any", PasswordLogin()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        refresh_tokens=cast("Any", refresh_tokens),
+    )
+
+    credentials = accounts_module.LocalCredentials(identifier="person@example.com", password="password")  # noqa: S106
+    assert await service.token_login(cast("Any", object()), credentials) == response
+    assert refresh_tokens.evidence == AuthenticationEvidence(
+        mechanism="bearer", slot="local", authenticated_at=issued_at, methods=frozenset({"password"}), amr=("pwd",)
+    )
+
+
+@pytest.mark.anyio
+async def test_token_login_fails_closed_when_refresh_issuance_clock_is_unavailable() -> None:
+    """A failed refresh issuance clock never mints a token with invented assurance time."""
+    account = _local_access_account()
+
+    class PasswordLogin:
+        async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccount[object]:
+            return account
+
+    class RefreshTokens:
+        @staticmethod
+        def clock() -> datetime:
+            raise RuntimeError
+
+        async def issue(self, *_args: object, **_kwargs: object) -> accounts_module.RefreshTokenResponse:
+            pytest.fail("token issuance must not run after the clock fails")
+
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", object()),
+        password_login=cast("Any", PasswordLogin()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        refresh_tokens=cast("Any", RefreshTokens()),
+    )
+
+    credentials = accounts_module.LocalCredentials(identifier="person@example.com", password="password")  # noqa: S106
+    assert isinstance(await service.token_login(cast("Any", object()), credentials), VerificationUnavailable)
 
 
 @pytest.mark.parametrize(
@@ -7615,6 +9272,17 @@ async def test_recovery_codes_are_reveal_once_digest_only_and_atomically_consume
     assert sum(isinstance(outcome, InvalidCredentials) for outcome in outcomes) == 1
 
 
+def test_recovery_code_digest_is_bound_to_its_account() -> None:
+    """The same recovery code cannot produce a portable cross-account digest."""
+    pepper = accounts_module.RecoveryCodePepper(key_version="v1", key=b"p" * 32)
+    code = "rc_v1_00000000000000000000000000000001"
+
+    owner_digest = mfa_module._recovery_digest(pepper, "account-1", code)  # noqa: SLF001
+    other_digest = mfa_module._recovery_digest(pepper, "account-2", code)  # noqa: SLF001
+
+    assert owner_digest != other_digest
+
+
 @pytest.mark.anyio
 async def test_recovery_regeneration_invalidates_old_codes_and_pepper_versions_are_explicit() -> None:
     entropy_values = iter((b"\x01" * 16, b"\x02" * 16, b"\x03" * 16))
@@ -7860,6 +9528,7 @@ class _WebAuthnVerifier:
         self.sign_count = sign_count
         self.backup_eligible = backup_eligible
         self.backup_state = backup_state
+        self.current_sign_counts: list[object] = []
 
     def registration_options(self, **kwargs: object) -> str:
         assert kwargs["challenge"] == self.challenge
@@ -7898,7 +9567,7 @@ class _WebAuthnVerifier:
         )
 
     def verify_authentication(self, **kwargs: object) -> accounts_module.AuthenticationVerification:
-        del kwargs
+        self.current_sign_counts.append(kwargs.get("current_sign_count"))
         if self.failure is not None:
             raise accounts_module.InvalidWebAuthnResponseError
         return accounts_module.AuthenticationVerification(
@@ -8075,6 +9744,7 @@ def _stored_passkey(
         (1, 2, accounts_module.CloneRiskPolicy.REJECT, AuthenticationEvidence, False),
         (1, 1, accounts_module.CloneRiskPolicy.REJECT, InvalidCredentials, True),
         (2, 1, accounts_module.CloneRiskPolicy.REJECT, InvalidCredentials, True),
+        (100, 0, accounts_module.CloneRiskPolicy.REJECT, InvalidCredentials, True),
         (2, 1, accounts_module.CloneRiskPolicy.AUDIT_ONLY, AuthenticationEvidence, True),
     ],
 )
@@ -8088,7 +9758,8 @@ async def test_passkey_counter_policy_persists_clone_risk_before_assurance(
 ) -> None:
     store = _PasskeyStore()
     store.credentials[b"credential-1"] = _stored_passkey(sign_count=stored_count)
-    service = _passkey_service(store=store, verifier=_WebAuthnVerifier(sign_count=new_count))
+    verifier = _WebAuthnVerifier(sign_count=new_count)
+    service = _passkey_service(store=store, verifier=verifier)
     service.clone_risk_policy = policy
     binding = b"session-binding"
     assert isinstance(await service.begin_authentication("account-1", binding=binding), accounts_module.WebAuthnOptions)
@@ -8097,6 +9768,8 @@ async def test_passkey_counter_policy_persists_clone_risk_before_assurance(
 
     assert isinstance(outcome, expected_type)
     assert store.credentials[b"credential-1"].suspect is suspect
+    assert store.credentials[b"credential-1"].sign_count == max(stored_count, new_count)
+    assert verifier.current_sign_counts == [stored_count]
 
 
 @pytest.mark.parametrize(
@@ -8254,6 +9927,8 @@ def test_public_testing_helpers_are_isolated_structural_conformance_ports() -> N
     clock = testing_module.FakeClock(now)
 
     assert isinstance(testing_module.InMemoryMFAStore(), accounts_module.MFAStore)
+    assert isinstance(testing_module.InMemoryMFALoginChallengeStore(), accounts_module.MFALoginChallengeStore)
+    assert isinstance(testing_module.InMemorySecurityBackend().mfa_login, accounts_module.MFALoginChallengeStore)
     assert isinstance(testing_module.InMemoryWebAuthnChallengeStore(), accounts_module.WebAuthnChallengeStore)
     assert isinstance(testing_module.InMemoryPasskeyStore(), accounts_module.PasskeyStore)
     assert isinstance(testing_module.InMemoryStepUpStore(), accounts_module.StepUpStore)
@@ -8387,7 +10062,7 @@ async def test_public_conformance_helpers_execute_factor_atomicity_matrix() -> N
             expires_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
         ),
         accounts_module.TOTPVerificationRequest(enrollment_id="e1", code="123456"),
-        accounts_module.RecoveryCodesRequest(step_up_grant="grant-secret"),
+        accounts_module.StepUpAuthorizedRequest(step_up_grant="grant-secret"),
         accounts_module.StepUpRequest(method="totp", credential="123456", method_id="m1"),
         accounts_module.StepUpResponse(
             grant="grant-secret", purpose="settings", expires_at=datetime(2026, 7, 27, tzinfo=timezone.utc)
@@ -8477,6 +10152,24 @@ def test_mfa_value_and_service_configuration_rejects_invalid_contracts() -> None
             authenticated_at=now,
             expires_at=now + timedelta(minutes=1),
         )
+    with pytest.raises(ValueError, match="MFA login challenge"):
+        accounts_module.MFALoginChallenge(
+            challenge_digest=bytearray(b"d" * 32),
+            account_id="a1",
+            security_epoch=1,
+            client_key=None,
+            issued_at=now,
+            expires_at=now + timedelta(minutes=5),
+        )
+    with pytest.raises(ValueError, match="MFA login challenge"):
+        accounts_module.MFALoginChallenge(
+            challenge_digest=b"d" * 32,
+            account_id="a1",
+            security_epoch=1,
+            client_key=None,
+            issued_at=now,
+            expires_at=now + timedelta(minutes=11),
+        )
     with pytest.raises(ImproperlyConfiguredException, match="store"):
         accounts_module.MFAService(cast("Any", object()), _MFAProtector())
     with pytest.raises(ImproperlyConfiguredException, match="protector"):
@@ -8560,6 +10253,7 @@ def test_pywebauthn_adapter_projects_pinned_dependency_results(monkeypatch: pyte
         rp_id="example.com",
         origins=("https://example.com",),
         public_key=b"public-key",
+        current_sign_count=1,
         require_user_verification=True,
     )
     assert registration.credential_id == b"credential"
@@ -8567,6 +10261,17 @@ def test_pywebauthn_adapter_projects_pinned_dependency_results(monkeypatch: pyte
     assert registration_kwargs["pem_root_certs_bytes_by_fmt"] == {
         passkeys_module.AttestationFormat.PACKED: [b"trusted-root"]
     }
+    verified.fmt = passkeys_module.AttestationFormat.APPLE
+    unproven_builtin_root = adapter.verify_registration(
+        response="{}",
+        challenge=b"challenge",
+        rp_id="example.com",
+        origins=("https://example.com",),
+        require_user_verification=True,
+        algorithms=(-7,),
+        root_certificates={"apple": (b"application-root",)},
+    )
+    assert not unproven_builtin_root.attestation_chain_verified
     assert authentication.sign_count == 2
 
     monkeypatch.setattr(passkeys_module, "options_to_json", lambda _options: 1 / 0)
@@ -8809,6 +10514,19 @@ async def test_local_auth_passkey_login_selects_only_configured_transport() -> N
     )
 
 
+def test_step_up_purpose_allowlist_covers_every_consumed_purpose_with_strong_factors() -> None:
+    purpose_methods = mfa_controllers_module._PURPOSE_METHODS  # noqa: SLF001 - assert the deny-by-default contract
+
+    assert set(purpose_methods) == {
+        "totp-enroll",
+        "totp-remove",
+        "recovery-codes",
+        "passkey-register",
+        "passkey-remove",
+    }
+    assert all(methods == frozenset({"password", "passkey"}) for methods in purpose_methods.values())
+
+
 @pytest.mark.anyio
 async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
     request = cast("Any", SimpleNamespace(headers={"authorization": "Bearer transport"}))
@@ -8827,10 +10545,21 @@ async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
         session_capable=True,
         token_capable=True,
     )
-    assert mfa_controllers_module._error(accounts_module.RateLimited(retry_after=3)).status_code == 429  # noqa: SLF001
-    assert mfa_controllers_module._error(accounts_module.RateLimited()).status_code == 429  # noqa: SLF001
-    assert mfa_controllers_module._error(VerificationUnavailable()).status_code == 503  # noqa: SLF001
-    assert mfa_controllers_module._error(InvalidCredentials()).status_code == 401  # noqa: SLF001
+    error_cases = (
+        (accounts_module.RateLimited(retry_after=3), TooManyRequestsException, 429, "Too many requests.", "3"),
+        (accounts_module.RateLimited(), TooManyRequestsException, 429, "Too many requests.", None),
+        (VerificationUnavailable(), ServiceUnavailableException, 503, "Authentication service is unavailable.", None),
+        (InvalidCredentials(), NotAuthorizedException, 401, "Authentication required.", None),
+    )
+    for outcome, exception_type, status_code, detail, retry_after in error_cases:
+        with pytest.raises(exception_type) as exc_info:
+            mfa_controllers_module._error(outcome)  # noqa: SLF001
+        assert exc_info.value.status_code == status_code
+        assert exc_info.value.detail == detail
+        if retry_after is None:
+            assert not exc_info.value.headers or "Retry-After" not in exc_info.value.headers
+        else:
+            assert exc_info.value.headers["Retry-After"] == retry_after
     assert mfa_controllers_module._principal_id(Principal.anonymous()) is None  # noqa: SLF001
     assert (
         mfa_controllers_module._transport_binding(  # noqa: SLF001
@@ -8897,8 +10626,17 @@ async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
         ),
         accounts_module.RateLimited,
     )
-    assert mfa_controllers_module._options_response(VerificationUnavailable()).status_code == 503  # noqa: SLF001
-    assert mfa_controllers_module._removal_response(VerificationUnavailable()).status_code == 503  # noqa: SLF001
+    assert isinstance(
+        await mfa_controllers_module._StepUpController._verify_factor(  # noqa: SLF001
+            "account-1", cast("Any", SimpleNamespace(method="unsupported", credential={})), request, services
+        ),
+        InvalidCredentials,
+    )
+    for response_factory in (mfa_controllers_module._options_response, mfa_controllers_module._removal_response):  # noqa: SLF001
+        with pytest.raises(ServiceUnavailableException) as exc_info:
+            response_factory(VerificationUnavailable())
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == "Authentication service is unavailable."
     assert (
         mfa_controllers_module._removal_response(  # noqa: SLF001 - exercises the private HTTP projection matrix
             accounts_module.RevokeLoginMethodResult(accounts_module.RevokeLoginMethodStatus.FINAL_METHOD)
@@ -9181,7 +10919,8 @@ def test_local_access_token_issuer_rejects_invalid_configuration(kwargs: dict[st
     ],
 )
 @pytest.mark.anyio
-async def test_local_access_token_issuer_maps_invalid_and_unavailable_composition(  # noqa: PLR0913
+async def test_local_access_token_issuer_maps_invalid_and_unavailable_composition(  # noqa: PLR0913 - one composition matrix per parametrized case
+    *,
     account: accounts_module.LocalAccount[object],
     signer: _AccessSigner,
     clock: Callable[[], datetime],
@@ -10770,38 +12509,98 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
 
     session_login = cast("Any", controllers_module._LocalSessionController.login.fn)  # noqa: SLF001
     assert (await session_login(None, credentials, request, services)).status_code == 200
-    assert (await session_login(None, credentials, request, services)).status_code == 400
+    await _assert_http_exception(
+        session_login(None, credentials, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     session_logout = cast("Any", controllers_module._LocalSessionController.logout.fn)  # noqa: SLF001
     assert (await session_logout(None, request, services)).status_code == 200
-    assert (await session_logout(None, request, services)).status_code == 503
+    await _assert_http_exception(
+        session_logout(None, request, services),
+        ServiceUnavailableException,
+        status_code=503,
+        detail="Authentication service is unavailable.",
+    )
     services.session_auth = None
-    assert (await session_logout(None, request, services)).status_code == 503
+    await _assert_http_exception(
+        session_logout(None, request, services),
+        ServiceUnavailableException,
+        status_code=503,
+        detail="Authentication service is unavailable.",
+    )
     services.session_auth = session_routes
     list_sessions = cast("Any", controllers_module._LocalSessionController.list_sessions.fn)  # noqa: SLF001
     assert (await list_sessions(None, request, principal, services)).status_code == 200
-    assert (await list_sessions(None, request, principal, services)).status_code == 503
-    assert (await list_sessions(None, request, anonymous, services)).status_code == 401
+    await _assert_http_exception(
+        list_sessions(None, request, principal, services),
+        ServiceUnavailableException,
+        status_code=503,
+        detail="Authentication service is unavailable.",
+    )
+    await _assert_http_exception(
+        list_sessions(None, request, anonymous, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
+    )
     revoke_session = cast("Any", controllers_module._LocalSessionController.revoke_session.fn)  # noqa: SLF001
     assert (await revoke_session(None, "session", request, principal, services)).status_code == 200
-    assert (await revoke_session(None, "session", request, principal, services)).status_code == 503
+    await _assert_http_exception(
+        revoke_session(None, "session", request, principal, services),
+        ServiceUnavailableException,
+        status_code=503,
+        detail="Authentication service is unavailable.",
+    )
     services.session_auth = None
-    assert (await revoke_session(None, "session", request, principal, services)).status_code == 401
+    await _assert_http_exception(
+        revoke_session(None, "session", request, principal, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
+    )
     services.session_auth = session_routes
 
     token_login = cast("Any", controllers_module._LocalTokenController.login.fn)  # noqa: SLF001
     assert (await token_login(None, credentials, request, services)).status_code == 200
-    assert (await token_login(None, credentials, request, services)).status_code == 400
+    await _assert_http_exception(
+        token_login(None, credentials, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     refresh = cast("Any", controllers_module._LocalTokenController.refresh.fn)  # noqa: SLF001
     assert (await refresh(None, token_request, request, services, "AAAAAAAAAAAAAAAAAAAAAA")).status_code == 200
-    assert (await refresh(None, token_request, request, services, None)).status_code == 400
+    await _assert_http_exception(
+        refresh(None, token_request, request, services, None),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     refresh_tokens = services.refresh_tokens
     services.refresh_tokens = None
-    assert (await refresh(None, token_request, request, services, None)).status_code == 503
+    await _assert_http_exception(
+        refresh(None, token_request, request, services, None),
+        ServiceUnavailableException,
+        status_code=503,
+        detail="Authentication service is unavailable.",
+    )
     services.refresh_tokens = refresh_tokens
     revoke = cast("Any", controllers_module._LocalTokenController.revoke.fn)  # noqa: SLF001
     assert (await revoke(None, token_request, principal, services)).status_code == 200
-    assert (await revoke(None, token_request, principal, services)).status_code == 503
-    assert (await revoke(None, token_request, anonymous, services)).status_code == 401
+    await _assert_http_exception(
+        revoke(None, token_request, principal, services),
+        ServiceUnavailableException,
+        status_code=503,
+        detail="Authentication service is unavailable.",
+    )
+    await _assert_http_exception(
+        revoke(None, token_request, anonymous, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
+    )
 
     lifecycle = controllers_module._LocalLifecycleController  # noqa: SLF001
     identifier = accounts_module.LocalIdentifierRequest(identifier="user@example.com")
@@ -10812,11 +12611,21 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         password="new-password",  # noqa: S106 - request DTO fixture
     )
     assert (await reset(None, reset_request, request, services)).status_code == 200
-    assert (await reset(None, reset_request, request, services)).status_code == 400
+    await _assert_http_exception(
+        reset(None, reset_request, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     assert (await cast("Any", lifecycle.verification.fn)(None, identifier, request, services)).status_code == 202
     confirm = cast("Any", lifecycle.confirm_verification.fn)
-    assert (await confirm(None, token_request, services)).status_code == 200
-    assert (await confirm(None, token_request, services)).status_code == 400
+    assert (await confirm(None, token_request, request, services)).status_code == 200
+    await _assert_http_exception(
+        confirm(None, token_request, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
 
     register = cast("Any", controllers_module._LocalRegistrationController.register.fn)  # noqa: SLF001
     registration = accounts_module.LocalRegistrationRequest(
@@ -10824,9 +12633,19 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         password="password",  # noqa: S106 - request DTO fixture
     )
     assert (await register(None, registration, request, services)).status_code == 202
-    assert (await register(None, registration, request, services)).status_code == 400
+    await _assert_http_exception(
+        register(None, registration, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     services.registration = None
-    assert (await register(None, registration, request, services)).status_code == 400
+    await _assert_http_exception(
+        register(None, registration, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     services.registration = SimpleNamespace(
         register=AsyncOutcome(accounts_module.LifecycleAccepted(), accounts_module.InvalidInvitation())
     )
@@ -10840,20 +12659,55 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         invitation_token="invite-secret",  # noqa: S106 - request DTO fixture
     )
     assert (await invite_register(None, invitation, request, services)).status_code == 202
-    assert (await invite_register(None, invitation, request, services)).status_code == 400
+    await _assert_http_exception(
+        invite_register(None, invitation, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
     services.registration = None
-    assert (await invite_register(None, invitation, request, services)).status_code == 400
+    await _assert_http_exception(
+        invite_register(None, invitation, request, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
 
     session_change = cast("Any", controllers_module._LocalSessionPasswordController.change.fn)  # noqa: SLF001
     assert (await session_change(None, password_request, request, principal, services)).status_code == 200
-    assert (await session_change(None, password_request, request, principal, services)).status_code == 400
-    assert (await session_change(None, password_request, request, anonymous, services)).status_code == 401
+    await _assert_http_exception(
+        session_change(None, password_request, request, principal, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
+    await _assert_http_exception(
+        session_change(None, password_request, request, anonymous, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
+    )
     token_change = cast("Any", controllers_module._LocalTokenPasswordController.change.fn)  # noqa: SLF001
     assert (await token_change(None, password_request, principal, services)).status_code == 200
-    assert (await token_change(None, password_request, anonymous, services)).status_code == 401
+    await _assert_http_exception(
+        token_change(None, password_request, anonymous, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
+    )
     token_only_change = cast("Any", controllers_module._LocalTokenOnlyPasswordController.change.fn)  # noqa: SLF001
-    assert (await token_only_change(None, password_request, principal, services)).status_code == 400
-    assert (await token_only_change(None, password_request, anonymous, services)).status_code == 401
+    await _assert_http_exception(
+        token_only_change(None, password_request, principal, services),
+        ClientException,
+        status_code=400,
+        detail="The request is invalid.",
+    )
+    await _assert_http_exception(
+        token_only_change(None, password_request, anonymous, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
+    )
 
     bearer_context = SecurityContext(
         session=NullSessionHandle(), evidence=(AuthenticationEvidence("bearer", "local", _JWT_NOW),)
@@ -10927,7 +12781,7 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
         verification=cast("Any", object()),
         recovery=cast("Any", object()),
         session_auth=cast("Any", session_auth),
-        refresh_tokens=cast("Any", SimpleNamespace(issue=AsyncOutcome(refresh_response))),
+        refresh_tokens=cast("Any", SimpleNamespace(clock=lambda: _JWT_NOW, issue=AsyncOutcome(refresh_response))),
     )
     credentials = accounts_module.LocalCredentials(
         identifier="user@example.com",
@@ -10956,7 +12810,11 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
     assert isinstance(
         await services.change_session_password(request, "account-1", password_request), InvalidCredentials
     )
-    compromised = replace(password_request, compromise=True)
+    compromised = accounts_module.LocalPasswordChangeRequest(
+        current_password="old",  # noqa: S106 - request DTO fixture
+        password="new-password",  # noqa: S106 - request DTO fixture
+        compromise=True,
+    )
     assert await services.change_session_password(request, "account-1", compromised) == changed
     assert session_auth.logout.outcomes == []
     compromised_failure = replace(
@@ -11061,6 +12919,16 @@ def _memory_limiter(**kwargs: Any) -> Any:
     return accounts_module.StoreRateLimiter(store=MemoryStore(), **kwargs)
 
 
+class _InterleavingStore(MemoryStore):
+    """Yield after each rate-limit read to expose read-modify-write races."""
+
+    async def get(self, key: str, renew_for: int | timedelta | None = None) -> bytes | None:
+        """Read one counter, then let a competing acquire run before its write."""
+        value = await super().get(key, renew_for)
+        await checkpoint()
+        return value
+
+
 @pytest.mark.parametrize(
     ("limit", "window"),
     [
@@ -11115,6 +12983,83 @@ async def test_unlimited_rate_limiter_allows_every_attempt() -> None:
     assert decision == accounts_module.RateLimitDecision(allowed=True)
 
 
+@pytest.mark.parametrize("forwarded_for", ["203.0.113.9, 10.0.0.1", "198.51.100.1, 203.0.113.9, 10.0.0.1"])
+def test_forwarded_client_key_uses_only_trusted_proxy_hops(forwarded_for: str) -> None:
+    extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"})
+    connection = cast(
+        "Any", SimpleNamespace(client=SimpleNamespace(host="10.0.0.5"), headers={"x-forwarded-for": forwarded_for})
+    )
+
+    assert extractor(connection) == "203.0.113.9"
+
+
+@pytest.mark.parametrize("peer", ["203.0.113.8", "unparseable-peer"])
+def test_forwarded_client_key_ignores_spoofed_header_from_an_untrusted_peer(peer: str) -> None:
+    class ExplosiveHeaders:
+        def get(self, _key: str) -> str:
+            msg = "untrusted peer must not read a forwarding header"
+            raise AssertionError(msg)
+
+    extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"})
+    connection = cast("Any", SimpleNamespace(client=SimpleNamespace(host=peer), headers=ExplosiveHeaders()))
+
+    assert extractor(connection) == peer
+
+
+def test_forwarded_client_key_returns_none_when_the_connection_has_no_peer() -> None:
+    extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"})
+
+    assert extractor(cast("Any", SimpleNamespace(client=None, headers={}))) is None
+
+
+def test_forwarded_client_key_normalizes_the_configured_header_name() -> None:
+    extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"}, header=" X-Client-Forwarded-For ")
+    connection = cast(
+        "Any",
+        SimpleNamespace(client=SimpleNamespace(host="10.0.0.5"), headers={"x-client-forwarded-for": "203.0.113.9"}),
+    )
+
+    assert extractor(connection) == "203.0.113.9"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"trusted_proxies": set()}, "at least one trusted proxy"),
+        ({"trusted_proxies": {"not-a-cidr"}}, "CIDR networks"),
+        ({"trusted_proxies": {"10.0.0.0/8"}, "max_hops": True}, "positive integer"),
+        ({"trusted_proxies": {"10.0.0.0/8"}, "max_hops": 0}, "positive integer"),
+        ({"trusted_proxies": {"10.0.0.0/8"}, "header": "  "}, "nonempty header name"),
+    ],
+)
+def test_forwarded_client_key_validates_its_configuration(kwargs: dict[str, object], match: str) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        accounts_module.forwarded_client_key(**cast("Any", kwargs))
+
+
+@pytest.mark.parametrize(
+    ("peer", "header", "expected"),
+    [
+        ("::ffff:10.0.0.5", "203.0.113.9, 10.0.0.1", "203.0.113.9"),
+        ("10.0.0.5", "203.0.113.9, malformed", "10.0.0.5"),
+        ("unparseable-peer", "203.0.113.9", "unparseable-peer"),
+    ],
+)
+def test_forwarded_client_key_normalizes_addresses_and_falls_back_safely(peer: str, header: str, expected: str) -> None:
+    extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"})
+    connection = cast("Any", SimpleNamespace(client=SimpleNamespace(host=peer), headers={"x-forwarded-for": header}))
+
+    assert extractor(connection) == expected
+
+
+@pytest.mark.parametrize("headers", [{}, {"x-forwarded-for": "10.0.0.1, 10.0.0.2"}])
+def test_forwarded_client_key_falls_back_when_no_external_hop_is_available(headers: dict[str, str]) -> None:
+    extractor = accounts_module.forwarded_client_key(trusted_proxies={"10.0.0.0/8"})
+    connection = cast("Any", SimpleNamespace(client=SimpleNamespace(host="10.0.0.5"), headers=headers))
+
+    assert extractor(connection) == "10.0.0.5"
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -11160,6 +13105,173 @@ async def test_store_rate_limiter_denies_after_the_window_budget_and_recovers_ne
 
     moment[0] = moment[0] + timedelta(minutes=5)
     assert (await limiter.acquire(request)).allowed
+
+
+@pytest.mark.anyio
+async def test_store_rate_limiter_serializes_concurrent_single_bucket_acquires() -> None:
+    limiter = accounts_module.StoreRateLimiter(
+        policies={"concurrent": accounts_module.RateLimitPolicy(limit=5, window=timedelta(minutes=1))},
+        store=_InterleavingStore(),
+    )
+    request = accounts_module.RateLimitRequest(operation="concurrent", client_key="shared")
+    decisions: list[accounts_module.RateLimitDecision] = []
+
+    async def acquire() -> None:
+        decisions.append(await limiter.acquire(request))
+
+    async with create_task_group() as task_group:
+        for _ in range(20):
+            task_group.start_soon(acquire)
+
+    assert sum(decision.allowed for decision in decisions) == 5
+
+
+@pytest.mark.anyio
+async def test_store_rate_limiter_serializes_concurrent_shared_store_acquires() -> None:
+    store = _InterleavingStore()
+    policies = {"concurrent": accounts_module.RateLimitPolicy(limit=5, window=timedelta(minutes=1))}
+    first_limiter = accounts_module.StoreRateLimiter(policies=policies, store=store)
+    second_limiter = accounts_module.StoreRateLimiter(policies=policies, store=store)
+    request = accounts_module.RateLimitRequest(operation="concurrent", client_key="shared")
+    decisions: list[accounts_module.RateLimitDecision] = []
+
+    async def acquire(limiter: accounts_module.StoreRateLimiter) -> None:
+        decisions.append(await limiter.acquire(request))
+
+    async with create_task_group() as task_group:
+        for index in range(20):
+            task_group.start_soon(acquire, first_limiter if index % 2 else second_limiter)
+
+    assert sum(decision.allowed for decision in decisions) == 5
+
+
+@pytest.mark.anyio
+async def test_process_rate_limit_lock_releases_after_cancellation() -> None:
+    lock = ThreadLock()
+    entered = Event()
+    blocked = Event()
+
+    async def hold() -> None:
+        async with rate_limits_module._hold_process_rate_limit_lock(lock):  # noqa: SLF001 - verify cleanup
+            entered.set()
+            await blocked.wait()
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(hold)
+        await entered.wait()
+        task_group.cancel_scope.cancel()
+
+    assert lock.acquire(blocking=False)
+    lock.release()
+
+
+@pytest.mark.anyio
+async def test_process_rate_limit_lock_cancels_promptly_while_waiting() -> None:
+    lock = ThreadLock()
+    assert lock.acquire(blocking=False)
+    started = Event()
+    entered = Event()
+
+    async def wait_for_lock() -> None:
+        started.set()
+        async with rate_limits_module._hold_process_rate_limit_lock(lock):  # noqa: SLF001 - cancellation regression
+            entered.set()
+
+    with fail_after(1):
+        async with create_task_group() as task_group:
+            task_group.start_soon(wait_for_lock)
+            await started.wait()
+            task_group.cancel_scope.cancel()
+
+    assert not entered.is_set()
+    assert not lock.acquire(blocking=False)
+    lock.release()
+
+
+def test_process_rate_limit_lock_supports_separate_event_loop_threads() -> None:
+    lock = ThreadLock()
+    first_entered = ThreadEvent()
+    second_started = ThreadEvent()
+    second_entered = ThreadEvent()
+    release_first = ThreadEvent()
+    failures: list[BaseException] = []
+
+    async def first() -> None:
+        async with rate_limits_module._hold_process_rate_limit_lock(lock):  # noqa: SLF001 - cross-loop regression
+            first_entered.set()
+            await to_thread.run_sync(release_first.wait)
+
+    async def second() -> None:
+        second_started.set()
+        async with rate_limits_module._hold_process_rate_limit_lock(lock):  # noqa: SLF001 - cross-loop regression
+            second_entered.set()
+
+    def run(target: Callable[[], Awaitable[None]]) -> None:
+        try:
+            anyio_run(target)
+        except BaseException as error:  # noqa: BLE001 - propagate thread failures through the parent test
+            failures.append(error)
+
+    first_thread = Thread(target=run, args=(first,), daemon=True)
+    second_thread = Thread(target=run, args=(second,), daemon=True)
+    try:
+        first_thread.start()
+        assert first_entered.wait(timeout=2)
+        second_thread.start()
+        assert second_started.wait(timeout=2)
+        assert not second_entered.is_set()
+    finally:
+        release_first.set()
+        first_thread.join(timeout=2)
+        second_thread.join(timeout=2)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert not failures
+    assert second_entered.is_set()
+
+
+@pytest.mark.anyio
+async def test_store_rate_limiter_serializes_each_multi_bucket_acquire() -> None:
+    class ObservingLimiter(accounts_module.StoreRateLimiter):
+        async def _consume(  # noqa: PLR0913 - observe each fully named rate-limit bucket argument
+            self,
+            store: Store,
+            request: accounts_module.RateLimitRequest,
+            policy: accounts_module.RateLimitPolicy,
+            *,
+            kind: str,
+            value: str,
+            now: datetime,
+        ) -> int | None:
+            consumed.append(value)
+            return await super()._consume(store, request, policy, kind=kind, value=value, now=now)
+
+    consumed: list[str] = []
+    limiter = ObservingLimiter(
+        policies={"concurrent": accounts_module.RateLimitPolicy(limit=5, window=timedelta(minutes=1))},
+        store=_InterleavingStore(),
+    )
+    first = accounts_module.RateLimitRequest(operation="concurrent", client_key="client-a", subject_digest="subject-a")
+    second = accounts_module.RateLimitRequest(operation="concurrent", client_key="client-b", subject_digest="subject-b")
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(limiter.acquire, first)
+        task_group.start_soon(limiter.acquire, second)
+
+    assert consumed in (
+        ["client-a", "subject-a", "client-b", "subject-b"],
+        ["client-b", "subject-b", "client-a", "subject-a"],
+    )
+
+
+@pytest.mark.anyio
+async def test_store_rate_limiter_budgets_password_verify_by_default() -> None:
+    limiter = _memory_limiter()
+    request = accounts_module.RateLimitRequest(operation="local.password.verify", client_key="1.1.1.1")
+    decisions = [await limiter.acquire(request) for _ in range(11)]
+
+    assert [decision.allowed for decision in decisions] == [True] * 10 + [False]
 
 
 @pytest.mark.anyio
@@ -11421,6 +13533,78 @@ async def test_verification_resend_consumes_a_budget_for_an_unnormalizable_ident
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("family", ["verification", "recovery"])
+async def test_uniform_durable_write_cost_for_present_and_absent_identifiers(family: str) -> None:
+    counts: dict[str, int] = {}
+    for name, account in (("present", _lifecycle_account()), ("absent", None)):
+        store = _LifecycleStore(account=account)
+        codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
+        if family == "verification":
+            outcome = await accounts_module.VerificationTokenService(accounts=store, store=store, tokens=codec).resend(
+                "user@example.com", now=_JWT_NOW
+            )
+        else:
+            outcome = await accounts_module.RecoveryTokenService(
+                accounts=store, store=store, tokens=codec, hasher=_PasswordHasher()
+            ).request("user@example.com", now=_JWT_NOW)
+        assert isinstance(outcome, accounts_module.LifecycleAccepted)
+        counts[name] = len(store.issues) + len(store.absent_probes)
+
+    assert counts["present"] == counts["absent"] == 1
+
+
+@pytest.mark.anyio
+async def test_verification_consume_buckets_only_the_client_never_the_token() -> None:
+    limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=False, retry_after=7))
+    store = _LifecycleStore()
+    service = accounts_module.VerificationTokenService(
+        accounts=store,
+        store=store,
+        tokens=accounts_module.PurposeTokenCodec(pepper=b"p" * 32),
+        rate_limits=_guard(limiter),
+    )
+
+    outcome = await service.consume("vt_token.secret", client_key="1.1.1.1", now=_JWT_NOW)
+
+    assert outcome == accounts_module.RateLimited(retry_after=7)
+    assert store.consumptions == []
+    assert limiter.requests[0].operation == "local.verification.consume"
+    assert limiter.requests[0].client_key == "1.1.1.1"
+    assert limiter.requests[0].subject_digest is None
+
+
+@pytest.mark.anyio
+async def test_generated_verification_confirm_reports_denials_with_the_client_bucket() -> None:
+    captured: dict[str, object] = {}
+
+    async def consume(token: object, *, client_key: str | None = None) -> object:
+        del token
+        captured["client_key"] = client_key
+        return accounts_module.RateLimited(retry_after=7)
+
+    services = cast(
+        "Any",
+        SimpleNamespace(verification=SimpleNamespace(consume=consume), client_key_for=lambda _connection: "1.1.1.1"),
+    )
+    handler = cast("Any", controllers_module._LocalLifecycleController.confirm_verification.fn)  # noqa: SLF001
+
+    error = await _assert_http_exception(
+        handler(
+            None,
+            accounts_module.LocalTokenRequest(token="vt_token.secret"),  # noqa: S106 - deterministic fixture token
+            cast("Any", SimpleNamespace()),
+            services,
+        ),
+        TooManyRequestsException,
+        status_code=429,
+        detail="Too many requests.",
+    )
+
+    assert error.headers["Retry-After"] == "7"
+    assert captured["client_key"] == "1.1.1.1"
+
+
+@pytest.mark.anyio
 async def test_recovery_request_and_reset_are_limited() -> None:
     store = _LifecycleStore()
     codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
@@ -11500,13 +13684,17 @@ async def test_refresh_rotation_is_limited_by_client_only() -> None:
 
 
 def test_route_errors_map_denials_to_429_with_a_retry_hint() -> None:
-    limited = controllers_module._route_error(accounts_module.RateLimited(retry_after=42))  # noqa: SLF001
-    unhinted = controllers_module._route_error(accounts_module.RateLimited())  # noqa: SLF001
+    with pytest.raises(TooManyRequestsException) as limited_info:
+        controllers_module._route_error(accounts_module.RateLimited(retry_after=42))  # noqa: SLF001
+    with pytest.raises(TooManyRequestsException) as unhinted_info:
+        controllers_module._route_error(accounts_module.RateLimited())  # noqa: SLF001
 
-    assert limited.status_code == 429
-    assert limited.headers["Retry-After"] == "42"
-    assert unhinted.status_code == 429
-    assert "Retry-After" not in unhinted.headers
+    assert limited_info.value.status_code == 429
+    assert limited_info.value.detail == "Too many requests."
+    assert limited_info.value.headers["Retry-After"] == "42"
+    assert unhinted_info.value.status_code == 429
+    assert unhinted_info.value.detail == "Too many requests."
+    assert not unhinted_info.value.headers or "Retry-After" not in unhinted_info.value.headers
 
 
 @pytest.mark.anyio
@@ -11530,7 +13718,121 @@ async def test_generated_lifecycle_handlers_report_denials_instead_of_the_shared
     handler = cast("Any", getattr(controllers_module._LocalLifecycleController, handler_name).fn)  # noqa: SLF001
     identifier = accounts_module.LocalIdentifierRequest(identifier="user@example.com")
 
-    response = await handler(None, identifier, cast("Any", SimpleNamespace()), services)
+    error = await _assert_http_exception(
+        handler(None, identifier, cast("Any", SimpleNamespace()), services),
+        TooManyRequestsException,
+        status_code=429,
+        detail="Too many requests.",
+    )
 
-    assert response.status_code == 429
-    assert response.headers["Retry-After"] == "7"
+    assert error.headers["Retry-After"] == "7"
+
+
+@pytest.mark.anyio
+async def test_aesgcm_oauth_transaction_protector_round_trips_bound_transaction_secrets() -> None:
+    protector = AESGCMOAuthTransactionProtector(active_key=OAuthTransactionProtectorKey("v1", b"k" * 32))
+    associated_data = b"transaction=1|purpose=pkce"
+    first = await protector.protect(b"pkce-verifier", associated_data=associated_data)
+    second = await protector.protect(b"pkce-verifier", associated_data=associated_data)
+
+    assert first.key_version == protector.active_key_version == "v1"
+    assert first.ciphertext != second.ciphertext
+    assert await protector.unprotect(first, associated_data=associated_data) == b"pkce-verifier"
+    with pytest.raises(InvalidTag):
+        await protector.unprotect(first, associated_data=b"transaction=2|purpose=pkce")
+
+    transaction = OAuthTransaction(
+        state_digest=b"s" * 32,
+        binding_digest=b"b" * 32,
+        operation=OAuthOperation.LOGIN,
+        provider="google",
+        expected_issuer="https://accounts.google.com",
+        redirect_uri="https://app.example/auth/google/callback",
+        return_to="/",
+        requested_scopes=frozenset({"openid"}),
+        pkce_verifier=SecretStr("v" * 43),
+        nonce=SecretStr("n" * 43),
+        expires_at=_JWT_NOW + timedelta(minutes=10),
+    )
+    store = MemoryOAuthTransactionStore(protector=protector)
+    await store.create(transaction)
+
+    assert (
+        await store.consume(
+            state_digest=transaction.state_digest,
+            binding_digest=transaction.binding_digest,
+            provider=transaction.provider,
+            now=_JWT_NOW,
+        )
+        == transaction
+    )
+
+
+@pytest.mark.anyio
+async def test_aesgcm_secret_protectors_reject_invalid_configuration_entropy_and_envelopes() -> None:
+    """Versioned AES-GCM protectors reject malformed material before decrypting it."""
+    mfa_key = accounts_module.SecretProtectorKey("v1", b"m" * 32)
+    oauth_key = OAuthTransactionProtectorKey("v1", b"o" * 32)
+    mfa_protector = accounts_module.AESGCMSecretProtector(active_key=mfa_key)
+    protected_mfa_secret = await mfa_protector.protect(b"secret", associated_data=b"bound")
+
+    assert mfa_protector.active_key_version == "v1"
+    assert await mfa_protector.unprotect(protected_mfa_secret, associated_data=b"bound") == b"secret"
+    with pytest.raises(InvalidTag):
+        await mfa_protector.unprotect(protected_mfa_secret, associated_data=b"other-binding")
+
+    with pytest.raises(ImproperlyConfiguredException, match="unique keys"):
+        accounts_module.AESGCMSecretProtector(active_key=mfa_key, retained_keys=(mfa_key,))
+    with pytest.raises(ImproperlyConfiguredException, match="unique keys"):
+        AESGCMOAuthTransactionProtector(active_key=oauth_key, retained_keys=(oauth_key,))
+
+    for protector in (
+        accounts_module.AESGCMSecretProtector(active_key=mfa_key, entropy=lambda _size: b"short"),
+        AESGCMOAuthTransactionProtector(active_key=oauth_key, entropy=lambda _size: bytearray(12)),
+    ):
+        with pytest.raises(ValueError, match="entropy"):
+            await protector.protect(b"secret", associated_data=b"bound")
+
+    for protector, protected in (
+        (
+            accounts_module.AESGCMSecretProtector(active_key=mfa_key),
+            accounts_module.ProtectedSecret(ciphertext=b"x" * 12, key_version="unknown"),
+        ),
+        (
+            AESGCMOAuthTransactionProtector(active_key=oauth_key),
+            oauth_transactions_module.ProtectedOAuthSecret(ciphertext=b"x" * 12, key_version="unknown"),
+        ),
+        (
+            accounts_module.AESGCMSecretProtector(active_key=mfa_key),
+            accounts_module.ProtectedSecret(ciphertext=b"x" * 12, key_version="v1"),
+        ),
+        (
+            AESGCMOAuthTransactionProtector(active_key=oauth_key),
+            oauth_transactions_module.ProtectedOAuthSecret(ciphertext=b"x" * 12, key_version="v1"),
+        ),
+    ):
+        with pytest.raises(ValueError, match="envelope"):
+            await protector.unprotect(protected, associated_data=b"bound")
+
+
+@pytest.mark.parametrize(("key_version", "key"), [("", b"o" * 32), ("v1", b"o" * 31), ("v1", bytearray(b"o" * 32))])
+def test_oauth_transaction_protector_key_rejects_invalid_key_material(key_version: str, key: object) -> None:
+    """OAuth transaction encryption only accepts exact versioned AES-256 keys."""
+    with pytest.raises(ImproperlyConfiguredException, match="32-byte key"):
+        OAuthTransactionProtectorKey(key_version, key)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(("key_version", "key"), [("", b"m" * 32), ("v1", b"m" * 31), ("v1", bytearray(b"m" * 32))])
+def test_mfa_secret_protector_key_rejects_invalid_key_material(key_version: str, key: object) -> None:
+    """MFA secret encryption only accepts exact versioned AES-256 keys."""
+    with pytest.raises(ImproperlyConfiguredException, match="32-byte key"):
+        accounts_module.SecretProtectorKey(key_version, key)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("account_id", ["", " ", "account\x00id"])
+def test_recovery_code_digest_rejects_invalid_account_binding(account_id: str) -> None:
+    """Recovery-code HMACs never accept blank or NUL-delimited account bindings."""
+    pepper = accounts_module.RecoveryCodePepper(key_version="v1", key=b"p" * 32)
+
+    with pytest.raises(ValueError):  # noqa: PT011 - private helper intentionally raises a bare ValueError
+        mfa_module._recovery_digest(pepper, account_id, "rc_v1_00000000000000000000000000000001")  # noqa: SLF001

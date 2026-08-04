@@ -7,23 +7,30 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from importlib import import_module
 from importlib.metadata import requires
+from pathlib import Path
 from subprocess import run
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
+import msgspec
 import pytest
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from litestar import Controller
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, PermissionDeniedException
 from litestar.stores.memory import MemoryStore
 from litestar.stores.registry import StoreRegistry
 
 import litestar_security
+import litestar_security._lazy as lazy_module
 import litestar_security._openapi as openapi_module
 import litestar_security.accounts as accounts_module
 import litestar_security.accounts._purpose_tokens as purpose_tokens_module
 import litestar_security.accounts._receipts as receipts_module
 import litestar_security.authentication as authentication_module
+from litestar_security import CSRF_REQUIRED_OPT_KEY, PublicController, SecureController, exclude
 from litestar_security.accounts import AssuranceRequirement, AssuranceTrait
+from litestar_security.authentication import public, required
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -51,6 +58,7 @@ from litestar_security.guards import (
     requires_tenant,
 )
 from litestar_security.providers.jwt import BearerTokenSlot, LocalKeyRing
+from litestar_security.testing import StaticAuthorizationSnapshotRefresher
 
 _DUPLICATE_GUARD = requires_authenticated()
 _ACCOUNT_NOW = datetime(2026, 7, 27, tzinfo=timezone.utc)
@@ -84,6 +92,7 @@ _BASE_LOCAL_CAPABILITIES = {
     "get_by_id",
     "get_password_state",
     "issue",
+    "issue_absent",
     "register_login_method",
     "replace_password_and_bump_epoch",
     "revoke_login_method",
@@ -108,6 +117,8 @@ _REFRESH_CAPABILITIES = {
     "rotate",
 }
 _PUBLIC_API = (
+    "CSRF_REQUIRED_OPT_KEY",
+    "AESGCMOAuthTransactionProtector",
     "AssuranceRequirement",
     "AssuranceTrait",
     "Authenticated",
@@ -132,9 +143,9 @@ _PUBLIC_API = (
     "GitHubOAuthProvider",
     "IdentityResolution",
     "IdentityResolver",
-    "InMemoryWebSocketTicketStore",
+    "InMemoryWebSocketConnectTokenStore",
     "InvalidCredentials",
-    "IssuedWebSocketTicket",
+    "IssuedWebSocketConnectToken",
     "LitestarSessionHandle",
     "MFAConfig",
     "MechanismRequirement",
@@ -145,11 +156,14 @@ _PUBLIC_API = (
     "OAuthConfig",
     "OAuthProvider",
     "OAuthRouteService",
+    "OAuthTransactionProtectorKey",
     "PasskeyConfig",
     "PresentedCredential",
     "Principal",
+    "PublicController",
     "RequestAuthenticator",
     "ResourcePermission",
+    "SecureController",
     "SecurityConfig",
     "SecurityContext",
     "SecurityHeadersConfig",
@@ -161,23 +175,25 @@ _PUBLIC_API = (
     "VerificationUnavailable",
     "WebSocketBinding",
     "WebSocketCloseCodes",
+    "WebSocketConnectTokenIssuer",
+    "WebSocketConnectTokenRecord",
+    "WebSocketConnectTokenService",
+    "WebSocketConnectTokenStore",
     "WebSocketRevocationSource",
     "WebSocketSecurityConfig",
-    "WebSocketTicketRecord",
-    "WebSocketTicketService",
-    "WebSocketTicketStore",
+    "WireStruct",
     "__project__",
     "__version__",
     "all_of",
     "any_of",
     "at_least",
     "csp_nonce",
+    "exclude",
     "guard_all_of",
     "guard_any_of",
     "guard_at_least",
     "guard_one_of",
-    "intersect_authorization",
-    "issue_websocket_ticket",
+    "issue_websocket_connect_token",
     "mechanism",
     "optional",
     "public",
@@ -189,6 +205,7 @@ _PUBLIC_API = (
     "requires_scope",
     "requires_team_role",
     "requires_tenant",
+    "resolve_authorization",
     "websocket_policy_fingerprint",
 )
 
@@ -479,6 +496,29 @@ def test_assurance_rejects_stale_raw_provider_or_wrong_purpose_evidence(
     assert predicate.decide(connection).code == code  # type: ignore[arg-type]
 
 
+def test_assurance_rejects_expired_evidence_without_max_age() -> None:
+    """Expired evidence cannot satisfy a bare assurance requirement."""
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    predicate = requires_assurance(methods={"totp"}, clock=lambda: now)
+    expired = AuthenticationEvidence(
+        mechanism="totp",
+        slot="mfa",
+        authenticated_at=now - timedelta(minutes=6),
+        expires_at=now - timedelta(minutes=1),
+        methods=frozenset({"totp"}),
+    )
+    live = AuthenticationEvidence(
+        mechanism="totp",
+        slot="mfa",
+        authenticated_at=now - timedelta(minutes=4),
+        expires_at=now + timedelta(minutes=1),
+        methods=frozenset({"totp"}),
+    )
+
+    assert predicate.decide(_guard_connection(evidence=(expired,))).code == "missing_assurance"  # type: ignore[arg-type]
+    assert predicate.decide(_guard_connection(evidence=(live,))).granted  # type: ignore[arg-type]
+
+
 def test_assurance_contract_validates_utc_clock_and_requirement_values() -> None:
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     with pytest.raises(ImproperlyConfiguredException, match="clock must return a timezone-aware"):
@@ -556,6 +596,21 @@ def test_authorization_snapshot_defensively_freezes_input() -> None:
 def test_authorization_snapshot_rejects_blank_values(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="must not be blank"):
         AuthorizationSnapshot(**kwargs)
+
+
+@pytest.mark.anyio
+async def test_static_authorization_snapshot_refresher_returns_its_immutable_snapshot() -> None:
+    previous = AuthorizationSnapshot(attributes={"previous": "value"})
+    snapshot = AuthorizationSnapshot(scopes={"reports:read"}, attributes={"source": "static"})
+
+    refreshed = await StaticAuthorizationSnapshotRefresher(snapshot).refresh(
+        principal=Principal(id="user-1"), previous=previous, route_name="reports.socket"
+    )
+
+    assert refreshed is snapshot
+    assert previous.attributes == {"previous": "value"}
+    with pytest.raises(TypeError):
+        refreshed.attributes["mutated"] = True  # type: ignore[index]
 
 
 def test_native_authorization_guard_allows_matching_scope_and_denies_without_leaking_grant() -> None:
@@ -851,7 +906,8 @@ def test_package_root_exports_only_foundational_contract() -> None:
     assert litestar_security.__all__ == _PUBLIC_API
     assert all(hasattr(litestar_security, name) for name in _PUBLIC_API)
     assert litestar_security.__project__ == "litestar-security"
-    assert litestar_security.__version__ == "0.1.0"
+    assert CSRF_REQUIRED_OPT_KEY == "csrf_required"
+    assert exclude() == authentication_module.exclude()
     for private_name in (
         "OwnedSessionBackend",
         "SecurityMiddleware",
@@ -868,7 +924,58 @@ def test_package_root_exports_only_foundational_contract() -> None:
         "SecurityRuntimeConfig",
         "SecurityRuntimePlan",
     }.intersection(authentication_module.__all__)
+    assert "CSRF_REQUIRED_OPT_KEY" in authentication_module.__all__
     assert openapi_module.__all__ == ()
+
+
+def test_typed_controllers_compile_auth_at_class_definition_time() -> None:
+    """Typed controllers preserve native opt layering without constructing an app."""
+
+    class Basic(SecureController):
+        pass
+
+    class WithExtraOpt(SecureController):
+        opt: ClassVar = {"csrf_required": True}  # type: ignore[misc]
+
+    class Grandchild(SecureController):
+        auth: ClassVar = required("bearer")
+
+    class Inherited(Grandchild):
+        pass
+
+    class Redeclared(Grandchild):
+        auth: ClassVar = required("session")
+
+    assert Basic.opt == {"auth": SecureController.auth}
+    assert WithExtraOpt.opt == {"csrf_required": True, "auth": SecureController.auth}
+    assert Inherited.opt == {"auth": required("bearer")}
+    assert Redeclared.opt == {"auth": required("session")}
+    assert PublicController.opt == {"auth": public()}
+
+
+def test_typed_controllers_reject_own_explicit_opt_auth() -> None:
+    """An own ``opt['auth']`` is ambiguous with the typed class attribute."""
+
+    with pytest.raises(ImproperlyConfiguredException, match="declares both"):
+
+        class WithExplicitOpt(SecureController):
+            opt: ClassVar = {"auth": required("bearer")}  # type: ignore[misc]
+
+    with pytest.raises(ImproperlyConfiguredException, match="declares both"):
+
+        class WithBoth(SecureController):
+            auth: ClassVar = required("session")
+            opt: ClassVar = {"auth": required("bearer")}  # type: ignore[misc]
+
+
+def test_plain_controller_auth_attribute_remains_inert() -> None:
+    """The helper must not alter ordinary Litestar controller class behavior."""
+
+    class Plain(Controller):
+        auth: ClassVar = authentication_module.required("bearer")
+
+    assert "opt" not in Plain.__dict__
+    assert Plain.auth == authentication_module.required("bearer")
 
 
 def test_provider_package_declares_crypto_dependency_without_duplicates() -> None:
@@ -883,6 +990,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
 
     providers = import_module("litestar_security.providers")
     assert providers.__all__ == (
+        "AESGCMOAuthTransactionProtector",
         "APIKeyClaims",
         "APIKeyCodec",
         "APIKeyConfig",
@@ -902,6 +1010,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "GitHubOAuthProvider",
         "GoogleIAPClaims",
         "GoogleIAPConfig",
+        "HttpxJWKSFetcher",
         "IssuedAPIKey",
         "JSONValue",
         "JWKSCacheEntry",
@@ -921,6 +1030,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "OAuthConfig",
         "OAuthProvider",
         "OAuthRouteService",
+        "OAuthTransactionProtectorKey",
         "OIDCDiscoveryClient",
         "OIDCDiscoveryError",
         "OIDCJWTLogoutTokenConsumer",
@@ -936,6 +1046,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "TokenVault",
         "VerificationKey",
         "VerificationKeySet",
+        "VerifiedCapability",
         "WorkerLimits",
         "build_access_token_claims",
         "build_local_jwks_handler",
@@ -952,19 +1063,24 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     iap_module = import_module("litestar_security.providers.iap")
     jwks_module = import_module("litestar_security.providers.jwks")
     jwt_module = import_module("litestar_security.providers.jwt")
+    capability_module = import_module("litestar_security.providers.jwt._capabilities")
     oidc_module = import_module("litestar_security.providers.oidc")
     oauth_exports = {
+        "AESGCMOAuthTransactionProtector",
         "GitHubOAuthProvider",
         "OAuthAccountService",
         "OAuthAccountStore",
         "OAuthConfig",
         "OAuthProvider",
         "OAuthRouteService",
+        "OAuthTransactionProtectorKey",
         "TokenVault",
     }
     assert set(api_key_module.__all__).union(
         iap_module.__all__, jwks_module.__all__, jwt_module.__all__, oidc_module.__all__, oauth_exports
     ) == set(providers.__all__)
+    assert "VerifiedCapability" in jwt_module.__all__
+    assert providers.VerifiedCapability is jwt_module.VerifiedCapability is capability_module.VerifiedCapability
     assert api_key_module.__all__ == (
         "APIKeyClaims",
         "APIKeyCodec",
@@ -982,6 +1098,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     assert jwks_module.__all__ == (
         "AsyncJWKSFetcher",
         "CachedJWKSProvider",
+        "HttpxJWKSFetcher",
         "JWKSCacheEntry",
         "JWKSCachePolicy",
         "JWKSFetchRequest",
@@ -995,11 +1112,17 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     )
 
 
-def test_accounts_package_declares_argon2_without_backend_dependencies() -> None:
+def test_package_declares_feature_dependencies_only_through_extras() -> None:
     declared = tuple(requirement.lower().replace(" ", "") for requirement in requires("litestar-security") or ())
 
-    assert any(
-        requirement.startswith("argon2-cffi") and ">=25.1" in requirement and "<26" in requirement
+    assert "argon2-cffi<26,>=25.1;extra=='argon2'" in declared
+    assert "pyotp<3,>=2.10;extra=='mfa'" in declared
+    assert "webauthn<4,>=3;extra=='passkeys'" in declared
+    assert "argon2-cffi<26,>=25.1;extra=='all'" in declared
+    assert "pyotp<3,>=2.10;extra=='all'" in declared
+    assert "webauthn<4,>=3;extra=='all'" in declared
+    assert not any(
+        requirement.startswith(("argon2-cffi", "pyotp", "webauthn")) and ";extra==" not in requirement
         for requirement in declared
     )
     assert all(
@@ -1014,6 +1137,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "LOCAL_AUTH_TAGS",
         "RATE_LIMIT_STORE_NAME",
         "REFRESH_RESPONSE_HEADERS",
+        "AESGCMSecretProtector",
         "AccountLookup",
         "Argon2PasswordHasher",
         "AssertionRecordResult",
@@ -1044,17 +1168,20 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "LocalCredentials",
         "LocalIdentifierRequest",
         "LocalInvitationRegistrationRequest",
+        "LocalMFACompletionRequest",
+        "LocalMFARequiredResponse",
         "LocalPasswordChangeRequest",
         "LocalPasswordResetRequest",
         "LocalRegistrationRequest",
-        "LocalRouteResponse",
         "LocalSessionListResponse",
         "LocalSessionResponse",
         "LocalTokenRequest",
         "LoginMethod",
         "LoginMethodStore",
+        "MFALoginChallenge",
+        "MFALoginChallengeStore",
+        "MFARequired",
         "MFAService",
-        "MFAStatusResponse",
         "MFAStore",
         "NativeSessionAuth",
         "NativeSessionStore",
@@ -1104,7 +1231,6 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "RecoveryCodeDigest",
         "RecoveryCodePepper",
         "RecoveryCodes",
-        "RecoveryCodesRequest",
         "RecoveryCodesResponse",
         "RecoveryTokenService",
         "RecoveryTokenStore",
@@ -1132,7 +1258,9 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "RevokeLoginMethodStatus",
         "RotateRefreshCommand",
         "RotateRefreshResult",
+        "RouteStatusResponse",
         "SecretProtector",
+        "SecretProtectorKey",
         "SecurityEpochStore",
         "SecurityEpochValidator",
         "SecurityEvent",
@@ -1144,6 +1272,7 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "SessionRecord",
         "SessionRegistry",
         "SessionSummary",
+        "StepUpAuthorizedRequest",
         "StepUpGrant",
         "StepUpRecord",
         "StepUpRequest",
@@ -1169,9 +1298,96 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         "WebAuthnVerifier",
         "build_local_auth_routes",
         "build_mfa_routes",
+        "forwarded_client_key",
         "normalize_identifier",
         "requires_local_bearer",
         "trusted_client_key",
+    )
+
+
+@pytest.mark.anyio
+async def test_aesgcm_secret_protector_is_nondeterministic_and_aad_bound() -> None:
+    key = accounts_module.SecretProtectorKey("v1", b"k" * 32)
+    nonces = iter((b"1" * 12, b"2" * 12))
+    protector = accounts_module.AESGCMSecretProtector(active_key=key, entropy=lambda _length: next(nonces))
+
+    first = await protector.protect(b"secret", associated_data=b"account-1")
+    second = await protector.protect(b"secret", associated_data=b"account-1")
+
+    assert first.ciphertext != second.ciphertext
+    assert await protector.unprotect(first, associated_data=b"account-1") == b"secret"
+    with pytest.raises(InvalidTag):
+        await protector.unprotect(first, associated_data=b"account-2")
+    with pytest.raises(ImproperlyConfiguredException, match="32-byte"):
+        accounts_module.SecretProtectorKey("v1", b"short")
+
+
+def test_default_rate_limit_policies_map_exactly_the_rate_limited_operations() -> None:
+    operations = import_module("litestar_security.accounts._operations")
+
+    assert "RATE_LIMITED_OPERATIONS" in operations.__all__
+    assert accounts_module.DEFAULT_RATE_LIMIT_POLICIES.keys() == operations.RATE_LIMITED_OPERATIONS
+    assert {
+        operations.MFA_TOTP_REMOVE,
+        operations.PASSKEY_REMOVE,
+        operations.PASSWORD_VERIFY,
+        operations.VERIFICATION_CONSUME,
+    } <= operations.RATE_LIMITED_OPERATIONS
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("203.0.113.5", "203.0.113.5"),
+        ("203.0.113.5:4711", "203.0.113.5"),
+        ("::1", "::1"),
+        ("[::1]", "::1"),
+        ("[::1]:4711", "::1"),
+        ("::ffff:203.0.113.5", "203.0.113.5"),
+        ("not-an-address", None),
+        ("[unterminated", None),
+        ("203.0.113.5:garbage", None),
+        ("203.0.113.5:", None),
+        ("[::1]garbage", None),
+        ("[::1]:garbage", None),
+        ("[::1]:", None),
+        ("[::1]:0", None),
+        ("[::1]:65536", None),
+        ("", None),
+    ],
+)
+def test_parse_forwarded_address_normalizes_supported_forms(raw: str, expected: str | None) -> None:
+    auth_service = import_module("litestar_security.accounts._auth_service")
+
+    address = auth_service.__dict__["_parse_forwarded_address"](raw)
+
+    assert (None if address is None else str(address)) == expected
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "litestar_security.accounts._profiles",
+        "litestar_security.accounts.controllers._local",
+        "litestar_security.accounts.controllers._mfa",
+        "litestar_security.accounts._auth_service",
+        "litestar_security.accounts._refresh",
+        "litestar_security.accounts._sessions",
+    ],
+)
+def test_accounts_layering_carries_no_cycle_break_suppressions(module_name: str) -> None:
+    source = Path(cast("str", import_module(module_name).__file__)).read_text(encoding="utf-8")
+
+    assert "PLC0415" not in source
+
+
+def test_profiles_reaches_the_generated_controllers_at_module_scope() -> None:
+    profiles = import_module("litestar_security.accounts._profiles")
+
+    assert "litestar_security.accounts.controllers" in sys.modules
+    assert (
+        profiles.build_local_auth_routes
+        is import_module("litestar_security.accounts.controllers").build_local_auth_routes
     )
 
 
@@ -1186,8 +1402,8 @@ def test_accounts_package_declares_argon2_without_backend_dependencies() -> None
         ),
         (accounts_module.LoginMethodStore, {"register_login_method", "revoke_login_method"}),
         (accounts_module.RegistrationStore, {"register"}),
-        (accounts_module.VerificationTokenStore, {"issue", "consume_and_verify"}),
-        (accounts_module.RecoveryTokenStore, {"issue", "consume_and_reset"}),
+        (accounts_module.VerificationTokenStore, {"issue", "issue_absent", "consume_and_verify"}),
+        (accounts_module.RecoveryTokenStore, {"issue", "issue_absent", "consume_and_reset"}),
         (accounts_module.SecurityEpochStore, {"current_epoch"}),
         (accounts_module.SessionRegistry, _SESSION_CAPABILITIES),
         (accounts_module.RefreshTokenFamilyStore, _REFRESH_CAPABILITIES),
@@ -1249,7 +1465,7 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
             expires_at=now + timedelta(hours=1),
         ),
         accounts_module.RegistrationCommand(normalized_identifier="user@example.com"),
-        accounts_module.PasswordCredentialState("encoded-secret-hash", 1),
+        accounts_module.PasswordCredentialState("encoded-secret-hash", 1, active=True, verified=True),
         accounts_module.PasswordReauthenticationProof(
             account_id=account.account_id, security_epoch=1, authenticated_at=now, expires_at=now + timedelta(minutes=5)
         ),
@@ -1276,6 +1492,7 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
             account_id=account.account_id,
             security_epoch=1,
             created_at=now,
+            authenticated_at=now,
             last_seen_at=now,
             expires_at=now + timedelta(hours=1),
         ),
@@ -1286,6 +1503,7 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
             account_id=account.account_id,
             security_epoch=1,
             created_at=now,
+            authenticated_at=now,
             expires_at=now + timedelta(hours=1),
         ),
         accounts_module.SessionSummary(
@@ -1431,6 +1649,12 @@ def test_refresh_value_contracts_are_frozen_slotted_and_secret_safe() -> None:
     assert sealer.unseal(sealed, receipt_context, now=now) == response
     for value in values:
         assert not hasattr(value, "__dict__")
+        # RefreshTokenResponse crosses the wire, so it is a frozen Struct; it names
+        # its fields and raises on assignment differently from a frozen dataclass.
+        if isinstance(value, msgspec.Struct):
+            with pytest.raises(AttributeError):
+                setattr(value, value.__struct_fields__[0], None)
+            continue
         with pytest.raises(FrozenInstanceError):
             setattr(value, fields(value)[0].name, None)
     rendered = " ".join(repr(value) for value in values)
@@ -1791,7 +2015,7 @@ def test_account_password_session_and_refresh_contracts_share_one_strict_epoch_d
             verified=True,
             security_epoch=epoch,
         ),
-        lambda: accounts_module.PasswordCredentialState("encoded-hash", epoch),
+        lambda: accounts_module.PasswordCredentialState("encoded-hash", epoch, active=True, verified=True),
         lambda: accounts_module.PasswordReauthenticationProof("account-1", epoch, now, now + timedelta(minutes=5)),
         lambda: accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, epoch),
         lambda: accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.RESET, "account-1", epoch),
@@ -1799,10 +2023,10 @@ def test_account_password_session_and_refresh_contracts_share_one_strict_epoch_d
             _SESSION_ID, _BINDING_ID, "account-1", epoch, now, now + timedelta(hours=1)
         ),
         lambda: accounts_module.SessionRecord(
-            _SESSION_ID, _BINDING_ID, b"d" * 32, "account-1", epoch, now, now, now + timedelta(hours=1)
+            _SESSION_ID, _BINDING_ID, b"d" * 32, "account-1", epoch, now, now, now, now + timedelta(hours=1)
         ),
         lambda: accounts_module.CreateSessionCommand(
-            _SESSION_ID, _BINDING_ID, b"d" * 32, "account-1", epoch, now, now + timedelta(hours=1)
+            _SESSION_ID, _BINDING_ID, b"d" * 32, "account-1", epoch, now, now, now + timedelta(hours=1)
         ),
         lambda: accounts_module.RotateRefreshCommand(
             _REFRESH_ID,
@@ -1842,6 +2066,15 @@ def test_local_account_requires_exact_boolean_state(field_name: str, value: obje
 
     with pytest.raises(ValueError, match="Local account"):
         accounts_module.LocalAccount(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(("field_name", "value"), [("active", 1), ("verified", "false")])
+def test_password_credential_state_requires_exact_boolean_account_state(field_name: str, value: object) -> None:
+    values = {"password_hash": "encoded-hash", "security_epoch": 1, "active": True, "verified": True}
+    values[field_name] = value
+
+    with pytest.raises(ValueError, match="boolean account state"):
+        accounts_module.PasswordCredentialState(**values)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -2284,6 +2517,7 @@ def test_native_session_contracts_reject_malformed_state(
             "account_id",
             "security_epoch",
             "created_at",
+            "authenticated_at",
             "last_seen_at",
             "expires_at",
             "display_metadata",
@@ -2295,6 +2529,7 @@ def test_native_session_contracts_reject_malformed_state(
             "account_id",
             "security_epoch",
             "created_at",
+            "authenticated_at",
             "expires_at",
             "display_metadata",
         ),
@@ -2713,6 +2948,93 @@ def test_security_config_rejects_invalid_headers_config() -> None:
         litestar_security.SecurityConfig(headers=object())  # type: ignore[arg-type]
 
 
+def test_local_route_schemas_redact_every_secret_they_carry() -> None:
+    secret = "s3cr3t-value"  # noqa: S105 - redaction fixture
+    identifier = "user@example.com"
+    schemas = (
+        accounts_module.LocalCredentials(identifier=identifier, password=secret),
+        accounts_module.LocalRegistrationRequest(identifier=identifier, password=secret, display_name="User"),
+        accounts_module.LocalInvitationRegistrationRequest(
+            identifier=identifier, password=secret, invitation_token=secret
+        ),
+        accounts_module.LocalTokenRequest(token=secret),
+        accounts_module.LocalPasswordResetRequest(token=secret, password=secret),
+        accounts_module.LocalPasswordChangeRequest(current_password=secret, password=secret, compromise=True),
+    )
+
+    for schema in schemas:
+        rendered = repr(schema)
+        assert secret not in rendered, type(schema).__name__
+        assert type(schema).__name__ in rendered
+    # Non-secret members stay visible so a representation is still worth reading.
+    assert identifier in repr(schemas[0])
+    assert "compromise=True" in repr(schemas[-1])
+
+
+def test_every_wire_schema_in_the_tree_shares_one_casing_and_strictness_policy() -> None:
+    import_module("litestar_security.accounts")
+    import_module("litestar_security.providers.oauth")
+
+    def descendants(base: type) -> set[type]:
+        found: set[type] = set()
+        for subclass in base.__subclasses__():
+            found.add(subclass)
+            found |= descendants(subclass)
+        return found
+
+    schemas = descendants(litestar_security.WireStruct)
+    # A schema that must tolerate members it does not model states so on itself and
+    # is listed here with the reason. Nothing needs the exemption today.
+    tolerant: dict[str, str] = {}
+
+    assert len(schemas) >= 30
+    for schema in schemas:
+        assert schema.__struct_config__.frozen, schema.__name__
+        assert schema.__struct_encode_fields__ == schema.__struct_fields__, schema.__name__
+        strict = schema.__struct_config__.forbid_unknown_fields
+        assert strict is (schema.__name__ not in tolerant), schema.__name__
+
+
+def test_wire_struct_is_frozen_strict_and_never_renamed() -> None:
+    class _Probe(litestar_security.WireStruct, frozen=True):
+        account_identifier: str
+        step_up_grant: str
+
+    probe = _Probe(account_identifier="user@example.com", step_up_grant="grant")
+
+    assert _Probe.__struct_config__.frozen
+    assert _Probe.__struct_config__.forbid_unknown_fields
+    assert _Probe.__struct_encode_fields__ == _Probe.__struct_fields__
+    assert msgspec.json.encode(probe) == b'{"account_identifier":"user@example.com","step_up_grant":"grant"}'
+    with pytest.raises(AttributeError):
+        probe.account_identifier = "other@example.com"  # type: ignore[misc]
+
+
+def test_wire_struct_subclasses_reject_unknown_and_camel_case_members() -> None:
+    class _Probe(litestar_security.WireStruct, frozen=True):
+        account_identifier: str
+
+    with pytest.raises(msgspec.ValidationError, match="unknown field"):
+        msgspec.json.decode(b'{"account_identifier":"user@example.com","extra":1}', type=_Probe)
+    with pytest.raises(msgspec.ValidationError, match="accountIdentifier"):
+        msgspec.json.decode(b'{"accountIdentifier":"user@example.com"}', type=_Probe)
+
+
+def test_wire_struct_subclasses_may_relax_strictness_without_losing_casing_or_immutability() -> None:
+    class _Tolerant(litestar_security.WireStruct, frozen=True, forbid_unknown_fields=False):
+        account_identifier: str
+        return_to: str = "/"
+
+    decoded = msgspec.json.decode(
+        b'{"account_identifier":"user@example.com","return_to":"/dashboard","unrecognized":1}', type=_Tolerant
+    )
+
+    assert decoded.return_to == "/dashboard"
+    assert _Tolerant.__struct_config__.frozen
+    assert not _Tolerant.__struct_config__.forbid_unknown_fields
+    assert _Tolerant.__struct_encode_fields__ == _Tolerant.__struct_fields__
+
+
 def test_root_import_has_no_optional_integration_dependencies() -> None:
     script = """
 import sys
@@ -2727,6 +3049,167 @@ for module_name in sys.modules:
     result = run([sys.executable, "-c", script], check=True, capture_output=True, text=True)  # noqa: S603
 
     assert not result.stdout
+
+
+def test_oauth_boundary_keeps_provider_tree_unloaded_until_requested() -> None:
+    script = """
+import sys
+
+import litestar_security
+import litestar_security.accounts
+
+assert not any(module_name.startswith("litestar_security.providers.oauth") for module_name in sys.modules)
+"""
+    result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_lazy_extra_exports_preserve_eager_export_identity() -> None:
+    script = """
+from importlib import import_module
+
+import litestar_security
+import litestar_security.accounts as accounts
+
+for name in litestar_security.__all__:
+    resolved = getattr(litestar_security, name)
+    eager = (
+        getattr(import_module("litestar_security.providers"), name)
+        if name in litestar_security._OAUTH_EXPORTS
+        else litestar_security.__dict__[name]
+    )
+    assert resolved is eager, name
+
+for name in accounts.__all__:
+    resolved = getattr(accounts, name)
+    target = accounts._OPTIONAL_EXPORTS.get(name)
+    eager = (
+        getattr(import_module(target[0]), name)
+        if target is not None
+        else getattr(import_module("litestar_security.accounts.controllers"), name)
+        if name in accounts._CONTROLLER_EXPORTS
+        else accounts.__dict__[name]
+    )
+    assert resolved is eager, name
+"""
+    result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("module_name", "name", "target_module"),
+    [
+        ("litestar_security.accounts.controllers", "LOCAL_AUTH_TAGS", "litestar_security.accounts.controllers._local"),
+        ("litestar_security.accounts.controllers", "build_mfa_routes", "litestar_security.accounts.controllers._mfa"),
+        ("litestar_security.providers", "OAuthConfig", "litestar_security.providers.oauth"),
+        ("litestar_security.providers", "OIDCMetadata", "litestar_security.providers.oidc"),
+    ],
+)
+def test_lazy_export_packages_resolve_optional_attributes(module_name: str, name: str, target_module: str) -> None:
+    module = import_module(module_name)
+
+    assert getattr(module, name) is getattr(import_module(target_module), name)
+
+
+@pytest.mark.parametrize("module_name", ["litestar_security.accounts.controllers", "litestar_security.providers"])
+def test_lazy_export_packages_reject_unknown_attributes(module_name: str) -> None:
+    module = import_module(module_name)
+
+    with pytest.raises(AttributeError, match="has no attribute 'missing'"):
+        module.__getattr__("missing")
+
+
+@pytest.mark.parametrize(
+    ("missing_dependency", "dependencies", "expected_exception"),
+    [
+        ("optional_dependency", frozenset({"optional_dependency"}), ImportError),
+        ("unrelated_dependency", frozenset({"optional_dependency"}), ModuleNotFoundError),
+    ],
+)
+def test_import_optional_attribute_only_translates_declared_missing_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_dependency: str,
+    dependencies: frozenset[str],
+    expected_exception: type[Exception],
+) -> None:
+    def raise_missing_module(_module_name: str) -> None:
+        raise ModuleNotFoundError(name=missing_dependency)
+
+    monkeypatch.setattr(lazy_module, "import_module", raise_missing_module)
+
+    with pytest.raises(expected_exception) as error:
+        lazy_module.import_optional_attribute("feature.module", "export", extras="feature", dependencies=dependencies)
+
+    if expected_exception is ImportError:
+        expected_message = (
+            "litestar-security feature requires the [feature] extra: pip install 'litestar-security[feature]'"
+        )
+        assert str(error.value) == expected_message
+
+
+@pytest.mark.parametrize("blocked_dependency", ["pyotp", "webauthn", "argon2"])
+def test_accounts_lazy_extra_exports_isolate_missing_dependencies(blocked_dependency: str) -> None:
+    script = f"""
+import sys
+from importlib import import_module
+
+sys.modules[{blocked_dependency!r}] = None
+import litestar_security.accounts as accounts
+
+assert accounts.RateLimiter
+for name in accounts.__all__:
+    target = accounts._OPTIONAL_EXPORTS.get(name)
+    if target is None and name in accounts._CONTROLLER_EXPORTS:
+        target = (
+            ("litestar_security.accounts.controllers", "argon2,mfa", frozenset({{"argon2", "pyotp"}}))
+            if name != "build_mfa_routes"
+            else (
+                "litestar_security.accounts.controllers",
+                "argon2,mfa,passkeys",
+                frozenset({{"argon2", "pyotp", "webauthn"}}),
+            )
+        )
+    if target is None or {blocked_dependency!r} not in target[2]:
+        getattr(accounts, name)
+        continue
+    try:
+        getattr(accounts, name)
+    except ImportError as error:
+        expected = (
+            f"litestar-security feature requires the [{{target[1]}}] extra: "
+            f"pip install 'litestar-security[{{target[1]}}]'"
+        )
+        assert str(error) == expected, (name, str(error))
+    else:
+        raise AssertionError(f"expected an actionable optional-extra ImportError for {{name}}")
+
+controllers = import_module("litestar_security.accounts.controllers")
+for name in controllers.__all__:
+    target = (
+        ("argon2,mfa", frozenset({{"argon2", "pyotp"}}))
+        if name in controllers._LOCAL_EXPORTS
+        else ("argon2,mfa,passkeys", frozenset({{"argon2", "pyotp", "webauthn"}}))
+    )
+    if {blocked_dependency!r} not in target[1]:
+        getattr(controllers, name)
+        continue
+    try:
+        getattr(controllers, name)
+    except ImportError as error:
+        expected = (
+            f"litestar-security feature requires the [{{target[0]}}] extra: "
+            f"pip install 'litestar-security[{{target[0]}}]'"
+        )
+        assert str(error) == expected, (name, str(error))
+    else:
+        raise AssertionError(f"expected an actionable optional-extra ImportError for {{name}}")
+"""
+
+    result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
+
+    assert result.returncode == 0, result.stderr
 
 
 def _local_auth_rate_limit_config(**kwargs: Any) -> "accounts_module.LocalAuthConfig[Any]":

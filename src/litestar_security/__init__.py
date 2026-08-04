@@ -3,7 +3,9 @@
 from typing import TYPE_CHECKING, Any
 
 from litestar_security.__metadata__ import __project__, __version__
+from litestar_security._lazy import import_optional_attribute
 from litestar_security.authentication import (
+    CSRF_REQUIRED_OPT_KEY,
     Authenticated,
     AuthenticationMechanism,
     AuthenticationOutcome,
@@ -23,6 +25,7 @@ from litestar_security.authentication import (
     all_of,
     any_of,
     at_least,
+    exclude,
     mechanism,
     optional,
     public,
@@ -41,8 +44,9 @@ from litestar_security.context import (
     SessionHandle,
     SessionPersistenceUnavailableError,
     SessionUnavailableError,
-    intersect_authorization,
+    resolve_authorization,
 )
+from litestar_security.controllers import PublicController, SecureController
 from litestar_security.guards import (
     AssuranceRequirement,
     AssuranceTrait,
@@ -62,33 +66,39 @@ from litestar_security.guards import at_least as guard_at_least
 from litestar_security.guards import one_of as guard_one_of
 from litestar_security.headers import ContentSecurityPolicy, CSPMode, SecurityHeadersConfig, csp_nonce
 from litestar_security.plugin import CurrentUser, SecurityPlugin
+from litestar_security.schema import WireStruct
 from litestar_security.websocket import (
     AuthorizationSnapshotRefresher,
-    InMemoryWebSocketTicketStore,
-    IssuedWebSocketTicket,
+    InMemoryWebSocketConnectTokenStore,
+    IssuedWebSocketConnectToken,
     WebSocketBinding,
     WebSocketCloseCodes,
+    WebSocketConnectTokenIssuer,
+    WebSocketConnectTokenRecord,
+    WebSocketConnectTokenService,
+    WebSocketConnectTokenStore,
     WebSocketRevocationSource,
     WebSocketSecurityConfig,
-    WebSocketTicketRecord,
-    WebSocketTicketService,
-    WebSocketTicketStore,
-    issue_websocket_ticket,
+    issue_websocket_connect_token,
     websocket_policy_fingerprint,
 )
 
 if TYPE_CHECKING:
     from litestar_security.providers.oauth import (
+        AESGCMOAuthTransactionProtector,
         GitHubOAuthProvider,
         OAuthAccountService,
         OAuthAccountStore,
         OAuthConfig,
         OAuthProvider,
         OAuthRouteService,
+        OAuthTransactionProtectorKey,
         TokenVault,
     )
 
 __all__ = (
+    "CSRF_REQUIRED_OPT_KEY",
+    "AESGCMOAuthTransactionProtector",
     "AssuranceRequirement",
     "AssuranceTrait",
     "Authenticated",
@@ -113,9 +123,9 @@ __all__ = (
     "GitHubOAuthProvider",
     "IdentityResolution",
     "IdentityResolver",
-    "InMemoryWebSocketTicketStore",
+    "InMemoryWebSocketConnectTokenStore",
     "InvalidCredentials",
-    "IssuedWebSocketTicket",
+    "IssuedWebSocketConnectToken",
     "LitestarSessionHandle",
     "MFAConfig",
     "MechanismRequirement",
@@ -126,11 +136,14 @@ __all__ = (
     "OAuthConfig",
     "OAuthProvider",
     "OAuthRouteService",
+    "OAuthTransactionProtectorKey",
     "PasskeyConfig",
     "PresentedCredential",
     "Principal",
+    "PublicController",
     "RequestAuthenticator",
     "ResourcePermission",
+    "SecureController",
     "SecurityConfig",
     "SecurityContext",
     "SecurityHeadersConfig",
@@ -142,23 +155,25 @@ __all__ = (
     "VerificationUnavailable",
     "WebSocketBinding",
     "WebSocketCloseCodes",
+    "WebSocketConnectTokenIssuer",
+    "WebSocketConnectTokenRecord",
+    "WebSocketConnectTokenService",
+    "WebSocketConnectTokenStore",
     "WebSocketRevocationSource",
     "WebSocketSecurityConfig",
-    "WebSocketTicketRecord",
-    "WebSocketTicketService",
-    "WebSocketTicketStore",
+    "WireStruct",
     "__project__",
     "__version__",
     "all_of",
     "any_of",
     "at_least",
     "csp_nonce",
+    "exclude",
     "guard_all_of",
     "guard_any_of",
     "guard_at_least",
     "guard_one_of",
-    "intersect_authorization",
-    "issue_websocket_ticket",
+    "issue_websocket_connect_token",
     "mechanism",
     "optional",
     "public",
@@ -170,16 +185,19 @@ __all__ = (
     "requires_scope",
     "requires_team_role",
     "requires_tenant",
+    "resolve_authorization",
     "websocket_policy_fingerprint",
 )
 
 _OAUTH_EXPORTS = frozenset({
+    "AESGCMOAuthTransactionProtector",
     "GitHubOAuthProvider",
     "OAuthAccountService",
     "OAuthAccountStore",
     "OAuthConfig",
     "OAuthProvider",
     "OAuthRouteService",
+    "OAuthTransactionProtectorKey",
     "TokenVault",
 })
 
@@ -187,8 +205,6 @@ _OAUTH_EXPORTS = frozenset({
 def __getattr__(name: str) -> Any:  # noqa: ANN401 - module lazy-export hooks are dynamically typed
     """Resolve curated OAuth exports without loading providers at root import."""
     if name in _OAUTH_EXPORTS:
-        from litestar_security import providers  # noqa: PLC0415 - preserve lightweight package-root imports
-
-        return getattr(providers, name)
+        return import_optional_attribute("litestar_security.providers", name, extras="oauth", dependencies=frozenset())
     message = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(message)

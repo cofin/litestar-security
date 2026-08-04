@@ -4,6 +4,7 @@ import ast
 import inspect
 import sys
 from dataclasses import FrozenInstanceError
+from datetime import datetime, timedelta, timezone
 from importlib.metadata import metadata
 from pathlib import Path
 from subprocess import run
@@ -16,18 +17,23 @@ from anyio import CancelScope, CapacityLimiter, Event, create_task_group, from_t
 from anyio.lowlevel import checkpoint
 
 import litestar_security.config as config_module
+import litestar_security.testing as testing_module
+import litestar_security.workers as workers_module
 from litestar_security.accounts import (
     LoginMethodStore,
+    MFALoginChallenge,
+    MFALoginChallengeStore,
     MFAStore,
     PasskeyStore,
     PasswordCredentialStore,
     RefreshTokenFamilyStore,
     RegistrationStore,
+    StepUpStore,
     WebAuthnChallengeStore,
 )
 from litestar_security.providers.api_key import APIKeyStore
-from litestar_security.providers.oauth import OAuthAccountStore, OAuthTransactionStore
-from litestar_security.websocket import WebSocketTicketStore
+from litestar_security.providers.oauth import OAuthAccountStore, OAuthTransactionStore, OIDCSessionLogoutStore
+from litestar_security.websocket import WebSocketConnectTokenStore
 
 _PACKAGE_ROOT = Path(__file__).parents[2] / "litestar_security"
 _FORBIDDEN_RUNTIME_ROOTS = frozenset({
@@ -51,12 +57,15 @@ _ATOMIC_METHODS = {
     LoginMethodStore: ("revoke_login_method",),
     RefreshTokenFamilyStore: ("rotate",),
     MFAStore: ("advance_totp_counter", "consume_recovery_code"),
+    OIDCSessionLogoutStore: ("consume_backchannel", "revoke_frontchannel"),
+    MFALoginChallengeStore: ("consume",),
     WebAuthnChallengeStore: ("consume",),
     PasskeyStore: ("record_assertion",),
     OAuthTransactionStore: ("consume",),
     OAuthAccountStore: ("unlink_identity",),
     APIKeyStore: ("rotate",),
-    WebSocketTicketStore: ("consume",),
+    StepUpStore: ("consume",),
+    WebSocketConnectTokenStore: ("consume",),
 }
 
 
@@ -109,6 +118,47 @@ def test_capability_protocols_do_not_expose_generic_persistence_methods() -> Non
         assert not {"add", "update", "delete", "query", "transaction", "connection"}.intersection(protocol.__dict__)
 
 
+@pytest.mark.anyio
+async def test_mfa_login_challenge_reference_store_is_atomic_and_burns_mismatches() -> None:
+    now = datetime(2026, 8, 3, tzinfo=timezone.utc)
+    challenge = MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key="client-1",
+        issued_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+    store = testing_module.InMemoryMFALoginChallengeStore()
+
+    assert isinstance(store, MFALoginChallengeStore)
+    await store.put(challenge)
+
+    assert await store.consume(b"d" * 32, account_id="other-account", security_epoch=0, now=now) is None
+    assert await store.consume(b"d" * 32, account_id="account-1", security_epoch=0, now=now) is None
+
+    winning_challenge = MFALoginChallenge(
+        challenge_digest=b"e" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key="client-1",
+        issued_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+    await store.put(winning_challenge)
+    outcomes: list[MFALoginChallenge | None] = []
+
+    async def consume() -> None:
+        outcomes.append(await store.consume(b"e" * 32, account_id="account-1", security_epoch=0, now=now))
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(consume)
+        task_group.start_soon(consume)
+
+    assert sum(outcome is winning_challenge for outcome in outcomes) == 1
+    assert outcomes.count(None) == 1
+
+
 def test_blocking_integration_marker_is_public_configuration() -> None:
     marker = config_module.BlockingIntegration(object())
 
@@ -144,7 +194,7 @@ def test_normalized_runtime_has_no_per_call_awaitability_branch() -> None:
 
 @pytest.mark.anyio
 async def test_blocking_call_runner_enforces_its_capacity_limit() -> None:
-    runner = config_module.BlockingCallRunner(limiter=CapacityLimiter(1))
+    runner = workers_module.BlockingCallRunner(limiter=CapacityLimiter(1))
     first_started = Event()
     release = ThreadEvent()
     state_lock = Lock()
@@ -180,7 +230,7 @@ async def test_blocking_call_runner_enforces_its_capacity_limit() -> None:
 
 @pytest.mark.anyio
 async def test_blocking_call_runner_finishes_in_flight_mutation_before_cancellation() -> None:
-    runner = config_module.BlockingCallRunner(limiter=CapacityLimiter(1))
+    runner = workers_module.BlockingCallRunner(limiter=CapacityLimiter(1))
     started = Event()
     caller_finished = Event()
     release = ThreadEvent()

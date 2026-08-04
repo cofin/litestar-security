@@ -35,6 +35,7 @@ from litestar_security.authentication import (
 from litestar_security.config import SecurityConfig
 from litestar_security.context import Principal, SecurityContext
 from litestar_security.headers import CSPHook, configure_security_headers
+from litestar_security.websocket import WebSocketConnectTokenIssuer
 
 __all__ = ("CurrentUser", "SecurityPlugin")
 
@@ -45,7 +46,7 @@ UserT = TypeVar("UserT")
 CurrentUser: TypeAlias = NamedDependency[UserT]
 
 
-_RESERVED_DEPENDENCIES = ("principal", "security_context", "current_user")
+_RESERVED_DEPENDENCIES = ("principal", "security_context", "current_user", "websocket_connect_tokens")
 
 
 _SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -64,7 +65,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     __slots__ = (
         "_api_key_lifespan",
         "_api_key_service",
-        "_headers_hook",
+        "_headers_hooks",
         "_jwks_lifespan",
         "_local_auth_route_handlers",
         "_mfa_route_handlers",
@@ -85,12 +86,15 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             "principal": Provide(_provide_principal, sync_to_thread=False, use_cache=False),
             "security_context": Provide(_provide_security_context, sync_to_thread=False, use_cache=False),
             "current_user": Provide(_provide_current_user, sync_to_thread=False, use_cache=False),
+            "websocket_connect_tokens": Provide(
+                self._provide_websocket_connect_tokens, sync_to_thread=False, use_cache=False
+            ),
         }
         self._route_compiler: RouteCompiler[UserT] | None = None
         self._runtime_config: SecurityRuntimeConfig[UserT] | None = None
         self._middleware: DefineMiddleware | None = None
         self._jwks_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
-        self._headers_hook: CSPHook | None = None
+        self._headers_hooks: tuple[CSPHook, ...] = ()
         self._api_key_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
         self._api_key_service: object | None = None
         self._local_auth_route_handlers: tuple[Router, ...] | None = None
@@ -116,6 +120,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         """
         self._configure_headers(app_config)
         self._configure_local_auth_rate_limits(app_config)
+        self._configure_mfa_login()
         self._configure_local_auth_routes(app_config)
         self._configure_mfa_routes(app_config)
         self._configure_oauth_routes(app_config)
@@ -208,7 +213,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     def _configure_headers(self, app_config: AppConfig) -> None:
         headers = self.config.headers
         if headers is not None:
-            self._headers_hook = configure_security_headers(app_config, headers, self._headers_hook)
+            self._headers_hooks = configure_security_headers(app_config, headers, self._headers_hooks)
 
     def _get_runtime(self) -> tuple[SecurityRuntimeConfig[UserT], DefineMiddleware]:
         if self._runtime_config is None:
@@ -304,6 +309,22 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             mechanisms.append(cast("AuthenticationMechanism[Any, Any, UserT]", service_mechanism))
         return slots, mechanisms
 
+    def _provide_websocket_connect_tokens(self, scope: Scope) -> WebSocketConnectTokenIssuer:
+        """Provide the configured issuer for one-time WebSocket connect tokens."""
+        websocket_config = self.config.websocket
+        connect_token_store = websocket_config.connect_token_store
+        if connect_token_store is None:
+            message = (
+                "WebSocket connect token minting requires SecurityConfig.websocket.connect_token_store to be configured"
+            )
+            raise ImproperlyConfiguredException(detail=message)
+        return WebSocketConnectTokenIssuer(
+            app=scope["litestar_app"],
+            store=connect_token_store,
+            clock=websocket_config.clock,
+            ttl=websocket_config.connect_token_ttl,
+        )
+
     def _configure_api_key_lifespan(self, app_config: AppConfig) -> None:
         api_key_service = self._api_key_service
         if api_key_service is None:
@@ -362,7 +383,9 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             message = "Native CSRF configuration must be a Litestar CSRFConfig"
             raise ImproperlyConfiguredException(detail=message)
         if config.exclude is not None:
-            message = "Native CSRF path exclusions are forbidden; use compiled route policy"
+            message = (
+                "Native CSRF path exclusions are forbidden; use compiled route policy (`auth=`) or csrf_required=True"
+            )
             raise ImproperlyConfiguredException(detail=message)
         try:
             safe_methods = frozenset(config.safe_methods)
@@ -413,6 +436,18 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         for route_handler in route_handlers:
             if not any(existing is route_handler for existing in app_config.route_handlers):
                 app_config.route_handlers.append(route_handler)
+
+    def _configure_mfa_login(self) -> None:
+        """Bind MFA-login challenges independently of generated MFA management routes."""
+        mfa = self.config.mfa
+        if mfa is None or not mfa.require_at_login:
+            return
+        local_auth = self.config.local_auth
+        if local_auth is None:
+            message = "MFA login requires local authentication"
+            raise ImproperlyConfiguredException(detail=message)
+        _validate_local_auth(local_auth)
+        local_auth.bind_mfa_login(mfa)
 
     def _configure_mfa_routes(self, app_config: AppConfig) -> None:
         mfa_config = self.config.mfa
@@ -644,7 +679,7 @@ def _owner_name(layer: object) -> str:
 
 
 def _validate_local_auth(value: object) -> None:
-    from litestar_security.accounts._profiles import LocalAuthConfig  # noqa: PLC0415 - breaks an import cycle
+    from litestar_security.accounts import LocalAuthConfig  # noqa: PLC0415 - account services load only when configured
 
     if not isinstance(value, LocalAuthConfig):
         message = "Security local authentication must be a LocalAuthConfig"

@@ -123,16 +123,18 @@ class PasswordCredentialStore(Protocol):
     """Store password credentials through atomic security operations."""
 
     async def get_password_state(self, account_id: str) -> PasswordCredentialState | None:
-        """Load one atomic encoded-password and security-epoch snapshot.
+        """Load one atomic password hash, account-state, and security-epoch snapshot.
 
-        Read both values in one operation. A hash paired with an epoch read
-        separately can describe a state that never existed.
+        Read the hash, active/verified projection, and epoch in one operation.
+        Values read separately can describe a state that never existed during
+        a concurrent deactivation or verification-state change.
 
         Args:
             account_id: The account whose credential state to read.
 
         Returns:
-            The paired hash and epoch, or ``None`` when the account has no password.
+            The paired hash, account-state projection, and epoch, or ``None``
+            when the account has no password.
         """
         ...  # pragma: no cover
 
@@ -266,6 +268,17 @@ class VerificationTokenStore(Protocol):
         """
         ...  # pragma: no cover
 
+    async def issue_absent(self) -> None:
+        """Perform one durable round trip that commits nothing.
+
+        Called instead of :meth:`issue` when the identifier resolves to no
+        eligible account. The durable step MUST cost the same whether or not the
+        identifier resolves: an implementation that answers quickly for unknown
+        accounts makes a present account measurably slower to probe, defeating
+        the shared-response guarantee. Commit, notify, and mutate nothing.
+        """
+        ...  # pragma: no cover
+
     async def consume_and_verify(
         self, token_id: str, digest: bytes, *, now: "datetime", event: SecurityEvent
     ) -> ConsumeResult:
@@ -302,6 +315,17 @@ class RecoveryTokenStore(Protocol):
             notification: The delivery the application should send.
             event: The audit event to commit with the issue. Rejecting it must
                 fail the issue.
+        """
+        ...  # pragma: no cover
+
+    async def issue_absent(self) -> None:
+        """Perform one durable round trip that commits nothing.
+
+        Called instead of :meth:`issue` when the identifier resolves to no
+        eligible account. The durable step MUST cost the same whether or not the
+        identifier resolves: an implementation that answers quickly for unknown
+        accounts makes a present account measurably slower to probe, defeating
+        the shared-response guarantee. Commit, notify, and mutate nothing.
         """
         ...  # pragma: no cover
 

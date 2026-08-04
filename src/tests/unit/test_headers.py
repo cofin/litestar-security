@@ -93,6 +93,15 @@ def test_security_headers_normalize_case_insensitive_duplicates() -> None:
         SecurityHeadersConfig(static={"X-Owned": "first", "x-owned": "second"})
 
 
+def test_security_headers_hardened_baseline() -> None:
+    assert SecurityHeadersConfig.hardened().static == {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Strict-Transport-Security": "max-age=63072000; includeSubDomains",
+    }
+
+
 @pytest.mark.parametrize(
     ("name", "value"), [("X Bad", "value"), ("X-Owned\r\n", "value"), ("X-Owned", "value\ninjected")]
 )

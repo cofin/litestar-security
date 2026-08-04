@@ -14,17 +14,20 @@ from typing import NoReturn, Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
 
 from anyio import Lock
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from litestar.datastructures import Cookie
 from litestar.exceptions import ImproperlyConfiguredException
 
 __all__ = (
     "OAUTH_BINDING_COOKIE_NAME",
+    "AESGCMOAuthTransactionProtector",
     "InvalidOAuthCallback",
     "MemoryOAuthTransactionStore",
     "OAuthOperation",
     "OAuthRedirectPolicy",
     "OAuthTransaction",
     "OAuthTransactionProtector",
+    "OAuthTransactionProtectorKey",
     "OAuthTransactionService",
     "OAuthTransactionStart",
     "OAuthTransactionStore",
@@ -50,6 +53,8 @@ _STATE_DIGEST_DOMAIN = b"litestar-security:oauth:state:v1\x00"
 _BINDING_DIGEST_DOMAIN = b"litestar-security:oauth:binding:v1\x00"
 _PROTECTED_SECRET_DOMAIN = b"litestar-security:oauth:transaction:v1\x00"
 _PKCE_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+_AES_256_KEY_BYTES = 32
+_AES_GCM_NONCE_BYTES = 12
 
 
 class OAuthOperation(str, Enum):
@@ -140,6 +145,88 @@ class OAuthTransactionProtector(Protocol):
             The recovered plaintext for immediate protocol use.
         """
         ...  # pragma: no cover
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthTransactionProtectorKey:
+    """One AES-256-GCM OAuth transaction key selected by a non-secret version."""
+
+    key_version: str
+    key: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        """Require a stable version and exact AES-256 key material."""
+        if not _strict_text(self.key_version) or self.key.__class__ is not bytes or len(self.key) != _AES_256_KEY_BYTES:
+            message = "OAuth transaction protector key requires a version and 32-byte key"
+            raise ImproperlyConfiguredException(detail=message)
+
+
+@dataclass(frozen=True, slots=True)
+class AESGCMOAuthTransactionProtector:
+    """Protect OAuth transaction secrets with AES-256-GCM application-owned keys."""
+
+    active_key: OAuthTransactionProtectorKey = field(repr=False)
+    retained_keys: tuple[OAuthTransactionProtectorKey, ...] = field(default=(), repr=False)
+    entropy: Callable[[int], bytes] = field(default=token_bytes, repr=False, compare=False)
+    _keys: Mapping[str, OAuthTransactionProtectorKey] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Compile a unique versioned key ring and validate the entropy source."""
+        keys = (self.active_key, *self.retained_keys)
+        if (
+            any(key.__class__ is not OAuthTransactionProtectorKey for key in keys)
+            or len({key.key_version for key in keys}) != len(keys)
+            or not callable(self.entropy)
+        ):
+            message = "OAuth transaction protector requires unique keys and callable entropy"
+            raise ImproperlyConfiguredException(detail=message)
+        object.__setattr__(self, "_keys", {key.key_version: key for key in keys})
+
+    @property
+    def active_key_version(self) -> str:
+        """Return the version used by the next protection operation."""
+        return self.active_key.key_version
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedOAuthSecret:
+        """Encrypt one transaction secret under exact associated data.
+
+        Args:
+            secret: Plaintext transaction secret bytes.
+            associated_data: Unencrypted transaction and purpose binding.
+
+        Returns:
+            A versioned, nonce-prefixed ciphertext envelope.
+
+        Raises:
+            ValueError: If the entropy source does not return a 12-byte nonce.
+        """
+        nonce = self.entropy(_AES_GCM_NONCE_BYTES)
+        if nonce.__class__ is not bytes or len(nonce) != _AES_GCM_NONCE_BYTES:
+            message = "OAuth transaction protector entropy must return a 12-byte nonce"
+            raise ValueError(message)
+        ciphertext = nonce + AESGCM(self.active_key.key).encrypt(nonce, secret, associated_data)
+        return ProtectedOAuthSecret(ciphertext=ciphertext, key_version=self.active_key.key_version)
+
+    async def unprotect(self, protected: ProtectedOAuthSecret, *, associated_data: bytes) -> bytes:
+        """Decrypt one envelope only under its original associated data.
+
+        Args:
+            protected: Versioned ciphertext envelope.
+            associated_data: Exact unencrypted transaction and purpose binding.
+
+        Returns:
+            The authenticated plaintext bytes.
+
+        Raises:
+            ValueError: If the key version or ciphertext envelope is invalid.
+            cryptography.exceptions.InvalidTag: If authentication fails.
+        """
+        key = self._keys.get(protected.key_version)
+        if key is None or len(protected.ciphertext) <= _AES_GCM_NONCE_BYTES:
+            message = "OAuth transaction protector envelope is invalid"
+            raise ValueError(message)
+        nonce, ciphertext = protected.ciphertext[:_AES_GCM_NONCE_BYTES], protected.ciphertext[_AES_GCM_NONCE_BYTES:]
+        return AESGCM(key.key).decrypt(nonce, ciphertext, associated_data)
 
 
 @dataclass(frozen=True, slots=True)

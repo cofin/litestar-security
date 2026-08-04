@@ -30,6 +30,7 @@ __all__ = ("OIDCProvider", "google_oidc_provider", "keycloak_oidc_provider", "oi
 
 _GOOGLE_ISSUER = "https://accounts.google.com"
 _DEFAULT_SCOPES = frozenset({"openid", "email", "profile"})
+_ID_TOKEN_TYPES = frozenset({"jwt"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,7 @@ class OIDCProvider:
             or config.issuer != self.metadata.issuer
             or config.audiences != frozenset({self.oauth.config.client_id})
             or config.access_token_profile
+            or config.token_types != _ID_TOKEN_TYPES
             or not config.algorithms
             or not config.algorithms.issubset(self.metadata.algorithms)
             or "openid" not in self.oauth.config.required_scopes

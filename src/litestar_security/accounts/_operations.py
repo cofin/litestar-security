@@ -11,6 +11,7 @@ what the operation settled on, not whether the request succeeded.
 
 __all__ = (
     "LOGIN",
+    "LOGIN_MFA",
     "MFA_RECOVERY_CONSUME",
     "MFA_RECOVERY_REPLACE",
     "MFA_TOTP_ENROLL",
@@ -41,6 +42,7 @@ __all__ = (
     "PASSWORD_SESSION_REBIND",
     "PASSWORD_SESSION_REVOKE_OTHERS",
     "PASSWORD_VERIFY",
+    "RATE_LIMITED_OPERATIONS",
     "RECOVERY",
     "RECOVERY_CONSUME",
     "RECOVERY_ISSUE",
@@ -93,6 +95,7 @@ SESSION_REVOKE_ALL_SUFFIX = ".session_revoke_all"
 # separate budgets would let an attacker double their allowance by alternating
 # between the two routes.
 LOGIN = "local.login"
+LOGIN_MFA = "local.login.mfa"
 MFA_RECOVERY_CONSUME = "local.mfa.recovery.consume"
 MFA_RECOVERY_REPLACE = "local.mfa.recovery.replace"
 MFA_TOTP_ENROLL = "local.mfa.totp.enroll"
@@ -105,6 +108,32 @@ PASSKEY_REGISTER_VERIFY = "local.passkey.registration.verify"
 PASSKEY_REMOVE = "local.passkey.remove"
 PASSWORD_RESET = "local.password.reset"
 VERIFICATION_RESEND = "local.verification.resend"
+
+# The exact set of operations the library's own routes/services hand to a
+# RateLimiter. DEFAULT_RATE_LIMIT_POLICIES MUST map every one of these: an
+# operation limited by a route but absent from the default map is silently
+# unlimited (StoreRateLimiter.acquire admits unmapped operations).
+RATE_LIMITED_OPERATIONS = frozenset({
+    LOGIN,
+    LOGIN_MFA,
+    REGISTRATION,
+    RECOVERY,
+    PASSWORD_RESET,
+    PASSWORD_VERIFY,
+    VERIFICATION_RESEND,
+    VERIFICATION_CONSUME,
+    REFRESH_ROTATE,
+    MFA_TOTP_ENROLL,
+    MFA_TOTP_VERIFY,
+    MFA_TOTP_REMOVE,
+    MFA_RECOVERY_CONSUME,
+    MFA_RECOVERY_REPLACE,
+    PASSKEY_REGISTER_OPTIONS,
+    PASSKEY_REGISTER_VERIFY,
+    PASSKEY_AUTH_OPTIONS,
+    PASSKEY_ASSERT,
+    PASSKEY_REMOVE,
+})
 
 OUTCOME_ATTEMPTED = "attempted"
 OUTCOME_CHANGED = "changed"

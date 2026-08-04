@@ -19,9 +19,11 @@ from litestar.exceptions import (
 from litestar.middleware import DefineMiddleware
 from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
 from litestar.openapi.spec import SecurityScheme
+from litestar.routes import HTTPRoute
 from litestar.types import ASGIApp, HTTPScope, Message, Receive, Scope, Send
 from typing_extensions import Self
 
+from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -32,16 +34,16 @@ from litestar_security.context import (
     ResourcePermission,
     SecurityContext,
     SessionHandle,
-    intersect_authorization,
+    resolve_authorization,
 )
 from litestar_security.websocket import (
     WebSocketBinding,
     WebSocketCloseCoordinator,
+    WebSocketConnectTokenRecord,
+    WebSocketConnectTokenService,
+    WebSocketConnectTokenUnavailableError,
     WebSocketHandshake,
     WebSocketSecurityConfig,
-    WebSocketTicketRecord,
-    WebSocketTicketService,
-    WebSocketTicketUnavailableError,
     close_websocket,
     extract_websocket_handshake,
     supervise_websocket_lifetime,
@@ -49,6 +51,7 @@ from litestar_security.websocket import (
 )
 
 __all__ = (
+    "CSRF_REQUIRED_OPT_KEY",
     "Authenticated",
     "AuthenticationMechanism",
     "AuthenticationOutcome",
@@ -68,6 +71,7 @@ __all__ = (
     "all_of",
     "any_of",
     "at_least",
+    "exclude",
     "mechanism",
     "optional",
     "public",
@@ -105,9 +109,6 @@ _AUTHENTICATION_UNAVAILABLE = "Authentication service unavailable"
 _LITESTAR_INTERNAL_ERROR_CLOSE = 4500
 
 
-RUNTIME_PLAN_OPT_KEY = "litestar_security_plan"
-
-
 AUTH_POLICY_OPT_KEY = "auth"
 
 
@@ -129,6 +130,30 @@ def queue_security_response_header(scope: Scope, header: tuple[bytes, bytes]) ->
     headers.append(header)
 
 
+def is_generated_options_handler(handler: object) -> bool:
+    """Report whether a callable is an OPTIONS handler Litestar generated for a route.
+
+    This is the one predicate every compile-time and runtime bypass shares, so
+    the two sites can never drift apart. The handler is matched by the module
+    and exact qualname of the closure :meth:`HTTPRoute.create_options_handler`
+    produces, both read from that method rather than spelled as string
+    literals, so a Litestar reorganization fails here instead of silently
+    reclassifying routes. An application handler that merely shares the
+    function name is not matched and is authenticated normally.
+
+    Args:
+        handler: The route handler function to identify.
+
+    Returns:
+        True only when Litestar generated the handler to answer OPTIONS.
+    """
+    return (
+        getattr(handler, "__module__", None) == HTTPRoute.create_options_handler.__module__
+        and getattr(handler, "__qualname__", None)
+        == f"{HTTPRoute.create_options_handler.__qualname__}.<locals>.options_handler"
+    )
+
+
 class AuthenticationPolicy:
     """Immutable closed request-authentication expression."""
 
@@ -144,6 +169,11 @@ class AuthenticationPolicy:
 
 @dataclass(frozen=True, slots=True)
 class PublicPolicy(AuthenticationPolicy):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class ExcludePolicy(AuthenticationPolicy):
     pass
 
 
@@ -172,6 +202,15 @@ def public() -> AuthenticationPolicy:
         A policy that authenticates nothing, leaving the anonymous principal in place.
     """
     return PublicPolicy()
+
+
+def exclude() -> AuthenticationPolicy:
+    """Bypass request authentication while preserving the default CSRF policy.
+
+    Returns:
+        A policy that skips credential extraction and authentication.
+    """
+    return ExcludePolicy()
 
 
 def required(*requirements: "str | MechanismRequirement") -> AuthenticationPolicy:
@@ -393,8 +432,14 @@ class IdentityResolver(Protocol[_ResolverClaimsT_contra, _UserT]):
             claims: The claims produced by the paired authenticator.
 
         Returns:
-            The application principal, or a sanitized outcome when the claims
-            cannot be mapped to one.
+            The application principal; ``InvalidCredentials`` for an expected
+            unknown or inactive identity; or ``VerificationUnavailable`` for
+            expected dependency trouble.
+
+        Raises:
+            Exception: For an unexpected resolver error or outage. The
+                evaluator catches this boundary in ``_resolve()`` and maps it
+                to one sanitized 503 response.
         """
         ...  # pragma: no cover
 
@@ -409,7 +454,14 @@ class AuthorizationResolver(Protocol[_UserT]):
             principal: The same-subject principal established by authentication.
 
         Returns:
-            Application authorization or a sanitized rejection/outage outcome.
+            The immutable application authorization snapshot;
+            ``InvalidCredentials`` for an expected authorization denial; or
+            ``VerificationUnavailable`` for expected dependency trouble.
+
+        Raises:
+            Exception: For an unexpected resolver error or outage. The
+                evaluator catches this boundary in ``_resolve_authorization()``
+                and maps it to one sanitized 503 response.
         """
         ...  # pragma: no cover
 
@@ -567,6 +619,7 @@ class SecurityRuntimePlan:
     """Compiled per-route authentication work for the runtime middleware."""
 
     authenticate: bool = True
+    bypass_authentication: bool = False
     required: bool = False
     participant_names: frozenset[str] | None = None
     alternatives: tuple[tuple[MechanismRequirement, ...], ...] = ()
@@ -666,6 +719,9 @@ class SecurityMiddleware(Generic[UserT]):
     async def _handle_websocket(  # noqa: C901, PLR0915 - handshake, hook, and close phases remain explicit
         self, scope: Scope, receive: Receive, send: Send, *, session: SessionHandle, plan: SecurityRuntimePlan
     ) -> None:
+        if plan.bypass_authentication:
+            await self.app(scope, receive, send)
+            return
         connection = ASGIConnection[Any, Principal[UserT], SecurityContext, Any](
             scope=scope, receive=receive, send=send
         )
@@ -680,8 +736,8 @@ class SecurityMiddleware(Generic[UserT]):
             handshake = extract_websocket_handshake(
                 connection, config=self.config.websocket, uses_cookie_credentials=uses_cookie_credentials
             )
-            if handshake.ticket is not None:
-                principal, context = await self._authenticate_ticket(
+            if handshake.connect_token is not None:
+                principal, context = await self._authenticate_connect_token(
                     scope=scope,
                     connection=connection,
                     handshake=handshake,
@@ -708,7 +764,7 @@ class SecurityMiddleware(Generic[UserT]):
                 send, code=self.config.websocket.close_codes.unauthenticated, reason="authentication_required"
             )
             return
-        except (ServiceUnavailableException, WebSocketTicketUnavailableError):
+        except (ServiceUnavailableException, WebSocketConnectTokenUnavailableError):
             await close_websocket(
                 send, code=self.config.websocket.close_codes.verification_unavailable, reason="verification_unavailable"
             )
@@ -744,7 +800,7 @@ class SecurityMiddleware(Generic[UserT]):
                 if snapshot.__class__ is not AuthorizationSnapshot:
                     raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
                 current_context = replace(
-                    current_context, authorization=intersect_authorization(snapshot, current_context.restrictions)
+                    current_context, authorization=resolve_authorization(snapshot, current_context.restrictions)
                 )
                 scope["auth"] = current_context
                 route_handler = cast("Any", cast("Mapping[str, object]", scope).get("route_handler"))
@@ -788,7 +844,7 @@ class SecurityMiddleware(Generic[UserT]):
         except (NotAuthorizedException, PermissionDeniedException):
             await coordinator.close(code=self.config.websocket.close_codes.unauthorized, reason="authorization_denied")
 
-    async def _authenticate_ticket(  # noqa: PLR0913 - explicit routed inputs prevent reparsing and hidden state
+    async def _authenticate_connect_token(  # noqa: PLR0913 - explicit routed inputs prevent reparsing and hidden state
         self,
         *,
         scope: Scope,
@@ -798,66 +854,72 @@ class SecurityMiddleware(Generic[UserT]):
         plan: SecurityRuntimePlan,
         extracted: Sequence[tuple[str, CredentialExtraction[Any]]],
     ) -> tuple[Principal[UserT], SecurityContext]:
-        ticket_store = self.config.websocket.ticket_store
+        connect_token_store = self.config.websocket.connect_token_store
         route_handler = cast("Mapping[str, object]", scope).get("route_handler")
         route_name = cast("str | None", getattr(route_handler, "name", None)) or cast(
             "str", getattr(route_handler, "handler_name", "")
         )
-        if ticket_store is None or handshake.origin is None or not route_name or handshake.ticket is None:
+        if connect_token_store is None or handshake.origin is None or not route_name or handshake.connect_token is None:
             raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-        ticket = await WebSocketTicketService(
-            store=ticket_store, ttl=self.config.websocket.ticket_ttl, clock=self.config.websocket.clock
+        connect_token = await WebSocketConnectTokenService(
+            store=connect_token_store, ttl=self.config.websocket.connect_token_ttl, clock=self.config.websocket.clock
         ).consume(
-            handshake.ticket,
+            handshake.connect_token,
             route_name=route_name,
             origin=handshake.origin,
             policy_fingerprint=websocket_policy_fingerprint(plan),
+            current_security_epoch=cast(
+                "Callable[[str], Awaitable[int | None]]", self.config.websocket.current_security_epoch
+            ),
         )
-        if ticket is None:
+        if connect_token is None:
             raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-        non_ticket_plan = replace(plan, required=False, alternatives=(), allow_anonymous=True)
+        non_connect_token_plan = replace(plan, required=False, alternatives=(), allow_anonymous=True)
         principal, context = await self.evaluator.evaluate(
-            connection, session, plan=non_ticket_plan, extracted=extracted
+            connection, session, plan=non_connect_token_plan, extracted=extracted
         )
-        return await self._merge_ticket(ticket, principal=principal, context=context, session=session)
+        return await self._merge_connect_token(connect_token, principal=principal, context=context, session=session)
 
-    async def _merge_ticket(
+    async def _merge_connect_token(
         self,
-        ticket: WebSocketTicketRecord,
+        connect_token: WebSocketConnectTokenRecord,
         *,
         principal: Principal[UserT],
         context: SecurityContext,
         session: SessionHandle,
     ) -> tuple[Principal[UserT], SecurityContext]:
         if principal.is_authenticated:
-            if principal.id != ticket.subject_id:
+            if principal.id != connect_token.subject_id:
                 raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-            authorization = intersect_authorization(context.authorization, (ticket.restrictions,))
+            authorization = resolve_authorization(context.authorization, (connect_token.restrictions,))
         else:
-            principal = Principal(id=ticket.subject_id)
+            principal = Principal(id=connect_token.subject_id)
             resolver = self.config.registry.authorization_resolver
             if resolver is None:
                 authorization = AuthorizationSnapshot()
             else:
-                resolution = await resolver.resolve(principal)
+                try:
+                    resolution = await resolver.resolve(principal)
+                except Exception:  # noqa: BLE001 - a raising authorization resolver fails closed as one 503
+                    raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
                 if isinstance(resolution, VerificationUnavailable):
                     raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
                 if isinstance(resolution, InvalidCredentials):
                     raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
                 authorization = resolution
-            authorization = intersect_authorization(authorization, (ticket.restrictions,))
+            authorization = resolve_authorization(authorization, (connect_token.restrictions,))
         evidence = AuthenticationEvidence(
-            mechanism="websocket-ticket",
-            slot=self.config.websocket.ticket_query_parameter,
-            authenticated_at=ticket.issued_at,
-            expires_at=ticket.expires_at,
-            methods=frozenset({"websocket-ticket"}),
+            mechanism="websocket-connect-token",
+            slot=self.config.websocket.connect_token_query_parameter,
+            authenticated_at=connect_token.issued_at,
+            expires_at=connect_token.expires_at,
+            methods=frozenset({"websocket-connect-token"}),
         )
         return principal, SecurityContext(
             session=session,
             evidence=(*context.evidence, evidence),
             authorization=authorization,
-            restrictions=(*context.restrictions, ticket.restrictions),
+            restrictions=(*context.restrictions, connect_token.restrictions),
         )
 
 
@@ -904,7 +966,7 @@ def _normalize_name(value: str, label: str) -> str:
 
 
 def _validate_policy(policy: object) -> None:
-    if not isinstance(policy, (PublicPolicy, MechanismPolicy, OptionalPolicy)):
+    if not isinstance(policy, (PublicPolicy, ExcludePolicy, MechanismPolicy, OptionalPolicy)):
         message = "Authentication policy must be created by a Litestar Security policy helper"
         raise ImproperlyConfiguredException(detail=message)
 
@@ -997,13 +1059,16 @@ class _AuthenticationEvaluator(Generic[UserT]):
         if resolver is None:
             snapshot = _merge_authorization(outcomes)
         else:
-            resolution = await resolver.resolve(principal)
+            try:
+                resolution = await resolver.resolve(principal)
+            except Exception:  # noqa: BLE001 - a raising authorization resolver fails closed as one 503
+                raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
             if isinstance(resolution, VerificationUnavailable):
                 raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
             if isinstance(resolution, InvalidCredentials):
                 raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
             snapshot = resolution
-        return intersect_authorization(snapshot, tuple(outcome.restrictions for outcome in outcomes))
+        return resolve_authorization(snapshot, tuple(outcome.restrictions for outcome in outcomes))
 
     def _participant_names(self, participant_names: AbstractSet[str] | None) -> frozenset[str]:
         if participant_names is None:
@@ -1014,9 +1079,14 @@ class _AuthenticationEvaluator(Generic[UserT]):
         self, connection: ASGIConnection[Any, Any, Any, Any]
     ) -> tuple[tuple[str, CredentialExtraction[Any]], ...]:
         """Extract every configured credential slot exactly once."""
-        return tuple(
-            (slot_name, self.registry.get_slot(slot_name).extract(connection)) for slot_name in self.registry.slot_names
-        )
+        extracted: list[tuple[str, CredentialExtraction[Any]]] = []
+        for slot_name in self.registry.slot_names:
+            try:
+                extraction = self.registry.get_slot(slot_name).extract(connection)
+            except Exception:  # noqa: BLE001 - a raising credential slot fails closed as one 503
+                raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
+            extracted.append((slot_name, extraction))
+        return tuple(extracted)
 
     async def _authenticate(
         self, extracted: Sequence[tuple[str, CredentialExtraction[Any]]], connection: ASGIConnection[Any, Any, Any, Any]
@@ -1030,7 +1100,10 @@ class _AuthenticationEvaluator(Generic[UserT]):
             if mechanism is None:
                 invalid = True
                 continue
-            outcome = await mechanism.authenticator.authenticate(extraction.value, connection)
+            try:
+                outcome = await mechanism.authenticator.authenticate(extraction.value, connection)
+            except Exception:  # noqa: BLE001 - a raising authenticator fails closed as one 503
+                raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
             name = _normalize_name(mechanism.authenticator.name, "Authentication mechanism name")
             if isinstance(outcome, NoCredentials):
                 invalid = True
@@ -1052,7 +1125,11 @@ class _AuthenticationEvaluator(Generic[UserT]):
         for name, outcome in outcomes:
             authenticated = cast("Authenticated[Any]", outcome)
             mechanism = self.registry.get_mechanism(name)
-            resolutions.append((name, authenticated, await mechanism.resolver.resolve(authenticated.claims)))
+            try:
+                resolution = await mechanism.resolver.resolve(authenticated.claims)
+            except Exception:  # noqa: BLE001 - a raising identity resolver fails closed as one 503
+                raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
+            resolutions.append((name, authenticated, resolution))
         if any(isinstance(resolution, VerificationUnavailable) for _, _, resolution in resolutions):
             raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
         if any(isinstance(resolution, InvalidCredentials) for _, _, resolution in resolutions):
@@ -1107,11 +1184,7 @@ def _is_generated_options(scope: Scope) -> bool:
     if http_scope["method"] != "OPTIONS":
         return False
     route_handler = cast("Mapping[str, object]", scope).get("route_handler")
-    handler = getattr(route_handler, "fn", None)
-    return (
-        getattr(handler, "__module__", None) == "litestar.routes.http"
-        and getattr(handler, "__name__", None) == "options_handler"
-    )
+    return is_generated_options_handler(getattr(route_handler, "fn", None))
 
 
 def _websocket_route_name(scope: Scope) -> str:
