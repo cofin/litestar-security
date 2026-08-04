@@ -348,7 +348,11 @@ class RouteCompiler(Generic[UserT]):
         policy: AuthenticationPolicy
         csrf_override: bool | None
         native_exclude = self._handler_excludes_auth(route, route_handler)
-        if self._is_generated_options(route_handler):
+        if self._is_excluded(route):
+            self._reject_excluded_policy(route, route_handler, self._resolved_policy(route, route_handler))
+            policy = exclude()
+            csrf_override = self._http_csrf_override(route, route_handler)
+        elif self._is_generated_options(route_handler):
             policy = public()
             csrf_override = False
         elif self._is_openapi_handler(route_handler):
@@ -465,6 +469,9 @@ class RouteCompiler(Generic[UserT]):
         policy = self._resolved_policy(route, route_handler)
         if native_exclude and policy is not None:
             self._raise_route_error(route, route_handler, "Route declares both auth and exclude_from_auth")
+        if self._is_excluded(route):
+            self._reject_excluded_policy(route, route_handler, policy)
+            return self._compile_policy(route, route_handler, exclude())
         if native_exclude:
             return self._compile_policy(route, route_handler, exclude())
         if policy is not None:
@@ -475,6 +482,18 @@ class RouteCompiler(Generic[UserT]):
         if not self.registry.mechanism_names:
             return self._compile_policy(route, route_handler, public())
         return self._compile_policy(route, route_handler, required())
+
+    def _is_excluded(self, route: BaseRoute) -> bool:
+        return self._exclude_pattern is not None and bool(self._exclude_pattern.match(route.path))
+
+    def _reject_excluded_policy(
+        self, route: BaseRoute, route_handler: BaseRouteHandler, policy: AuthenticationPolicy | None
+    ) -> None:
+        # A route that declares a policy and also matches an exclusion pattern
+        # states two incompatible intentions, so neither is silently preferred.
+        if policy is not None:
+            message = "Route declares auth but matches a security exclusion pattern"
+            self._raise_route_error(route, route_handler, message)
 
     def _compile_policy(
         self,

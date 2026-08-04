@@ -6,10 +6,11 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from litestar import Litestar, get
+from litestar import Litestar, WebSocket, asgi, get, websocket
 from litestar.exceptions import ImproperlyConfiguredException, LitestarWarning
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import SecurityScheme
+from litestar.routes import ASGIRoute, BaseRoute, WebSocketRoute
 from litestar.static_files import create_static_files_router
 from litestar.testing import TestClient
 
@@ -21,12 +22,18 @@ from litestar_security.authentication import (
     InvalidCredentials,
     NoCredentials,
     PresentedCredential,
+    required,
 )
 from litestar_security.context import Principal
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from litestar.handlers.base import BaseRouteHandler
+    from litestar.types import Receive, Scope, Send
+
+    from litestar_security.authentication import SecurityRuntimePlan
 
 
 class _HeaderSlot:
@@ -91,6 +98,27 @@ def _assets_manifest() -> str:
     return "manifest"
 
 
+@get("/assets/report", auth=required(), sync_to_thread=False)
+def _declared_http() -> str:
+    return "report"
+
+
+@websocket("/assets/socket", auth=required())
+async def _declared_socket(socket: WebSocket[Any, Any, Any]) -> None:
+    del socket
+
+
+@asgi("/assets/mount", auth=required(), copy_scope=True)
+async def _declared_asgi(scope: Scope, receive: Receive, send: Send) -> None:
+    del scope, receive, send
+
+
+def _plan(app: Litestar, route_type: type[BaseRoute], path: str) -> SecurityRuntimePlan:
+    route = next(value for value in app.routes if isinstance(value, route_type) and value.path == path)
+    handler = cast("BaseRouteHandler", route.route_handler)  # type: ignore[attr-defined]
+    return cast("SecurityRuntimePlan", handler.opt["litestar_security_plan"])
+
+
 @pytest.fixture(name="static_directory")
 def fixture_static_directory(tmp_path: Path) -> Path:
     """Write one asset into a request-local static directory."""
@@ -118,3 +146,54 @@ def test_uncompilable_exclusion_pattern_is_rejected_at_startup() -> None:
 def test_exclusion_pattern_matching_every_path_warns() -> None:
     with pytest.warns(LitestarWarning, match="greedily matches all paths"):
         Litestar(route_handlers=[_api_thing], plugins=[SecurityPlugin(_api_team_config(exclude=["^/"]))])
+
+
+def test_excluded_websocket_and_asgi_routes_bypass_authentication() -> None:
+    @websocket("/assets/socket")
+    async def socket_handler(socket: WebSocket[Any, Any, Any]) -> None:
+        await socket.accept()
+        await socket.close()
+
+    @asgi("/assets/mount", copy_scope=True)
+    async def mounted(scope: Scope, receive: Receive, send: Send) -> None:
+        del scope, receive, send
+
+    app = Litestar(
+        route_handlers=[socket_handler, mounted, _api_thing],
+        openapi_config=None,
+        plugins=[SecurityPlugin(_api_team_config(exclude=["^/assets"]))],
+    )
+    socket_plan = _plan(app, WebSocketRoute, "/assets/socket")
+    asgi_plan = _plan(app, ASGIRoute, "/assets/mount")
+
+    assert (socket_plan.authenticate, socket_plan.bypass_authentication) == (False, True)
+    assert (asgi_plan.authenticate, asgi_plan.bypass_authentication) == (False, True)
+    with TestClient(app) as client, client.websocket_connect("/assets/socket"):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("handlers", "expected"),
+    [
+        pytest.param([_declared_http], "GET /assets/report", id="http"),
+        pytest.param([_declared_socket], "websocket /assets/socket", id="websocket"),
+        pytest.param([_declared_asgi], "asgi /assets/mount", id="asgi"),
+    ],
+)
+def test_route_declaring_auth_and_matching_an_exclusion_pattern_is_rejected(handlers: list[Any], expected: str) -> None:
+    message = rf"Route declares auth but matches a security exclusion pattern for {expected}"
+    with pytest.raises(ImproperlyConfiguredException, match=message):
+        Litestar(
+            route_handlers=handlers,
+            openapi_config=None,
+            plugins=[SecurityPlugin(_api_team_config(exclude=["^/assets"]))],
+        )
+
+
+def test_router_level_exclude_from_auth_is_still_rejected(static_directory: Path) -> None:
+    static_router = create_static_files_router(
+        path="/static", directories=[static_directory], opt={"exclude_from_auth": True}
+    )
+
+    with pytest.raises(ImproperlyConfiguredException, match="only on individual route handlers"):
+        Litestar(route_handlers=[static_router], plugins=[SecurityPlugin(_api_team_config())])
