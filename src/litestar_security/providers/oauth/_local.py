@@ -9,7 +9,7 @@ from litestar import Request, Response
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
 from litestar.status_codes import HTTP_200_OK
 
-from litestar_security.accounts import LocalAccountResponse, RefreshTokenResponse
+from litestar_security.accounts import LocalAccount, RefreshTokenResponse
 from litestar_security.authentication import VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
 from litestar_security.providers.oauth._provider import ProviderIdentity
@@ -35,7 +35,7 @@ class _VerifiedLocalAuthService(Protocol):
         *,
         transport: str | None,
         evidence: AuthenticationEvidence,
-    ) -> LocalAccountResponse | RefreshTokenResponse | VerificationUnavailable | object: ...  # pragma: no cover
+    ) -> LocalAccount | RefreshTokenResponse | VerificationUnavailable | object: ...  # pragma: no cover
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +82,7 @@ class OAuthLocalAuthTransport:
                 amr=identity.amr,
             ),
         )
-        if isinstance(result, LocalAccountResponse):
+        if isinstance(result, LocalAccount):
             return OAuthRouteResponse(detail="Authenticated.", account_id=account_id)
         if isinstance(result, RefreshTokenResponse):
             return Response(content=result, status_code=HTTP_200_OK)

@@ -56,7 +56,7 @@ from litestar_security._cli import register, security_group
 from litestar_security.accounts import (
     LOCAL_AUTH_TAGS,
     LifecycleAccepted,
-    LocalAccountResponse,
+    LocalAccount,
     LocalAuth,
     LocalAuthSecrets,
     LocalCredentials,
@@ -612,7 +612,7 @@ class _RouteLocalAuth:
         del request, transport, evidence
         if self.failure:
             return InvalidCredentials()
-        return LocalAccountResponse(account_id=account_id)
+        return LocalAccount(account_id=account_id)
 
 
 def _route_factor_evidence() -> AuthenticationEvidence:
@@ -1165,7 +1165,7 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
         async def complete_mfa_login(self, _request: object, _challenge: str, **kwargs: object) -> object:
             self.completions.append(kwargs)
             if kwargs["transport"] == "session":
-                return LocalAccountResponse(account_id="account-1")
+                return LocalAccount(account_id="account-1")
             return InvalidCredentials()
 
     service = Service()
@@ -1207,7 +1207,7 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
     assert token_login is not None
     assert token_login.responses is not None
     for responses, success_schema in (
-        (session_login.responses, "#/components/schemas/LocalAccountResponse"),
+        (session_login.responses, "#/components/schemas/LocalAccount"),
         (token_login.responses, "#/components/schemas/RefreshTokenResponse"),
     ):
         success_content = responses["200"].content
@@ -1217,7 +1217,7 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
         assert success_content["application/json"].schema is not None
         assert required_content["application/json"].schema is not None
         assert success_content["application/json"].schema.ref == success_schema
-        assert required_content["application/json"].schema.ref == "#/components/schemas/LocalMFARequiredResponse"
+        assert required_content["application/json"].schema.ref == "#/components/schemas/LocalMFAChallenge"
 
     with TestClient(app) as client:
         csrf_token = generate_csrf_token(csrf_secret)
@@ -1354,7 +1354,7 @@ def test_generated_mfa_completion_routes_follow_local_auth_transport_and_csrf_mo
             transport = cast("str", kwargs["transport"])
             self.transports.append(transport)
             if transport == "session":
-                return LocalAccountResponse(account_id="account-1")
+                return LocalAccount(account_id="account-1")
             return accounts_module.RefreshTokenResponse(
                 access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
                 refresh_token="rt_aWlpaWlpaWlpaWlpaWlpaQ.c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",  # noqa: S106
@@ -2900,9 +2900,9 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
     schemas = app.openapi_schema.components.schemas if app.openapi_schema.components is not None else None
     assert schemas is not None
     if registration_mode == "public":
-        assert "invitation_token" not in schemas["LocalRegistrationRequest"].properties
+        assert "invitation_token" not in schemas["LocalRegistration"].properties
     elif registration_mode == "invite":
-        invitation_schema = schemas["LocalInvitationRegistrationRequest"]
+        invitation_schema = schemas["LocalInvitationRegistration"]
         assert invitation_schema.required is not None
         assert "invitation_token" in invitation_schema.required
     if mode in {"tokens", "hybrid"}:
@@ -2976,8 +2976,8 @@ def test_generated_local_routes_are_grouped_documented_and_uniquely_identified(
 
     schemas = app.openapi_schema.components.schemas if app.openapi_schema.components is not None else None
     assert schemas is not None
-    documented = ("LocalCredentials", "LocalPasswordChangeRequest", "LocalSessionResponse", "RouteStatusResponse")
-    # LocalSessionResponse is only named when the nested annotation resolves, which a
+    documented = ("LocalCredentials", "LocalPasswordChange", "LocalSession", "RouteStatus")
+    # LocalSession is only named when the nested annotation resolves, which a
     # quoted reference does not do on Python 3.10.
     assert set(documented) <= set(schemas)
     assert all(all(prop.description for prop in (schemas[name].properties or {}).values()) for name in documented)

@@ -605,10 +605,10 @@ async def test_mfa_login_helper_boundaries_fail_closed_without_secret_processing
 
 def test_local_mfa_wire_representations_redact_challenge_and_factor_proof() -> None:
     """Typed MFA transport values cannot disclose either reusable secret through diagnostics."""
-    required = accounts_module.LocalMFARequiredResponse(
+    required = accounts_module.LocalMFAChallenge(
         challenge="challenge-secret", account_id="account-1", expires_at=_JWT_NOW, methods=("totp",)
     )
-    completion = accounts_module.LocalMFACompletionRequest(
+    completion = accounts_module.LocalMFACompletion(
         challenge="challenge-secret", account_id="account-1", method="totp", code="factor-secret", method_id="method-1"
     )
 
@@ -740,7 +740,7 @@ async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_ke
             code="123456",
             transport="session",
         ),
-        accounts_module.LocalAccountResponse,
+        accounts_module.LocalAccount,
     )
     assert calls == [
         "password",
@@ -10477,7 +10477,7 @@ async def test_local_auth_passkey_login_selects_only_configured_transport() -> N
     result = await services(session_auth=session, refresh_tokens=None).passkey_login(
         cast("Any", object()), "account-1", transport=None, evidence=evidence
     )
-    assert isinstance(result, accounts_module.LocalAccountResponse)
+    assert isinstance(result, accounts_module.LocalAccount)
     assert (
         await services(session_auth=None, refresh_tokens=tokens).passkey_login(
             cast("Any", object()), "account-1", transport=None, evidence=evidence
@@ -12476,14 +12476,14 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         identifier="user@example.com",
         password="secret",  # noqa: S106 - request DTO fixture
     )
-    token_request = accounts_module.LocalTokenRequest(token=token)
-    password_request = accounts_module.LocalPasswordChangeRequest(
+    token_request = accounts_module.LocalToken(token=token)
+    password_request = accounts_module.LocalPasswordChange(
         current_password="old",  # noqa: S106 - request DTO fixture
         password="new-password",  # noqa: S106 - request DTO fixture
     )
     session_routes = SessionRoutes()
     services = SimpleNamespace(
-        session_login=AsyncOutcome(accounts_module.LocalAccountResponse("account-1"), InvalidCredentials()),
+        session_login=AsyncOutcome(accounts_module.LocalAccount("account-1"), InvalidCredentials()),
         token_login=AsyncOutcome(refresh_response, InvalidCredentials()),
         session_auth=session_routes,
         refresh_tokens=SimpleNamespace(
@@ -12617,10 +12617,10 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
     )
 
     lifecycle = controllers_module._LocalLifecycleController  # noqa: SLF001
-    identifier = accounts_module.LocalIdentifierRequest(identifier="user@example.com")
+    identifier = accounts_module.LocalIdentifier(identifier="user@example.com")
     assert (await cast("Any", lifecycle.recovery.fn)(None, identifier, request, services)).status_code == 202
     reset = cast("Any", lifecycle.reset.fn)
-    reset_request = accounts_module.LocalPasswordResetRequest(
+    reset_request = accounts_module.LocalPasswordReset(
         token=token,
         password="new-password",  # noqa: S106 - request DTO fixture
     )
@@ -12642,7 +12642,7 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
     )
 
     register = cast("Any", controllers_module._LocalRegistrationController.register.fn)  # noqa: SLF001
-    registration = accounts_module.LocalRegistrationRequest(
+    registration = accounts_module.LocalRegistration(
         identifier="user@example.com",
         password="password",  # noqa: S106 - request DTO fixture
     )
@@ -12667,7 +12667,7 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         "Any",
         controllers_module._LocalInvitationRegistrationController.register.fn,  # noqa: SLF001
     )
-    invitation = accounts_module.LocalInvitationRegistrationRequest(
+    invitation = accounts_module.LocalInvitationRegistration(
         identifier="user@example.com",
         password="password",  # noqa: S106 - request DTO fixture
         invitation_token="invite-secret",  # noqa: S106 - request DTO fixture
@@ -12801,7 +12801,7 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
         identifier="user@example.com",
         password="password",  # noqa: S106 - request DTO fixture
     )
-    password_request = accounts_module.LocalPasswordChangeRequest(
+    password_request = accounts_module.LocalPasswordChange(
         current_password="old",  # noqa: S106 - request DTO fixture
         password="new-password",  # noqa: S106 - request DTO fixture
     )
@@ -12809,7 +12809,7 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
 
     assert isinstance(await services.session_login(request, credentials), InvalidCredentials)
     assert isinstance(await services.session_login(request, credentials), VerificationUnavailable)
-    assert isinstance(await services.session_login(request, credentials), accounts_module.LocalAccountResponse)
+    assert isinstance(await services.session_login(request, credentials), accounts_module.LocalAccount)
     no_session = replace(services, session_auth=None)
     no_session.password_login.authenticate.outcomes.append(account)
     assert isinstance(await no_session.session_login(request, credentials), VerificationUnavailable)
@@ -12824,7 +12824,7 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
     assert isinstance(
         await services.change_session_password(request, "account-1", password_request), InvalidCredentials
     )
-    compromised = accounts_module.LocalPasswordChangeRequest(
+    compromised = accounts_module.LocalPasswordChange(
         current_password="old",  # noqa: S106 - request DTO fixture
         password="new-password",  # noqa: S106 - request DTO fixture
         compromise=True,
@@ -13605,7 +13605,7 @@ async def test_generated_verification_confirm_reports_denials_with_the_client_bu
     error = await _assert_http_exception(
         handler(
             None,
-            accounts_module.LocalTokenRequest(token="vt_token.secret"),  # noqa: S106 - deterministic fixture token
+            accounts_module.LocalToken(token="vt_token.secret"),  # noqa: S106 - deterministic fixture token
             cast("Any", SimpleNamespace()),
             services,
         ),
@@ -13730,7 +13730,7 @@ async def test_generated_lifecycle_handlers_report_denials_instead_of_the_shared
         ),
     )
     handler = cast("Any", getattr(controllers_module._LocalLifecycleController, handler_name).fn)  # noqa: SLF001
-    identifier = accounts_module.LocalIdentifierRequest(identifier="user@example.com")
+    identifier = accounts_module.LocalIdentifier(identifier="user@example.com")
 
     error = await _assert_http_exception(
         handler(None, identifier, cast("Any", SimpleNamespace()), services),

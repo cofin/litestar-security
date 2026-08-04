@@ -13,7 +13,7 @@ from litestar.testing import AsyncTestClient
 
 from litestar_security import SecurityConfig, SecurityPlugin
 from litestar_security.accounts import (
-    LocalAccountResponse,
+    LocalAccount,
     RateLimitGuard,
     RateLimitPolicy,
     RefreshTokenResponse,
@@ -191,7 +191,7 @@ class VerifiedLocalServices:
     async def verified_login(self, request: Request[Any, Any, Any], account_id: str, **kwargs: object) -> object:
         del request, kwargs
         self.established.append(account_id)
-        return LocalAccountResponse(account_id=account_id, display_name="User")
+        return LocalAccount(account_id=account_id, display_name="User")
 
 
 class ConfigurableLocalServices:

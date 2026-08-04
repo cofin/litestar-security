@@ -34,7 +34,7 @@ from litestar_security.accounts._refresh_tokens import RefreshTokenResponse
 from litestar_security.accounts._registration import RegistrationService, VerificationTokenService
 from litestar_security.accounts._sessions import NativeSessionAuth, SessionAuthentication
 from litestar_security.accounts._stores import LocalAccountCapabilities
-from litestar_security.accounts.schemas import LocalAccountResponse, LocalCredentials, LocalPasswordChangeRequest
+from litestar_security.accounts.schemas import LocalAccount, LocalCredentials, LocalPasswordChange
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
 
@@ -213,7 +213,7 @@ class LocalAuthService(Generic[UserT]):
 
     async def session_login(
         self, request: Request[Any, Any, Any], credentials: LocalCredentials
-    ) -> LocalAccountResponse | MFARequired | RateLimited | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccount | MFARequired | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Authenticate a password and establish fixation-safe session state.
 
         Args:
@@ -239,7 +239,7 @@ class LocalAuthService(Generic[UserT]):
         established = await session_auth.establish(request, account)
         if not isinstance(established, SessionAuthentication):
             return established
-        return LocalAccountResponse(account_id=account.account_id, display_name=account.display_name)
+        return LocalAccount(account_id=account.account_id, display_name=account.display_name)
 
     async def token_login(
         self, request: Request[Any, Any, Any], credentials: LocalCredentials
@@ -282,7 +282,7 @@ class LocalAuthService(Generic[UserT]):
         *,
         transport: str | None,
         evidence: AuthenticationEvidence,
-    ) -> LocalAccountResponse | RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccount | RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
         """Establish a configured local transport after verified passkey evidence.
 
         Args:
@@ -305,7 +305,7 @@ class LocalAuthService(Generic[UserT]):
         transport: str | None,
         evidence: AuthenticationEvidence,
         expected_security_epoch: int | None = None,
-    ) -> LocalAccountResponse | RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccount | RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
         """Establish a local transport after externally verified authentication.
 
         Args:
@@ -339,7 +339,7 @@ class LocalAuthService(Generic[UserT]):
             established = await session_auth.establish(request, account, evidence=evidence)
             if not isinstance(established, SessionAuthentication):
                 return established
-            return LocalAccountResponse(account_id=account.account_id, display_name=account.display_name)
+            return LocalAccount(account_id=account.account_id, display_name=account.display_name)
         if transport == "tokens" or (
             transport is None and self.refresh_tokens is not None and self.session_auth is None
         ):
@@ -359,7 +359,7 @@ class LocalAuthService(Generic[UserT]):
         code: str,
         method_id: str | None = None,
         transport: str | None = None,
-    ) -> LocalAccountResponse | RefreshTokenResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccount | RefreshTokenResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Complete an MFA-gated password login through the normal issuer path.
 
         The rate limit, authoritative account read, and atomic challenge consume
@@ -414,7 +414,7 @@ class LocalAuthService(Generic[UserT]):
         )
 
     async def change_session_password(  # noqa: PLR0911 - preserve explicit sanitized outcomes
-        self, request: Request[Any, Any, Any], account_id: str, data: LocalPasswordChangeRequest
+        self, request: Request[Any, Any, Any], account_id: str, data: LocalPasswordChange
     ) -> (
         PasswordChangeResult
         | PasswordPolicyResult
@@ -473,7 +473,7 @@ class LocalAuthService(Generic[UserT]):
         return result
 
     async def change_token_password(
-        self, account_id: str, data: LocalPasswordChangeRequest
+        self, account_id: str, data: LocalPasswordChange
     ) -> (
         PasswordChangeResult
         | PasswordPolicyResult
