@@ -13,9 +13,10 @@ from hashlib import sha256
 from hmac import compare_digest
 from importlib import import_module
 from secrets import token_bytes
-from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from anyio import Lock
+from litestar.app import Litestar
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.handlers import WebsocketRouteHandler
 
@@ -23,9 +24,6 @@ from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
 from litestar_security.context import CredentialRestrictions, Principal, SecurityContext
 from litestar_security.websocket._internal import aware_utc, canonical_origin, strict_text
 from litestar_security.websocket._lifecycle import websocket_policy_fingerprint
-
-if TYPE_CHECKING:
-    from litestar.app import Litestar
 
 __all__ = (
     "InMemoryWebSocketConnectTokenStore",
@@ -263,7 +261,7 @@ class WebSocketConnectTokenService:
 class WebSocketConnectTokenIssuer:
     """Mint one-time WebSocket connect tokens by route name."""
 
-    app: "Litestar" = field(repr=False)
+    app: Litestar = field(repr=False)
     store: WebSocketConnectTokenStore
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc), repr=False, compare=False)
     ttl: timedelta = timedelta(seconds=30)

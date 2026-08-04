@@ -35,6 +35,7 @@ from litestar_security.authentication import (
 from litestar_security.config import SecurityConfig
 from litestar_security.context import Principal, SecurityContext
 from litestar_security.headers import CSPHook, configure_security_headers
+from litestar_security.websocket import WebSocketConnectTokenIssuer
 
 __all__ = ("CurrentUser", "SecurityPlugin")
 
@@ -45,7 +46,7 @@ UserT = TypeVar("UserT")
 CurrentUser: TypeAlias = NamedDependency[UserT]
 
 
-_RESERVED_DEPENDENCIES = ("principal", "security_context", "current_user")
+_RESERVED_DEPENDENCIES = ("principal", "security_context", "current_user", "websocket_connect_tokens")
 
 
 _SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -85,6 +86,9 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             "principal": Provide(_provide_principal, sync_to_thread=False, use_cache=False),
             "security_context": Provide(_provide_security_context, sync_to_thread=False, use_cache=False),
             "current_user": Provide(_provide_current_user, sync_to_thread=False, use_cache=False),
+            "websocket_connect_tokens": Provide(
+                self._provide_websocket_connect_tokens, sync_to_thread=False, use_cache=False
+            ),
         }
         self._route_compiler: RouteCompiler[UserT] | None = None
         self._runtime_config: SecurityRuntimeConfig[UserT] | None = None
@@ -304,6 +308,22 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             slots.append(service_slot)
             mechanisms.append(cast("AuthenticationMechanism[Any, Any, UserT]", service_mechanism))
         return slots, mechanisms
+
+    def _provide_websocket_connect_tokens(self, scope: Scope) -> WebSocketConnectTokenIssuer:
+        """Provide the configured issuer for one-time WebSocket connect tokens."""
+        websocket_config = self.config.websocket
+        connect_token_store = websocket_config.connect_token_store
+        if connect_token_store is None:
+            message = (
+                "WebSocket connect token minting requires SecurityConfig.websocket.connect_token_store to be configured"
+            )
+            raise ImproperlyConfiguredException(detail=message)
+        return WebSocketConnectTokenIssuer(
+            app=scope["litestar_app"],
+            store=connect_token_store,
+            clock=websocket_config.clock,
+            ttl=websocket_config.connect_token_ttl,
+        )
 
     def _configure_api_key_lifespan(self, app_config: AppConfig) -> None:
         api_key_service = self._api_key_service

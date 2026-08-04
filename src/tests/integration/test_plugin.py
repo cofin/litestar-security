@@ -18,7 +18,7 @@ from click.testing import CliRunner
 from litestar import Controller, Litestar, Response, Router, WebSocket, asgi, get, post, route, websocket
 from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
-from litestar.di import Provide
+from litestar.di import NamedDependency, Provide
 from litestar.enums import HttpMethod, ScopeType
 from litestar.exceptions import (
     ClientException,
@@ -119,7 +119,11 @@ from litestar_security.providers.jwt import (
     VerificationKey,
 )
 from litestar_security.providers.oidc import ServiceTokenConfig
-from litestar_security.websocket import WebSocketSecurityConfig
+from litestar_security.websocket import (
+    InMemoryWebSocketConnectTokenStore,
+    WebSocketConnectTokenIssuer,
+    WebSocketSecurityConfig,
+)
 
 
 def test_static_security_headers_cover_success_and_error_responses_without_duplicates() -> None:
@@ -3579,7 +3583,7 @@ def test_plugin_traverses_constructed_controller_ownership_without_collisions() 
 
     app_config = SecurityPlugin().on_app_init(AppConfig(route_handlers=[router]))
 
-    assert set(app_config.dependencies) == {"current_user", "principal", "security_context"}
+    assert set(app_config.dependencies) == {"current_user", "principal", "security_context", "websocket_connect_tokens"}
 
 
 def test_plugin_traverses_direct_controller_and_leaves_unknown_handlers_to_litestar() -> None:
@@ -3592,7 +3596,7 @@ def test_plugin_traverses_direct_controller_and_leaves_unknown_handlers_to_lites
 
     app_config = SecurityPlugin().on_app_init(AppConfig(route_handlers=[TestController, cast("Any", object())]))
 
-    assert set(app_config.dependencies) == {"current_user", "principal", "security_context"}
+    assert set(app_config.dependencies) == {"current_user", "principal", "security_context", "websocket_connect_tokens"}
 
 
 def test_plugin_registers_runtime_contract_idempotently() -> None:
@@ -3604,7 +3608,7 @@ def test_plugin_registers_runtime_contract_idempotently() -> None:
     middleware = list(app_config.middleware)
     namespace = dict(app_config.signature_namespace)
 
-    assert set(providers) == {"current_user", "principal", "security_context"}
+    assert set(providers) == {"current_user", "principal", "security_context", "websocket_connect_tokens"}
     assert len(middleware) == 1
     assert isinstance(middleware[0], DefineMiddleware)
     assert middleware[0].middleware is SecurityMiddlewareWrapper
@@ -3616,7 +3620,64 @@ def test_plugin_registers_runtime_contract_idempotently() -> None:
     assert app_config.signature_namespace == namespace
 
 
-@pytest.mark.parametrize("reserved_name", ["principal", "security_context", "current_user"])
+def test_plugin_injects_websocket_connect_token_issuer_from_scope() -> None:
+    store = InMemoryWebSocketConnectTokenStore()
+
+    def clock() -> datetime:
+        return datetime(2026, 8, 4, tzinfo=timezone.utc)
+
+    @get("/connect-token-issuer", sync_to_thread=False)
+    def handler(websocket_connect_tokens: NamedDependency[WebSocketConnectTokenIssuer]) -> dict[str, bool]:
+        return {
+            "app": websocket_connect_tokens.app is app,
+            "clock": websocket_connect_tokens.clock is clock,
+            "store": websocket_connect_tokens.store is store,
+            "ttl": websocket_connect_tokens.ttl == timedelta(seconds=45),
+        }
+
+    app = Litestar(
+        route_handlers=[handler],
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(
+                    websocket=WebSocketSecurityConfig(
+                        connect_token_store=store, connect_token_ttl=timedelta(seconds=45), clock=clock
+                    )
+                )
+            )
+        ],
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/connect-token-issuer")
+
+    assert response.status_code == HTTP_200_OK
+    assert response.json() == {"app": True, "clock": True, "store": True, "ttl": True}
+
+
+def test_plugin_defers_missing_websocket_connect_token_store_until_dependency_injection() -> None:
+    @get("/public", sync_to_thread=False)
+    def public() -> str:
+        return "available"
+
+    @get("/connect-token-issuer", sync_to_thread=False)
+    def requires_issuer(websocket_connect_tokens: NamedDependency[WebSocketConnectTokenIssuer]) -> None:
+        del websocket_connect_tokens
+
+    app = Litestar(route_handlers=[public, requires_issuer], plugins=[SecurityPlugin()])
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        public_response = client.get("/public")
+        injection_response = client.get("/connect-token-issuer")
+
+    assert public_response.status_code == HTTP_200_OK
+    assert injection_response.status_code == 500
+    provider = cast("Provide", app.dependencies["websocket_connect_tokens"])
+    with pytest.raises(ImproperlyConfiguredException, match="connect_token_store"):
+        provider.dependency({"litestar_app": app})
+
+
+@pytest.mark.parametrize("reserved_name", ["principal", "security_context", "current_user", "websocket_connect_tokens"])
 @pytest.mark.parametrize("owner", ["application", "router", "controller", "handler"])
 def test_plugin_rejects_reserved_dependency_collisions(reserved_name: str, owner: str) -> None:
     provider = Provide(object, sync_to_thread=False, use_cache=False)
