@@ -8768,6 +8768,37 @@ async def test_token_login_preserves_password_assurance_at_refresh_issuance() ->
     )
 
 
+@pytest.mark.anyio
+async def test_token_login_fails_closed_when_refresh_issuance_clock_is_unavailable() -> None:
+    """A failed refresh issuance clock never mints a token with invented assurance time."""
+    account = _local_access_account()
+
+    class PasswordLogin:
+        async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccount[object]:
+            return account
+
+    class RefreshTokens:
+        @staticmethod
+        def clock() -> datetime:
+            raise RuntimeError
+
+        async def issue(self, *_args: object, **_kwargs: object) -> accounts_module.RefreshTokenResponse:
+            pytest.fail("token issuance must not run after the clock fails")
+
+    service = accounts_module.LocalAuthService(
+        accounts=cast("Any", object()),
+        password_login=cast("Any", PasswordLogin()),
+        password_reauthentication=cast("Any", object()),
+        password_change=cast("Any", object()),
+        verification=cast("Any", object()),
+        recovery=cast("Any", object()),
+        refresh_tokens=cast("Any", RefreshTokens()),
+    )
+
+    credentials = accounts_module.LocalCredentials(identifier="person@example.com", password="password")  # noqa: S106
+    assert isinstance(await service.token_login(cast("Any", object()), credentials), VerificationUnavailable)
+
+
 @pytest.mark.parametrize(
     ("account", "fail_lookup", "fail_epoch", "epoch", "expected_type"),
     [

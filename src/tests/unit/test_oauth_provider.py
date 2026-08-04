@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -491,11 +492,13 @@ async def test_response_body_is_bounded_while_streaming() -> None:
 
 @pytest.mark.anyio
 async def test_response_rejects_compressed_content_before_reading() -> None:
+    body = gzip.compress(json.dumps({"access_token": "token"}).encode())
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             headers={"content-type": "application/json", "content-encoding": "gzip"},
-            content=b"not actually compressed",
+            content=body,
             request=request,
         )
 
@@ -505,7 +508,9 @@ async def test_response_rejects_compressed_content_before_reading() -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("answers", [(), ("10.0.0.1",), ("93.184.216.34", "127.0.0.1")])
+@pytest.mark.parametrize(
+    "answers", [(), ("not-an-ip-address",), ("10.0.0.1",), ("93.184.216.34", "127.0.0.1")]
+)
 async def test_secret_bearing_request_rejects_empty_or_non_public_dns_answers(answers: tuple[str, ...]) -> None:
     called = False
 
@@ -522,6 +527,31 @@ async def test_secret_bearing_request_rejects_empty_or_non_public_dns_answers(an
             await client.refresh(SecretStr("refresh"), now=_NOW)
 
     assert called is False
+
+
+@pytest.mark.anyio
+async def test_literal_public_ip_endpoint_does_not_require_dns_resolution() -> None:
+    resolver_called = False
+
+    async def resolver(_host: str, _port: int) -> tuple[str, ...]:
+        nonlocal resolver_called
+        resolver_called = True
+        return ()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == _PUBLIC_IP
+        assert request.headers["host"] == _PUBLIC_IP
+        return _json_response(
+            request,
+            {"access_token": "access-token", "token_type": "Bearer", "expires_in": 60, "scope": "openid"},
+        )
+
+    config = replace(_config(), token_endpoint=f"https://{_PUBLIC_IP}/oauth/token")
+    async with OAuthProviderClient(config, transport=httpx.MockTransport(handler), resolver=resolver) as client:
+        tokens = await client.refresh(SecretStr("refresh-token"), now=_NOW)
+
+    assert tokens.access_token == SecretStr("access-token")
+    assert resolver_called is False
 
 
 @pytest.mark.anyio
