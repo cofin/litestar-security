@@ -131,6 +131,70 @@ class _AADIgnoringSecretProtector:
         return protected.ciphertext
 
 
+@dataclass(frozen=True, slots=True)
+class _WrongOAuthRoundTripProtector:
+    """Return a valid envelope which cannot recover the submitted secret."""
+
+    active_key_version: str = "test-v1"
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedOAuthSecret:
+        del secret, associated_data
+        return ProtectedOAuthSecret(ciphertext=b"wrong", key_version=self.active_key_version)
+
+    async def unprotect(self, protected: ProtectedOAuthSecret, *, associated_data: bytes) -> bytes:
+        del associated_data
+        return protected.ciphertext
+
+
+@dataclass(frozen=True, slots=True)
+class _WrongOAuthVersionProtector(_ConformanceTransactionProtector):
+    """Return ciphertext stamped with a non-active key version."""
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedOAuthSecret:
+        envelope = await super().protect(secret, associated_data=associated_data)
+        return replace(envelope, key_version="retired")
+
+
+@dataclass(frozen=True, slots=True)
+class _WrongSecretRoundTripProtector:
+    """Return an MFA envelope that cannot recover its plaintext."""
+
+    active_key_version: str = "test-v1"
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedSecret:
+        del secret, associated_data
+        return ProtectedSecret(ciphertext=b"wrong", key_version=self.active_key_version)
+
+    async def unprotect(self, protected: ProtectedSecret, *, associated_data: bytes) -> bytes:
+        del associated_data
+        return protected.ciphertext
+
+
+@dataclass(frozen=True, slots=True)
+class _WrongSecretVersionProtector(_AADIgnoringSecretProtector):
+    """Return an MFA envelope stamped with a non-active key version."""
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedSecret:
+        envelope = await super().protect(secret, associated_data=associated_data)
+        return replace(envelope, key_version="retired")
+
+
+@dataclass(frozen=True, slots=True)
+class _DeterministicSecretProtector:
+    """Authenticate the fixed conformance AAD while reusing ciphertext."""
+
+    active_key_version: str = "test-v1"
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedSecret:
+        del associated_data
+        return ProtectedSecret(ciphertext=secret, key_version=self.active_key_version)
+
+    async def unprotect(self, protected: ProtectedSecret, *, associated_data: bytes) -> bytes:
+        if associated_data != b"conformance|account=a|purpose=totp":
+            raise ValueError
+        return protected.ciphertext
+
+
 @dataclass
 class _YieldingConnectTokenStore:
     """Deliberately non-atomic consume implementation for the conformance self-test."""
@@ -182,6 +246,47 @@ class _BrokenMFALoginChallengeStore(testing_module.InMemoryMFALoginChallengeStor
         return await super().consume(challenge_digest, account_id=account_id, security_epoch=security_epoch, now=now)
 
 
+class _WrongMFAAccountStore(testing_module.InMemoryMFALoginChallengeStore):
+    """Accept an otherwise rejected account binding."""
+
+    async def consume(
+        self, challenge_digest: bytes, *, account_id: str, security_epoch: int, now: datetime
+    ) -> MFALoginChallenge | None:
+        del account_id
+        challenge = self.challenges.get(challenge_digest)
+        if challenge is not None:
+            return await super().consume(
+                challenge_digest, account_id=challenge.account_id, security_epoch=security_epoch, now=now
+            )
+        return None
+
+
+class _WrongMFAEpochStore(testing_module.InMemoryMFALoginChallengeStore):
+    """Accept an otherwise rejected epoch binding."""
+
+    async def consume(
+        self, challenge_digest: bytes, *, account_id: str, security_epoch: int, now: datetime
+    ) -> MFALoginChallenge | None:
+        challenge = self.challenges.get(challenge_digest)
+        if challenge is not None and account_id == challenge.account_id:
+            return await super().consume(
+                challenge_digest, account_id=account_id, security_epoch=challenge.security_epoch, now=now
+            )
+        return await super().consume(challenge_digest, account_id=account_id, security_epoch=security_epoch, now=now)
+
+
+class _RetainedExpiredMFAStore(testing_module.InMemoryMFALoginChallengeStore):
+    """Make an expired challenge appear valid."""
+
+    async def consume(
+        self, challenge_digest: bytes, *, account_id: str, security_epoch: int, now: datetime
+    ) -> MFALoginChallenge | None:
+        challenge = self.challenges.get(challenge_digest)
+        if challenge is not None and challenge.expires_at <= now:
+            return challenge
+        return await super().consume(challenge_digest, account_id=account_id, security_epoch=security_epoch, now=now)
+
+
 class _BrokenWebAuthnChallengeStore(testing_module.InMemoryWebAuthnChallengeStore):
     """Leave rejected WebAuthn bindings available for a later retry."""
 
@@ -191,6 +296,47 @@ class _BrokenWebAuthnChallengeStore(testing_module.InMemoryWebAuthnChallengeStor
         challenge = self.challenges.get(challenge_digest)
         if challenge is not None and (challenge.binding_digest != binding_digest or challenge.purpose != purpose):
             return None
+        return await super().consume(challenge_digest, binding_digest=binding_digest, purpose=purpose, now=now)
+
+
+class _WrongWebAuthnBindingStore(testing_module.InMemoryWebAuthnChallengeStore):
+    """Accept a challenge despite its binding mismatch."""
+
+    async def consume(
+        self, challenge_digest: bytes, *, binding_digest: bytes, purpose: str, now: datetime
+    ) -> WebAuthnChallenge | None:
+        del binding_digest
+        challenge = self.challenges.get(challenge_digest)
+        if challenge is not None:
+            return await super().consume(
+                challenge_digest, binding_digest=challenge.binding_digest, purpose=purpose, now=now
+            )
+        return None
+
+
+class _WrongWebAuthnPurposeStore(testing_module.InMemoryWebAuthnChallengeStore):
+    """Accept a challenge despite its purpose mismatch."""
+
+    async def consume(
+        self, challenge_digest: bytes, *, binding_digest: bytes, purpose: str, now: datetime
+    ) -> WebAuthnChallenge | None:
+        challenge = self.challenges.get(challenge_digest)
+        if challenge is not None and binding_digest == challenge.binding_digest:
+            return await super().consume(
+                challenge_digest, binding_digest=binding_digest, purpose=challenge.purpose, now=now
+            )
+        return await super().consume(challenge_digest, binding_digest=binding_digest, purpose=purpose, now=now)
+
+
+class _RetainedExpiredWebAuthnStore(testing_module.InMemoryWebAuthnChallengeStore):
+    """Make an expired challenge appear valid."""
+
+    async def consume(
+        self, challenge_digest: bytes, *, binding_digest: bytes, purpose: str, now: datetime
+    ) -> WebAuthnChallenge | None:
+        challenge = self.challenges.get(challenge_digest)
+        if challenge is not None and challenge.expires_at <= now:
+            return challenge
         return await super().consume(challenge_digest, binding_digest=binding_digest, purpose=purpose, now=now)
 
 
@@ -1199,9 +1345,50 @@ async def test_oauth_transaction_protector_conformance_rejects_deterministic_pro
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("factory", "invariant"),
+    [
+        (
+            _WrongOAuthRoundTripProtector,
+            r"OAuthTransactionProtector round-trip invariant",
+        ),
+        (
+            _WrongOAuthVersionProtector,
+            r"OAuthTransactionProtector key-version invariant",
+        ),
+        (
+            _ConformanceTransactionProtector,
+            r"OAuthTransactionProtector associated data invariant",
+        ),
+    ],
+)
+async def test_oauth_transaction_protector_conformance_names_the_remaining_invariants(
+    factory: Callable[[], testing_module.OAuthTransactionProtector], invariant: str
+) -> None:
+    with pytest.raises(AssertionError, match=invariant):
+        await assert_oauth_transaction_protector_conformance(factory)
+
+
+@pytest.mark.anyio
 async def test_secret_protector_conformance_rejects_ignored_associated_data() -> None:
     with pytest.raises(AssertionError, match="associated data"):
         await assert_secret_protector_conformance(_AADIgnoringSecretProtector)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("factory", "invariant"),
+    [
+        (_WrongSecretRoundTripProtector, r"SecretProtector round-trip invariant"),
+        (_WrongSecretVersionProtector, r"SecretProtector key-version invariant"),
+        (_DeterministicSecretProtector, r"SecretProtector non-determinism invariant"),
+    ],
+)
+async def test_secret_protector_conformance_names_the_remaining_invariants(
+    factory: Callable[[], testing_module.SecretProtector], invariant: str
+) -> None:
+    with pytest.raises(AssertionError, match=invariant):
+        await assert_secret_protector_conformance(factory)
 
 
 @pytest.mark.anyio
@@ -1413,9 +1600,41 @@ async def test_mfa_login_challenge_conformance_rejects_an_unburned_binding() -> 
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("factory", "invariant"),
+    [
+        (_WrongMFAAccountStore, r"MFALoginChallengeStore binding invariant"),
+        (_WrongMFAEpochStore, r"MFALoginChallengeStore epoch invariant"),
+        (_RetainedExpiredMFAStore, r"MFALoginChallengeStore expiry invariant"),
+    ],
+)
+async def test_mfa_login_challenge_conformance_names_rejected_value_invariants(
+    factory: Callable[[], testing_module.MFALoginChallengeStore], invariant: str
+) -> None:
+    with pytest.raises(AssertionError, match=invariant):
+        await assert_mfa_login_challenge_store_conformance(factory)
+
+
+@pytest.mark.anyio
 async def test_webauthn_challenge_conformance_rejects_an_unburned_binding() -> None:
     with pytest.raises(AssertionError, match="binding burn invariant"):
         await assert_webauthn_challenge_store_conformance(_BrokenWebAuthnChallengeStore)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("factory", "invariant"),
+    [
+        (_WrongWebAuthnBindingStore, r"WebAuthnChallengeStore binding invariant"),
+        (_WrongWebAuthnPurposeStore, r"WebAuthnChallengeStore purpose invariant"),
+        (_RetainedExpiredWebAuthnStore, r"WebAuthnChallengeStore expiry invariant"),
+    ],
+)
+async def test_webauthn_challenge_conformance_names_rejected_value_invariants(
+    factory: Callable[[], testing_module.WebAuthnChallengeStore], invariant: str
+) -> None:
+    with pytest.raises(AssertionError, match=invariant):
+        await assert_webauthn_challenge_store_conformance(factory)
 
 
 @pytest.mark.anyio

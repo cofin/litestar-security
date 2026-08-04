@@ -515,6 +515,181 @@ async def test_local_account_store_rejects_refresh_identifier_collisions_before_
     )
 
 
+@pytest.mark.anyio
+async def test_local_account_store_preserves_purpose_token_terminal_outcomes() -> None:
+    backend = InMemorySecurityBackend(clock=lambda: _NOW)
+    account_id = await _register(backend)
+    notification = NotificationCommand("token", "test@example.com", "secret", _NOW + timedelta(hours=1))
+    verification = TokenIssue(
+        token_id="verification_aWlpaWlpaWlpaWlpaWlpaQ",  # noqa: S106 - non-secret lookup ID
+        digest=b"v" * 32,
+        purpose=TokenPurpose.VERIFICATION,
+        account_id=account_id,
+        expires_at=_NOW + timedelta(hours=1),
+        maximum_attempts=2,
+    )
+    expired = replace(
+        verification,
+        token_id="verification_ampqampqampqampqampqag",  # noqa: S106 - non-secret lookup ID
+        expires_at=_NOW,
+    )
+    await backend.accounts.issue(verification, notification, event=_event())
+    await backend.accounts.issue(expired, notification, event=_event())
+    await backend.accounts.issue_absent()
+
+    missing = await backend.accounts.consume_and_verify("missing", b"x", now=_NOW, event=_event())
+    expired_result = await backend.accounts.consume_and_verify(
+        expired.token_id, expired.digest, now=_NOW, event=_event()
+    )
+    consumed = await backend.accounts.consume_and_verify(
+        verification.token_id, verification.digest, now=_NOW, event=_event()
+    )
+    replayed = await backend.accounts.consume_and_verify(
+        verification.token_id, verification.digest, now=_NOW, event=_event()
+    )
+    assert missing.status is ConsumeStatus.INVALID
+    assert expired_result.status is ConsumeStatus.EXPIRED
+    assert consumed.status is ConsumeStatus.CONSUMED
+    assert replayed.status is ConsumeStatus.USED
+
+    recovery = TokenIssue(
+        token_id="recovery_aWlpaWlpaWlpaWlpaWlpaQ",  # noqa: S106 - non-secret lookup ID
+        digest=b"r" * 32,
+        purpose=TokenPurpose.RECOVERY,
+        account_id=account_id,
+        expires_at=_NOW + timedelta(hours=1),
+        maximum_attempts=2,
+        issued_security_epoch=1,
+    )
+    await backend.accounts.issue(recovery, notification, event=_event())
+    reset = await backend.accounts.consume_and_reset(
+        recovery.token_id, recovery.digest, "new-hash", now=_NOW, event=_event()
+    )
+
+    assert reset.status is PasswordResetStatus.RESET
+    assert reset.security_epoch == 2
+    replayed_reset = await backend.accounts.consume_and_reset(
+        recovery.token_id, recovery.digest, "new-hash", now=_NOW, event=_event()
+    )
+    assert replayed_reset.status is PasswordResetStatus.USED
+
+    expired_recovery = replace(
+        recovery,
+        token_id="recovery_ampqampqampqampqampqag",  # noqa: S106 - non-secret lookup ID
+        digest=b"e" * 32,
+        expires_at=_NOW,
+    )
+    stale_recovery = replace(
+        recovery,
+        token_id="recovery_bm5ubm5ubm5ubm5ubm5ubg",  # noqa: S106 - non-secret lookup ID
+        digest=b"s" * 32,
+    )
+    orphaned_verification = replace(
+        verification,
+        token_id="verification_bm5ubm5ubm5ubm5ubm5ubg",  # noqa: S106 - non-secret lookup ID
+        digest=b"o" * 32,
+        account_id="missing-account",
+    )
+    await backend.accounts.issue(expired_recovery, notification, event=_event())
+    await backend.accounts.issue(stale_recovery, notification, event=_event())
+    await backend.accounts.issue(orphaned_verification, notification, event=_event())
+
+    assert (
+        await backend.accounts.consume_and_reset(
+            expired_recovery.token_id, expired_recovery.digest, "new-hash", now=_NOW, event=_event()
+        )
+    ).status is PasswordResetStatus.EXPIRED
+    assert (
+        await backend.accounts.consume_and_reset(
+            stale_recovery.token_id, stale_recovery.digest, "new-hash", now=_NOW, event=_event()
+        )
+    ).status is PasswordResetStatus.CONFLICT
+    assert (
+        await backend.accounts.consume_and_verify(
+            orphaned_verification.token_id, orphaned_verification.digest, now=_NOW, event=_event()
+        )
+    ).status is ConsumeStatus.INVALID
+
+
+@pytest.mark.anyio
+async def test_local_account_store_updates_and_revokes_owned_sessions() -> None:
+    backend = InMemorySecurityBackend(clock=lambda: _NOW)
+    account_id = await _register(backend)
+    command = CreateSessionCommand(
+        session_id=_SESSION_ID,
+        binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
+        binding_digest=b"b" * 32,
+        account_id=account_id,
+        security_epoch=1,
+        created_at=_NOW,
+        authenticated_at=_NOW,
+        expires_at=_NOW + timedelta(hours=1),
+    )
+    successor = replace(command, session_id=_SECOND_SESSION_ID)
+    await backend.accounts.create(command, event=_event())
+    await backend.accounts.create(successor, event=_event())
+
+    touched = await backend.accounts.touch(command.session_id, now=_NOW + timedelta(minutes=1))
+    assert touched is not None
+    assert touched.last_seen_at == _NOW + timedelta(minutes=1)
+    assert not await backend.accounts.revoke_session_for_account("other", command.session_id, event=_event())
+    assert await backend.accounts.revoke_session_for_account(account_id, command.session_id, event=_event())
+    await backend.accounts.create(command, event=_event())
+    assert await backend.accounts.revoke_other_sessions(account_id, successor.session_id, event=_event()) == 1
+    assert await backend.accounts.revoke_sessions_for_account(account_id, event=_event()) == 1
+    assert await backend.accounts.rebind("missing", command, event=_event()) is None
+    await backend.accounts.create(command, event=_event())
+    rebound = await backend.accounts.rebind(command.session_id, successor, event=_event())
+    assert rebound is not None
+    assert rebound.session_id == successor.session_id
+
+
+@pytest.mark.anyio
+async def test_local_account_store_refresh_revocation_and_epoch_outcomes() -> None:
+    backend = InMemorySecurityBackend(clock=lambda: _NOW)
+    account_id = await _register(backend)
+    command = CreateRefreshFamilyCommand(
+        token_id=_REFRESH_ID,
+        token_digest=b"d" * 32,
+        account_id=account_id,
+        family_id="rf_a2tra2tra2tra2tra2traw",
+        security_epoch=1,
+        created_at=_NOW,
+        token_expires_at=_NOW + timedelta(hours=1),
+        family_expires_at=_NOW + timedelta(hours=2),
+    )
+    second = replace(
+        command,
+        token_id=_REFRESH_SUCCESSOR_ID,
+        token_digest=b"s" * 32,
+        family_id="rf_bm5ubm5ubm5ubm5ubm5ubg",
+    )
+    assert await backend.accounts.create_family(command, event=_event())
+    assert await backend.accounts.create_family(second, event=_event())
+    assert not await backend.accounts.revoke_token_for_account(
+        "other", command.token_id, command.token_digest, event=_event()
+    )
+    assert await backend.accounts.revoke_token(command.token_id, command.token_digest, event=_event())
+    assert not await backend.accounts.revoke_family(command.family_id, event=_event())
+    assert await backend.accounts.revoke_for_account(account_id, event=_event()) == 1
+
+    epoch_backend = InMemorySecurityBackend(clock=lambda: _NOW)
+    epoch_account_id = await _register(epoch_backend, "epoch@example.com")
+    current = replace(command, account_id=epoch_account_id)
+    assert await epoch_backend.accounts.create_family(current, event=_event())
+    assert (
+        await epoch_backend.accounts.replace_password_and_bump_epoch(
+            epoch_account_id, "later-hash", expected_epoch=1, event=_event()
+        )
+    ).status is PasswordChangeStatus.CHANGED
+    prepared = await epoch_backend.accounts.prepare_rotation(
+        RefreshTokenProof(current.token_id, current.token_digest), None, now=_NOW, event=_event()
+    )
+
+    assert isinstance(prepared, PrepareRefreshResult)
+    assert prepared.status is RefreshRotationStatus.EPOCH_MISMATCH
+
+
 def test_in_memory_backend_accepts_injected_deterministic_sources() -> None:
     test_hash = "$test$injected"
     backend = InMemorySecurityBackend(
