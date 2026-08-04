@@ -44,7 +44,7 @@ from litestar_security.accounts._refresh_tokens import (
     RefreshRotationStatus,
     RefreshTokenCodec,
     RefreshTokenProof,
-    RefreshTokenResponse,
+    TokenPair,
     normalize_refresh_scopes,
     valid_refresh_scope,
 )
@@ -436,7 +436,7 @@ class RefreshTokenService(Generic[UserT]):
         scopes: AbstractSet[str] = frozenset(),
         evidence: AuthenticationEvidence | None = None,
         now: datetime | None = None,
-    ) -> RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+    ) -> TokenPair | InvalidCredentials | VerificationUnavailable:
         """Create the initial family before revealing either credential.
 
         Args:
@@ -513,7 +513,7 @@ class RefreshTokenService(Generic[UserT]):
             return VerificationUnavailable()
         if created is not True:
             return VerificationUnavailable()
-        return RefreshTokenResponse(
+        return TokenPair(
             access_token=access.access_token, refresh_token=refresh.refresh_token, expires_in=access.expires_in
         )
 
@@ -524,7 +524,7 @@ class RefreshTokenService(Generic[UserT]):
         idempotency_key: str | None = None,
         now: datetime | None = None,
         client_key: str | None = None,
-    ) -> RefreshTokenResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
+    ) -> TokenPair | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Return exactly the store-accepted sealed response or one safe failure.
 
         Only the client bucket applies: the presented value is a refresh token,
@@ -611,7 +611,7 @@ class RefreshTokenService(Generic[UserT]):
                 )
                 else VerificationUnavailable()
             )
-        response = RefreshTokenResponse(
+        response = TokenPair(
             access_token=access.access_token, refresh_token=successor.refresh_token, expires_in=access.expires_in
         )
         successor_expires_at = min(rotated_at + self.idle_lifetime, prepared.family_expires_at)
@@ -780,7 +780,7 @@ class RefreshTokenService(Generic[UserT]):
         token_id: str,
         idempotency_digest: bytes | None,
         occurred_at: datetime,
-    ) -> RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+    ) -> TokenPair | InvalidCredentials | VerificationUnavailable:
         receipt_context = RefreshReceiptContext(
             token_id=token_id,
             family_id=context.family_id,
@@ -789,11 +789,7 @@ class RefreshTokenService(Generic[UserT]):
             idempotency_digest=idempotency_digest,
         )
         accepted = self.receipts.unseal(sealed_receipt, receipt_context, now=occurred_at)
-        return (
-            accepted
-            if isinstance(accepted, RefreshTokenResponse)
-            else await self._fail_closed_receipt(context, occurred_at)
-        )
+        return accepted if isinstance(accepted, TokenPair) else await self._fail_closed_receipt(context, occurred_at)
 
     def _event(
         self, occurred_at: datetime, *, operation: str, outcome: str, account_id: str | None, family_id: str | None

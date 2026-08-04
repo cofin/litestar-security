@@ -16,10 +16,10 @@ from litestar_security.accounts import (
     LocalAccount,
     RateLimitGuard,
     RateLimitPolicy,
-    RefreshTokenResponse,
     StepUpCredential,
     StepUpService,
     StoreRateLimiter,
+    TokenPair,
 )
 from litestar_security.authentication import AuthenticationEvidence, InvalidCredentials, VerificationUnavailable
 from litestar_security.context import Principal
@@ -36,20 +36,20 @@ from litestar_security.providers.oauth import (
     OAuthAuthorization,
     OAuthConfig,
     OAuthLifecycleService,
-    OAuthLinkRequest,
+    OAuthLink,
     OAuthLocalAuthTransport,
     OAuthLogoutResult,
     OAuthOperation,
     OAuthProviderError,
     OAuthProviderRegistration,
     OAuthRedirectPolicy,
-    OAuthRouteResponse,
-    OAuthScopeRequest,
+    OAuthRouteStatus,
+    OAuthScopeUpgrade,
+    OAuthStepUp,
     OAuthStepUpAuthorization,
-    OAuthStepUpRequest,
     OAuthTransactionService,
     OAuthTransactionUnavailable,
-    OIDCBackchannelLogoutRequest,
+    OIDCBackchannelLogout,
     OIDCLogoutIdentity,
     OIDCLogoutLifecycleService,
     ProtectedOAuthSecret,
@@ -125,17 +125,17 @@ class RouteService:
 
     async def callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         del code, state, request
-        return OAuthRouteResponse(detail="Authenticated.", provider_account_id=f"{provider}-account")
+        return OAuthRouteStatus(detail="Authenticated.", provider_account_id=f"{provider}-account")
 
-    async def unlink(self, **kwargs: object) -> OAuthRouteResponse:
+    async def unlink(self, **kwargs: object) -> OAuthRouteStatus:
         del kwargs
-        return OAuthRouteResponse(detail="Unlinked.")
+        return OAuthRouteStatus(detail="Unlinked.")
 
-    async def revoke(self, **kwargs: object) -> OAuthRouteResponse:
+    async def revoke(self, **kwargs: object) -> OAuthRouteStatus:
         del kwargs
-        return OAuthRouteResponse(detail="Revoked.")
+        return OAuthRouteStatus(detail="Revoked.")
 
     async def logout(self, **kwargs: object) -> OAuthLogoutResult:
         del kwargs
@@ -166,10 +166,10 @@ class LocalTransport:
         identity: ProviderIdentity,
         request: Request[Any, Any, Any],
         authenticated_at: datetime,
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         del identity, request, authenticated_at
         self.established.append(account_id)
-        return OAuthRouteResponse(detail="Authenticated.", provider_account_id=account_id)
+        return OAuthRouteStatus(detail="Authenticated.", provider_account_id=account_id)
 
     async def logout(self, *, account_id: str, request: Request[Any, Any, Any]) -> None:
         del request
@@ -706,7 +706,7 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
     linked = await service.callback(
         provider="example", code="code", state=parse_qs(urlsplit(link_start.url).query)["state"][0], request=request
     )
-    assert isinstance(linked, OAuthRouteResponse)
+    assert isinstance(linked, OAuthRouteStatus)
     provider_account_id = cast("str", linked.provider_account_id)
 
     scope_start = await service.begin(
@@ -722,7 +722,7 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
     updated = await service.callback(
         provider="example", code="code", state=parse_qs(urlsplit(scope_start.url).query)["state"][0], request=request
     )
-    assert isinstance(updated, OAuthRouteResponse)
+    assert isinstance(updated, OAuthRouteStatus)
     assert updated.detail == "Scopes updated."
     logout = await service.logout(provider="example", account_id="account-1", request=request)
     assert logout.redirect_url is not None
@@ -818,7 +818,7 @@ async def test_lifecycle_and_local_transport_reject_invalid_or_unavailable_paths
             request=request,
         )
 
-    refresh_response = RefreshTokenResponse(
+    refresh_response = TokenPair(
         access_token="e30.e30.YQ",  # noqa: S106 - compact JWT fixture
         refresh_token="rt_aWlpaWlpaWlpaWlpaWlpaQ.c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",  # noqa: S106
         expires_in=600,
@@ -1396,11 +1396,11 @@ async def test_public_login_and_callback_have_binding_and_no_store_headers() -> 
 
 
 def test_oauth_dtos_are_frozen_camel_case_and_redact_step_up() -> None:
-    link = OAuthLinkRequest(step_up_grant="secret", return_to="/")
-    scope = OAuthScopeRequest(
+    link = OAuthLink(step_up_grant="secret", return_to="/")
+    scope = OAuthScopeUpgrade(
         provider_account_id="provider-account", scopes=frozenset({"email"}), step_up_grant="secret"
     )
-    action = OAuthStepUpRequest(step_up_grant="secret")
+    action = OAuthStepUp(step_up_grant="secret")
 
     with pytest.raises(AttributeError):
         link.return_to = "/other"  # type: ignore[misc]
@@ -1408,7 +1408,7 @@ def test_oauth_dtos_are_frozen_camel_case_and_redact_step_up() -> None:
     assert "secret" not in repr(scope)
     assert "secret" not in repr(action)
     assert "secret" not in repr(
-        OIDCBackchannelLogoutRequest(logout_token="secret")  # noqa: S106 - redaction fixture
+        OIDCBackchannelLogout(logout_token="secret")  # noqa: S106 - redaction fixture
     )
 
 
@@ -1537,7 +1537,7 @@ class RaisingRouteService(RouteService):
 
     async def callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         del provider, code, state, request
         raise self.exception
 

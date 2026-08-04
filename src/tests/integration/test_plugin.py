@@ -1208,7 +1208,7 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
     assert token_login.responses is not None
     for responses, success_schema in (
         (session_login.responses, "#/components/schemas/LocalAccount"),
-        (token_login.responses, "#/components/schemas/RefreshTokenResponse"),
+        (token_login.responses, "#/components/schemas/TokenPair"),
     ):
         success_content = responses["200"].content
         required_content = responses["403"].content
@@ -1355,7 +1355,7 @@ def test_generated_mfa_completion_routes_follow_local_auth_transport_and_csrf_mo
             self.transports.append(transport)
             if transport == "session":
                 return LocalAccount(account_id="account-1")
-            return accounts_module.RefreshTokenResponse(
+            return accounts_module.TokenPair(
                 access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
                 refresh_token="rt_aWlpaWlpaWlpaWlpaWlpaQ.c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",  # noqa: S106
                 expires_in=60,

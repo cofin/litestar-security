@@ -41,7 +41,7 @@ from litestar_security.accounts._records import (
     PasswordResetStatus,
     RegistrationMode,
 )
-from litestar_security.accounts._refresh_tokens import RefreshTokenResponse
+from litestar_security.accounts._refresh_tokens import TokenPair
 from litestar_security.accounts.schemas import (
     LocalAccount,
     LocalCredentials,
@@ -142,7 +142,7 @@ _LOCAL_SESSION_MFA_LOGIN_RESPONSES = {
 
 
 _LOCAL_TOKEN_MFA_LOGIN_RESPONSES = {
-    HTTP_200_OK: ResponseSpec(RefreshTokenResponse, description="A newly issued access and refresh token pair."),
+    HTTP_200_OK: ResponseSpec(TokenPair, description="A newly issued access and refresh token pair."),
     **_LOCAL_MFA_LOGIN_RESPONSES,
 }
 
@@ -443,12 +443,12 @@ class _LocalTokenController(Controller):
         data: JSONBody[LocalCredentials],
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[RefreshTokenResponse | LocalMFAChallenge]:
+    ) -> Response[TokenPair | LocalMFAChallenge]:
         """Authenticate a password and issue a local access/refresh pair."""
         result = await local_auth_service.token_login(request, data)
         if isinstance(result, MFARequired):
-            return cast("Response[RefreshTokenResponse | LocalMFAChallenge]", _mfa_required_response(result))
-        if not isinstance(result, RefreshTokenResponse):
+            return cast("Response[TokenPair | LocalMFAChallenge]", _mfa_required_response(result))
+        if not isinstance(result, TokenPair):
             _route_error(result)
         return Response(content=result, status_code=HTTP_200_OK)
 
@@ -473,7 +473,7 @@ class _LocalTokenController(Controller):
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
         idempotency_key: Annotated[str | None, HeaderParameter(name="Idempotency-Key")] = None,
-    ) -> Response[RefreshTokenResponse]:
+    ) -> Response[TokenPair]:
         """Strictly rotate one opaque refresh token."""
         refresh_tokens = local_auth_service.refresh_tokens
         if refresh_tokens is None:
@@ -481,7 +481,7 @@ class _LocalTokenController(Controller):
         result = await refresh_tokens.rotate(
             data.token, idempotency_key=idempotency_key, client_key=local_auth_service.client_key_for(request)
         )
-        if not isinstance(result, RefreshTokenResponse):
+        if not isinstance(result, TokenPair):
             _route_error(result)
         return Response(content=result, status_code=HTTP_200_OK)
 
@@ -539,7 +539,7 @@ class _LocalTokenMFAController(Controller):
         data: JSONBody[LocalMFACompletion],
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[RefreshTokenResponse]:
+    ) -> Response[TokenPair]:
         """Verify one challenge factor and issue the token transport."""
         result = await local_auth_service.complete_mfa_login(
             request,
@@ -550,7 +550,7 @@ class _LocalTokenMFAController(Controller):
             code=data.code,
             transport="tokens",
         )
-        if not isinstance(result, RefreshTokenResponse):
+        if not isinstance(result, TokenPair):
             _route_error(result)
         return Response(content=result, status_code=HTTP_200_OK)
 

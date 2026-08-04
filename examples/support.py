@@ -33,7 +33,7 @@ from litestar_security.providers.oauth import (
     OAuthConfig,
     OAuthLogoutResult,
     OAuthOperation,
-    OAuthRouteResponse,
+    OAuthRouteStatus,
     ProviderIdentity,
     ProviderTokenSet,
     SecretStr,
@@ -118,15 +118,15 @@ class _ExampleOAuthService:
 
     async def callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         del code, state, request
-        return OAuthRouteResponse(detail="Authenticated.", provider_account_id=f"{provider}-account")
+        return OAuthRouteStatus(detail="Authenticated.", provider_account_id=f"{provider}-account")
 
-    async def unlink(self, **_kwargs: object) -> OAuthRouteResponse:
-        return OAuthRouteResponse(detail="Unlinked.")
+    async def unlink(self, **_kwargs: object) -> OAuthRouteStatus:
+        return OAuthRouteStatus(detail="Unlinked.")
 
-    async def revoke(self, **_kwargs: object) -> OAuthRouteResponse:
-        return OAuthRouteResponse(detail="Revoked.")
+    async def revoke(self, **_kwargs: object) -> OAuthRouteStatus:
+        return OAuthRouteStatus(detail="Revoked.")
 
     async def logout(self, **_kwargs: object) -> OAuthLogoutResult:
         return OAuthLogoutResult()

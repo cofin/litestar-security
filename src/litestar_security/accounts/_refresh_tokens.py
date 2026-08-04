@@ -44,7 +44,7 @@ __all__ = (
     "RefreshTokenCodec",
     "RefreshTokenIssue",
     "RefreshTokenProof",
-    "RefreshTokenResponse",
+    "TokenPair",
 )
 
 
@@ -237,7 +237,7 @@ class RefreshTokenCodec:
         return hmac_digest(self.pepper, _REFRESH_TOKEN_DOMAIN + token_id.encode("ascii") + b"\x00" + secret, sha256)
 
 
-class RefreshTokenResponse(WireStruct, frozen=True):
+class TokenPair(WireStruct, frozen=True):
     """Secret-safe token response recovered from a sealed rotation receipt."""
 
     access_token: str

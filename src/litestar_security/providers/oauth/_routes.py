@@ -70,17 +70,17 @@ __all__ = (
     "OAuthAuthorization",
     "OAuthConfig",
     "OAuthLifecycleService",
-    "OAuthLinkRequest",
+    "OAuthLink",
     "OAuthLocalTransport",
     "OAuthLogoutResult",
     "OAuthProviderRegistration",
-    "OAuthRouteResponse",
     "OAuthRouteService",
-    "OAuthScopeRequest",
+    "OAuthRouteStatus",
+    "OAuthScopeUpgrade",
+    "OAuthStepUp",
     "OAuthStepUpAuthorization",
     "OAuthStepUpAuthorizer",
-    "OAuthStepUpRequest",
-    "OIDCBackchannelLogoutRequest",
+    "OIDCBackchannelLogout",
     "OIDCLogoutIdentity",
     "OIDCLogoutLifecycleService",
     "OIDCLogoutTokenConsumer",
@@ -97,7 +97,7 @@ _MAXIMUM_TCP_PORT = 65_535
 _MAXIMUM_SECURITY_EPOCH = 9_223_372_036_854_775_807
 
 
-class OAuthRouteResponse(WireStruct, frozen=True, kw_only=True, omit_defaults=True):
+class OAuthRouteStatus(WireStruct, frozen=True, kw_only=True, omit_defaults=True):
     """Secret-free provider lifecycle response.
 
     Each identifier has its own member, and a response carries only the members
@@ -112,7 +112,7 @@ class OAuthRouteResponse(WireStruct, frozen=True, kw_only=True, omit_defaults=Tr
     revoked_sessions: int | None = None
 
 
-class OAuthLinkRequest(WireStruct, frozen=True, kw_only=True):
+class OAuthLink(WireStruct, frozen=True, kw_only=True):
     """Purpose-bound link request."""
 
     step_up_grant: str
@@ -123,7 +123,7 @@ class OAuthLinkRequest(WireStruct, frozen=True, kw_only=True):
         return f"{type(self).__name__}(step_up_grant=<redacted>, return_to={self.return_to!r})"
 
 
-class OAuthScopeRequest(WireStruct, frozen=True, kw_only=True):
+class OAuthScopeUpgrade(WireStruct, frozen=True, kw_only=True):
     """Incremental provider-scope request."""
 
     provider_account_id: str
@@ -139,7 +139,7 @@ class OAuthScopeRequest(WireStruct, frozen=True, kw_only=True):
         )
 
 
-class OAuthStepUpRequest(WireStruct, frozen=True, kw_only=True):
+class OAuthStepUp(WireStruct, frozen=True, kw_only=True):
     """Provider-account action requiring fresh step-up."""
 
     step_up_grant: str
@@ -149,7 +149,7 @@ class OAuthStepUpRequest(WireStruct, frozen=True, kw_only=True):
         return f"{type(self).__name__}(step_up_grant=<redacted>)"
 
 
-class OIDCBackchannelLogoutRequest(WireStruct, frozen=True, kw_only=True):
+class OIDCBackchannelLogout(WireStruct, frozen=True, kw_only=True):
     """OIDC back-channel logout token form, decoded from a form-encoded body."""
 
     logout_token: str
@@ -179,21 +179,21 @@ class OAuthLogoutResult(msgspec.Struct, frozen=True, kw_only=True):
 
 
 _OAUTH_PUBLIC_RESPONSES = {
-    HTTP_400_BAD_REQUEST: ResponseSpec(OAuthRouteResponse, description="The provider request is invalid."),
-    HTTP_401_UNAUTHORIZED: ResponseSpec(OAuthRouteResponse, description="The provider exchange was rejected."),
-    HTTP_503_SERVICE_UNAVAILABLE: ResponseSpec(OAuthRouteResponse, description="The provider is unavailable."),
+    HTTP_400_BAD_REQUEST: ResponseSpec(OAuthRouteStatus, description="The provider request is invalid."),
+    HTTP_401_UNAUTHORIZED: ResponseSpec(OAuthRouteStatus, description="The provider exchange was rejected."),
+    HTTP_503_SERVICE_UNAVAILABLE: ResponseSpec(OAuthRouteStatus, description="The provider is unavailable."),
 }
 
 
 _OAUTH_AUTHENTICATED_RESPONSES = {
     **_OAUTH_PUBLIC_RESPONSES,
-    HTTP_401_UNAUTHORIZED: ResponseSpec(OAuthRouteResponse, description="Authentication or step-up is required."),
+    HTTP_401_UNAUTHORIZED: ResponseSpec(OAuthRouteStatus, description="Authentication or step-up is required."),
 }
 
 
 _OIDC_FRONTCHANNEL_RESPONSES = {
     **_OAUTH_PUBLIC_RESPONSES,
-    HTTP_429_TOO_MANY_REQUESTS: ResponseSpec(OAuthRouteResponse, description="The request exceeded its rate limit."),
+    HTTP_429_TOO_MANY_REQUESTS: ResponseSpec(OAuthRouteStatus, description="The request exceeded its rate limit."),
 }
 
 
@@ -413,7 +413,7 @@ class OAuthLocalTransport(Protocol):
         identity: ProviderIdentity,
         request: Request[Any, Any, Any],
         authenticated_at: datetime,
-    ) -> OAuthRouteResponse | Response[Any]:
+    ) -> OAuthRouteStatus | Response[Any]:
         """Establish a session, token pair, or explicit hybrid transport."""
         ...  # pragma: no cover
 
@@ -448,7 +448,7 @@ class OAuthRouteService(Protocol):
 
     async def callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteResponse | Response[Any]:
+    ) -> OAuthRouteStatus | Response[Any]:
         """Consume a callback and issue the configured local transport."""
         ...  # pragma: no cover
 
@@ -460,13 +460,13 @@ class OAuthRouteService(Protocol):
         account_id: str,
         step_up_grant: str,
         request: Request[Any, Any, Any],
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         """Atomically unlink a provider account."""
         ...  # pragma: no cover
 
     async def revoke(
         self, *, provider: str, account_id: str, step_up_grant: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         """Locally delete and attempt upstream revocation."""
         ...  # pragma: no cover
 
@@ -562,7 +562,7 @@ class OAuthLifecycleService:
 
     async def callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteResponse | Response[Any]:
+    ) -> OAuthRouteStatus | Response[Any]:
         """Consume one callback and complete its stored login, link, or scope purpose."""
         if not code or not state:
             raise InvalidOAuthCallback
@@ -587,13 +587,13 @@ class OAuthLifecycleService:
         proof = await self._callback_proof(transaction.account_id, transaction.security_epoch, transaction.operation)
         if transaction.operation is OAuthOperation.LINK:
             linked = await self.accounts.link(proof, identity, grant, tokens, now=now)
-            return OAuthRouteResponse(detail="Linked.", provider_account_id=linked.provider_account_id)
+            return OAuthRouteStatus(detail="Linked.", provider_account_id=linked.provider_account_id)
         if transaction.provider_account_id is None:
             raise OAuthAccountError
         linked = await self.accounts.apply_scope_upgrade(
             proof, transaction.provider_account_id, grant, required_scopes=transaction.requested_scopes, now=now
         )
-        return OAuthRouteResponse(detail="Scopes updated.", provider_account_id=linked.provider_account_id)
+        return OAuthRouteStatus(detail="Scopes updated.", provider_account_id=linked.provider_account_id)
 
     async def unlink(
         self,
@@ -603,18 +603,18 @@ class OAuthLifecycleService:
         account_id: str,
         step_up_grant: str,
         request: Request[Any, Any, Any],
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         """Consume step-up and atomically unlink one account-owned provider identity."""
         self._registration(provider)
         authorization = await self._authorize(step_up_grant, account_id, "oauth-unlink", request)
         proof = self._proof(account_id, "oauth-unlink", authorization.security_epoch, authorization.security_epoch)
         result = await self.accounts.unlink(proof, provider_account_id, now=self._now())
         detail = "Unlinked." if result.status is UnlinkStatus.UNLINKED else "Provider account not unlinked."
-        return OAuthRouteResponse(detail=detail, provider_account_id=result.provider_account_id)
+        return OAuthRouteStatus(detail=detail, provider_account_id=result.provider_account_id)
 
     async def revoke(
         self, *, provider: str, account_id: str, step_up_grant: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         """Consume step-up and revoke the exact account-owned provider grant."""
         registration = self._registration(provider)
         await self._authorize(step_up_grant, account_id, "oauth-provider-token-management", request)
@@ -622,7 +622,7 @@ class OAuthLifecycleService:
         if linked is None:
             raise OAuthAccountError
         await self.accounts.revoke(linked.provider_account_id, registration.provider, now=self._now())
-        return OAuthRouteResponse(detail="Revoked.", provider_account_id=linked.provider_account_id)
+        return OAuthRouteStatus(detail="Revoked.", provider_account_id=linked.provider_account_id)
 
     async def logout(self, *, provider: str, account_id: str, request: Request[Any, Any, Any]) -> OAuthLogoutResult:
         """Complete local logout before returning an optional fixed RP redirect."""
@@ -747,7 +747,7 @@ class OIDCLogoutLifecycleService:
         """Return providers supporting OIDC logout."""
         return frozenset(self.provider_issuers)
 
-    async def backchannel(self, provider: str, logout_token: str) -> OAuthRouteResponse:
+    async def backchannel(self, provider: str, logout_token: str) -> OAuthRouteStatus:
         """Verify a logout token, check its issuer, then consume and revoke through the store."""
         self._issuer(provider)
         now = self._now()
@@ -757,11 +757,11 @@ class OIDCLogoutLifecycleService:
         revoked = await self.sessions.consume_backchannel(identity, now=now)
         if revoked is None:
             raise NotAuthorizedException(detail="OIDC logout token is invalid")
-        return OAuthRouteResponse(detail="OIDC sessions revoked.", revoked_sessions=revoked)
+        return OAuthRouteStatus(detail="OIDC sessions revoked.", revoked_sessions=revoked)
 
     async def frontchannel(
         self, provider: str, issuer: str, session_id: str, *, request: Request[Any, Any, Any]
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         """Revoke one exact provider-session mapping the caller's binding owns.
 
         Args:
@@ -808,7 +808,7 @@ class OIDCLogoutLifecycleService:
             raise ServiceUnavailableException(detail="OIDC logout is unavailable") from None
         if revoked is None:
             raise NotAuthorizedException(detail="OIDC logout request is invalid")
-        return OAuthRouteResponse(detail="OIDC sessions revoked.", revoked_sessions=revoked)
+        return OAuthRouteStatus(detail="OIDC sessions revoked.", revoked_sessions=revoked)
 
     def _issuer(self, provider: str) -> str:
         issuer = self.provider_issuers.get(provider)
@@ -1042,7 +1042,7 @@ class _OAuthController(Controller):
         oauth_state: Annotated[str, QueryParameter(name="state", include_in_schema=False)],
         request: Request[Any, Any, Any],
         oauth_service: NamedDependency[SkipValidation[OAuthRouteService]],
-    ) -> OAuthRouteResponse | Response[Any]:
+    ) -> OAuthRouteStatus | Response[Any]:
         """Consume a transaction-bound callback and issue local authentication."""
         return await oauth_service.callback(provider=provider, code=code, state=oauth_state, request=request)
 
@@ -1060,7 +1060,7 @@ class _OAuthController(Controller):
     async def link(
         self,
         provider: FromPath[str],
-        data: JSONBody[OAuthLinkRequest],
+        data: JSONBody[OAuthLink],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         oauth_service: NamedDependency[SkipValidation[OAuthRouteService]],
@@ -1097,11 +1097,11 @@ class _OAuthController(Controller):
         *,
         provider: FromPath[str],
         provider_account_id: FromPath[str],
-        data: JSONBody[OAuthStepUpRequest],
+        data: JSONBody[OAuthStepUp],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         oauth_service: NamedDependency[SkipValidation[OAuthRouteService]],
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         """Unlink one provider identity without removing the final login method."""
         return await oauth_service.unlink(
             provider=provider,
@@ -1125,7 +1125,7 @@ class _OAuthController(Controller):
     async def scopes(
         self,
         provider: FromPath[str],
-        data: JSONBody[OAuthScopeRequest],
+        data: JSONBody[OAuthScopeUpgrade],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         oauth_service: NamedDependency[SkipValidation[OAuthRouteService]],
@@ -1160,11 +1160,11 @@ class _OAuthController(Controller):
     async def revoke(
         self,
         provider: FromPath[str],
-        data: JSONBody[OAuthStepUpRequest],
+        data: JSONBody[OAuthStepUp],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         oauth_service: NamedDependency[SkipValidation[OAuthRouteService]],
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         """Delete local provider tokens regardless of upstream retry state."""
         return await oauth_service.revoke(
             provider=provider, account_id=_account_id(principal), step_up_grant=data.step_up_grant, request=request
@@ -1190,18 +1190,18 @@ class _OAuthController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         oauth_service: NamedDependency[SkipValidation[OAuthRouteService]],
-    ) -> Response[OAuthRouteResponse] | OAuthRouteResponse:
+    ) -> Response[OAuthRouteStatus] | OAuthRouteStatus:
         """Complete local logout, then optionally redirect to a validated RP endpoint."""
         result = await oauth_service.logout(provider=provider, account_id=_account_id(principal), request=request)
         if result.redirect_url is not None:
             # Response rather than litestar.response.Redirect: this 302 carries
             # the logout detail as its JSON body, which Redirect cannot express.
             return Response(
-                content=OAuthRouteResponse(detail=result.detail),
+                content=OAuthRouteStatus(detail=result.detail),
                 status_code=HTTP_302_FOUND,
                 headers={"Location": result.redirect_url},
             )
-        return OAuthRouteResponse(detail=result.detail)
+        return OAuthRouteStatus(detail=result.detail)
 
 
 class _OIDCLogoutController(Controller):
@@ -1230,7 +1230,7 @@ class _OIDCLogoutController(Controller):
         session_id: Annotated[str, QueryParameter(name="sid")],
         request: Request[Any, Any, Any],
         oidc_service: NamedDependency[SkipValidation[OIDCLogoutLifecycleService]],
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         """Revoke local sessions the caller's binding owns for one exact issuer and sid."""
         return await oidc_service.frontchannel(provider, issuer, session_id, request=request)
 
@@ -1251,9 +1251,9 @@ class _OIDCLogoutController(Controller):
     async def backchannel_logout(
         self,
         provider: FromPath[str],
-        data: Annotated[OIDCBackchannelLogoutRequest, Body(media_type=RequestEncodingType.URL_ENCODED)],
+        data: Annotated[OIDCBackchannelLogout, Body(media_type=RequestEncodingType.URL_ENCODED)],
         oidc_service: NamedDependency[SkipValidation[OIDCLogoutLifecycleService]],
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         """Verify a logout token, consume its jti, and revoke mapped sessions."""
         return await oidc_service.backchannel(provider, data.logout_token)
 

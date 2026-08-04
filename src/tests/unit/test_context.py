@@ -1244,7 +1244,6 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
         "RefreshTokenFamilyStore",
         "RefreshTokenIssue",
         "RefreshTokenProof",
-        "RefreshTokenResponse",
         "RefreshTokenService",
         "RegistrationCommand",
         "RegistrationMode",
@@ -1287,6 +1286,7 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
         "TOTPProvisioningGrant",
         "TOTPVerification",
         "TokenIssue",
+        "TokenPair",
         "TokenPurpose",
         "UnlimitedRateLimiter",
         "UserVerification",
@@ -1609,7 +1609,7 @@ def test_refresh_value_contracts_are_frozen_slotted_and_secret_safe() -> None:
     issue = codec.issue()
     proof = codec.verify(issue.refresh_token)
     assert isinstance(proof, accounts_module.RefreshTokenProof)
-    response = accounts_module.RefreshTokenResponse(
+    response = accounts_module.TokenPair(
         access_token="e30.e30.YQ",  # noqa: S106 - compact JWT response fixture
         refresh_token=issue.refresh_token,
         expires_in=600,
@@ -1649,7 +1649,7 @@ def test_refresh_value_contracts_are_frozen_slotted_and_secret_safe() -> None:
     assert sealer.unseal(sealed, receipt_context, now=now) == response
     for value in values:
         assert not hasattr(value, "__dict__")
-        # RefreshTokenResponse crosses the wire, so it is a frozen Struct; it names
+        # TokenPair crosses the wire, so it is a frozen Struct; it names
         # its fields and raises on assignment differently from a frozen dataclass.
         if isinstance(value, msgspec.Struct):
             with pytest.raises(AttributeError):
@@ -1740,7 +1740,7 @@ def test_refresh_response_rejects_invalid_credentials_and_expiry(
     access_token: object, refresh_token: str, expires_in: object
 ) -> None:
     with pytest.raises(ValueError, match="response"):
-        accounts_module.RefreshTokenResponse(  # type: ignore[arg-type]
+        accounts_module.TokenPair(  # type: ignore[arg-type]
             access_token=access_token, refresh_token=refresh_token, expires_in=expires_in
         )
 
@@ -1801,7 +1801,7 @@ def test_refresh_receipt_sealer_rejects_invalid_nonce_material(nonce: object) ->
         active_key=accounts_module.RefreshReceiptKey("key", b"k" * 32),
         entropy=lambda _length: nonce,  # type: ignore[return-value]
     )
-    response = accounts_module.RefreshTokenResponse(_ACCESS_TOKEN, _REFRESH_TOKEN, 600)
+    response = accounts_module.TokenPair(_ACCESS_TOKEN, _REFRESH_TOKEN, 600)
     context = accounts_module.RefreshReceiptContext(**_base_refresh_receipt_context())  # type: ignore[arg-type]
     with pytest.raises(RuntimeError, match="nonce"):
         sealer.seal(response, context, expires_at=_ACCOUNT_NOW + timedelta(seconds=30))
@@ -1817,7 +1817,7 @@ def test_refresh_receipt_sealer_rejects_invalid_nonce_material(nonce: object) ->
 )
 def test_refresh_receipt_sealer_rejects_invalid_expiry(expiry: object) -> None:
     sealer = accounts_module.RefreshReceiptSealer(active_key=accounts_module.RefreshReceiptKey("key", b"k" * 32))
-    response = accounts_module.RefreshTokenResponse(_ACCESS_TOKEN, _REFRESH_TOKEN, 600)
+    response = accounts_module.TokenPair(_ACCESS_TOKEN, _REFRESH_TOKEN, 600)
     context = accounts_module.RefreshReceiptContext(**_base_refresh_receipt_context())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="expiry"):
         sealer.seal(response, context, expires_at=expiry)  # type: ignore[arg-type]

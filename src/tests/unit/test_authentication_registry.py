@@ -8740,7 +8740,7 @@ async def test_token_login_preserves_password_assurance_at_refresh_issuance() ->
     """Password token login carries its original assurance into the refresh family."""
     account = _local_access_account()
     issued_at = _JWT_NOW + timedelta(minutes=1)
-    response = accounts_module.RefreshTokenResponse(
+    response = accounts_module.TokenPair(
         access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
         refresh_token=(
             accounts_module.RefreshTokenCodec(pepper=b"p" * 32, entropy=_RefreshEntropy()).issue().refresh_token
@@ -8758,7 +8758,7 @@ async def test_token_login_preserves_password_assurance_at_refresh_issuance() ->
 
         async def issue(
             self, issued_for: object, *, evidence: AuthenticationEvidence | None = None, now: datetime | None = None
-        ) -> accounts_module.RefreshTokenResponse:
+        ) -> accounts_module.TokenPair:
             assert issued_for is account
             assert now == issued_at
             self.evidence = evidence
@@ -8796,7 +8796,7 @@ async def test_token_login_fails_closed_when_refresh_issuance_clock_is_unavailab
         def clock() -> datetime:
             raise RuntimeError
 
-        async def issue(self, *_args: object, **_kwargs: object) -> accounts_module.RefreshTokenResponse:
+        async def issue(self, *_args: object, **_kwargs: object) -> accounts_module.TokenPair:
             pytest.fail("token issuance must not run after the clock fails")
 
     service = accounts_module.LocalAuthService(
@@ -11618,7 +11618,7 @@ def test_refresh_codec_is_canonical_hmac_only_and_rejects_malformed_tokens(token
 async def test_refresh_known_lookup_with_wrong_digest_is_invalid_without_family_revocation() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
     token_id = initial.refresh_token.split(".")[0]
     wrong_secret = base64.urlsafe_b64encode(b"wrong" * 6 + b"!!").rstrip(b"=").decode()
 
@@ -11643,7 +11643,7 @@ async def test_refresh_known_lookup_with_wrong_digest_is_invalid_without_family_
 )
 def test_refresh_receipts_bind_all_context_and_support_key_rotation(field: str, replacement: object) -> None:
     codec = accounts_module.RefreshTokenCodec(pepper=b"p" * 32, entropy=_RefreshEntropy())
-    response = accounts_module.RefreshTokenResponse(
+    response = accounts_module.TokenPair(
         access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
         refresh_token=codec.issue().refresh_token,
         expires_in=600,
@@ -11689,13 +11689,13 @@ def test_refresh_receipts_bind_all_context_and_support_key_rotation(field: str, 
 async def test_refresh_first_rotation_and_same_key_duplicate_return_exact_sealed_result() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, scopes=frozenset({"reports:read"}), now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
     key = _refresh_idempotency_key()
 
     first = await service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW)
     duplicate = await service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW)
 
-    assert isinstance(first, accounts_module.RefreshTokenResponse)
+    assert isinstance(first, accounts_module.TokenPair)
     assert duplicate == first
     assert store.rotations == [accounts_module.RefreshRotationStatus.ROTATED]
     assert isinstance(store.preparations[-1], accounts_module.RefreshReceiptReplay)
@@ -11723,13 +11723,13 @@ async def test_refresh_rotation_preserves_original_passkey_assurance_and_time() 
         amr=("passkey",),
     )
     initial = await service.issue(account, evidence=evidence, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
 
     rotated = await service.rotate(
         initial.refresh_token, idempotency_key=_refresh_idempotency_key(), now=_JWT_NOW + timedelta(minutes=1)
     )
 
-    assert isinstance(rotated, accounts_module.RefreshTokenResponse)
+    assert isinstance(rotated, accounts_module.TokenPair)
     records = tuple(store.tokens.values())
     assert all(record.evidence == evidence for record in records)
     signer = cast("_AccessSigner", service.access_tokens.signer)
@@ -11745,10 +11745,10 @@ async def test_refresh_rotation_preserves_original_passkey_assurance_and_time() 
 async def test_refresh_same_key_retry_recovers_without_fresh_crypto(outage: str) -> None:
     service, _store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
     key = _refresh_idempotency_key()
     first = await service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW)
-    assert isinstance(first, accounts_module.RefreshTokenResponse)
+    assert isinstance(first, accounts_module.TokenPair)
     if outage == "signer":
         service = replace(service, access_tokens=_RefreshAccessOutcome(VerificationUnavailable(), fail=True))
     elif outage == "token_entropy":
@@ -11768,11 +11768,11 @@ async def test_refresh_same_key_retry_recovers_without_fresh_crypto(outage: str)
 async def test_refresh_receipt_window_preserves_subsecond_precision() -> None:
     service, _store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
     key = _refresh_idempotency_key()
     rotated_at = _JWT_NOW + timedelta(microseconds=500_000)
     first = await service.rotate(initial.refresh_token, idempotency_key=key, now=rotated_at)
-    assert isinstance(first, accounts_module.RefreshTokenResponse)
+    assert isinstance(first, accounts_module.TokenPair)
 
     duplicate = await service.rotate(
         initial.refresh_token, idempotency_key=key, now=rotated_at + timedelta(seconds=29, microseconds=750_000)
@@ -11785,12 +11785,12 @@ async def test_refresh_receipt_window_preserves_subsecond_precision() -> None:
 async def test_refresh_malformed_key_revokes_consumed_token_but_not_active_token() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
     assert isinstance(
         await service.rotate(initial.refresh_token, idempotency_key="weak", now=_JWT_NOW), InvalidCredentials
     )
     first = await service.rotate(initial.refresh_token, idempotency_key=_refresh_idempotency_key(), now=_JWT_NOW)
-    assert isinstance(first, accounts_module.RefreshTokenResponse)
+    assert isinstance(first, accounts_module.TokenPair)
     assert isinstance(
         await service.rotate(initial.refresh_token, idempotency_key="weak", now=_JWT_NOW), InvalidCredentials
     )
@@ -11804,10 +11804,10 @@ async def test_refresh_malformed_key_revokes_consumed_token_but_not_active_token
 async def test_refresh_preflight_replay_receipt_failure_revokes_family() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
     key = _refresh_idempotency_key()
     first = await service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW)
-    assert isinstance(first, accounts_module.RefreshTokenResponse)
+    assert isinstance(first, accounts_module.TokenPair)
     record = store.tokens[initial.refresh_token.partition(".")[0]]
     record.sealed_receipt = b"malformed"
 
@@ -11829,9 +11829,9 @@ async def test_refresh_preflight_replay_receipt_failure_revokes_family() -> None
 async def test_refresh_replay_without_exact_live_key_revokes_family(second_key: str | None, advance: timedelta) -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
     first = await service.rotate(initial.refresh_token, idempotency_key=_refresh_idempotency_key(1), now=_JWT_NOW)
-    assert isinstance(first, accounts_module.RefreshTokenResponse)
+    assert isinstance(first, accounts_module.TokenPair)
 
     replay = await service.rotate(initial.refresh_token, idempotency_key=second_key, now=_JWT_NOW + advance)
 
@@ -11855,7 +11855,7 @@ async def test_refresh_replay_without_exact_live_key_revokes_family(second_key: 
 async def test_refresh_invalid_store_receipt_fails_closed_and_revokes_family(receipt_kind: str) -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
     key = _refresh_idempotency_key()
     proof = service.codec.verify(initial.refresh_token)
     assert isinstance(proof, accounts_module.RefreshTokenProof)
@@ -11873,7 +11873,7 @@ async def test_refresh_invalid_store_receipt_fails_closed_and_revokes_family(rec
             idempotency_digest=digest,
         )
         store.override_receipt = service.receipts.seal(
-            accounts_module.RefreshTokenResponse(
+            accounts_module.TokenPair(
                 access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
                 refresh_token=service.codec.issue().refresh_token,
                 expires_in=600,
@@ -11895,7 +11895,7 @@ async def test_refresh_rotation_rejects_expiry_epoch_and_revocation_boundaries(c
     absolute = timedelta(days=2)
     service, store, accounts, account = _refresh_service(idle_lifetime=idle, absolute_lifetime=absolute)
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
     rotate_at = _JWT_NOW
     if condition == "idle":
         rotate_at += idle
@@ -11939,7 +11939,7 @@ async def test_refresh_epoch_bump_after_preflight_is_rejected_by_atomic_rotate()
     )
     accounts_holder.append(accounts)
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
 
     outcomes = await asyncio.gather(
         *(
@@ -11958,7 +11958,7 @@ async def test_refresh_epoch_bump_after_preflight_is_rejected_by_atomic_rotate()
 async def test_refresh_atomic_rotate_revalidates_preserved_scopes() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, scopes=frozenset({"read"}), now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
     prepare_rotation = store.prepare_rotation
 
     async def broadened_preflight(
@@ -11992,7 +11992,7 @@ async def test_refresh_atomic_rotate_revalidates_preserved_scopes() -> None:
 async def test_refresh_presented_token_revoke_is_exact_and_idempotent() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
 
     assert not await service.revoke_for_account("account-2", initial.refresh_token, now=_JWT_NOW)
     assert await service.revoke_for_account(account.account_id, initial.refresh_token, now=_JWT_NOW)
@@ -12006,14 +12006,14 @@ async def test_refresh_presented_token_revoke_is_exact_and_idempotent() -> None:
 async def test_refresh_one_hundred_way_races_enforce_one_logical_result(mode: str) -> None:
     service, store, _accounts, account = _refresh_service(expected_preparations=100)
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
     key = _refresh_idempotency_key() if mode == "shared_key" else None
 
     outcomes = await asyncio.gather(
         *(service.rotate(initial.refresh_token, idempotency_key=key, now=_JWT_NOW) for _ in range(100))
     )
 
-    successes = [outcome for outcome in outcomes if isinstance(outcome, accounts_module.RefreshTokenResponse)]
+    successes = [outcome for outcome in outcomes if isinstance(outcome, accounts_module.TokenPair)]
     if mode == "shared_key":
         assert len(successes) == 100
         assert all(outcome == successes[0] for outcome in successes)
@@ -12073,7 +12073,7 @@ async def test_refresh_service_default_clock_and_id_factories_issue_valid_family
 
     outcome = await defaulted.issue(account)
 
-    assert isinstance(outcome, accounts_module.RefreshTokenResponse)
+    assert isinstance(outcome, accounts_module.TokenPair)
     assert next(iter(store.tokens.values())).family_id.startswith("rf_")
 
 
@@ -12242,7 +12242,7 @@ async def test_refresh_rotate_sanitizes_invalid_and_unavailable_composition(  # 
 ) -> None:
     service, store, accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
     presented = initial.refresh_token
     idempotency_key: str | None = _refresh_idempotency_key()
     if mode == "malformed":
@@ -12298,7 +12298,7 @@ async def test_refresh_rotate_sanitizes_invalid_and_unavailable_composition(  # 
         idempotency_key = "weak"
     elif mode == "replay_account_failure":
         first = await service.rotate(presented, idempotency_key=idempotency_key, now=_JWT_NOW)
-        assert isinstance(first, accounts_module.RefreshTokenResponse)
+        assert isinstance(first, accounts_module.TokenPair)
 
         async def get_by_id(_account_id: str) -> None:
             return None
@@ -12388,7 +12388,7 @@ async def test_refresh_rotate_sanitizes_invalid_and_unavailable_composition(  # 
 async def test_refresh_revoke_maps_store_and_clock_failures_to_unavailable() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
-    assert isinstance(initial, accounts_module.RefreshTokenResponse)
+    assert isinstance(initial, accounts_module.TokenPair)
 
     async def revoke_token(_token_id: str, _token_digest: bytes, *, event: accounts_module.SecurityEvent) -> bool:
         del event
@@ -12465,7 +12465,7 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
             return None
 
     token = accounts_module.RefreshTokenCodec(pepper=b"p" * 32, entropy=_RefreshEntropy()).issue().refresh_token
-    refresh_response = accounts_module.RefreshTokenResponse(
+    refresh_response = accounts_module.TokenPair(
         access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
         refresh_token=token,
         expires_in=600,
@@ -12759,7 +12759,7 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
     authentication = SimpleNamespace(account_id="account-1", session_id="session-old")
     plan = SimpleNamespace(prior_session_id="session-old", command=object())
     changed = accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2)
-    refresh_response = accounts_module.RefreshTokenResponse(
+    refresh_response = accounts_module.TokenPair(
         access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
         refresh_token=accounts_module
         .RefreshTokenCodec(pepper=b"p" * 32, entropy=_RefreshEntropy())

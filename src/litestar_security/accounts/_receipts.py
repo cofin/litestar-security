@@ -28,7 +28,7 @@ from litestar_security.accounts._internal import (
     valid_identifier,
     valid_security_epoch,
 )
-from litestar_security.accounts._refresh_tokens import RefreshFamilyContext, RefreshTokenResponse
+from litestar_security.accounts._refresh_tokens import RefreshFamilyContext, TokenPair
 from litestar_security.authentication import InvalidCredentials
 
 __all__ = ("RefreshReceiptContext", "RefreshReceiptKey", "RefreshReceiptReplay", "RefreshReceiptSealer")
@@ -126,7 +126,7 @@ class RefreshReceiptSealer:
         object.__setattr__(self, "retained_keys", tuple(self.retained_keys))
         object.__setattr__(self, "_keys", MappingProxyType({key.key_id: key for key in keys}))
 
-    def seal(self, response: RefreshTokenResponse, context: RefreshReceiptContext, *, expires_at: datetime) -> bytes:
+    def seal(self, response: TokenPair, context: RefreshReceiptContext, *, expires_at: datetime) -> bytes:
         """Seal one exact response and authenticate all replay decision fields.
 
         The replay decision fields are authenticated as associated data, so a
@@ -168,7 +168,7 @@ class RefreshReceiptSealer:
 
     def unseal(  # noqa: PLR0911 - each malformed receipt boundary fails closed explicitly
         self, sealed_receipt: bytes, context: RefreshReceiptContext, *, now: datetime
-    ) -> RefreshTokenResponse | InvalidCredentials:
+    ) -> TokenPair | InvalidCredentials:
         """Recover one response only while its bound receipt and key remain valid.
 
         Args:
@@ -209,7 +209,7 @@ class RefreshReceiptSealer:
                 or expires_in.__class__ is not int
             ):
                 return InvalidCredentials()
-            return RefreshTokenResponse(
+            return TokenPair(
                 access_token=cast("str", access_token),  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
                 refresh_token=cast("str", refresh_token),  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
                 expires_in=cast("int", expires_in),  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not

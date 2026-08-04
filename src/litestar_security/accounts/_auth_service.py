@@ -30,7 +30,7 @@ from litestar_security.accounts._records import (
 )
 from litestar_security.accounts._recovery import PasswordChangeService, RecoveryTokenService
 from litestar_security.accounts._refresh import RefreshTokenService
-from litestar_security.accounts._refresh_tokens import RefreshTokenResponse
+from litestar_security.accounts._refresh_tokens import TokenPair
 from litestar_security.accounts._registration import RegistrationService, VerificationTokenService
 from litestar_security.accounts._sessions import NativeSessionAuth, SessionAuthentication
 from litestar_security.accounts._stores import LocalAccountCapabilities
@@ -243,7 +243,7 @@ class LocalAuthService(Generic[UserT]):
 
     async def token_login(
         self, request: Request[Any, Any, Any], credentials: LocalCredentials
-    ) -> RefreshTokenResponse | MFARequired | RateLimited | InvalidCredentials | VerificationUnavailable:
+    ) -> TokenPair | MFARequired | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Authenticate a password and issue one access/refresh pair.
 
         Args:
@@ -282,7 +282,7 @@ class LocalAuthService(Generic[UserT]):
         *,
         transport: str | None,
         evidence: AuthenticationEvidence,
-    ) -> LocalAccount | RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccount | TokenPair | InvalidCredentials | VerificationUnavailable:
         """Establish a configured local transport after verified passkey evidence.
 
         Args:
@@ -305,7 +305,7 @@ class LocalAuthService(Generic[UserT]):
         transport: str | None,
         evidence: AuthenticationEvidence,
         expected_security_epoch: int | None = None,
-    ) -> LocalAccount | RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccount | TokenPair | InvalidCredentials | VerificationUnavailable:
         """Establish a local transport after externally verified authentication.
 
         Args:
@@ -359,7 +359,7 @@ class LocalAuthService(Generic[UserT]):
         code: str,
         method_id: str | None = None,
         transport: str | None = None,
-    ) -> LocalAccount | RefreshTokenResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccount | TokenPair | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Complete an MFA-gated password login through the normal issuer path.
 
         The rate limit, authoritative account read, and atomic challenge consume

@@ -80,7 +80,7 @@ from litestar_security.accounts._refresh_tokens import (
     RefreshTokenCodec,
     RefreshTokenIssue,
     RefreshTokenProof,
-    RefreshTokenResponse,
+    TokenPair,
 )
 from litestar_security.accounts._sessions import (
     CreateSessionCommand,
@@ -306,7 +306,6 @@ __all__ = (
     "RefreshTokenFamilyStore",
     "RefreshTokenIssue",
     "RefreshTokenProof",
-    "RefreshTokenResponse",
     "RefreshTokenService",
     "RegistrationCommand",
     "RegistrationMode",
@@ -349,6 +348,7 @@ __all__ = (
     "TOTPProvisioningGrant",
     "TOTPVerification",
     "TokenIssue",
+    "TokenPair",
     "TokenPurpose",
     "UnlimitedRateLimiter",
     "UserVerification",
