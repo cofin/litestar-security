@@ -14,6 +14,7 @@ from litestar_security.websocket._config import WebSocketCloseCodes, WebSocketSe
 from litestar_security.websocket._connect_tokens import (
     InMemoryWebSocketConnectTokenStore,
     IssuedWebSocketConnectToken,
+    WebSocketConnectTokenIssuer,
     WebSocketConnectTokenRecord,
     WebSocketConnectTokenService,
     WebSocketConnectTokenStore,
@@ -34,6 +35,7 @@ __all__ = (
     "IssuedWebSocketConnectToken",
     "WebSocketBinding",
     "WebSocketCloseCodes",
+    "WebSocketConnectTokenIssuer",
     "WebSocketConnectTokenRecord",
     "WebSocketConnectTokenService",
     "WebSocketConnectTokenStore",

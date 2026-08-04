@@ -7,15 +7,20 @@ from types import SimpleNamespace
 
 import anyio
 import pytest
+from litestar.enums import HttpMethod
 from litestar.exceptions import (
     ImproperlyConfiguredException,
     PermissionDeniedException,
     ServiceUnavailableException,
     WebSocketException,
 )
+from litestar.handlers import WebsocketRouteHandler
+from litestar.handlers.http_handlers import HTTPRouteHandler
 
 import litestar_security.websocket as websocket_module
 import litestar_security.websocket._connect_tokens as connect_tokens_module
+from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
+from litestar_security.authentication import SecurityRuntimePlan
 from litestar_security.context import CredentialRestrictions, NullSessionHandle, Principal, SecurityContext
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,
@@ -23,6 +28,7 @@ from litestar_security.websocket import (
     WebSocketBinding,
     WebSocketCloseCodes,
     WebSocketCloseCoordinator,
+    WebSocketConnectTokenIssuer,
     WebSocketConnectTokenRecord,
     WebSocketConnectTokenService,
     WebSocketHandshake,
@@ -562,6 +568,57 @@ def test_websocket_policy_fingerprint_is_stable_for_default_shape() -> None:
         alternatives=((SimpleNamespace(name="bearer", scopes=("reports:read",)),),),
     )
     assert websocket_module.websocket_policy_fingerprint(plan) == websocket_module.websocket_policy_fingerprint(plan)
+
+
+@pytest.mark.anyio
+async def test_connect_token_issuer_mints_by_route_name_and_rejects_invalid_targets() -> None:
+    class App:
+        handlers: dict[str, object]
+
+        def get_handler_index_by_name(self, name: str) -> object | None:
+            return self.handlers.get(name)
+
+    plan = SecurityRuntimePlan(required=True, participant_names=frozenset({"bearer"}))
+    websocket_handler = WebsocketRouteHandler(name="reports.socket", opt={RUNTIME_PLAN_OPT_KEY: plan})
+    http_handler = HTTPRouteHandler(name="reports.http", http_method=HttpMethod.GET)
+    missing_plan_handler = WebsocketRouteHandler(name="reports.missing-plan")
+    mismatch_handler = WebsocketRouteHandler(name="reports.mismatch", opt={RUNTIME_PLAN_OPT_KEY: object()})
+    wrong_name_handler = WebsocketRouteHandler(name="reports.actual", opt={RUNTIME_PLAN_OPT_KEY: plan})
+    app = App()
+    app.handlers = {
+        "reports.socket": {"handler": websocket_handler},
+        "reports.http": {"handler": http_handler},
+        "reports.missing-plan": {"handler": missing_plan_handler},
+        "reports.mismatch": {"handler": mismatch_handler},
+        "reports.alias": {"handler": wrong_name_handler},
+    }
+    store = InMemoryWebSocketConnectTokenStore()
+    issuer = WebSocketConnectTokenIssuer(app=app, store=store, clock=lambda: _NOW)  # type: ignore[arg-type]
+    principal = Principal(id="subject-1")
+    context = SecurityContext(session=NullSessionHandle())
+    origin = "https://trusted.example"
+
+    with pytest.raises(ImproperlyConfiguredException, match="does not resolve"):
+        await issuer.issue("missing", principal=principal, context=context, origin=origin)
+    with pytest.raises(ImproperlyConfiguredException, match="does not resolve"):
+        await issuer.issue("reports.http", principal=principal, context=context, origin=origin)
+    with pytest.raises(ImproperlyConfiguredException, match="has no compiled"):
+        await issuer.issue("reports.missing-plan", principal=principal, context=context, origin=origin)
+    with pytest.raises(ImproperlyConfiguredException, match="has an invalid"):
+        await issuer.issue("reports.mismatch", principal=principal, context=context, origin=origin)
+    with pytest.raises(ImproperlyConfiguredException, match="does not match"):
+        await issuer.issue("reports.alias", principal=principal, context=context, origin=origin)
+
+    issued = await issuer.issue("reports.socket", principal=principal, context=context, origin=origin)
+    consumed = await WebSocketConnectTokenService(store=store, clock=lambda: _NOW).consume(
+        issued.value,
+        route_name="reports.socket",
+        origin="https://trusted.example",
+        policy_fingerprint=websocket_module.websocket_policy_fingerprint(plan),
+    )
+
+    assert consumed is not None
+    assert consumed.subject_id == "subject-1"
 
 
 @pytest.mark.anyio

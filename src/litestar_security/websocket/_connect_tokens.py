@@ -11,18 +11,26 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import compare_digest
+from importlib import import_module
 from secrets import token_bytes
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from anyio import Lock
 from litestar.exceptions import ImproperlyConfiguredException
+from litestar.handlers import WebsocketRouteHandler
 
+from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
 from litestar_security.context import CredentialRestrictions, Principal, SecurityContext
 from litestar_security.websocket._internal import aware_utc, canonical_origin, strict_text
+from litestar_security.websocket._lifecycle import websocket_policy_fingerprint
+
+if TYPE_CHECKING:
+    from litestar.app import Litestar
 
 __all__ = (
     "InMemoryWebSocketConnectTokenStore",
     "IssuedWebSocketConnectToken",
+    "WebSocketConnectTokenIssuer",
     "WebSocketConnectTokenRecord",
     "WebSocketConnectTokenService",
     "WebSocketConnectTokenStore",
@@ -249,6 +257,78 @@ class WebSocketConnectTokenService:
             message = "WebSocket connect token entropy is unavailable"
             raise ValueError(message)
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class WebSocketConnectTokenIssuer:
+    """Mint one-time WebSocket connect tokens by route name."""
+
+    app: "Litestar" = field(repr=False)
+    store: WebSocketConnectTokenStore
+    clock: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc), repr=False, compare=False)
+    ttl: timedelta = timedelta(seconds=30)
+
+    async def issue(  # noqa: PLR0913 - every security binding remains an explicit keyword
+        self,
+        route_name: str,
+        *,
+        principal: Principal[Any],
+        context: SecurityContext,
+        origin: str,
+        restrictions: CredentialRestrictions | None = None,
+        ttl: timedelta | None = None,
+    ) -> IssuedWebSocketConnectToken:
+        """Resolve one route name to its compiled plan and mint a connect token.
+
+        Args:
+            route_name: The registered Litestar route handler name.
+            principal: The authenticated principal minting the connect token.
+            context: The current request's security context.
+            origin: The exact canonical Origin the connect token is bound to.
+            restrictions: Optional narrowed authorization restrictions.
+            ttl: Optional override for the configured connect token lifetime.
+
+        Returns:
+            The reveal-once issued connect token.
+
+        Raises:
+            ImproperlyConfiguredException: If the route name does not resolve to
+                a registered WebSocket handler with a compiled runtime plan.
+        """
+        index = self.app.get_handler_index_by_name(route_name)
+        if index is None:
+            message = f"WebSocket connect token route {route_name!r} does not resolve to a registered WebSocket handler"
+            raise ImproperlyConfiguredException(detail=message)
+        handler = index["handler"]
+        if not isinstance(handler, WebsocketRouteHandler):
+            message = f"WebSocket connect token route {route_name!r} does not resolve to a registered WebSocket handler"
+            raise ImproperlyConfiguredException(detail=message)
+        if handler.name != route_name:
+            message = f"WebSocket connect token route {route_name!r} does not match its registered handler name"
+            raise ImproperlyConfiguredException(detail=message)
+        plan = handler.opt.get(RUNTIME_PLAN_OPT_KEY)
+        if plan is None:
+            message = f"WebSocket connect token route {route_name!r} has no compiled security runtime plan"
+            raise ImproperlyConfiguredException(detail=message)
+        runtime_plan_type = cast(
+            "type[object]", import_module("litestar_security.authentication").SecurityRuntimePlan
+        )
+        if not isinstance(plan, runtime_plan_type):
+            message = f"WebSocket connect token route {route_name!r} has an invalid compiled security runtime plan"
+            raise ImproperlyConfiguredException(detail=message)
+        service = WebSocketConnectTokenService(
+            store=self.store,
+            clock=self.clock,
+            ttl=ttl if ttl is not None else self.ttl,
+        )
+        return await service.issue(
+            principal=principal,
+            context=context,
+            route_name=route_name,
+            origin=origin,
+            policy_fingerprint=websocket_policy_fingerprint(plan),
+            restrictions=restrictions,
+        )
 
 
 async def issue_websocket_connect_token(  # noqa: PLR0913 - the helper makes every connect token binding explicit

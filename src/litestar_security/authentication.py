@@ -23,6 +23,7 @@ from litestar.routes import HTTPRoute
 from litestar.types import ASGIApp, HTTPScope, Message, Receive, Scope, Send
 from typing_extensions import Self
 
+from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -106,9 +107,6 @@ _AUTHENTICATION_UNAVAILABLE = "Authentication service unavailable"
 
 
 _LITESTAR_INTERNAL_ERROR_CLOSE = 4500
-
-
-RUNTIME_PLAN_OPT_KEY = "litestar_security_plan"
 
 
 AUTH_POLICY_OPT_KEY = "auth"

@@ -22,10 +22,10 @@ from litestar.openapi.spec import Components, Reference, SecurityRequirement, Se
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 from litestar.types import Empty
 
+from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
 from litestar_security.authentication import (
     AUTH_POLICY_OPT_KEY,
     CSRF_REQUIRED_OPT_KEY,
-    RUNTIME_PLAN_OPT_KEY,
     AuthenticationPolicy,
     AuthenticationRegistry,
     ExcludePolicy,
