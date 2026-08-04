@@ -128,6 +128,7 @@ from litestar_security.providers.jwt import _claims as jwt_claims
 from litestar_security.providers.jwt import _keyring as jwt_keyring
 from litestar_security.providers.jwt import _workers as jwt_workers
 from litestar_security.providers.oauth import MemoryOAuthTransactionStore, OAuthOperation, OAuthTransaction, SecretStr
+from litestar_security.providers.oauth import _transactions as oauth_transactions_module
 from litestar_security.providers.oidc import DiscoveryPolicy, OIDCDiscoveryClient, OIDCDiscoveryError, OIDCMetadata
 from litestar_security.providers.oidc import _discovery as oidc_discovery
 
@@ -13734,3 +13735,79 @@ async def test_aesgcm_oauth_transaction_protector_round_trips_bound_transaction_
         )
         == transaction
     )
+
+
+@pytest.mark.anyio
+async def test_aesgcm_secret_protectors_reject_invalid_configuration_entropy_and_envelopes() -> None:
+    """Versioned AES-GCM protectors reject malformed material before decrypting it."""
+    mfa_key = accounts_module.SecretProtectorKey("v1", b"m" * 32)
+    oauth_key = OAuthTransactionProtectorKey("v1", b"o" * 32)
+    mfa_protector = accounts_module.AESGCMSecretProtector(active_key=mfa_key)
+    protected_mfa_secret = await mfa_protector.protect(b"secret", associated_data=b"bound")
+
+    assert mfa_protector.active_key_version == "v1"
+    assert await mfa_protector.unprotect(protected_mfa_secret, associated_data=b"bound") == b"secret"
+    with pytest.raises(InvalidTag):
+        await mfa_protector.unprotect(protected_mfa_secret, associated_data=b"other-binding")
+
+    with pytest.raises(ImproperlyConfiguredException, match="unique keys"):
+        accounts_module.AESGCMSecretProtector(active_key=mfa_key, retained_keys=(mfa_key,))
+    with pytest.raises(ImproperlyConfiguredException, match="unique keys"):
+        AESGCMOAuthTransactionProtector(active_key=oauth_key, retained_keys=(oauth_key,))
+
+    for protector in (
+        accounts_module.AESGCMSecretProtector(active_key=mfa_key, entropy=lambda _size: b"short"),
+        AESGCMOAuthTransactionProtector(active_key=oauth_key, entropy=lambda _size: bytearray(12)),
+    ):
+        with pytest.raises(ValueError, match="entropy"):
+            await protector.protect(b"secret", associated_data=b"bound")
+
+    for protector, protected in (
+        (
+            accounts_module.AESGCMSecretProtector(active_key=mfa_key),
+            accounts_module.ProtectedSecret(ciphertext=b"x" * 12, key_version="unknown"),
+        ),
+        (
+            AESGCMOAuthTransactionProtector(active_key=oauth_key),
+            oauth_transactions_module.ProtectedOAuthSecret(ciphertext=b"x" * 12, key_version="unknown"),
+        ),
+        (
+            accounts_module.AESGCMSecretProtector(active_key=mfa_key),
+            accounts_module.ProtectedSecret(ciphertext=b"x" * 12, key_version="v1"),
+        ),
+        (
+            AESGCMOAuthTransactionProtector(active_key=oauth_key),
+            oauth_transactions_module.ProtectedOAuthSecret(ciphertext=b"x" * 12, key_version="v1"),
+        ),
+    ):
+        with pytest.raises(ValueError, match="envelope"):
+            await protector.unprotect(protected, associated_data=b"bound")
+
+
+@pytest.mark.parametrize(
+    ("key_version", "key"),
+    [("", b"o" * 32), ("v1", b"o" * 31), ("v1", bytearray(b"o" * 32))],
+)
+def test_oauth_transaction_protector_key_rejects_invalid_key_material(key_version: str, key: object) -> None:
+    """OAuth transaction encryption only accepts exact versioned AES-256 keys."""
+    with pytest.raises(ImproperlyConfiguredException, match="32-byte key"):
+        OAuthTransactionProtectorKey(key_version, key)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("key_version", "key"),
+    [("", b"m" * 32), ("v1", b"m" * 31), ("v1", bytearray(b"m" * 32))],
+)
+def test_mfa_secret_protector_key_rejects_invalid_key_material(key_version: str, key: object) -> None:
+    """MFA secret encryption only accepts exact versioned AES-256 keys."""
+    with pytest.raises(ImproperlyConfiguredException, match="32-byte key"):
+        accounts_module.SecretProtectorKey(key_version, key)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("account_id", ["", " ", "account\x00id"])
+def test_recovery_code_digest_rejects_invalid_account_binding(account_id: str) -> None:
+    """Recovery-code HMACs never accept blank or NUL-delimited account bindings."""
+    pepper = accounts_module.RecoveryCodePepper(key_version="v1", key=b"p" * 32)
+
+    with pytest.raises(ValueError):  # noqa: PT011 - private helper intentionally raises a bare ValueError
+        mfa_module._recovery_digest(pepper, account_id, "rc_v1_00000000000000000000000000000001")  # noqa: SLF001
