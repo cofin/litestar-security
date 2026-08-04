@@ -7,6 +7,30 @@ Install Litestar Security:
 
    pip install litestar-security
 
+Install an extra only for the optional capability your application uses:
+
+.. list-table:: Optional installation extras
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Install
+     - Enables
+   * - ``pip install 'litestar-security[mfa]'``
+     - TOTP, recovery codes, and step-up authentication. This also includes the
+       reference ``SecretProtector`` implementation for protecting MFA secrets.
+   * - ``pip install 'litestar-security[passkeys]'``
+     - WebAuthn passkeys.
+   * - ``pip install 'litestar-security[oauth]'``
+     - The OAuth/OIDC provider tree. This is a capability marker and does not
+       add another distribution dependency.
+   * - ``pip install 'litestar-security[argon2]'``
+     - Argon2-backed local-password authentication.
+   * - ``pip install 'litestar-security[all]'``
+     - Every optional capability above.
+
+JWT and JWKS validation, API-key authentication, IAP verification, and OIDC
+token verification are part of the core installation and need no extra.
+
 Add the plugin and mark public routes explicitly:
 
 .. code-block:: python
