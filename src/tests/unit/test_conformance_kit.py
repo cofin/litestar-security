@@ -23,6 +23,7 @@ from litestar_security.accounts import (
     LoginMethod,
     MFALoginChallenge,
     NotificationCommand,
+    PasskeyCredential,
     PasswordChangeResult,
     PasswordChangeStatus,
     PasswordCredentialState,
@@ -55,6 +56,7 @@ from litestar_security.accounts import (
     StepUpRecord,
     StoreRateLimiter,
     TokenIssue,
+    TOTPMethod,
     WebAuthnChallenge,
 )
 from litestar_security.providers.api_key import APIKeyRecord, APIKeyStore
@@ -253,8 +255,18 @@ class _AlwaysConsumeRecoveryStore(testing_module.InMemoryMFAStore):
 class _RejectingMFAActivationStore(testing_module.InMemoryMFAStore):
     """Reject an otherwise valid fresh TOTP activation."""
 
-    async def activate_totp(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
+    async def activate_totp(  # noqa: PLR0913 - mirrors the exact atomic public protocol
+        self,
+        account_id: str,
+        enrollment_id: str,
+        *,
+        accepted_counter: int,
+        login_method: LoginMethod,
+        event: SecurityEvent,
+        now: datetime,
+    ) -> TOTPMethod | None:
+        del account_id, enrollment_id, accepted_counter, login_method, event, now
+        return None
 
 
 class _EqualCounterMFAStore(testing_module.InMemoryMFAStore):
@@ -891,8 +903,10 @@ class _BrokenPasskeyCloneStateStore(testing_module.InMemoryPasskeyStore):
 class _RejectingPasskeyStore(testing_module.InMemoryPasskeyStore):
     """Reject an otherwise fresh passkey credential."""
 
-    async def add_credential(self, *args: object, **kwargs: object) -> bool:
-        del args, kwargs
+    async def add_credential(
+        self, credential: PasskeyCredential, *, login_method: LoginMethod, event: SecurityEvent
+    ) -> bool:
+        del credential, login_method, event
         return False
 
 
