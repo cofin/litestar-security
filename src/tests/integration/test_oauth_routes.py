@@ -228,18 +228,12 @@ class StepUpAuthorizer:
 
 
 def step_up_oauth_authorizer(
-    *,
-    epochs: dict[str, int | None],
-    transport_binding: bytes = b"transport-binding",
+    *, epochs: dict[str, int | None], transport_binding: bytes = b"transport-binding"
 ) -> tuple[StepUpOAuthAuthorizer, StepUpService]:
     async def current_epoch(account_id: str) -> int | None:
         return epochs.get(account_id)
 
-    service = StepUpService(
-        InMemoryStepUpStore(),
-        clock=lambda: NOW,
-        entropy=lambda _size: b"s" * 32,
-    )
+    service = StepUpService(InMemoryStepUpStore(), clock=lambda: NOW, entropy=lambda _size: b"s" * 32)
     return (
         StepUpOAuthAuthorizer(
             service=service,
@@ -260,10 +254,7 @@ async def issue_step_up_grant(
         purpose=purpose,
         transport_binding=transport_binding,
         evidence=AuthenticationEvidence(
-            mechanism="totp",
-            slot="mfa",
-            authenticated_at=NOW,
-            methods=frozenset({"totp"}),
+            mechanism="totp", slot="mfa", authenticated_at=NOW, methods=frozenset({"totp"})
         ),
     )
     assert isinstance(grant, StepUpGrant)
@@ -387,19 +378,14 @@ async def test_step_up_oauth_authorizer_consumes_one_grant_once() -> None:
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("issued_purpose", "requested_purpose", "issued_binding"),
-    [
-        ("oauth-link", "oauth-unlink", b"transport-binding"),
-        ("oauth-link", "oauth-link", b"other-binding"),
-    ],
+    [("oauth-link", "oauth-unlink", b"transport-binding"), ("oauth-link", "oauth-link", b"other-binding")],
 )
 async def test_step_up_oauth_authorizer_rejects_wrong_purpose_or_transport_binding(
     issued_purpose: str, requested_purpose: str, issued_binding: bytes
 ) -> None:
     authorizer, service = step_up_oauth_authorizer(epochs={"account-1": 2})
     request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {})())
-    grant = await issue_step_up_grant(
-        service, epoch=2, purpose=issued_purpose, transport_binding=issued_binding
-    )
+    grant = await issue_step_up_grant(service, epoch=2, purpose=issued_purpose, transport_binding=issued_binding)
 
     with pytest.raises(NotAuthorizedException, match="Fresh step-up") as denied:
         await authorizer.authorize(grant=grant, account_id="account-1", purpose=requested_purpose, request=request)
