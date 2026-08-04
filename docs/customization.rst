@@ -7,6 +7,80 @@ protocols needed by the selected feature, then run the matching helpers from
 provider transports are references for tests and examples, not production
 persistence.
 
+Verify your backend
+===================
+
+Pass a fresh, isolated instance of each application-owned atomic port to its
+matching conformance helper. The in-memory backend is a deterministic reference
+for the store contracts; it is not a production persistence implementation.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 42 28
+
+   * - Protocol
+     - Conformance helper
+     - Reference attribute
+   * - ``APIKeyStore``
+     - :func:`~litestar_security.testing.assert_api_key_store_conformance`
+     - ``InMemorySecurityBackend.api_keys``
+   * - ``LocalAccountCapabilities``
+     - :func:`~litestar_security.testing.assert_local_account_store_conformance`
+     - ``InMemorySecurityBackend.accounts``
+   * - ``MFALoginChallengeStore``
+     - :func:`~litestar_security.testing.assert_mfa_login_challenge_store_conformance`
+     - ``InMemorySecurityBackend.mfa_login``
+   * - ``MFAStore``
+     - :func:`~litestar_security.testing.assert_mfa_store_conformance`
+     - ``InMemorySecurityBackend.mfa``
+   * - ``OAuthAccountStore``
+     - :func:`~litestar_security.testing.assert_oauth_account_store_conformance`
+     - ``InMemorySecurityBackend.oauth_accounts``
+   * - ``OAuthTransactionStore``
+     - :func:`~litestar_security.testing.assert_oauth_transaction_store_conformance`
+     - ``InMemorySecurityBackend.oauth_transactions``
+   * - ``PasskeyStore``
+     - :func:`~litestar_security.testing.assert_passkey_store_conformance`
+     - ``InMemorySecurityBackend.passkeys``
+   * - ``RefreshTokenFamilyStore``
+     - :func:`~litestar_security.testing.assert_refresh_family_store_conformance`
+     - ``InMemorySecurityBackend.accounts``
+   * - ``SessionRegistry``
+     - :func:`~litestar_security.testing.assert_session_registry_conformance`
+     - ``InMemorySecurityBackend.accounts``
+   * - ``WebAuthnChallengeStore``
+     - :func:`~litestar_security.testing.assert_webauthn_challenge_store_conformance`
+     - ``InMemorySecurityBackend.challenges``
+   * - ``WebSocketConnectTokenStore``
+     - :func:`~litestar_security.testing.assert_websocket_connect_token_store_conformance`
+     - ``InMemorySecurityBackend.websocket_connect_tokens``
+
+For example, supply only the capabilities that the application implements. A
+factory must return a new store each time so the isolation checks can detect
+shared state:
+
+.. code-block:: python
+
+   from litestar_security.testing import (
+       InMemoryMFAStore,
+       InMemorySecurityBackend,
+       StoreConformanceFactories,
+       assert_security_backend_conformance,
+   )
+
+
+   async def verify_backend() -> None:
+       await assert_security_backend_conformance(
+           StoreConformanceFactories(
+               api_key_store=lambda: InMemorySecurityBackend().api_keys,
+               mfa_store=InMemoryMFAStore,
+           )
+       )
+
+Rate limiters use the standalone
+:func:`~litestar_security.testing.assert_rate_limiter_conformance` helper,
+because their factory is not a security-store factory.
+
 Async implementations stay on the event loop. Wrap a complete synchronous port
 in ``BlockingIntegration`` so the runtime can use the configured bounded worker
 budget. Do not wrap individual calls or perform hidden blocking I/O in async

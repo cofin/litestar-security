@@ -18,6 +18,15 @@ Added
   completion is required. ``MFALoginChallengeStore`` and the testing-only
   ``InMemoryMFALoginChallengeStore`` provide the atomic, digest-only,
   reveal-once challenge boundary.
+* ``InMemoryLocalAccountStore`` and
+  ``InMemorySecurityBackend.accounts`` provide a deterministic reference for
+  local-account, native-session, refresh-family, and registration ports.
+* ``litestar_security.testing`` now exports conformance helpers for API-key,
+  local-account, MFA-login challenge, MFA, OAuth account and transaction,
+  passkey, refresh-family, session-registry, WebAuthn-challenge, WebSocket
+  connect-token, and rate-limiter integrations. Use
+  ``StoreConformanceFactories`` with
+  ``assert_security_backend_conformance`` to run the selected store scenarios.
 
 0.2.0
 -----
