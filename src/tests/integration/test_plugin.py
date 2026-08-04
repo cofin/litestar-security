@@ -60,11 +60,11 @@ from litestar_security.accounts import (
     LocalAuth,
     LocalAuthSecrets,
     LocalCredentials,
-    PasskeySummary,
+    PasskeyRecord,
     PasswordReauthenticationProof,
     ProtectedSecret,
     PurposeTokenCodec,
-    RecoveryCodes,
+    RecoveryCodeGrant,
     RefreshReceiptKey,
     RefreshReceiptSealer,
     RefreshTokenCodec,
@@ -73,15 +73,15 @@ from litestar_security.accounts import (
     RevokeLoginMethodStatus,
     SessionBindingConfig,
     SessionSummary,
-    StepUpGrant,
-    TOTPEnrollment,
+    StepUpCredential,
     TOTPMethod,
     TOTPPolicy,
+    TOTPProvisioningGrant,
     WebAuthnOptions,
     build_mfa_routes,
 )
 from litestar_security.accounts._mfa_login import MFARequired
-from litestar_security.accounts._records import LocalAccount
+from litestar_security.accounts._records import LocalAccountRecord
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -466,7 +466,7 @@ class _RouteMFAService:
         del account_id, label
         if self.failure == "enroll":
             return VerificationUnavailable()
-        return TOTPEnrollment(
+        return TOTPProvisioningGrant(
             enrollment_id="enrollment-1",
             method_id="method-1",
             provisioning_uri="otpauth://totp/Example?secret=SECRET",
@@ -492,13 +492,13 @@ class _RouteMFAService:
             return InvalidCredentials()
         if self.failure == "recovery":
             return VerificationUnavailable()
-        return RecoveryCodes(codes=("rc_v1_00000000000000000000000000000000",))
+        return RecoveryCodeGrant(codes=("rc_v1_00000000000000000000000000000000",))
 
     async def generate_recovery_codes(self, account_id: str) -> object:
         del account_id
         if self.failure == "recovery":
             return VerificationUnavailable()
-        return RecoveryCodes(codes=("rc_v1_00000000000000000000000000000000",))
+        return RecoveryCodeGrant(codes=("rc_v1_00000000000000000000000000000000",))
 
     async def remove_totp_method(self, account_id: str, method_id: str) -> object:
         del account_id, method_id
@@ -539,7 +539,7 @@ class _RoutePasskeyService:
         if self.failure == "list":
             return VerificationUnavailable()
         return (
-            PasskeySummary(
+            PasskeyRecord(
                 credential_id="Y3JlZGVudGlhbA",
                 display_name="Laptop",
                 backup_eligible=True,
@@ -564,7 +564,7 @@ class _RouteStepUpService:
         del kwargs
         if self.failure == "issue":
             return InvalidCredentials()
-        return StepUpGrant(
+        return StepUpCredential(
             token="step-up-grant",  # noqa: S106 - deterministic opaque fixture token
             purpose="settings",
             expires_at=datetime(2026, 7, 27, 0, 5, tzinfo=timezone.utc),
@@ -1599,7 +1599,7 @@ async def test_plugin_binds_login_mfa_before_local_route_caching_and_gates_passw
     assert local_auth.local_auth_service.mfa_login is local_auth.mfa_login
     assert local_auth.build_route_handlers() == ()
 
-    account = LocalAccount(
+    account = LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -1609,7 +1609,7 @@ async def test_plugin_binds_login_mfa_before_local_route_caching_and_gates_passw
     )
 
     class PasswordLogin:
-        async def authenticate(self, *_args: object, **_kwargs: object) -> LocalAccount[object]:
+        async def authenticate(self, *_args: object, **_kwargs: object) -> LocalAccountRecord[object]:
             return account
 
     service = replace(local_auth.local_auth_service, password_login=cast("Any", PasswordLogin()))

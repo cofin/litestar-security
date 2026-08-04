@@ -14,7 +14,7 @@ from litestar_security.accounts._purpose_tokens import (
 )
 from litestar_security.accounts._records import (
     ConsumeResult,
-    LocalAccount,
+    LocalAccountRecord,
     LoginMethod,
     PasswordChangeResult,
     PasswordCredentialState,
@@ -92,7 +92,7 @@ class RegistrationPolicy:
 class AccountLookup(Protocol[UserT]):
     """Resolve the minimal application account projection."""
 
-    async def find_for_login(self, normalized_identifier: str) -> "LocalAccount[UserT] | None":
+    async def find_for_login(self, normalized_identifier: str) -> "LocalAccountRecord[UserT] | None":
         """Find an account through an already-normalized identifier.
 
         The caller normalizes before calling, so match the stored value exactly
@@ -106,7 +106,7 @@ class AccountLookup(Protocol[UserT]):
         """
         ...  # pragma: no cover
 
-    async def get_by_id(self, account_id: str) -> "LocalAccount[UserT] | None":
+    async def get_by_id(self, account_id: str) -> "LocalAccountRecord[UserT] | None":
         """Resolve an account by its stable security identifier.
 
         Args:

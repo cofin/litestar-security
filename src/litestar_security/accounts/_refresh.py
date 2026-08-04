@@ -38,7 +38,7 @@ from litestar_security.accounts._operations import (
 )
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, validate_rate_limits
 from litestar_security.accounts._receipts import RefreshReceiptContext, RefreshReceiptReplay, RefreshReceiptSealer
-from litestar_security.accounts._records import LocalAccount, SecurityEvent
+from litestar_security.accounts._records import LocalAccountRecord, SecurityEvent
 from litestar_security.accounts._refresh_tokens import (
     RefreshFamilyContext,
     RefreshRotationStatus,
@@ -431,7 +431,7 @@ class RefreshTokenService(Generic[UserT]):
 
     async def issue(  # noqa: PLR0911 - preserve explicit sanitized outcomes
         self,
-        account: "LocalAccount[UserT]",
+        account: "LocalAccountRecord[UserT]",
         *,
         scopes: AbstractSet[str] = frozenset(),
         evidence: AuthenticationEvidence | None = None,
@@ -451,7 +451,7 @@ class RefreshTokenService(Generic[UserT]):
         """
         account_value: object = account
         if (
-            not isinstance(account_value, LocalAccount)  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
+            not isinstance(account_value, LocalAccountRecord)  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
             or not account_value.active
             or not account_value.verified
         ):
@@ -573,7 +573,7 @@ class RefreshTokenService(Generic[UserT]):
             return VerificationUnavailable()
         if isinstance(prepared, RefreshReceiptReplay):
             account_result = await self._resolve_account(prepared.context)
-            if not isinstance(account_result, LocalAccount):
+            if not isinstance(account_result, LocalAccountRecord):
                 return account_result
             return await self._recover_receipt(
                 prepared.context,
@@ -593,7 +593,7 @@ class RefreshTokenService(Generic[UserT]):
         if prepared.token_expires_at <= rotated_at or prepared.family_expires_at <= rotated_at:
             return InvalidCredentials()
         account_result = await self._resolve_account(prepared)
-        if not isinstance(account_result, LocalAccount):
+        if not isinstance(account_result, LocalAccountRecord):
             return account_result
         account = account_result
         try:
@@ -735,7 +735,7 @@ class RefreshTokenService(Generic[UserT]):
 
     async def _resolve_account(
         self, context: RefreshFamilyContext
-    ) -> "LocalAccount[UserT] | InvalidCredentials | VerificationUnavailable":
+    ) -> "LocalAccountRecord[UserT] | InvalidCredentials | VerificationUnavailable":
 
         try:
             account = await cast("Any", self.accounts).get_by_id(context.account_id)
@@ -743,7 +743,7 @@ class RefreshTokenService(Generic[UserT]):
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
         if (
-            not isinstance(account, LocalAccount)
+            not isinstance(account, LocalAccountRecord)
             or account.account_id != context.account_id
             or not account.active
             or not account.verified
@@ -752,7 +752,7 @@ class RefreshTokenService(Generic[UserT]):
             or current_epoch != context.security_epoch
         ):
             return InvalidCredentials()
-        return cast("LocalAccount[UserT]", account)
+        return cast("LocalAccountRecord[UserT]", account)
 
     async def _fail_closed_receipt(
         self, context: RefreshFamilyContext, occurred_at: datetime

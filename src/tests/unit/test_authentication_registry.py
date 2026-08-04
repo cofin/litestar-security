@@ -206,7 +206,7 @@ async def test_mfa_login_issue_derives_a_domain_separated_digest_and_consumes_on
     )
 
     issued = await service.issue(
-        accounts_module.LocalAccount(
+        accounts_module.LocalAccountRecord(
             account_id="account-1",
             normalized_identifier="person@example.com",
             display_name="Person",
@@ -263,7 +263,7 @@ async def test_mfa_login_rejects_malformed_challenges_and_burns_client_key_misma
         clock=lambda: now,
         entropy=lambda size: b"x" * size,
     )
-    account = accounts_module.LocalAccount(
+    account = accounts_module.LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -396,7 +396,7 @@ def test_mfa_login_service_rejects_incomplete_or_unbounded_dependencies(kwargs: 
 @pytest.mark.anyio
 async def test_mfa_login_service_fail_closes_invalid_inputs_and_collaborators() -> None:
     """Invalid challenge context, entropy, clocks, stores, and factor input never leak through."""
-    account = accounts_module.LocalAccount(
+    account = accounts_module.LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -449,7 +449,7 @@ async def test_mfa_login_service_fail_closes_invalid_inputs_and_collaborators() 
 @pytest.mark.parametrize("failure", ["limit", "account", "consume", "verify"])
 async def test_local_auth_mfa_completion_fail_closes_collaborator_failures(failure: str) -> None:
     """Every completion boundary returns the sanitized unavailable outcome on collaborator faults."""
-    account = accounts_module.LocalAccount(
+    account = accounts_module.LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -520,7 +520,7 @@ async def test_local_auth_mfa_completion_fail_closes_collaborator_failures(failu
         (None, None, InvalidCredentials()),
         (
             None,
-            accounts_module.LocalAccount(
+            accounts_module.LocalAccountRecord(
                 account_id="account-1",
                 normalized_identifier="person@example.com",
                 display_name="Person",
@@ -620,7 +620,7 @@ def test_local_mfa_wire_representations_redact_challenge_and_factor_proof() -> N
 @pytest.mark.anyio
 async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_key() -> None:
     """MFA login burns before factor verification and delegates with merged evidence."""
-    account = accounts_module.LocalAccount(
+    account = accounts_module.LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -640,13 +640,15 @@ async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_ke
     calls: list[str] = []
 
     class PasswordLogin:
-        async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccount[dict[str, str]]:
+        async def authenticate(
+            self, *_args: object, **_kwargs: object
+        ) -> accounts_module.LocalAccountRecord[dict[str, str]]:
             assert _kwargs["client_key"] in {"client-session", "client-token"}
             calls.append("password")
             return account
 
     class Accounts:
-        async def get_by_id(self, account_id: str) -> accounts_module.LocalAccount[dict[str, str]]:
+        async def get_by_id(self, account_id: str) -> accounts_module.LocalAccountRecord[dict[str, str]]:
             assert account_id == account.account_id
             calls.append("account")
             return account
@@ -764,7 +766,7 @@ async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_ke
 @pytest.mark.anyio
 async def test_local_auth_mfa_completion_rejects_an_epoch_advance_before_issuance() -> None:
     """A reset racing completion invalidates the final authoritative account read."""
-    account = accounts_module.LocalAccount(
+    account = accounts_module.LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -784,7 +786,7 @@ async def test_local_auth_mfa_completion_rejects_an_epoch_advance_before_issuanc
     class Accounts:
         reads = 0
 
-        async def get_by_id(self, _account_id: str) -> accounts_module.LocalAccount[object]:
+        async def get_by_id(self, _account_id: str) -> accounts_module.LocalAccountRecord[object]:
             self.reads += 1
             return account if self.reads == 1 else replace(account, security_epoch=account.security_epoch + 1)
 
@@ -836,7 +838,7 @@ async def test_local_auth_mfa_completion_rejects_an_epoch_advance_before_issuanc
 @pytest.mark.anyio
 async def test_local_auth_mfa_completion_burns_a_wrong_factor_before_a_retry() -> None:
     """A failed factor consumes the opaque login challenge, so a later correct code cannot replay it."""
-    account = accounts_module.LocalAccount(
+    account = accounts_module.LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -846,7 +848,7 @@ async def test_local_auth_mfa_completion_burns_a_wrong_factor_before_a_retry() -
     )
 
     class Accounts:
-        async def get_by_id(self, _account_id: str) -> accounts_module.LocalAccount[object]:
+        async def get_by_id(self, _account_id: str) -> accounts_module.LocalAccountRecord[object]:
             return account
 
     class Guard:
@@ -6911,7 +6913,7 @@ class _LifecycleStore:
     def __init__(
         self,
         *,
-        account: "accounts_module.LocalAccount[object] | None" = None,
+        account: "accounts_module.LocalAccountRecord[object] | None" = None,
         registration_status: accounts_module.RegistrationStatus = accounts_module.RegistrationStatus.CREATED,
         consume_status: accounts_module.ConsumeStatus = accounts_module.ConsumeStatus.CONSUMED,
         reset_status: accounts_module.PasswordResetStatus = accounts_module.PasswordResetStatus.RESET,
@@ -6930,10 +6932,10 @@ class _LifecycleStore:
         self.consumptions: list[tuple[str, bytes, datetime, accounts_module.SecurityEvent]] = []
         self.resets: list[tuple[str, bytes, str, datetime, accounts_module.SecurityEvent]] = []
 
-    async def find_for_login(self, _normalized_identifier: str) -> "accounts_module.LocalAccount[object] | None":
+    async def find_for_login(self, _normalized_identifier: str) -> "accounts_module.LocalAccountRecord[object] | None":
         return self.account
 
-    async def get_by_id(self, _account_id: str) -> "accounts_module.LocalAccount[object] | None":
+    async def get_by_id(self, _account_id: str) -> "accounts_module.LocalAccountRecord[object] | None":
         return self.account
 
     async def register(  # noqa: PLR0913
@@ -6950,7 +6952,7 @@ class _LifecycleStore:
         if self.fail:
             raise OSError
         account = (
-            accounts_module.LocalAccount(
+            accounts_module.LocalAccountRecord(
                 account_id="account-1",
                 normalized_identifier="user@example.com",
                 display_name=None,
@@ -7016,8 +7018,8 @@ def test_notification_destination_rejects_control_characters() -> None:
         )
 
 
-def _lifecycle_account(*, active: bool = True, verified: bool = False) -> "accounts_module.LocalAccount[object]":
-    return accounts_module.LocalAccount(
+def _lifecycle_account(*, active: bool = True, verified: bool = False) -> "accounts_module.LocalAccountRecord[object]":
+    return accounts_module.LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="user@example.com",
         display_name="User",
@@ -7195,7 +7197,7 @@ async def test_registration_service_returns_password_policy_without_hash_or_stor
 )
 @pytest.mark.anyio
 async def test_verification_resend_is_generic_across_account_and_store_states(
-    account: "accounts_module.LocalAccount[object] | None",
+    account: "accounts_module.LocalAccountRecord[object] | None",
     *,
     fail: bool,
     issue_count: int,
@@ -7290,7 +7292,7 @@ async def test_verification_consume_maps_atomic_store_failure_to_unavailable() -
 )
 @pytest.mark.anyio
 async def test_recovery_request_is_generic_and_emits_only_atomic_outbox_commands(
-    account: "accounts_module.LocalAccount[object] | None",
+    account: "accounts_module.LocalAccountRecord[object] | None",
     *,
     fail: bool,
     issue_count: int,
@@ -7520,7 +7522,7 @@ def test_lifecycle_services_reject_invalid_shared_configuration(field: str, valu
 
 class _NativeSessionStore:
     def __init__(self) -> None:
-        self.account: accounts_module.LocalAccount[object] | None = accounts_module.LocalAccount(
+        self.account: accounts_module.LocalAccountRecord[object] | None = accounts_module.LocalAccountRecord(
             account_id="account-1",
             normalized_identifier="user@example.com",
             display_name="User",
@@ -7581,7 +7583,7 @@ class _NativeSessionStore:
             raise OSError
         return self.records.get(session_id)
 
-    async def get_by_id(self, account_id: str) -> accounts_module.LocalAccount[object] | None:
+    async def get_by_id(self, account_id: str) -> accounts_module.LocalAccountRecord[object] | None:
         if "account" in self.failures:
             raise OSError
         return self.account if self.account is not None and self.account.account_id == account_id else None
@@ -7796,7 +7798,7 @@ async def test_native_session_remains_authenticated_after_step_up_assurance_expi
         methods=frozenset({"totp"}),
     )
     established = await auth.establish(
-        connection, cast("accounts_module.LocalAccount[object]", store.account), evidence=evidence
+        connection, cast("accounts_module.LocalAccountRecord[object]", store.account), evidence=evidence
     )
     assert isinstance(established, accounts_module.SessionAuthentication)
     token = _queued_binding_token(connection)
@@ -7831,7 +7833,9 @@ async def test_native_session_establish_authenticate_touch_and_rebind_are_fixati
     connection = _native_session_connection(session)
 
     authentication = await auth.establish(
-        connection, cast("accounts_module.LocalAccount[object]", store.account), display_metadata={"device": "browser"}
+        connection,
+        cast("accounts_module.LocalAccountRecord[object]", store.account),
+        display_metadata={"device": "browser"},
     )
 
     assert isinstance(authentication, accounts_module.SessionAuthentication)
@@ -7887,7 +7891,7 @@ async def test_native_session_establish_authenticate_touch_and_rebind_are_fixati
 
     old_session = _copy_native_session(session)
     old_token = token
-    replacement = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    replacement = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
     assert isinstance(replacement, accounts_module.SessionAuthentication)
     assert replacement.session_id != authentication.session_id
     assert store.rebinds[0][0] == authentication.session_id
@@ -7919,7 +7923,7 @@ async def test_native_session_binds_evidence_authentication_time_to_durable_reco
     evidence_authenticated_at = _JWT_NOW - timedelta(minutes=5)
     established = await auth.establish(
         establishing_connection,
-        cast("accounts_module.LocalAccount[object]", store.account),
+        cast("accounts_module.LocalAccountRecord[object]", store.account),
         evidence=AuthenticationEvidence(
             mechanism="local",
             slot="password",
@@ -7987,7 +7991,9 @@ async def test_native_session_transient_verification_failures_preserve_retryable
     session: dict[str, object] = {}
     establishing_connection = _native_session_connection(session)
     assert isinstance(
-        await auth.establish(establishing_connection, cast("accounts_module.LocalAccount[object]", store.account)),
+        await auth.establish(
+            establishing_connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
+        ),
         accounts_module.SessionAuthentication,
     )
     connection = _native_session_connection(session, binding_token=_queued_binding_token(establishing_connection))
@@ -8018,13 +8024,13 @@ async def test_native_session_current_state_mismatch_is_invalid_and_cleared(inva
     session: dict[str, object] = {}
     establishing_connection = _native_session_connection(session)
     established = await auth.establish(
-        establishing_connection, cast("accounts_module.LocalAccount[object]", store.account)
+        establishing_connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
     )
     assert isinstance(established, accounts_module.SessionAuthentication)
     if invalid_state == "missing":
         store.records.clear()
     elif invalid_state in {"disabled", "unverified"}:
-        store.account = accounts_module.LocalAccount(
+        store.account = accounts_module.LocalAccountRecord(
             account_id="account-1",
             normalized_identifier="user@example.com",
             display_name="User",
@@ -8075,7 +8081,7 @@ async def test_native_session_logout_and_account_qualified_revoke_are_explicit_a
     )
     session: dict[str, object] = {}
     connection = _native_session_connection(session)
-    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     other = _NativeSessionStore.record(
         accounts_module.CreateSessionCommand(
@@ -8115,11 +8121,11 @@ async def test_native_session_password_rebind_plan_activates_only_the_committed_
     )
     session: dict[str, object] = {}
     connection = _native_session_connection(session)
-    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     assert auth.current_authentication(connection) == current
 
-    plan = auth.prepare_password_rebind(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    plan = auth.prepare_password_rebind(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
     assert isinstance(plan, accounts_module.SessionRebindPlan)
     assert plan.binding_token not in repr(plan)
     replacement = replace(plan.command, security_epoch=2)
@@ -8143,12 +8149,14 @@ async def test_native_session_password_rebind_plan_activates_only_the_committed_
 
     empty_connection = _native_session_connection({})
     assert isinstance(
-        auth.prepare_password_rebind(empty_connection, cast("accounts_module.LocalAccount[object]", store.account)),
+        auth.prepare_password_rebind(
+            empty_connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
+        ),
         VerificationUnavailable,
     )
     assert isinstance(
         replace(auth, entropy=lambda _size: b"").prepare_password_rebind(
-            connection, cast("accounts_module.LocalAccount[object]", store.account)
+            connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
         ),
         VerificationUnavailable,
     )
@@ -8156,9 +8164,11 @@ async def test_native_session_password_rebind_plan_activates_only_the_committed_
     assert not await auth.activate_password_rebind(connection, cast("Any", object()), 2)
     assert auth.current_authentication(connection) is None
 
-    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
-    failed_plan = auth.prepare_password_rebind(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    failed_plan = auth.prepare_password_rebind(
+        connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
+    )
     assert isinstance(failed_plan, accounts_module.SessionRebindPlan)
 
     async def failing_get(_session_id: str) -> accounts_module.SessionRecord | None:
@@ -8169,16 +8179,18 @@ async def test_native_session_password_rebind_plan_activates_only_the_committed_
     assert not await auth.activate_password_rebind(connection, failed_plan, 2)
     store.get = original_get  # type: ignore[method-assign]
 
-    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
-    missing_plan = auth.prepare_password_rebind(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    missing_plan = auth.prepare_password_rebind(
+        connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
+    )
     assert isinstance(missing_plan, accounts_module.SessionRebindPlan)
     assert not await auth.activate_password_rebind(connection, missing_plan, 2)
 
-    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     mismatch_plan = auth.prepare_password_rebind(
-        connection, cast("accounts_module.LocalAccount[object]", store.account)
+        connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
     )
     assert isinstance(mismatch_plan, accounts_module.SessionRebindPlan)
     store.records[mismatch_plan.command.session_id] = _NativeSessionStore.record(
@@ -8198,7 +8210,7 @@ async def test_native_session_lists_safe_summaries_and_websocket_lifecycle_is_re
     )
     session: dict[str, object] = {}
     connection = _native_session_connection(session)
-    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     summaries = await auth.list_sessions("account-1", current_session_id=current.session_id)
     assert len(summaries) == 1
@@ -8215,7 +8227,7 @@ async def test_native_session_lists_safe_summaries_and_websocket_lifecycle_is_re
     assert isinstance(extraction, PresentedCredential)
     assert isinstance(await auth.authenticate(extraction.value, websocket), Authenticated)
     assert isinstance(
-        await auth.establish(websocket, cast("accounts_module.LocalAccount[object]", store.account)),
+        await auth.establish(websocket, cast("accounts_module.LocalAccountRecord[object]", store.account)),
         VerificationUnavailable,
     )
     assert isinstance(await auth.logout(websocket), VerificationUnavailable)
@@ -8268,7 +8280,7 @@ async def test_native_session_rejects_wrong_credential_and_ignores_touch_failure
     session: dict[str, object] = {}
     establishing_connection = _native_session_connection(session)
     established = await auth.establish(
-        establishing_connection, cast("accounts_module.LocalAccount[object]", store.account)
+        establishing_connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
     )
     assert isinstance(established, accounts_module.SessionAuthentication)
     wrong_connection = _native_session_connection(_copy_native_session(session))
@@ -8317,7 +8329,7 @@ async def test_native_session_establishment_fails_closed_without_revealing_a_coo
     clock: Callable[[], datetime] = valid_clock
     account = store.account
     if case == "invalid_account":
-        account = accounts_module.LocalAccount(
+        account = accounts_module.LocalAccountRecord(
             "account-1", "user@example.com", None, active=False, verified=True, security_epoch=1
         )
     elif case == "create_failure":
@@ -8342,7 +8354,7 @@ async def test_native_session_establishment_fails_closed_without_revealing_a_coo
     session: dict[str, object] = {"anonymous": "value"}
     connection = _native_session_connection(session)
 
-    outcome = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", account))
+    outcome = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", account))
 
     assert isinstance(outcome, VerificationUnavailable)
     assert session == {"anonymous": "value"}
@@ -8362,7 +8374,9 @@ async def test_native_session_rejects_canonical_length_malformed_binding_and_pay
     session: dict[str, object] = {}
     establishing_connection = _native_session_connection(session)
     assert isinstance(
-        await auth.establish(establishing_connection, cast("accounts_module.LocalAccount[object]", store.account)),
+        await auth.establish(
+            establishing_connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
+        ),
         accounts_module.SessionAuthentication,
     )
     token = _queued_binding_token(establishing_connection)
@@ -8397,7 +8411,7 @@ async def test_native_session_logout_and_revoke_report_store_failure_after_local
     )
     session: dict[str, object] = {}
     connection = _native_session_connection(session)
-    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     store.failures.add("revoke")
 
@@ -8420,7 +8434,7 @@ async def test_native_session_current_revoke_clears_browser_state_and_list_filte
     )
     session: dict[str, object] = {}
     connection = _native_session_connection(session)
-    current = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     leaked = accounts_module.SessionRecord(
         session_id="bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4",
@@ -8440,7 +8454,7 @@ async def test_native_session_current_revoke_clears_browser_state_and_list_filte
     assert await auth.revoke_session(connection, "account-1", current.session_id)
     assert "_litestar_security" not in session
 
-    replacement = await auth.establish(connection, cast("accounts_module.LocalAccount[object]", store.account))
+    replacement = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
     assert isinstance(replacement, accounts_module.SessionAuthentication)
     store.records.clear()
     assert not await auth.revoke_session(connection, "account-1", replacement.session_id)
@@ -8463,7 +8477,7 @@ def test_native_session_http_cleanup_without_mutable_native_session_only_expires
 class _LocalAccessStore(_PasswordStore):
     def __init__(
         self,
-        account: accounts_module.LocalAccount[object] | None,
+        account: accounts_module.LocalAccountRecord[object] | None,
         *,
         fail_lookup: bool = False,
         fail_password_read: bool = False,
@@ -8478,13 +8492,13 @@ class _LocalAccessStore(_PasswordStore):
         self.login_lookups: list[str] = []
         self.id_lookups: list[str] = []
 
-    async def find_for_login(self, normalized_identifier: str) -> accounts_module.LocalAccount[object] | None:
+    async def find_for_login(self, normalized_identifier: str) -> accounts_module.LocalAccountRecord[object] | None:
         self.login_lookups.append(normalized_identifier)
         if self.fail_lookup:
             raise OSError
         return self.account
 
-    async def get_by_id(self, account_id: str) -> accounts_module.LocalAccount[object] | None:
+    async def get_by_id(self, account_id: str) -> accounts_module.LocalAccountRecord[object] | None:
         self.id_lookups.append(account_id)
         if self.fail_lookup:
             raise OSError
@@ -8498,8 +8512,8 @@ class _LocalAccessStore(_PasswordStore):
 
 def _local_access_account(
     *, active: bool = True, verified: bool = True, security_epoch: int = 3
-) -> accounts_module.LocalAccount[object]:
-    return accounts_module.LocalAccount(
+) -> accounts_module.LocalAccountRecord[object]:
+    return accounts_module.LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Local Person",
@@ -8513,7 +8527,7 @@ def _local_access_account(
 @pytest.mark.parametrize(
     ("account", "fail_lookup", "fail_password_read", "hasher_unavailable", "expected_type"),
     [
-        (_local_access_account(), False, False, False, accounts_module.LocalAccount),
+        (_local_access_account(), False, False, False, accounts_module.LocalAccountRecord),
         (None, False, False, False, InvalidCredentials),
         (_local_access_account(active=False), False, False, False, InvalidCredentials),
         (_local_access_account(verified=False), False, False, False, InvalidCredentials),
@@ -8524,7 +8538,7 @@ def _local_access_account(
 )
 @pytest.mark.anyio
 async def test_password_login_is_constant_work_and_returns_structured_outcomes(
-    account: accounts_module.LocalAccount[object] | None,
+    account: accounts_module.LocalAccountRecord[object] | None,
     fail_lookup: bool,  # noqa: FBT001
     fail_password_read: bool,  # noqa: FBT001
     hasher_unavailable: bool,  # noqa: FBT001
@@ -8735,7 +8749,7 @@ async def test_token_login_preserves_password_assurance_at_refresh_issuance() ->
     )
 
     class PasswordLogin:
-        async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccount[object]:
+        async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccountRecord[object]:
             return account
 
     class RefreshTokens:
@@ -8774,7 +8788,7 @@ async def test_token_login_fails_closed_when_refresh_issuance_clock_is_unavailab
     account = _local_access_account()
 
     class PasswordLogin:
-        async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccount[object]:
+        async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccountRecord[object]:
             return account
 
     class RefreshTokens:
@@ -8813,7 +8827,7 @@ async def test_token_login_fails_closed_when_refresh_issuance_clock_is_unavailab
 )
 @pytest.mark.anyio
 async def test_local_bearer_identity_resolution_checks_account_and_exact_epoch(
-    account: accounts_module.LocalAccount[object] | None,
+    account: accounts_module.LocalAccountRecord[object] | None,
     fail_lookup: bool,  # noqa: FBT001
     fail_epoch: bool,  # noqa: FBT001
     epoch: int,
@@ -9130,7 +9144,7 @@ async def test_totp_enrollment_uses_rfc_vectors_and_persists_only_protected_secr
 
     enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
 
-    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    assert isinstance(enrollment, accounts_module.TOTPProvisioningGrant)
     assert "secret=" in enrollment.provisioning_uri
     assert secret not in repr(enrollment)
     assert secret.encode() not in repr(store.enrollments).encode()
@@ -9152,7 +9166,7 @@ async def test_totp_counter_advance_allows_one_concurrent_use_and_rejects_replay
     events = _SecurityEvents()
     service.events = events
     enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
-    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    assert isinstance(enrollment, accounts_module.TOTPProvisioningGrant)
     code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", interval=30).at(now)
     assert isinstance(
         await service.activate_totp("account-1", enrollment.enrollment_id, code), accounts_module.TOTPMethod
@@ -9200,7 +9214,7 @@ async def test_totp_drift_account_and_expiry_failures_are_generic() -> None:
     protector = _MFAProtector()
     service = _mfa_service(store, protector, now=now)
     enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
-    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    assert isinstance(enrollment, accounts_module.TOTPProvisioningGrant)
     code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", interval=30).at(now)
 
     assert isinstance(await service.activate_totp("account-2", enrollment.enrollment_id, code), InvalidCredentials)
@@ -9209,7 +9223,7 @@ async def test_totp_drift_account_and_expiry_failures_are_generic() -> None:
 
     service = _mfa_service(store := _MFAStore(), protector := _MFAProtector(), now=now)
     enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
-    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    assert isinstance(enrollment, accounts_module.TOTPProvisioningGrant)
     future_code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", interval=30).at(now + timedelta(seconds=30))
     activated = await service.activate_totp("account-1", enrollment.enrollment_id, future_code)
     assert isinstance(activated, accounts_module.TOTPMethod)
@@ -9235,7 +9249,7 @@ async def test_totp_protector_and_store_failures_are_sanitized(failure: str) -> 
         assert isinstance(enrollment, VerificationUnavailable)
         assert "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" not in repr(enrollment)
         return
-    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    assert isinstance(enrollment, accounts_module.TOTPProvisioningGrant)
     protector.fail = True
     code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", interval=30).at(now)
     outcome = await service.activate_totp("account-1", enrollment.enrollment_id, code)
@@ -9253,7 +9267,7 @@ async def test_recovery_codes_are_reveal_once_digest_only_and_atomically_consume
 
     issued = await service.generate_recovery_codes("account-1")
 
-    assert isinstance(issued, accounts_module.RecoveryCodes)
+    assert isinstance(issued, accounts_module.RecoveryCodeGrant)
     assert len(issued.codes) == 10
     assert len(set(issued.codes)) == 10
     assert all(code.startswith("rc_v1_") and len(code) == 38 for code in issued.codes)
@@ -9294,15 +9308,15 @@ async def test_recovery_regeneration_invalidates_old_codes_and_pepper_versions_a
     service.recovery_code_count = 1
     service.recovery_entropy = lambda _length: next(entropy_values)
     first = await service.generate_recovery_codes("account-1")
-    assert isinstance(first, accounts_module.RecoveryCodes)
+    assert isinstance(first, accounts_module.RecoveryCodeGrant)
     service.recovery_peppers = (v2, v1)
     assert isinstance(await service.consume_recovery_code("account-1", first.codes[0]), AuthenticationEvidence)
     service.recovery_peppers = (v1,)
     stale = await service.generate_recovery_codes("account-1")
-    assert isinstance(stale, accounts_module.RecoveryCodes)
+    assert isinstance(stale, accounts_module.RecoveryCodeGrant)
     service.recovery_peppers = (v2, v1)
     second = await service.generate_recovery_codes("account-1")
-    assert isinstance(second, accounts_module.RecoveryCodes)
+    assert isinstance(second, accounts_module.RecoveryCodeGrant)
     assert second.codes[0].startswith("rc_v2_")
     assert isinstance(await service.consume_recovery_code("account-1", stale.codes[0]), InvalidCredentials)
 
@@ -9359,7 +9373,7 @@ async def test_recovery_failures_are_generic_and_never_leak_codes(case: str, exp
         outcome = await service.generate_recovery_codes("account-1")
     else:
         issued = await service.generate_recovery_codes("account-1")
-        assert isinstance(issued, accounts_module.RecoveryCodes)
+        assert isinstance(issued, accounts_module.RecoveryCodeGrant)
         code = (
             "malformed"
             if case == "malformed"
@@ -9386,7 +9400,7 @@ async def test_recovery_audit_failure_cannot_reverse_settled_generation_or_consu
 
     issued = await service.generate_recovery_codes("account-1")
 
-    assert isinstance(issued, accounts_module.RecoveryCodes)
+    assert isinstance(issued, accounts_module.RecoveryCodeGrant)
     assert isinstance(await service.consume_recovery_code("account-1", issued.codes[0]), AuthenticationEvidence)
 
 
@@ -9867,7 +9881,7 @@ async def test_step_up_grant_is_exactly_bound_expiring_and_single_use() -> None:
         evidence=source,
     )
 
-    assert isinstance(grant, accounts_module.StepUpGrant)
+    assert isinstance(grant, accounts_module.StepUpCredential)
     assert "gggg" not in repr(grant)
     assert isinstance(
         await service.consume(
@@ -9909,7 +9923,7 @@ async def test_step_up_grant_rejects_changed_binding(changed: str) -> None:
         transport_binding=b"token-1",
         evidence=source,
     )
-    assert isinstance(grant, accounts_module.StepUpGrant)
+    assert isinstance(grant, accounts_module.StepUpCredential)
     if changed == "expiry":
         service.clock = lambda: now + timedelta(minutes=6)
     result = await service.consume(
@@ -9952,7 +9966,7 @@ async def test_public_step_up_conformance_store_has_one_atomic_winner() -> None:
             mechanism="totp", slot="mfa", authenticated_at=now, methods=frozenset({"totp"})
         ),
     )
-    assert isinstance(grant, accounts_module.StepUpGrant)
+    assert isinstance(grant, accounts_module.StepUpCredential)
     outcomes: list[object] = []
 
     async def consume() -> None:
@@ -9991,14 +10005,14 @@ async def test_public_conformance_helpers_execute_factor_atomicity_matrix() -> N
         recovery_entropy=lambda _size: next(recovery_values).to_bytes(16, "big"),
     )
     enrollment = await mfa.begin_totp_enrollment("account-1", label="person@example.com")
-    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    assert isinstance(enrollment, accounts_module.TOTPProvisioningGrant)
     code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").at(now)
     method = await mfa.activate_totp("account-1", enrollment.enrollment_id, code)
     assert isinstance(method, accounts_module.TOTPMethod)
     assert await mfa_store.get_totp_method("other", method.method_id) is None
     assert not await mfa_store.advance_totp_counter(method.method_id, accepted_counter=1, now=now)
     recovery = await mfa.generate_recovery_codes("account-1")
-    assert isinstance(recovery, accounts_module.RecoveryCodes)
+    assert isinstance(recovery, accounts_module.RecoveryCodeGrant)
     assert isinstance(await mfa.consume_recovery_code("account-1", recovery.codes[0]), AuthenticationEvidence)
     assert isinstance(await mfa.consume_recovery_code("account-1", recovery.codes[0]), InvalidCredentials)
 
@@ -10394,7 +10408,7 @@ async def test_passkey_service_defensive_store_and_ceremony_outcomes_are_sanitiz
 
 @pytest.mark.anyio
 async def test_local_auth_passkey_login_selects_only_configured_transport() -> None:
-    account = accounts_module.LocalAccount(
+    account = accounts_module.LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -10666,7 +10680,7 @@ async def test_mfa_and_step_up_defensive_failures_are_sanitized() -> None:
     )
     service = _mfa_service(_MFAStore(), _MFAProtector(), now=now)
     enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
-    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    assert isinstance(enrollment, accounts_module.TOTPProvisioningGrant)
     assert isinstance(await service.activate_totp("account-1", enrollment.enrollment_id, "000000"), InvalidCredentials)
     assert isinstance(await service.remove_totp_method("account-1", "method-1"), VerificationUnavailable)
     assert isinstance(await service.consume_recovery_code("account-1", 1), InvalidCredentials)  # type: ignore[arg-type]
@@ -10921,7 +10935,7 @@ def test_local_access_token_issuer_rejects_invalid_configuration(kwargs: dict[st
 @pytest.mark.anyio
 async def test_local_access_token_issuer_maps_invalid_and_unavailable_composition(  # noqa: PLR0913 - one composition matrix per parametrized case
     *,
-    account: accounts_module.LocalAccount[object],
+    account: accounts_module.LocalAccountRecord[object],
     signer: _AccessSigner,
     clock: Callable[[], datetime],
     token_ids: Callable[[], str],
@@ -11249,7 +11263,7 @@ def _refresh_service(
     accounts_module.RefreshTokenService[object],
     _AtomicRefreshStore,
     _LocalAccessStore,
-    accounts_module.LocalAccount[object],
+    accounts_module.LocalAccountRecord[object],
 ]:
     account = _local_access_account()
     accounts = _LocalAccessStore(account)
@@ -11296,7 +11310,7 @@ async def test_mfa_operational_and_format_failure_branches_are_sanitized() -> No
     protector = _MFAProtector()
     service = _mfa_service(store, protector, now=now)
     enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
-    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    assert isinstance(enrollment, accounts_module.TOTPProvisioningGrant)
     code = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").at(now)
     method = await service.activate_totp("account-1", enrollment.enrollment_id, code)
     assert isinstance(method, accounts_module.TOTPMethod)
@@ -11352,7 +11366,7 @@ async def test_mfa_atomic_rejection_and_step_up_storage_failure_are_sanitized() 
     store = RejectingAdvanceStore()
     service = _mfa_service(store, _MFAProtector(), now=now)
     enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
-    assert isinstance(enrollment, accounts_module.TOTPEnrollment)
+    assert isinstance(enrollment, accounts_module.TOTPProvisioningGrant)
     activation_code = pyotp.TOTP(_MFA_ENCODED_SEED).at(now)
     method = await service.activate_totp("account-1", enrollment.enrollment_id, activation_code)
     assert isinstance(method, accounts_module.TOTPMethod)
@@ -11393,7 +11407,7 @@ async def test_mfa_atomic_rejection_and_step_up_storage_failure_are_sanitized() 
     atomic.recovery_code_count = 1
     atomic.recovery_entropy = lambda length: b"r" * length
     pending = await atomic.begin_totp_enrollment("account-1", label="person@example.com")
-    assert isinstance(pending, accounts_module.TOTPEnrollment)
+    assert isinstance(pending, accounts_module.TOTPProvisioningGrant)
     assert isinstance(
         await atomic.activate_totp_with_recovery_codes("account-1", pending.enrollment_id, "000000"), InvalidCredentials
     )
@@ -11408,7 +11422,7 @@ async def test_mfa_atomic_rejection_and_step_up_storage_failure_are_sanitized() 
     activated = await atomic.activate_totp_with_recovery_codes(
         "account-1", pending.enrollment_id, pyotp.TOTP(_MFA_ENCODED_SEED).at(now)
     )
-    assert isinstance(activated, accounts_module.RecoveryCodes)
+    assert isinstance(activated, accounts_module.RecoveryCodeGrant)
     assert atomic_store.methods
     assert atomic_store.recovery_codes
     assert isinstance(
@@ -11429,7 +11443,7 @@ async def test_mfa_atomic_rejection_and_step_up_storage_failure_are_sanitized() 
     rejecting.recovery_peppers = atomic.recovery_peppers
     rejecting.recovery_code_count = 1
     rejected_pending = await rejecting.begin_totp_enrollment("account-1", label="person@example.com")
-    assert isinstance(rejected_pending, accounts_module.TOTPEnrollment)
+    assert isinstance(rejected_pending, accounts_module.TOTPProvisioningGrant)
     assert isinstance(
         await rejecting.activate_totp_with_recovery_codes(
             "account-1", rejected_pending.enrollment_id, pyotp.TOTP(_MFA_ENCODED_SEED).at(now)
@@ -11444,7 +11458,7 @@ async def test_mfa_atomic_rejection_and_step_up_storage_failure_are_sanitized() 
 
     single = _mfa_service(RejectSingleActivationStore(), _MFAProtector(), now=now)
     single_pending = await single.begin_totp_enrollment("account-1", label="person@example.com")
-    assert isinstance(single_pending, accounts_module.TOTPEnrollment)
+    assert isinstance(single_pending, accounts_module.TOTPProvisioningGrant)
     assert isinstance(
         await single.activate_totp("account-1", single_pending.enrollment_id, pyotp.TOTP(_MFA_ENCODED_SEED).at(now)),
         InvalidCredentials,
@@ -12292,7 +12306,7 @@ async def test_refresh_rotate_sanitizes_invalid_and_unavailable_composition(  # 
         accounts.get_by_id = get_by_id  # type: ignore[method-assign]
     elif mode == "account_failure":
 
-        async def get_by_id(_account_id: str) -> accounts_module.LocalAccount[object] | None:
+        async def get_by_id(_account_id: str) -> accounts_module.LocalAccountRecord[object] | None:
             raise OSError
 
         accounts.get_by_id = get_by_id  # type: ignore[method-assign]
@@ -12731,7 +12745,7 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
                 raise outcome
             return outcome
 
-    account = accounts_module.LocalAccount(
+    account = accounts_module.LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="user@example.com",
         display_name="User",

@@ -22,7 +22,7 @@ __all__ = (
     "InvalidInvitation",
     "InvalidLifecycleRequest",
     "LifecycleAccepted",
-    "LocalAccount",
+    "LocalAccountRecord",
     "LocalAuthMode",
     "LoginMethod",
     "NoOpSecurityEventSink",
@@ -141,7 +141,7 @@ class PasswordResetStatus(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class LocalAccount(Generic[UserT]):
+class LocalAccountRecord(Generic[UserT]):
     """Application-owned account projection needed by local authentication."""
 
     account_id: str
@@ -328,7 +328,7 @@ class RegistrationResult(Generic[UserT]):
     """Atomic registration outcome."""
 
     status: RegistrationStatus
-    account: LocalAccount[UserT] | None = None
+    account: LocalAccountRecord[UserT] | None = None
 
     def __post_init__(self) -> None:
         """Require an account projection only for a created registration."""

@@ -64,9 +64,9 @@ __all__ = (
     "CloneRiskPolicy",
     "InvalidWebAuthnResponseError",
     "PasskeyCredential",
+    "PasskeyRecord",
     "PasskeyService",
     "PasskeyStore",
-    "PasskeySummary",
     "PyWebAuthnVerifier",
     "RegistrationVerification",
     "UserVerification",
@@ -268,7 +268,7 @@ class PasskeyCredential:
 
 
 @dataclass(frozen=True, slots=True)
-class PasskeySummary:
+class PasskeyRecord:
     """Safe credential metadata for account-management responses."""
 
     credential_id: str
@@ -893,7 +893,7 @@ class PasskeyService:
             amr=("passkey",),
         )
 
-    async def list_credentials(self, account_id: str) -> tuple[PasskeySummary, ...] | VerificationUnavailable:
+    async def list_credentials(self, account_id: str) -> tuple[PasskeyRecord, ...] | VerificationUnavailable:
         """List safe credential metadata for one owner."""
         try:
             credentials = await self.store.list_credentials(account_id)
@@ -905,7 +905,7 @@ class PasskeyService:
 
     async def rename_credential(
         self, account_id: str, credential_id: bytes, display_name: str
-    ) -> PasskeySummary | VerificationUnavailable | None:
+    ) -> PasskeyRecord | VerificationUnavailable | None:
         """Rename one credential through its owner-checked store operation."""
         if not strict_context_text(display_name):
             return None
@@ -990,9 +990,9 @@ def _binding_digest(binding: bytes) -> bytes:
     return sha256(value).digest()
 
 
-def _credential_summary(credential: PasskeyCredential) -> PasskeySummary:
+def _credential_summary(credential: PasskeyCredential) -> PasskeyRecord:
     identifier = urlsafe_b64encode(credential.credential_id).rstrip(b"=").decode("ascii")
-    return PasskeySummary(
+    return PasskeyRecord(
         credential_id=identifier,
         display_name=credential.display_name,
         backup_eligible=credential.backup_eligible,

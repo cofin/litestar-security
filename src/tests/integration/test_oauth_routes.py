@@ -17,7 +17,7 @@ from litestar_security.accounts import (
     RateLimitGuard,
     RateLimitPolicy,
     RefreshTokenResponse,
-    StepUpGrant,
+    StepUpCredential,
     StepUpService,
     StoreRateLimiter,
 )
@@ -277,7 +277,7 @@ async def issue_step_up_grant(
             mechanism="totp", slot="mfa", authenticated_at=NOW, methods=frozenset({"totp"})
         ),
     )
-    assert isinstance(grant, StepUpGrant)
+    assert isinstance(grant, StepUpCredential)
     return grant.token
 
 

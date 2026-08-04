@@ -22,8 +22,8 @@ from litestar_security.accounts import (
     ConsumeStatus,
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
-    LocalAccount,
     LocalAccountCapabilities,
+    LocalAccountRecord,
     LoginMethod,
     MFALoginChallenge,
     MFALoginChallengeStore,
@@ -545,7 +545,7 @@ class InMemoryLocalAccountStore:
         entropy: "Callable[[int], bytes]",
     ) -> None:
         """Initialize isolated state with aggregate deterministic sources."""
-        self._accounts: dict[str, LocalAccount[object]] = {}
+        self._accounts: dict[str, LocalAccountRecord[object]] = {}
         self._password_hashes: dict[str, str] = {}
         self._login_methods: dict[str, dict[str, LoginMethod]] = {}
         self._purpose_attempts: dict[str, int] = {}
@@ -559,7 +559,7 @@ class InMemoryLocalAccountStore:
         self._lock = Lock()
         self._observe = observe
 
-    async def find_for_login(self, normalized_identifier: str) -> LocalAccount[object] | None:
+    async def find_for_login(self, normalized_identifier: str) -> LocalAccountRecord[object] | None:
         """Find one account through its normalized identifier."""
         async with self._lock:
             return next(
@@ -571,7 +571,7 @@ class InMemoryLocalAccountStore:
                 None,
             )
 
-    async def get_by_id(self, account_id: str) -> LocalAccount[object] | None:
+    async def get_by_id(self, account_id: str) -> LocalAccountRecord[object] | None:
         """Return one account by its stable identifier."""
         async with self._lock:
             return self._accounts.get(account_id)
@@ -685,7 +685,7 @@ class InMemoryLocalAccountStore:
             if account_id in self._accounts:
                 message = "In-memory account identifier collision"
                 raise ValueError(message)
-            account = LocalAccount(
+            account = LocalAccountRecord(
                 account_id=account_id,
                 normalized_identifier=command.normalized_identifier,
                 display_name=command.display_name,
@@ -1427,7 +1427,7 @@ async def _assert_local_account_factory_isolation(
 
 async def _assert_registration_scenarios(
     store: _ConformanceLocalAccountStore,
-) -> tuple[PurposeTokenDelivery, LocalAccount[object]]:
+) -> tuple[PurposeTokenDelivery, LocalAccountRecord[object]]:
     command = _conformance_registration_command("atomic-registration@example.com")
     outcomes: list[RegistrationResult[object]] = []
 
@@ -1501,7 +1501,7 @@ async def _assert_registration_scenarios(
     return verification, after_duplicate.account
 
 
-async def _assert_password_cas(store: _ConformanceLocalAccountStore, account: LocalAccount[object]) -> None:
+async def _assert_password_cas(store: _ConformanceLocalAccountStore, account: LocalAccountRecord[object]) -> None:
     account_before = await store.get_by_id(account.account_id)
     password_state = await store.get_password_state(account.account_id)
     if account_before is None or password_state is None:  # pragma: no cover - account was just registered
@@ -1551,7 +1551,9 @@ async def _assert_password_cas(store: _ConformanceLocalAccountStore, account: Lo
         raise AssertionError(message)
 
 
-async def _assert_password_epoch_bump(store: _ConformanceLocalAccountStore, account: LocalAccount[object]) -> None:
+async def _assert_password_epoch_bump(
+    store: _ConformanceLocalAccountStore, account: LocalAccountRecord[object]
+) -> None:
     password_state = await store.get_password_state(account.account_id)
     if password_state is None:  # pragma: no cover - preceding CAS guarantees it
         message = "PasswordCredentialStore.get_password_state invariant: password state must remain readable"
@@ -1601,7 +1603,7 @@ async def _assert_password_epoch_bump(store: _ConformanceLocalAccountStore, acco
 
 
 async def _assert_verification_scenarios(
-    store: _ConformanceLocalAccountStore, verification: PurposeTokenDelivery, account: LocalAccount[object]
+    store: _ConformanceLocalAccountStore, verification: PurposeTokenDelivery, account: LocalAccountRecord[object]
 ) -> None:
     consumed = await store.consume_and_verify(
         verification.issue.token_id,
@@ -1681,7 +1683,7 @@ async def _assert_verification_attempt_exhaustion(store: _ConformanceLocalAccoun
         raise AssertionError(message)
 
 
-async def _assert_recovery_epoch(store: _ConformanceLocalAccountStore, account: LocalAccount[object]) -> None:
+async def _assert_recovery_epoch(store: _ConformanceLocalAccountStore, account: LocalAccountRecord[object]) -> None:
     delivery = _conformance_token_delivery(TokenPurpose.RECOVERY, marker=6)
     epoch = await store.current_epoch(account.account_id)
     if epoch is None:  # pragma: no cover - account was just registered
@@ -1724,7 +1726,7 @@ async def _assert_recovery_epoch(store: _ConformanceLocalAccountStore, account: 
         raise AssertionError(message)
 
 
-async def _assert_recovery_expiry(store: _ConformanceLocalAccountStore, account: LocalAccount[object]) -> None:
+async def _assert_recovery_expiry(store: _ConformanceLocalAccountStore, account: LocalAccountRecord[object]) -> None:
     delivery = _conformance_token_delivery(TokenPurpose.RECOVERY, marker=7)
     epoch = await store.current_epoch(account.account_id)
     state_before = await store.get_password_state(account.account_id)
@@ -1749,7 +1751,7 @@ async def _assert_recovery_expiry(store: _ConformanceLocalAccountStore, account:
 
 
 async def _assert_recovery_attempt_exhaustion(
-    store: _ConformanceLocalAccountStore, account: LocalAccount[object]
+    store: _ConformanceLocalAccountStore, account: LocalAccountRecord[object]
 ) -> None:
     delivery = _conformance_token_delivery(TokenPurpose.RECOVERY, marker=8, maximum_attempts=2)
     epoch = await store.current_epoch(account.account_id)
@@ -1790,7 +1792,7 @@ async def _assert_recovery_attempt_exhaustion(
         raise AssertionError(message)
 
 
-async def _assert_final_login_method(store: _ConformanceLocalAccountStore, account: LocalAccount[object]) -> None:
+async def _assert_final_login_method(store: _ConformanceLocalAccountStore, account: LocalAccountRecord[object]) -> None:
     other_account = await _conformance_register_account(store, "login-method-owner@example.com")
     method = LoginMethod("conformance-password", "password", _DEFAULT_NOW)
     await store.register_login_method(account.account_id, method, event=_conformance_event("register-login-method"))
@@ -2041,7 +2043,7 @@ async def assert_refresh_family_store_conformance(factory: Callable[[], _Conform
 
 
 async def _assert_refresh_rotation_atomicity(
-    store: _ConformanceRefreshFamilyStore, account: LocalAccount[object]
+    store: _ConformanceRefreshFamilyStore, account: LocalAccountRecord[object]
 ) -> None:
     command = _conformance_refresh_family_command(account, marker=3)
     if not await store.create_family(command, event=_conformance_event("create-atomic-refresh")):
@@ -2122,7 +2124,9 @@ async def _assert_refresh_rotation_atomicity(
         raise AssertionError(message)
 
 
-async def _assert_refresh_rotation_commit(store: _ConformanceRefreshFamilyStore, account: LocalAccount[object]) -> None:
+async def _assert_refresh_rotation_commit(
+    store: _ConformanceRefreshFamilyStore, account: LocalAccountRecord[object]
+) -> None:
     command = _conformance_refresh_family_command(account, marker=6)
     if not await store.create_family(command, event=_conformance_event("create-commit-refresh")):
         message = "RefreshTokenFamilyStore.rotate partial-write setup invariant: a fresh family must be created"
@@ -2158,7 +2162,7 @@ async def _assert_refresh_rotation_commit(store: _ConformanceRefreshFamilyStore,
 
 
 async def _assert_refresh_late_rotation_rejection(
-    store: _ConformanceRefreshFamilyStore, account: LocalAccount[object]
+    store: _ConformanceRefreshFamilyStore, account: LocalAccountRecord[object]
 ) -> None:
     expiry_command = _conformance_refresh_family_command(account, marker=10)
     if not await store.create_family(expiry_command, event=_conformance_event("create-late-expiry-refresh")):
@@ -2244,7 +2248,7 @@ async def _assert_refresh_late_rotation_rejection(
 
 
 async def _assert_refresh_replay_and_idempotency(
-    store: _ConformanceRefreshFamilyStore, account: LocalAccount[object]
+    store: _ConformanceRefreshFamilyStore, account: LocalAccountRecord[object]
 ) -> None:
     command = _conformance_refresh_family_command(account, marker=8)
     if not await store.create_family(command, event=_conformance_event("create-replay-refresh")):
@@ -2290,7 +2294,7 @@ async def _assert_refresh_replay_and_idempotency(
         raise AssertionError(message)
 
 
-async def _assert_refresh_ownership(store: _ConformanceRefreshFamilyStore, account: LocalAccount[object]) -> None:
+async def _assert_refresh_ownership(store: _ConformanceRefreshFamilyStore, account: LocalAccountRecord[object]) -> None:
     command = _conformance_refresh_family_command(account, marker=11)
     if not await store.create_family(command, event=_conformance_event("create-owned-refresh")):
         message = (
@@ -3123,7 +3127,7 @@ def _conformance_session_record(command: CreateSessionCommand) -> SessionRecord:
 
 
 def _conformance_refresh_family_command(
-    account: LocalAccount[object],
+    account: LocalAccountRecord[object],
     *,
     marker: int,
     expires_at: datetime | None = None,
@@ -3201,7 +3205,7 @@ def _conformance_identifier(prefix: str | None, marker: int) -> str:
 
 async def _conformance_register_account(
     store: RegistrationStore[object], normalized_identifier: str, *, verification: PurposeTokenDelivery | None = None
-) -> LocalAccount[object]:
+) -> LocalAccountRecord[object]:
     """Register one password account required by several local-account scenarios."""
     result = await store.register(
         _conformance_registration_command(normalized_identifier),

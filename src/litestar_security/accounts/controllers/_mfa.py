@@ -24,7 +24,7 @@ from litestar.status_codes import (
 )
 
 from litestar_security.accounts._auth_service import LocalAuthService
-from litestar_security.accounts._mfa import MFAService, RecoveryCodes, StepUpGrant, StepUpService
+from litestar_security.accounts._mfa import MFAService, RecoveryCodeGrant, StepUpCredential, StepUpService
 from litestar_security.accounts._operations import (
     MFA_RECOVERY_REPLACE,
     MFA_TOTP_ENROLL,
@@ -37,7 +37,7 @@ from litestar_security.accounts._operations import (
     PASSKEY_REMOVE,
     PASSWORD_VERIFY,
 )
-from litestar_security.accounts._passkeys import PasskeyService, PasskeySummary, WebAuthnOptions
+from litestar_security.accounts._passkeys import PasskeyRecord, PasskeyService, WebAuthnOptions
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
     PasswordReauthenticationProof,
@@ -283,7 +283,7 @@ class _StepUpController(Controller):
             transport_binding=_transport_binding(request),
             evidence=evidence,
         )
-        if not isinstance(grant, StepUpGrant):
+        if not isinstance(grant, StepUpCredential):
             _error(grant)
         return _response(StepUpResponse(grant=grant.token, purpose=grant.purpose, expires_at=grant.expires_at))
 
@@ -398,7 +398,7 @@ class _MFAController(Controller):
         if limited is not None:
             _error(limited)
         recovery = await totp_service.activate_totp_with_recovery_codes(account_id, data.enrollment_id, data.code)
-        if not isinstance(recovery, RecoveryCodes):
+        if not isinstance(recovery, RecoveryCodeGrant):
             _error(recovery)
         return _response(RecoveryCodesResponse(codes=recovery.codes))
 
@@ -487,7 +487,7 @@ class _MFAController(Controller):
         if not isinstance(assurance, AuthenticationEvidence):
             _error(assurance)
         result = await totp_service.generate_recovery_codes(account_id)
-        if not isinstance(result, RecoveryCodes):
+        if not isinstance(result, RecoveryCodeGrant):
             _error(result)
         return _response(RecoveryCodesResponse(codes=result.codes))
 
@@ -837,7 +837,7 @@ def _options_response(
     return _response(PasskeyOptionsResponse(options=result.json, expires_at=result.expires_at, binding=binding))
 
 
-def _summary_response(summary: PasskeySummary) -> PasskeySummaryResponse:
+def _summary_response(summary: PasskeyRecord) -> PasskeySummaryResponse:
     return PasskeySummaryResponse(
         credential_id=summary.credential_id,
         display_name=summary.display_name,

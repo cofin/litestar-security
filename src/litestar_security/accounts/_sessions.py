@@ -56,7 +56,7 @@ from litestar_security.context import AuthenticationEvidence, Principal
 if TYPE_CHECKING:
     from litestar.types import Scope
 
-    from litestar_security.accounts._records import LocalAccount
+    from litestar_security.accounts._records import LocalAccountRecord
 
 __all__ = (
     "CreateSessionCommand",
@@ -487,7 +487,7 @@ class SessionRegistry(Protocol):
 class NativeSessionStore(SessionRegistry, Protocol[UserT]):
     """Combined account, epoch, and session capabilities for native authentication."""
 
-    async def get_by_id(self, account_id: str) -> "LocalAccount[UserT] | None":
+    async def get_by_id(self, account_id: str) -> "LocalAccountRecord[UserT] | None":
         """Load one local account projection.
 
         Args:
@@ -563,7 +563,7 @@ class NativeSessionAuth(Generic[UserT]):
 
     async def authenticate(
         self, credential: "_SessionCredential", connection: ASGIConnection[Any, Any, Any, Any]
-    ) -> Authenticated["LocalAccount[UserT]"] | InvalidCredentials | VerificationUnavailable:
+    ) -> Authenticated["LocalAccountRecord[UserT]"] | InvalidCredentials | VerificationUnavailable:
         """Verify registry, binding, account, and exact epoch state.
 
         Args:
@@ -616,7 +616,7 @@ class NativeSessionAuth(Generic[UserT]):
             ),
         )
 
-    async def resolve(self, claims: "LocalAccount[UserT]") -> Principal[UserT]:
+    async def resolve(self, claims: "LocalAccountRecord[UserT]") -> Principal[UserT]:
         """Resolve an already validated local account without another store call.
 
         Args:
@@ -630,7 +630,7 @@ class NativeSessionAuth(Generic[UserT]):
     async def establish(
         self,
         connection: ASGIConnection[Any, Any, Any, Any],
-        account: "LocalAccount[UserT]",
+        account: "LocalAccountRecord[UserT]",
         *,
         evidence: AuthenticationEvidence | None = None,
         display_metadata: Mapping[str, str] = _EMPTY_DISPLAY_METADATA,
@@ -831,7 +831,7 @@ class NativeSessionAuth(Generic[UserT]):
     def prepare_password_rebind(
         self,
         connection: ASGIConnection[Any, Any, Any, Any],
-        account: "LocalAccount[UserT]",
+        account: "LocalAccountRecord[UserT]",
         *,
         now: datetime | None = None,
     ) -> SessionRebindPlan | VerificationUnavailable:
@@ -1048,7 +1048,7 @@ class NativeSessionAuth(Generic[UserT]):
         binding: SessionBindingProof,
         record: SessionRecord,
         *,
-        account: "LocalAccount[UserT]",
+        account: "LocalAccountRecord[UserT]",
         current_epoch: object,
         now: datetime,
     ) -> bool:

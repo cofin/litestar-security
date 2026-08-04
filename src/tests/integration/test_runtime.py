@@ -39,7 +39,7 @@ from litestar_security.accounts import (
     ConsumeStatus,
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
-    LocalAccount,
+    LocalAccountRecord,
     LocalAuth,
     LocalAuthSecrets,
     LoginMethod,
@@ -53,8 +53,8 @@ from litestar_security.accounts import (
     PasswordVerificationStatus,
     ProtectedSecret,
     PurposeTokenCodec,
+    RecoveryCodeGrant,
     RecoveryCodePepper,
-    RecoveryCodes,
     RefreshFamilyContext,
     RefreshReceiptKey,
     RefreshReceiptSealer,
@@ -698,8 +698,8 @@ def test_composite_bearer_runs_through_the_complete_litestar_runtime() -> None:
     assert unavailable.status_code == HTTP_503_SERVICE_UNAVAILABLE
 
 
-def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  # noqa: C901
-    account = LocalAccount(
+def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccountRecord[object]]:  # noqa: C901
+    account = LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="user@example.com",
         display_name="User",
@@ -730,7 +730,7 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  #
     async def get_session(session_id: str) -> SessionRecord | None:
         return records.get(session_id)
 
-    async def get_account(account_id: str) -> LocalAccount[object] | None:
+    async def get_account(account_id: str) -> LocalAccountRecord[object] | None:
         if state.fail_lookup:
             raise OSError
         return account if account_id == account.account_id else None
@@ -884,7 +884,7 @@ class _RouteRefreshState:
 
 @dataclass(slots=True)
 class _GeneratedRouteAccounts:
-    account: LocalAccount[object] | None = None
+    account: LocalAccountRecord[object] | None = None
     password_hash: str | None = None
     sessions: dict[str, SessionRecord] = field(default_factory=dict)
     purpose_tokens: dict[str, TokenIssue] = field(default_factory=dict)
@@ -893,12 +893,12 @@ class _GeneratedRouteAccounts:
     recovery_token: str | None = None
     absent_probes: int = 0
 
-    async def find_for_login(self, normalized_identifier: str) -> LocalAccount[object] | None:
+    async def find_for_login(self, normalized_identifier: str) -> LocalAccountRecord[object] | None:
         if self.account is None or self.account.normalized_identifier != normalized_identifier:
             return None
         return self.account
 
-    async def get_by_id(self, account_id: str) -> LocalAccount[object] | None:
+    async def get_by_id(self, account_id: str) -> LocalAccountRecord[object] | None:
         return self.account if self.account is not None and self.account.account_id == account_id else None
 
     async def current_epoch(self, account_id: str) -> int | None:
@@ -939,7 +939,7 @@ class _GeneratedRouteAccounts:
     ) -> RegistrationResult[object]:
         if self.account is not None:
             return RegistrationResult(RegistrationStatus.DUPLICATE)
-        self.account = LocalAccount(
+        self.account = LocalAccountRecord(
             account_id="account-1",
             normalized_identifier=cast("Any", command).normalized_identifier,
             display_name=cast("Any", command).display_name,
@@ -1136,7 +1136,7 @@ def _mfa_at_login_config(*, required: bool = True) -> MFAConfig:
 def _verified_route_accounts(password: str) -> _GeneratedRouteAccounts:
     """Return a direct, verified account suitable for password-login journeys."""
     return _GeneratedRouteAccounts(
-        account=LocalAccount(
+        account=LocalAccountRecord(
             account_id="account-1",
             normalized_identifier="user@example.com",
             display_name="User",
@@ -1495,7 +1495,7 @@ async def test_generated_session_login_requires_and_completes_mfa() -> None:
     accounts = _verified_route_accounts(password)
     mfa = _mfa_at_login_config()
     recovery_codes = await cast("Any", mfa.mfa_service).generate_recovery_codes("account-1")
-    assert isinstance(recovery_codes, RecoveryCodes)
+    assert isinstance(recovery_codes, RecoveryCodeGrant)
     csrf = CSRFConfig(secret="s" * 32)
     local_auth: Any = LocalAuth.session(
         accounts=cast("Any", accounts),
@@ -1561,7 +1561,7 @@ async def test_generated_token_login_requires_and_completes_mfa(
     accounts = _verified_route_accounts(password)
     mfa = _mfa_at_login_config()
     recovery_codes = await cast("Any", mfa.mfa_service).generate_recovery_codes("account-1")
-    assert isinstance(recovery_codes, RecoveryCodes)
+    assert isinstance(recovery_codes, RecoveryCodeGrant)
     private_key, _public_key = jwt_key_material["EdDSA"]
     local_auth: Any = LocalAuth.tokens(
         accounts=cast("Any", accounts),

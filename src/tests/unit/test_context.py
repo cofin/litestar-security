@@ -1156,8 +1156,8 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
         "LifecycleAccepted",
         "LocalAccessToken",
         "LocalAccessTokenIssuer",
-        "LocalAccount",
         "LocalAccountCapabilities",
+        "LocalAccountRecord",
         "LocalAccountResponse",
         "LocalAuth",
         "LocalAuthConfig",
@@ -1190,10 +1190,10 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
         "PasskeyAuthenticationOptionsRequest",
         "PasskeyCredential",
         "PasskeyOptionsResponse",
+        "PasskeyRecord",
         "PasskeyRegistrationOptionsRequest",
         "PasskeyService",
         "PasskeyStore",
-        "PasskeySummary",
         "PasskeySummaryResponse",
         "PasskeyVerifyRequest",
         "PasswordChangeResult",
@@ -1229,8 +1229,8 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
         "RateLimited",
         "RateLimiter",
         "RecoveryCodeDigest",
+        "RecoveryCodeGrant",
         "RecoveryCodePepper",
-        "RecoveryCodes",
         "RecoveryCodesResponse",
         "RecoveryTokenService",
         "RecoveryTokenStore",
@@ -1273,18 +1273,18 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
         "SessionRegistry",
         "SessionSummary",
         "StepUpAuthorizedRequest",
-        "StepUpGrant",
+        "StepUpCredential",
         "StepUpRecord",
         "StepUpRequest",
         "StepUpResponse",
         "StepUpService",
         "StepUpStore",
         "StoreRateLimiter",
-        "TOTPEnrollment",
         "TOTPEnrollmentRequest",
         "TOTPEnrollmentResponse",
         "TOTPMethod",
         "TOTPPolicy",
+        "TOTPProvisioningGrant",
         "TOTPVerificationRequest",
         "TokenIssue",
         "TokenPurpose",
@@ -1421,7 +1421,7 @@ def test_account_capabilities_are_runtime_structural(protocol: type[object], met
 
 def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe() -> None:
     now = datetime(2026, 7, 26, 23, tzinfo=timezone.utc)
-    account = accounts_module.LocalAccount(
+    account = accounts_module.LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="user@example.com",
         display_name="User",
@@ -1545,7 +1545,7 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
 
 
 def test_atomic_results_reject_contradictory_status_payloads() -> None:
-    account: accounts_module.LocalAccount[object] = accounts_module.LocalAccount(
+    account: accounts_module.LocalAccountRecord[object] = accounts_module.LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="user@example.com",
         display_name=None,
@@ -2007,7 +2007,7 @@ def test_prepare_refresh_result_rejects_invalid_state(kwargs: dict[str, object])
 def test_account_password_session_and_refresh_contracts_share_one_strict_epoch_domain(epoch: object) -> None:
     now = _ACCOUNT_NOW
     factories = (
-        lambda: accounts_module.LocalAccount(
+        lambda: accounts_module.LocalAccountRecord(
             account_id="account-1",
             normalized_identifier="user@example.com",
             display_name=None,
@@ -2065,7 +2065,7 @@ def test_local_account_requires_exact_boolean_state(field_name: str, value: obje
     values[field_name] = value
 
     with pytest.raises(ValueError, match="Local account"):
-        accounts_module.LocalAccount(**values)  # type: ignore[arg-type]
+        accounts_module.LocalAccountRecord(**values)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(("field_name", "value"), [("active", 1), ("verified", "false")])

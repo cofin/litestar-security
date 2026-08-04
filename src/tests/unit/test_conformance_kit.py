@@ -18,8 +18,8 @@ from litestar_security.accounts import (
     ConsumeStatus,
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
-    LocalAccount,
     LocalAccountCapabilities,
+    LocalAccountRecord,
     LoginMethod,
     MFALoginChallenge,
     NotificationCommand,
@@ -1054,10 +1054,10 @@ class _BrokenAccountStore:
     _cas_attempts: int = 0
     _bump_attempts: int = 0
 
-    async def find_for_login(self, normalized_identifier: str) -> LocalAccount[object] | None:
+    async def find_for_login(self, normalized_identifier: str) -> LocalAccountRecord[object] | None:
         return await self.delegate.find_for_login(normalized_identifier)
 
-    async def get_by_id(self, account_id: str) -> LocalAccount[object] | None:
+    async def get_by_id(self, account_id: str) -> LocalAccountRecord[object] | None:
         return await self.delegate.get_by_id(account_id)
 
     async def current_epoch(self, account_id: str) -> int | None:
