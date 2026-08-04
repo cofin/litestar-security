@@ -53,12 +53,14 @@ from litestar_security.providers.jwt import (
     normalize_verifier,
 )
 from litestar_security.providers.oauth import (
+    AESGCMOAuthTransactionProtector,
     GitHubOAuthProvider,
     OAuthAccountService,
     OAuthAccountStore,
     OAuthConfig,
     OAuthProvider,
     OAuthRouteService,
+    OAuthTransactionProtectorKey,
     TokenVault,
 )
 from litestar_security.providers.oidc import (
@@ -77,6 +79,7 @@ from litestar_security.providers.oidc import (
 )
 
 __all__ = (
+    "AESGCMOAuthTransactionProtector",
     "APIKeyClaims",
     "APIKeyCodec",
     "APIKeyConfig",
@@ -116,6 +119,7 @@ __all__ = (
     "OAuthConfig",
     "OAuthProvider",
     "OAuthRouteService",
+    "OAuthTransactionProtectorKey",
     "OIDCDiscoveryClient",
     "OIDCDiscoveryError",
     "OIDCJWTLogoutTokenConsumer",

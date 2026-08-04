@@ -57,12 +57,14 @@ from litestar_security.providers.oauth._routes import (
 )
 from litestar_security.providers.oauth._transactions import (
     OAUTH_BINDING_COOKIE_NAME,
+    AESGCMOAuthTransactionProtector,
     InvalidOAuthCallback,
     MemoryOAuthTransactionStore,
     OAuthOperation,
     OAuthRedirectPolicy,
     OAuthTransaction,
     OAuthTransactionProtector,
+    OAuthTransactionProtectorKey,
     OAuthTransactionService,
     OAuthTransactionStart,
     OAuthTransactionStore,
@@ -79,6 +81,7 @@ if TYPE_CHECKING:
 __all__ = (
     "OAUTH_BINDING_COOKIE_NAME",
     "OIDC_FRONTCHANNEL_LOGOUT",
+    "AESGCMOAuthTransactionProtector",
     "AccountLinkError",
     "GitHubOAuthProvider",
     "InvalidOAuthCallback",
@@ -118,6 +121,7 @@ __all__ = (
     "OAuthStepUpRequest",
     "OAuthTransaction",
     "OAuthTransactionProtector",
+    "OAuthTransactionProtectorKey",
     "OAuthTransactionService",
     "OAuthTransactionStart",
     "OAuthTransactionStore",

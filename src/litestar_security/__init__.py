@@ -83,17 +83,20 @@ from litestar_security.websocket import (
 
 if TYPE_CHECKING:
     from litestar_security.providers.oauth import (
+        AESGCMOAuthTransactionProtector,
         GitHubOAuthProvider,
         OAuthAccountService,
         OAuthAccountStore,
         OAuthConfig,
         OAuthProvider,
         OAuthRouteService,
+        OAuthTransactionProtectorKey,
         TokenVault,
     )
 
 __all__ = (
     "CSRF_REQUIRED_OPT_KEY",
+    "AESGCMOAuthTransactionProtector",
     "AssuranceRequirement",
     "AssuranceTrait",
     "Authenticated",
@@ -131,6 +134,7 @@ __all__ = (
     "OAuthConfig",
     "OAuthProvider",
     "OAuthRouteService",
+    "OAuthTransactionProtectorKey",
     "PasskeyConfig",
     "PresentedCredential",
     "Principal",
@@ -183,12 +187,14 @@ __all__ = (
 )
 
 _OAUTH_EXPORTS = frozenset({
+    "AESGCMOAuthTransactionProtector",
     "GitHubOAuthProvider",
     "OAuthAccountService",
     "OAuthAccountStore",
     "OAuthConfig",
     "OAuthProvider",
     "OAuthRouteService",
+    "OAuthTransactionProtectorKey",
     "TokenVault",
 })
 

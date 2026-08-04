@@ -28,6 +28,7 @@ from anyio.lowlevel import checkpoint
 from argon2 import PasswordHasher as Argon2Engine
 from argon2 import extract_parameters as extract_argon2_parameters
 from argon2.exceptions import VerificationError
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from litestar.connection import ASGIConnection
@@ -53,6 +54,7 @@ import litestar_security.accounts._sessions as sessions_module
 import litestar_security.accounts.controllers._local as controllers_module
 import litestar_security.accounts.controllers._mfa as mfa_controllers_module
 import litestar_security.testing as testing_module
+from litestar_security import AESGCMOAuthTransactionProtector, OAuthTransactionProtectorKey
 from litestar_security.accounts._mfa_login import MFARequired
 from litestar_security.accounts._operations import LOGIN_MFA
 from litestar_security.authentication import (
@@ -125,6 +127,7 @@ from litestar_security.providers.jwt import _capabilities as jwt_capabilities
 from litestar_security.providers.jwt import _claims as jwt_claims
 from litestar_security.providers.jwt import _keyring as jwt_keyring
 from litestar_security.providers.jwt import _workers as jwt_workers
+from litestar_security.providers.oauth import MemoryOAuthTransactionStore, OAuthOperation, OAuthTransaction, SecretStr
 from litestar_security.providers.oidc import DiscoveryPolicy, OIDCDiscoveryClient, OIDCDiscoveryError, OIDCMetadata
 from litestar_security.providers.oidc import _discovery as oidc_discovery
 
@@ -13689,3 +13692,42 @@ async def test_generated_lifecycle_handlers_report_denials_instead_of_the_shared
     )
 
     assert error.headers["Retry-After"] == "7"
+
+
+@pytest.mark.anyio
+async def test_aesgcm_oauth_transaction_protector_round_trips_bound_transaction_secrets() -> None:
+    protector = AESGCMOAuthTransactionProtector(
+        active_key=OAuthTransactionProtectorKey("v1", b"k" * 32)
+    )
+    associated_data = b"transaction=1|purpose=pkce"
+    first = await protector.protect(b"pkce-verifier", associated_data=associated_data)
+    second = await protector.protect(b"pkce-verifier", associated_data=associated_data)
+
+    assert first.key_version == protector.active_key_version == "v1"
+    assert first.ciphertext != second.ciphertext
+    assert await protector.unprotect(first, associated_data=associated_data) == b"pkce-verifier"
+    with pytest.raises(InvalidTag):
+        await protector.unprotect(first, associated_data=b"transaction=2|purpose=pkce")
+
+    transaction = OAuthTransaction(
+        state_digest=b"s" * 32,
+        binding_digest=b"b" * 32,
+        operation=OAuthOperation.LOGIN,
+        provider="google",
+        expected_issuer="https://accounts.google.com",
+        redirect_uri="https://app.example/auth/google/callback",
+        return_to="/",
+        requested_scopes=frozenset({"openid"}),
+        pkce_verifier=SecretStr("v" * 43),
+        nonce=SecretStr("n" * 43),
+        expires_at=_JWT_NOW + timedelta(minutes=10),
+    )
+    store = MemoryOAuthTransactionStore(protector=protector)
+    await store.create(transaction)
+
+    assert await store.consume(
+        state_digest=transaction.state_digest,
+        binding_digest=transaction.binding_digest,
+        provider=transaction.provider,
+        now=_JWT_NOW,
+    ) == transaction
