@@ -156,11 +156,7 @@ class OAuthTransactionProtectorKey:
 
     def __post_init__(self) -> None:
         """Require a stable version and exact AES-256 key material."""
-        if (
-            not _strict_text(self.key_version)
-            or self.key.__class__ is not bytes
-            or len(self.key) != _AES_256_KEY_BYTES
-        ):
+        if not _strict_text(self.key_version) or self.key.__class__ is not bytes or len(self.key) != _AES_256_KEY_BYTES:
             message = "OAuth transaction protector key requires a version and 32-byte key"
             raise ImproperlyConfiguredException(detail=message)
 
@@ -231,6 +227,7 @@ class AESGCMOAuthTransactionProtector:
             raise ValueError(message)
         nonce, ciphertext = protected.ciphertext[:_AES_GCM_NONCE_BYTES], protected.ciphertext[_AES_GCM_NONCE_BYTES:]
         return AESGCM(key.key).decrypt(nonce, ciphertext, associated_data)
+
 
 @dataclass(frozen=True, slots=True)
 class OAuthTransaction:

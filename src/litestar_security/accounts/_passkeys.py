@@ -81,9 +81,11 @@ _MAXIMUM_CHALLENGE_TTL = timedelta(minutes=10)
 _DEFAULT_CHALLENGE_TTL = timedelta(minutes=5)
 _DEFAULT_ALGORITHMS = (-8, -7, -257)
 _SUPPORTED_ALGORITHMS = frozenset(_DEFAULT_ALGORITHMS)
-_APPLICATION_ROOT_VERIFYING_FORMATS = frozenset(
-    {AttestationFormat.FIDO_U2F, AttestationFormat.PACKED, AttestationFormat.TPM}
-)
+_APPLICATION_ROOT_VERIFYING_FORMATS = frozenset({
+    AttestationFormat.FIDO_U2F,
+    AttestationFormat.PACKED,
+    AttestationFormat.TPM,
+})
 WorkerT = TypeVar("WorkerT")
 
 

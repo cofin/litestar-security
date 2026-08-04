@@ -205,8 +205,6 @@ _OAUTH_EXPORTS = frozenset({
 def __getattr__(name: str) -> Any:  # noqa: ANN401 - module lazy-export hooks are dynamically typed
     """Resolve curated OAuth exports without loading providers at root import."""
     if name in _OAUTH_EXPORTS:
-        return import_optional_attribute(
-            "litestar_security.providers", name, extras="oauth", dependencies=frozenset()
-        )
+        return import_optional_attribute("litestar_security.providers", name, extras="oauth", dependencies=frozenset())
     message = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(message)

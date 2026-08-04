@@ -4812,8 +4812,7 @@ async def test_oidc_discovery_requires_explicit_cross_origin_oauth_endpoint_trus
     }
     answers = {"issuer.example": (_OIDC_PUBLIC_IP,), "login.example": (_OIDC_PUBLIC_IP,)}
     client, _transport, _resolver = _oidc_client(
-        lambda _request: _oidc_response(_oidc_document(**endpoints)),
-        answers=answers,
+        lambda _request: _oidc_response(_oidc_document(**endpoints)), answers=answers
     )
 
     with pytest.raises(OIDCDiscoveryError):
@@ -7809,9 +7808,7 @@ async def test_native_session_remains_authenticated_after_step_up_assurance_expi
 
     assert isinstance(outcome, Authenticated)
     authenticated_connection.scope["user"] = Principal(id="account-1")
-    authenticated_connection.scope["auth"] = SecurityContext(
-        session=NullSessionHandle(), evidence=(outcome.evidence,)
-    )
+    authenticated_connection.scope["auth"] = SecurityContext(session=NullSessionHandle(), evidence=(outcome.evidence,))
     decision = requires_assurance(methods={"totp"}, clock=lambda: current[0]).decide(authenticated_connection)
     assert decision.code == "missing_assurance"
 
@@ -8766,11 +8763,7 @@ async def test_token_login_preserves_password_assurance_at_refresh_issuance() ->
     credentials = accounts_module.LocalCredentials(identifier="person@example.com", password="password")  # noqa: S106
     assert await service.token_login(cast("Any", object()), credentials) == response
     assert refresh_tokens.evidence == AuthenticationEvidence(
-        mechanism="bearer",
-        slot="local",
-        authenticated_at=issued_at,
-        methods=frozenset({"password"}),
-        amr=("pwd",),
+        mechanism="bearer", slot="local", authenticated_at=issued_at, methods=frozenset({"password"}), amr=("pwd",)
     )
 
 
@@ -12756,9 +12749,7 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
         verification=cast("Any", object()),
         recovery=cast("Any", object()),
         session_auth=cast("Any", session_auth),
-        refresh_tokens=cast(
-            "Any", SimpleNamespace(clock=lambda: _JWT_NOW, issue=AsyncOutcome(refresh_response))
-        ),
+        refresh_tokens=cast("Any", SimpleNamespace(clock=lambda: _JWT_NOW, issue=AsyncOutcome(refresh_response))),
     )
     credentials = accounts_module.LocalCredentials(
         identifier="user@example.com",
@@ -13707,9 +13698,7 @@ async def test_generated_lifecycle_handlers_report_denials_instead_of_the_shared
 
 @pytest.mark.anyio
 async def test_aesgcm_oauth_transaction_protector_round_trips_bound_transaction_secrets() -> None:
-    protector = AESGCMOAuthTransactionProtector(
-        active_key=OAuthTransactionProtectorKey("v1", b"k" * 32)
-    )
+    protector = AESGCMOAuthTransactionProtector(active_key=OAuthTransactionProtectorKey("v1", b"k" * 32))
     associated_data = b"transaction=1|purpose=pkce"
     first = await protector.protect(b"pkce-verifier", associated_data=associated_data)
     second = await protector.protect(b"pkce-verifier", associated_data=associated_data)
@@ -13736,9 +13725,12 @@ async def test_aesgcm_oauth_transaction_protector_round_trips_bound_transaction_
     store = MemoryOAuthTransactionStore(protector=protector)
     await store.create(transaction)
 
-    assert await store.consume(
-        state_digest=transaction.state_digest,
-        binding_digest=transaction.binding_digest,
-        provider=transaction.provider,
-        now=_JWT_NOW,
-    ) == transaction
+    assert (
+        await store.consume(
+            state_digest=transaction.state_digest,
+            binding_digest=transaction.binding_digest,
+            provider=transaction.provider,
+            now=_JWT_NOW,
+        )
+        == transaction
+    )

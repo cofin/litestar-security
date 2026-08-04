@@ -254,11 +254,9 @@ class AESGCMSecretProtector:
         if key is None or len(protected.ciphertext) <= _AES_GCM_NONCE_BYTES:
             msg = "Secret protector envelope is invalid"
             raise ValueError(msg)
-        nonce, ciphertext = (
-            protected.ciphertext[:_AES_GCM_NONCE_BYTES],
-            protected.ciphertext[_AES_GCM_NONCE_BYTES:],
-        )
+        nonce, ciphertext = (protected.ciphertext[:_AES_GCM_NONCE_BYTES], protected.ciphertext[_AES_GCM_NONCE_BYTES:])
         return AESGCM(key.key).decrypt(nonce, ciphertext, associated_data)
+
 
 @dataclass(frozen=True, slots=True)
 class PendingTOTPEnrollment:
@@ -1138,10 +1136,5 @@ def _recovery_digest(pepper: RecoveryCodePepper, account_id: str, code: str) -> 
     _recovery_code_version(code)
     if not strict_context_text(account_id) or "\x00" in account_id:
         raise ValueError
-    payload = (
-        b"litestar-security:recovery-code:v2\x00"
-        + account_id.encode("utf-8")
-        + b"\x00"
-        + code.encode("ascii")
-    )
+    payload = b"litestar-security:recovery-code:v2\x00" + account_id.encode("utf-8") + b"\x00" + code.encode("ascii")
     return new_hmac(pepper.key, payload, sha256).digest()

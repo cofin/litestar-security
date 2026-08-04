@@ -271,11 +271,7 @@ class LocalAuthService(Generic[UserT]):
         except Exception:  # noqa: BLE001 - an unavailable issuance clock must fail closed
             return VerificationUnavailable()
         evidence = AuthenticationEvidence(
-            mechanism="bearer",
-            slot="local",
-            authenticated_at=issued_at,
-            methods=frozenset({"password"}),
-            amr=("pwd",),
+            mechanism="bearer", slot="local", authenticated_at=issued_at, methods=frozenset({"password"}), amr=("pwd",)
         )
         return await refresh_tokens.issue(account, evidence=evidence, now=issued_at)
 

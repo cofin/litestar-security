@@ -366,72 +366,67 @@ __all__ = (
     "trusted_client_key",
 )
 
-_MFA_EXPORTS = frozenset(
-    {
-        "AESGCMSecretProtector",
-        "MFAService",
-        "MFAStore",
-        "PendingTOTPEnrollment",
-        "ProtectedSecret",
-        "RecoveryCodeDigest",
-        "RecoveryCodePepper",
-        "RecoveryCodes",
-        "SecretProtector",
-        "SecretProtectorKey",
-        "StepUpGrant",
-        "StepUpRecord",
-        "StepUpService",
-        "StepUpStore",
-        "TOTPEnrollment",
-        "TOTPMethod",
-        "TOTPPolicy",
-    }
-)
+_MFA_EXPORTS = frozenset({
+    "AESGCMSecretProtector",
+    "MFAService",
+    "MFAStore",
+    "PendingTOTPEnrollment",
+    "ProtectedSecret",
+    "RecoveryCodeDigest",
+    "RecoveryCodePepper",
+    "RecoveryCodes",
+    "SecretProtector",
+    "SecretProtectorKey",
+    "StepUpGrant",
+    "StepUpRecord",
+    "StepUpService",
+    "StepUpStore",
+    "TOTPEnrollment",
+    "TOTPMethod",
+    "TOTPPolicy",
+})
 _MFA_LOGIN_EXPORTS = frozenset({"MFALoginChallenge", "MFALoginChallengeStore", "MFARequired"})
-_PASSKEY_EXPORTS = frozenset(
-    {
-        "AssertionRecordResult",
-        "AttestationTrustMapper",
-        "AuthenticationVerification",
-        "CloneRiskPolicy",
-        "InvalidWebAuthnResponseError",
-        "PasskeyCredential",
-        "PasskeyService",
-        "PasskeyStore",
-        "PasskeySummary",
-        "PyWebAuthnVerifier",
-        "RegistrationVerification",
-        "UserVerification",
-        "WebAuthnChallenge",
-        "WebAuthnChallengeStore",
-        "WebAuthnOptions",
-        "WebAuthnVerifier",
-    }
-)
-_ARGON2_EXPORTS = frozenset(
-    {
-        "Argon2PasswordHasher",
-        "PasswordHasher",
-        "PasswordHashingUnavailableError",
-        "PasswordPolicy",
-        "PasswordPolicyResult",
-        "PasswordVerificationResult",
-    }
-)
+_PASSKEY_EXPORTS = frozenset({
+    "AssertionRecordResult",
+    "AttestationTrustMapper",
+    "AuthenticationVerification",
+    "CloneRiskPolicy",
+    "InvalidWebAuthnResponseError",
+    "PasskeyCredential",
+    "PasskeyService",
+    "PasskeyStore",
+    "PasskeySummary",
+    "PyWebAuthnVerifier",
+    "RegistrationVerification",
+    "UserVerification",
+    "WebAuthnChallenge",
+    "WebAuthnChallengeStore",
+    "WebAuthnOptions",
+    "WebAuthnVerifier",
+})
+_ARGON2_EXPORTS = frozenset({
+    "Argon2PasswordHasher",
+    "PasswordHasher",
+    "PasswordHashingUnavailableError",
+    "PasswordPolicy",
+    "PasswordPolicyResult",
+    "PasswordVerificationResult",
+})
 _LOGIN_EXPORTS = frozenset({"PasswordLoginService", "PasswordReauthenticationService"})
 _REGISTRATION_EXPORTS = frozenset({"RegistrationService", "VerificationTokenService"})
 _RECOVERY_EXPORTS = frozenset({"PasswordChangeService", "RecoveryTokenService"})
 _AUTH_SERVICE_EXPORTS = frozenset({"LocalAuthService", "forwarded_client_key", "trusted_client_key"})
 _PROFILE_EXPORTS = frozenset({"LocalAuth", "LocalAuthConfig", "LocalAuthSecrets"})
-_CONTROLLER_EXPORTS = frozenset(
-    {"LOCAL_AUTH_TAGS", "build_local_auth_routes", "build_mfa_routes", "requires_local_bearer"}
-)
+_CONTROLLER_EXPORTS = frozenset({
+    "LOCAL_AUTH_TAGS",
+    "build_local_auth_routes",
+    "build_mfa_routes",
+    "requires_local_bearer",
+})
 _OPTIONAL_EXPORTS = (
     dict.fromkeys(_MFA_EXPORTS, ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})))
     | dict.fromkeys(_MFA_LOGIN_EXPORTS, ("litestar_security.accounts._mfa_login", "mfa", frozenset({"pyotp"})))
-    | dict.fromkeys(
-        _PASSKEY_EXPORTS, ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"}))
-    )
+    | dict.fromkeys(_PASSKEY_EXPORTS, ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})))
     | dict.fromkeys(_ARGON2_EXPORTS, ("litestar_security.accounts._passwords", "argon2", frozenset({"argon2"})))
     | dict.fromkeys(_LOGIN_EXPORTS, ("litestar_security.accounts._login", "argon2", frozenset({"argon2"})))
     | dict.fromkeys(
@@ -443,8 +438,7 @@ _OPTIONAL_EXPORTS = (
         ("litestar_security.accounts._auth_service", "argon2,mfa", frozenset({"argon2", "pyotp"})),
     )
     | dict.fromkeys(
-        _PROFILE_EXPORTS,
-        ("litestar_security.accounts._profiles", "argon2,mfa", frozenset({"argon2", "pyotp"})),
+        _PROFILE_EXPORTS, ("litestar_security.accounts._profiles", "argon2,mfa", frozenset({"argon2", "pyotp"}))
     )
 )
 
