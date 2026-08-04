@@ -10068,23 +10068,23 @@ async def test_public_conformance_helpers_execute_factor_atomicity_matrix() -> N
 @pytest.mark.parametrize(
     "value",
     [
-        accounts_module.TOTPEnrollmentRequest(label="User", step_up_grant="grant-secret"),
-        accounts_module.TOTPEnrollmentResponse(
+        accounts_module.TOTPEnrollment(label="User", step_up_grant="grant-secret"),
+        accounts_module.TOTPProvisioning(
             enrollment_id="e1",
             method_id="m1",
             provisioning_uri="otpauth://secret",
             expires_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
         ),
-        accounts_module.TOTPVerificationRequest(enrollment_id="e1", code="123456"),
-        accounts_module.StepUpAuthorizedRequest(step_up_grant="grant-secret"),
-        accounts_module.StepUpRequest(method="totp", credential="123456", method_id="m1"),
-        accounts_module.StepUpResponse(
+        accounts_module.TOTPVerification(enrollment_id="e1", code="123456"),
+        accounts_module.StepUpAuthorization(step_up_grant="grant-secret"),
+        accounts_module.StepUpVerification(method="totp", credential="123456", method_id="m1"),
+        accounts_module.StepUpGrant(
             grant="grant-secret", purpose="settings", expires_at=datetime(2026, 7, 27, tzinfo=timezone.utc)
         ),
-        accounts_module.RecoveryCodesResponse(codes=("rc_v1_SECRET",)),
-        accounts_module.PasskeyVerifyRequest(account_id="account-1", response="browser-secret"),
-        accounts_module.PasskeyRegistrationOptionsRequest(user_name="person@example.com", step_up_grant="grant-secret"),
-        accounts_module.PasskeyOptionsResponse(
+        accounts_module.RecoveryCodes(codes=("rc_v1_SECRET",)),
+        accounts_module.PasskeyVerification(account_id="account-1", response="browser-secret"),
+        accounts_module.PasskeyRegistrationStart(user_name="person@example.com", step_up_grant="grant-secret"),
+        accounts_module.PasskeyOptions(
             options="challenge-secret", expires_at=datetime(2026, 7, 27, tzinfo=timezone.utc)
         ),
     ],

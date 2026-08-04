@@ -46,19 +46,19 @@ from litestar_security.accounts._records import (
 )
 from litestar_security.accounts._stores import SecurityEpochStore
 from litestar_security.accounts.schemas import (
-    PasskeyAuthenticationOptionsRequest,
-    PasskeyOptionsResponse,
-    PasskeyRegistrationOptionsRequest,
-    PasskeySummaryResponse,
-    PasskeyVerifyRequest,
-    RecoveryCodesResponse,
+    PasskeyAuthenticationStart,
+    PasskeyOptions,
+    PasskeyRegistrationStart,
+    PasskeySummary,
+    PasskeyVerification,
+    RecoveryCodes,
     RouteStatus,
-    StepUpAuthorizedRequest,
-    StepUpRequest,
-    StepUpResponse,
-    TOTPEnrollmentRequest,
-    TOTPEnrollmentResponse,
-    TOTPVerificationRequest,
+    StepUpAuthorization,
+    StepUpGrant,
+    StepUpVerification,
+    TOTPEnrollment,
+    TOTPProvisioning,
+    TOTPVerification,
 )
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, optional, public, required
 from litestar_security.context import AuthenticationEvidence, Principal
@@ -254,11 +254,11 @@ class _StepUpController(Controller):
     async def issue(
         self,
         purpose: FromPath[str],
-        data: JSONBody[StepUpRequest],
+        data: JSONBody[StepUpVerification],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[StepUpResponse]:
+    ) -> Response[StepUpGrant]:
         """Verify one factor and issue a purpose-bound grant."""
         account_id = _principal_id(principal)
         if account_id is None:  # pragma: no cover - required authentication rejects anonymous requests first
@@ -285,11 +285,11 @@ class _StepUpController(Controller):
         )
         if not isinstance(grant, StepUpCredential):
             _error(grant)
-        return _response(StepUpResponse(grant=grant.token, purpose=grant.purpose, expires_at=grant.expires_at))
+        return _response(StepUpGrant(grant=grant.token, purpose=grant.purpose, expires_at=grant.expires_at))
 
     @staticmethod
     async def _verify_factor(
-        account_id: str, data: StepUpRequest, request: Request[Any, Any, Any], mfa_service: _MFAFeatureService
+        account_id: str, data: StepUpVerification, request: Request[Any, Any, Any], mfa_service: _MFAFeatureService
     ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
         if data.method == "password" and mfa_service.local_auth is not None:
             proof = await mfa_service.local_auth.password_reauthentication.verify(account_id, data.credential)
@@ -329,11 +329,11 @@ class _MFAController(Controller):
     )
     async def enroll_totp(
         self,
-        data: JSONBody[TOTPEnrollmentRequest],
+        data: JSONBody[TOTPEnrollment],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[TOTPEnrollmentResponse]:
+    ) -> Response[TOTPProvisioning]:
         """Begin TOTP enrollment after consuming exact step-up."""
         account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
@@ -357,7 +357,7 @@ class _MFAController(Controller):
         if isinstance(result, VerificationUnavailable):
             _error(result)
         return _response(
-            TOTPEnrollmentResponse(
+            TOTPProvisioning(
                 enrollment_id=result.enrollment_id,
                 method_id=result.method_id,
                 provisioning_uri=result.provisioning_uri,
@@ -382,11 +382,11 @@ class _MFAController(Controller):
     )
     async def verify_totp(
         self,
-        data: JSONBody[TOTPVerificationRequest],
+        data: JSONBody[TOTPVerification],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[RecoveryCodesResponse]:
+    ) -> Response[RecoveryCodes]:
         """Activate TOTP and return a recovery-code set once."""
         account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
@@ -400,7 +400,7 @@ class _MFAController(Controller):
         recovery = await totp_service.activate_totp_with_recovery_codes(account_id, data.enrollment_id, data.code)
         if not isinstance(recovery, RecoveryCodeGrant):
             _error(recovery)
-        return _response(RecoveryCodesResponse(codes=recovery.codes))
+        return _response(RecoveryCodes(codes=recovery.codes))
 
     @post(
         "/mfa/totp/{method_id:str}/remove",
@@ -419,7 +419,7 @@ class _MFAController(Controller):
     async def remove_totp(
         self,
         method_id: FromPath[str],
-        data: JSONBody[StepUpAuthorizedRequest],
+        data: JSONBody[StepUpAuthorization],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
@@ -462,11 +462,11 @@ class _MFAController(Controller):
     )
     async def recovery_codes(
         self,
-        data: JSONBody[StepUpAuthorizedRequest],
+        data: JSONBody[StepUpAuthorization],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[RecoveryCodesResponse]:
+    ) -> Response[RecoveryCodes]:
         """Replace recovery codes after exact step-up."""
         account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
@@ -489,7 +489,7 @@ class _MFAController(Controller):
         result = await totp_service.generate_recovery_codes(account_id)
         if not isinstance(result, RecoveryCodeGrant):
             _error(result)
-        return _response(RecoveryCodesResponse(codes=result.codes))
+        return _response(RecoveryCodes(codes=result.codes))
 
 
 class _PasskeyController(Controller):
@@ -511,11 +511,11 @@ class _PasskeyController(Controller):
     )
     async def registration_options(
         self,
-        data: JSONBody[PasskeyRegistrationOptionsRequest],
+        data: JSONBody[PasskeyRegistrationStart],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[PasskeyOptionsResponse]:
+    ) -> Response[PasskeyOptions]:
         """Create registration options after exact step-up."""
         account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys
@@ -553,7 +553,7 @@ class _PasskeyController(Controller):
     )
     async def registration_verify(
         self,
-        data: JSONBody[PasskeyVerifyRequest],
+        data: JSONBody[PasskeyVerification],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
@@ -589,10 +589,10 @@ class _PasskeyController(Controller):
     )
     async def authentication_options(
         self,
-        data: JSONBody[PasskeyAuthenticationOptionsRequest],
+        data: JSONBody[PasskeyAuthenticationStart],
         request: Request[Any, Any, Any],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[PasskeyOptionsResponse]:
+    ) -> Response[PasskeyOptions]:
         """Create public account-bound assertion options."""
         passkey_service = mfa_service.passkeys
         if passkey_service is None:  # pragma: no cover - this controller is registered only with a passkey service
@@ -619,7 +619,7 @@ class _PasskeyController(Controller):
         self,
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[tuple[PasskeySummaryResponse, ...]]:
+    ) -> Response[tuple[PasskeySummary, ...]]:
         """List only caller-owned safe credential metadata."""
         account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys
@@ -649,7 +649,7 @@ class _PasskeyController(Controller):
     async def remove_passkey(
         self,
         credential_id: FromPath[str],
-        data: JSONBody[StepUpAuthorizedRequest],
+        data: JSONBody[StepUpAuthorization],
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
@@ -701,7 +701,7 @@ class _PasskeySessionAuthenticationController(Controller):
     )
     async def authentication_verify(
         self,
-        data: JSONBody[PasskeyVerifyRequest],
+        data: JSONBody[PasskeyVerification],
         request: Request[Any, Any, Any],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[Any]:
@@ -730,7 +730,7 @@ class _PasskeyTokenAuthenticationController(Controller):
     )
     async def authentication_verify(
         self,
-        data: JSONBody[PasskeyVerifyRequest],
+        data: JSONBody[PasskeyVerification],
         request: Request[Any, Any, Any],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[Any]:
@@ -758,7 +758,7 @@ class _PasskeyHybridSessionController(Controller):
     )
     async def authentication_verify(
         self,
-        data: JSONBody[PasskeyVerifyRequest],
+        data: JSONBody[PasskeyVerification],
         request: Request[Any, Any, Any],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[Any]:
@@ -787,7 +787,7 @@ class _PasskeyHybridTokenController(Controller):
     )
     async def authentication_verify(
         self,
-        data: JSONBody[PasskeyVerifyRequest],
+        data: JSONBody[PasskeyVerification],
         request: Request[Any, Any, Any],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[Any]:
@@ -798,7 +798,7 @@ class _PasskeyHybridTokenController(Controller):
 
 
 async def _verify_passkey_authentication(
-    data: PasskeyVerifyRequest,
+    data: PasskeyVerification,
     request: Request[Any, Any, Any],
     mfa_service: _MFAFeatureService,
     *,
@@ -834,11 +834,11 @@ def _options_response(
 ) -> Response[Any]:
     if isinstance(result, VerificationUnavailable):
         _error(result)
-    return _response(PasskeyOptionsResponse(options=result.json, expires_at=result.expires_at, binding=binding))
+    return _response(PasskeyOptions(options=result.json, expires_at=result.expires_at, binding=binding))
 
 
-def _summary_response(summary: PasskeyRecord) -> PasskeySummaryResponse:
-    return PasskeySummaryResponse(
+def _summary_response(summary: PasskeyRecord) -> PasskeySummary:
+    return PasskeySummary(
         credential_id=summary.credential_id,
         display_name=summary.display_name,
         created_at=summary.created_at,

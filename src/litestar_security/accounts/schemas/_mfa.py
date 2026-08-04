@@ -5,22 +5,22 @@ from datetime import datetime
 from litestar_security.schema import WireStruct
 
 __all__ = (
-    "PasskeyAuthenticationOptionsRequest",
-    "PasskeyOptionsResponse",
-    "PasskeyRegistrationOptionsRequest",
-    "PasskeySummaryResponse",
-    "PasskeyVerifyRequest",
-    "RecoveryCodesResponse",
-    "StepUpAuthorizedRequest",
-    "StepUpRequest",
-    "StepUpResponse",
-    "TOTPEnrollmentRequest",
-    "TOTPEnrollmentResponse",
-    "TOTPVerificationRequest",
+    "PasskeyAuthenticationStart",
+    "PasskeyOptions",
+    "PasskeyRegistrationStart",
+    "PasskeySummary",
+    "PasskeyVerification",
+    "RecoveryCodes",
+    "StepUpAuthorization",
+    "StepUpGrant",
+    "StepUpVerification",
+    "TOTPEnrollment",
+    "TOTPProvisioning",
+    "TOTPVerification",
 )
 
 
-class TOTPEnrollmentRequest(WireStruct, frozen=True):
+class TOTPEnrollment(WireStruct, frozen=True):
     """Request a protected TOTP enrollment."""
 
     label: str
@@ -31,7 +31,7 @@ class TOTPEnrollmentRequest(WireStruct, frozen=True):
         return f"{type(self).__name__}(label={self.label!r}, step_up_grant=<redacted>)"
 
 
-class TOTPEnrollmentResponse(WireStruct, frozen=True):
+class TOTPProvisioning(WireStruct, frozen=True):
     """Reveal one TOTP provisioning URI."""
 
     enrollment_id: str
@@ -47,7 +47,7 @@ class TOTPEnrollmentResponse(WireStruct, frozen=True):
         )
 
 
-class TOTPVerificationRequest(WireStruct, frozen=True):
+class TOTPVerification(WireStruct, frozen=True):
     """Activate one pending TOTP enrollment."""
 
     enrollment_id: str
@@ -58,7 +58,7 @@ class TOTPVerificationRequest(WireStruct, frozen=True):
         return f"{type(self).__name__}(enrollment_id={self.enrollment_id!r}, code=<redacted>)"
 
 
-class StepUpAuthorizedRequest(WireStruct, frozen=True):
+class StepUpAuthorization(WireStruct, frozen=True):
     """Carry the grant authorizing one sensitive factor operation."""
 
     step_up_grant: str
@@ -68,7 +68,7 @@ class StepUpAuthorizedRequest(WireStruct, frozen=True):
         return f"{type(self).__name__}(step_up_grant=<redacted>)"
 
 
-class RecoveryCodesResponse(WireStruct, frozen=True):
+class RecoveryCodes(WireStruct, frozen=True):
     """Reveal a replacement recovery-code set once."""
 
     codes: tuple[str, ...]
@@ -78,7 +78,7 @@ class RecoveryCodesResponse(WireStruct, frozen=True):
         return f"{type(self).__name__}(codes=<redacted>)"
 
 
-class StepUpRequest(WireStruct, frozen=True):
+class StepUpVerification(WireStruct, frozen=True):
     """Present one configured factor for a purpose-bound grant."""
 
     method: str
@@ -90,7 +90,7 @@ class StepUpRequest(WireStruct, frozen=True):
         return f"{type(self).__name__}(method={self.method!r}, credential=<redacted>, method_id={self.method_id!r})"
 
 
-class StepUpResponse(WireStruct, frozen=True):
+class StepUpGrant(WireStruct, frozen=True):
     """Return one short-lived transport-bound grant."""
 
     grant: str
@@ -102,7 +102,7 @@ class StepUpResponse(WireStruct, frozen=True):
         return f"{type(self).__name__}(grant=<redacted>, purpose={self.purpose!r}, expires_at={self.expires_at!r})"
 
 
-class PasskeyRegistrationOptionsRequest(WireStruct, frozen=True):
+class PasskeyRegistrationStart(WireStruct, frozen=True):
     """Request bound passkey registration options."""
 
     user_name: str
@@ -113,13 +113,13 @@ class PasskeyRegistrationOptionsRequest(WireStruct, frozen=True):
         return f"{type(self).__name__}(user_name={self.user_name!r}, step_up_grant=<redacted>)"
 
 
-class PasskeyAuthenticationOptionsRequest(WireStruct, frozen=True):
+class PasskeyAuthenticationStart(WireStruct, frozen=True):
     """Request bound passkey authentication options."""
 
     account_id: str
 
 
-class PasskeyVerifyRequest(WireStruct, frozen=True):
+class PasskeyVerification(WireStruct, frozen=True):
     """Submit one browser WebAuthn JSON response."""
 
     account_id: str
@@ -135,7 +135,7 @@ class PasskeyVerifyRequest(WireStruct, frozen=True):
         )
 
 
-class PasskeyOptionsResponse(WireStruct, frozen=True):
+class PasskeyOptions(WireStruct, frozen=True):
     """Carry dependency-independent WebAuthn JSON options."""
 
     options: str
@@ -147,7 +147,7 @@ class PasskeyOptionsResponse(WireStruct, frozen=True):
         return f"{type(self).__name__}(options=<redacted>, expires_at={self.expires_at!r}, binding=<redacted>)"
 
 
-class PasskeySummaryResponse(WireStruct, frozen=True):
+class PasskeySummary(WireStruct, frozen=True):
     """Safe caller-owned credential metadata."""
 
     credential_id: str
