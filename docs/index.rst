@@ -23,6 +23,7 @@ guards, OpenAPI schema, and WebSocket lifecycle.
    accounts
    providers
    generated-routes
+   composition
    rate-limiting
    jwt-and-jwks
    websockets

@@ -4,6 +4,18 @@ Changelog
 Unreleased
 ----------
 
+Added
+~~~~~
+
+* ``SecurityConfig(exclude=[...])`` takes path patterns that remove routes from
+  security entirely, mirroring ``JWTAuth.exclude``. It is what lets an
+  application serve static assets, or any other route tree a plugin registered,
+  without authentication. Patterns apply when routes are compiled, so an
+  excluded operation also documents anonymous access in OpenAPI instead of
+  claiming a protection it does not have. A route that declares its own ``auth``
+  and also matches a pattern is rejected at startup, and a pattern matching no
+  registered route warns once. See :doc:`composition`.
+
 0.2.0
 -----
 
