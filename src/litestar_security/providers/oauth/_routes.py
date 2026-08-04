@@ -1,6 +1,6 @@
 """Native Litestar route bundle for interactive OAuth provider lifecycles."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from logging import getLogger
@@ -36,7 +36,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
-from litestar_security.authentication import public, required
+from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import Principal
 from litestar_security.providers.oauth._accounts import (
     AccountLinkError,
@@ -63,7 +63,7 @@ from litestar_security.providers.oauth._transactions import (
 from litestar_security.schema import WireStruct
 
 if TYPE_CHECKING:
-    from litestar_security.accounts import RateLimitGuard
+    from litestar_security.accounts import RateLimitGuard, StepUpService
 
 __all__ = (
     "OIDC_FRONTCHANNEL_LOGOUT",
@@ -85,6 +85,7 @@ __all__ = (
     "OIDCLogoutLifecycleService",
     "OIDCLogoutTokenConsumer",
     "OIDCSessionLogoutStore",
+    "StepUpOAuthAuthorizer",
     "build_oauth_routes",
 )
 
@@ -93,6 +94,7 @@ OIDC_FRONTCHANNEL_LOGOUT = "oidc.logout.frontchannel"
 
 _LOGGER = getLogger(__name__)
 _MAXIMUM_TCP_PORT = 65_535
+_MAXIMUM_SECURITY_EPOCH = 9_223_372_036_854_775_807
 
 
 class OAuthRouteResponse(WireStruct, frozen=True, kw_only=True, omit_defaults=True):
@@ -223,6 +225,8 @@ class OAuthProviderRegistration:
         ):
             message = "OAuth provider registration is invalid"
             raise ImproperlyConfiguredException(detail=message)
+
+
 @dataclass(frozen=True, slots=True)
 class OAuthStepUpAuthorization:
     """Authoritative account epoch and transport binding from consumed step-up."""
@@ -233,7 +237,7 @@ class OAuthStepUpAuthorization:
 
 @dataclass(frozen=True, slots=True)
 class OIDCLogoutIdentity:
-    """Verified logout-token identity after atomic replay consumption."""
+    """Verified logout-token identity whose ``jti`` awaits store consumption."""
 
     provider: str
     issuer: str
@@ -245,16 +249,16 @@ class OIDCLogoutIdentity:
 
 @runtime_checkable
 class OIDCLogoutTokenConsumer(Protocol):
-    """Verify logout-token signature/claims/events and atomically consume jti."""
+    """Verify logout-token signature, claims, and events, yielding its ``jti``."""
 
     async def consume(self, provider: str, logout_token: str, *, now: datetime) -> OIDCLogoutIdentity:
-        """Return one verified non-replayed logout identity."""
+        """Return one verified logout identity without consuming its ``jti``."""
         ...  # pragma: no cover
 
 
 @runtime_checkable
 class OIDCSessionLogoutStore(Protocol):
-    """Atomically consume logout jti and revoke mapped local sessions."""
+    """Atomically consume a verified logout ``jti`` and revoke mapped sessions."""
 
     async def consume_backchannel(self, identity: OIDCLogoutIdentity, *, now: datetime) -> int | None:
         """Consume jti and revoke sessions atomically, returning none on replay."""
@@ -302,6 +306,100 @@ class OAuthStepUpAuthorizer(Protocol):
     def session_binding(self, request: Request[Any, Any, Any]) -> str | None:
         """Return the current transport binding used by callback validation."""
         ...  # pragma: no cover
+
+
+@dataclass(frozen=True, slots=True)
+class StepUpOAuthAuthorizer:
+    """Adapt ``StepUpService`` grants to OAuth lifecycle authorization."""
+
+    service: "StepUpService"
+    current_epoch: Callable[[str], Awaitable[int | None]]
+    transport_binding: Callable[[Request[Any, Any, Any]], bytes | None]
+    session_binding: Callable[[Request[Any, Any, Any]], str | None]
+
+    def __post_init__(self) -> None:
+        """Require the concrete service and application-owned callbacks."""
+        if (
+            not callable(getattr(self.service, "consume", None))
+            or not callable(self.current_epoch)
+            or not callable(self.transport_binding)
+            or not callable(self.session_binding)
+        ):
+            message = "OAuth step-up authorizer configuration is invalid"
+            raise ImproperlyConfiguredException(detail=message)
+
+    async def authorize(
+        self, *, grant: str, account_id: str, purpose: str, request: Request[Any, Any, Any]
+    ) -> OAuthStepUpAuthorization:
+        """Consume one exact step-up grant for the current OAuth operation.
+
+        Args:
+            grant: One-time step-up grant presented by the authenticated account.
+            account_id: Account the grant must belong to.
+            purpose: Exact OAuth operation the grant authorizes.
+            request: Request from which application callbacks derive bindings.
+
+        Returns:
+            The current epoch and optional callback-session binding.
+
+        Raises:
+            NotAuthorizedException: If the grant or transport binding is absent or invalid.
+            ServiceUnavailableException: If the epoch or step-up service is unavailable.
+        """
+        security_epoch = await self.current_security_epoch(account_id)
+        try:
+            binding = self.transport_binding(request)
+        except Exception:  # noqa: BLE001 - application-owned binding failures fail closed
+            raise _step_up_unavailable() from None
+        if binding is None or binding.__class__ is not bytes or not binding:
+            raise NotAuthorizedException(detail="Fresh step-up authentication required")
+        try:
+            result = await self.service.consume(
+                grant,
+                principal_id=account_id,
+                security_epoch=security_epoch,
+                purpose=purpose,
+                transport_binding=binding,
+            )
+        except Exception:  # noqa: BLE001 - a service failure must not escape as an OAuth decision
+            raise _step_up_unavailable() from None
+        if isinstance(result, InvalidCredentials):
+            raise NotAuthorizedException(detail="Fresh step-up authentication required")
+        if isinstance(result, VerificationUnavailable):
+            raise _step_up_unavailable()
+        try:
+            session_binding = self.session_binding(request)
+        except Exception:  # noqa: BLE001 - application-owned binding failures fail closed
+            raise _step_up_unavailable() from None
+        if session_binding is not None and (session_binding.__class__ is not str or not session_binding):
+            raise _step_up_unavailable()
+        return OAuthStepUpAuthorization(security_epoch=security_epoch, session_binding=session_binding)
+
+    async def current_security_epoch(self, account_id: str) -> int:
+        """Return the application callback's current valid epoch.
+
+        Args:
+            account_id: Account whose security epoch must be read.
+
+        Returns:
+            The current valid non-negative security epoch.
+
+        Raises:
+            ServiceUnavailableException: If the callback fails or returns no valid epoch.
+        """
+        try:
+            epoch = await self.current_epoch(account_id)
+        except Exception:  # noqa: BLE001 - epoch lookups are application-owned availability boundaries
+            raise _step_up_unavailable() from None
+        if not isinstance(epoch, int) or isinstance(epoch, bool):
+            raise _step_up_unavailable()
+        if epoch < 0 or epoch > _MAXIMUM_SECURITY_EPOCH:
+            raise _step_up_unavailable()
+        return epoch
+
+
+def _step_up_unavailable() -> ServiceUnavailableException:
+    return ServiceUnavailableException(detail="Step-up authentication is unavailable")
 
 
 @runtime_checkable
@@ -610,8 +708,8 @@ class OIDCLogoutLifecycleService:
 
         Args:
             provider_issuers: Exact configured issuer per provider.
-            consumer: Logout-token verification and jti consumption.
-            sessions: Atomic session revocation store.
+            consumer: Logout-token verifier that yields a verified identity and ``jti``.
+            sessions: Store that atomically consumes that ``jti`` and revokes mapped sessions.
             rate_limits: Optional budget consumed by each front-channel attempt.
             client_key: Trusted client identity extractor for the rate-limit
                 client bucket, defaulting to the peer address without trusting
@@ -650,7 +748,7 @@ class OIDCLogoutLifecycleService:
         return frozenset(self.provider_issuers)
 
     async def backchannel(self, provider: str, logout_token: str) -> OAuthRouteResponse:
-        """Verify and atomically consume a logout token before local revocation."""
+        """Verify a logout token, check its issuer, then consume and revoke through the store."""
         self._issuer(provider)
         now = self._now()
         identity = await self.consumer.consume(provider, logout_token, now=now)

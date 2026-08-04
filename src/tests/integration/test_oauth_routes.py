@@ -17,9 +17,11 @@ from litestar_security.accounts import (
     RateLimitGuard,
     RateLimitPolicy,
     RefreshTokenResponse,
+    StepUpGrant,
+    StepUpService,
     StoreRateLimiter,
 )
-from litestar_security.authentication import VerificationUnavailable
+from litestar_security.authentication import AuthenticationEvidence, VerificationUnavailable
 from litestar_security.context import Principal
 from litestar_security.providers.oauth import (
     AccountLinkError,
@@ -54,9 +56,10 @@ from litestar_security.providers.oauth import (
     ProviderIdentity,
     ProviderTokenSet,
     SecretStr,
+    StepUpOAuthAuthorizer,
     build_oauth_routes,
 )
-from litestar_security.testing import FakeOAuthProvider
+from litestar_security.testing import FakeOAuthProvider, InMemoryStepUpStore
 
 NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
 
@@ -224,16 +227,62 @@ class StepUpAuthorizer:
         return "session-binding"
 
 
+def step_up_oauth_authorizer(
+    *,
+    epochs: dict[str, int | None],
+    transport_binding: bytes = b"transport-binding",
+) -> tuple[StepUpOAuthAuthorizer, StepUpService]:
+    async def current_epoch(account_id: str) -> int | None:
+        return epochs.get(account_id)
+
+    service = StepUpService(
+        InMemoryStepUpStore(),
+        clock=lambda: NOW,
+        entropy=lambda _size: b"s" * 32,
+    )
+    return (
+        StepUpOAuthAuthorizer(
+            service=service,
+            current_epoch=current_epoch,
+            transport_binding=lambda _request: transport_binding,
+            session_binding=lambda _request: "session-binding",
+        ),
+        service,
+    )
+
+
+async def issue_step_up_grant(
+    service: StepUpService, *, epoch: int, purpose: str, transport_binding: bytes = b"transport-binding"
+) -> str:
+    grant = await service.issue(
+        principal_id="account-1",
+        security_epoch=epoch,
+        purpose=purpose,
+        transport_binding=transport_binding,
+        evidence=AuthenticationEvidence(
+            mechanism="totp",
+            slot="mfa",
+            authenticated_at=NOW,
+            methods=frozenset({"totp"}),
+        ),
+    )
+    assert isinstance(grant, StepUpGrant)
+    return grant.token
+
+
 class LogoutConsumer:
     def __init__(self) -> None:
         self.tokens: list[str] = []
+        self.verified_token_ids: list[str] = []
 
     async def consume(self, provider: str, logout_token: str, *, now: datetime) -> OIDCLogoutIdentity:
         del now
         self.tokens.append(logout_token)
-        return OIDCLogoutIdentity(
+        identity = OIDCLogoutIdentity(
             provider, "https://issuer.example", "subject", "sid-1", "jti-1", NOW + timedelta(minutes=5)
         )
+        self.verified_token_ids.append(identity.token_id)
+        return identity
 
 
 class LogoutSessions:
@@ -317,6 +366,91 @@ def oauth_app(*, openapi: bool, oauth_service: RouteService | None = None, authe
         "dependencies": {"principal": Provide(provide_principal, sync_to_thread=False)},
     }
     return Litestar(**kwargs) if openapi else Litestar(**kwargs, openapi_config=None)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_step_up_oauth_authorizer_consumes_one_grant_once() -> None:
+    authorizer, service = step_up_oauth_authorizer(epochs={"account-1": 2})
+    request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {})())
+    grant = await issue_step_up_grant(service, epoch=2, purpose="oauth-link")
+
+    authorization = await authorizer.authorize(
+        grant=grant, account_id="account-1", purpose="oauth-link", request=request
+    )
+
+    assert authorization == OAuthStepUpAuthorization(security_epoch=2, session_binding="session-binding")
+    with pytest.raises(NotAuthorizedException, match="Fresh step-up") as consumed:
+        await authorizer.authorize(grant=grant, account_id="account-1", purpose="oauth-link", request=request)
+    assert consumed.value.status_code == 401
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("issued_purpose", "requested_purpose", "issued_binding"),
+    [
+        ("oauth-link", "oauth-unlink", b"transport-binding"),
+        ("oauth-link", "oauth-link", b"other-binding"),
+    ],
+)
+async def test_step_up_oauth_authorizer_rejects_wrong_purpose_or_transport_binding(
+    issued_purpose: str, requested_purpose: str, issued_binding: bytes
+) -> None:
+    authorizer, service = step_up_oauth_authorizer(epochs={"account-1": 2})
+    request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {})())
+    grant = await issue_step_up_grant(
+        service, epoch=2, purpose=issued_purpose, transport_binding=issued_binding
+    )
+
+    with pytest.raises(NotAuthorizedException, match="Fresh step-up") as denied:
+        await authorizer.authorize(grant=grant, account_id="account-1", purpose=requested_purpose, request=request)
+
+    assert denied.value.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_step_up_oauth_authorizer_rechecks_epoch_for_callback_proof() -> None:
+    epochs: dict[str, int | None] = {"account-1": 2}
+    authorizer, step_up = step_up_oauth_authorizer(epochs=epochs)
+    service = lifecycle_service(provider=oauth_fake_provider(), step_up=cast("Any", authorizer))
+    request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {"cookies": {}})())
+    grant = await issue_step_up_grant(step_up, epoch=2, purpose="oauth-link")
+
+    start = await service.begin(
+        provider="example",
+        operation=OAuthOperation.LINK,
+        account_id="account-1",
+        provider_account_id=None,
+        return_to="/",
+        scopes=None,
+        step_up_grant=grant,
+        request=request,
+    )
+    epochs["account-1"] = 3
+    request.cookies["__Host-litestar-security-oauth"] = start.binding_cookie.value
+
+    with pytest.raises(OAuthAccountError):
+        await service.callback(
+            provider="example", code="code", state=parse_qs(urlsplit(start.url).query)["state"][0], request=request
+        )
+
+
+@pytest.mark.anyio
+async def test_step_up_oauth_authorizer_maps_epoch_callback_failure_to_503() -> None:
+    async def broken_epoch(_account_id: str) -> int | None:
+        raise OSError
+
+    service = StepUpService(InMemoryStepUpStore(), clock=lambda: NOW, entropy=lambda _size: b"s" * 32)
+    authorizer = StepUpOAuthAuthorizer(
+        service=service,
+        current_epoch=broken_epoch,
+        transport_binding=lambda _request: b"transport-binding",
+        session_binding=lambda _request: "session-binding",
+    )
+
+    with pytest.raises(ServiceUnavailableException, match="Step-up authentication is unavailable") as unavailable:
+        await authorizer.current_security_epoch("account-1")
+
+    assert unavailable.value.status_code == 503
 
 
 def test_oauth_config_caches_routes_and_plugin_registers_once() -> None:
@@ -814,6 +948,8 @@ async def test_oidc_front_and_backchannel_logout_routes_delegate_verified_lifecy
     assert back.status_code == 200
     assert replay.status_code == 401
     assert consumer.tokens == ["signed-token", "signed-token"]
+    assert consumer.verified_token_ids == ["jti-1", "jti-1"]
+    assert sessions.consumed == {"jti-1"}
     assert sessions.calls == ["sid-front", "sid-1"]
 
 

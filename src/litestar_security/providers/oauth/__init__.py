@@ -53,6 +53,7 @@ from litestar_security.providers.oauth._routes import (
     OIDCLogoutLifecycleService,
     OIDCLogoutTokenConsumer,
     OIDCSessionLogoutStore,
+    StepUpOAuthAuthorizer,
     build_oauth_routes,
 )
 from litestar_security.providers.oauth._transactions import (
@@ -137,6 +138,7 @@ __all__ = (
     "ProviderTokenReference",
     "ProviderTokenSet",
     "SecretStr",
+    "StepUpOAuthAuthorizer",
     "StoredProviderTokens",
     "TokenVault",
     "UnlinkResult",
