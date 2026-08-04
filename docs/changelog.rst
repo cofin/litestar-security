@@ -4,30 +4,6 @@ Changelog
 Unreleased
 ----------
 
-Added
-~~~~~
-
-* Typed ``SecureController`` / ``PublicController`` base classes compile their
-  ``auth`` ``ClassVar`` into native ``opt``.
-* ``LocalKeyRing`` can mint and verify bounded, purpose-specific capability
-  JWTs for application-owned flows such as signed download URLs.
-* ``MFAConfig.require_at_login`` adds password-login MFA completion routes:
-  ``POST /auth/login/mfa`` (``LocalSessionMFALogin``) and
-  ``POST /auth/token/mfa`` (``LocalTokenMFALogin``). A verified password now
-  returns the typed ``MFARequired`` / ``LocalMFARequiredResponse`` outcome when
-  completion is required. ``MFALoginChallengeStore`` and the testing-only
-  ``InMemoryMFALoginChallengeStore`` provide the atomic, digest-only,
-  reveal-once challenge boundary.
-* ``InMemoryLocalAccountStore`` and
-  ``InMemorySecurityBackend.accounts`` provide a deterministic reference for
-  local-account, native-session, refresh-family, and registration ports.
-* ``litestar_security.testing`` now exports conformance helpers for API-key,
-  local-account, MFA-login challenge, MFA, OAuth account and transaction,
-  passkey, refresh-family, session-registry, WebAuthn-challenge, WebSocket
-  connect-token, and rate-limiter integrations. Use
-  ``StoreConformanceFactories`` with
-  ``assert_security_backend_conformance`` to run the selected store scenarios.
-
 0.2.0
 -----
 
@@ -108,6 +84,20 @@ Changed (breaking)
   of revoked sessions rendered as a string. These are now
   ``provider_account_id``, ``account_id``, and ``revoked_sessions``, and a
   response omits the members its operation did not resolve.
+* ``OIDCSessionLogoutStore`` now owns atomic back-channel ``jti`` replay
+  consumption. ``revoke_frontchannel()`` additionally requires the caller's
+  browser-binding digest and returns ``int | None`` so a rejected binding is
+  distinguishable from a successful zero-session revocation. Custom stores must
+  implement the widened protocol.
+* WebSocket connect-token stores and callers must preserve the account
+  ``security_epoch``. Issuance requires the epoch, and consumption requires an
+  authoritative asynchronous epoch callback so a burned token cannot establish
+  a connection after account-wide revocation.
+* Argon2, TOTP, and WebAuthn are no longer installed by the core distribution.
+  Applications using local passwords, MFA, or passkeys must install
+  ``litestar-security[argon2]``, ``litestar-security[mfa]``, or
+  ``litestar-security[passkeys]`` respectively; ``litestar-security[all]``
+  installs every optional feature.
 
 Added
 ~~~~~
@@ -119,17 +109,97 @@ Added
   ``require_dependency``, which raises where a capability is used and names the
   distribution to install. The flags resolve when they are read, so importing
   the module never imports what it describes.
+* Typed ``SecureController`` and ``PublicController`` base classes compile an
+  ``auth`` ``ClassVar`` into native Litestar route metadata, with explicit
+  precedence and bypass-conflict validation.
+* ``exclude()`` is a first-class authentication policy for routes that bypass
+  the security evaluator while retaining ordinary CSRF derivation. It rejects
+  contradictory authentication policy at application startup.
+* ``LocalKeyRing`` can mint and verify bounded, purpose-specific capability
+  JWTs for application-owned flows such as signed download URLs.
+* ``MFAConfig.require_at_login`` adds password-login MFA completion routes:
+  ``POST /auth/login/mfa`` and ``POST /auth/token/mfa``. A verified password can
+  now return the typed ``MFARequired`` outcome backed by an atomic,
+  digest-only, reveal-once ``MFALoginChallengeStore``.
+* ``HttpxJWKSFetcher`` provides a default bounded httpx transport with ETag
+  revalidation, redirect and environment-proxy refusal, public-address
+  validation, injectable DNS/transport seams, and owned-client lifecycle.
+* ``forwarded_client_key()`` derives rate-limit keys from explicitly trusted
+  proxy CIDRs using a bounded right-to-left ``X-Forwarded-For`` walk and safe
+  peer fallback.
+* ``AESGCMSecretProtector`` and ``AESGCMOAuthTransactionProtector`` provide
+  versioned, non-deterministic authenticated encryption with associated-data
+  binding for MFA secrets and OAuth transaction/vault state.
+* ``WebSocketConnectTokenIssuer`` resolves a named WebSocket handler's compiled
+  security plan and mints a policy-bound connect token through the
+  ``websocket_connect_tokens`` dependency.
+* ``InMemoryLocalAccountStore`` and ``InMemorySecurityBackend.accounts`` provide
+  deterministic references for local-account, native-session, refresh-family,
+  registration, recovery, purpose-token, and login-method ports. The aggregate
+  backend exposes separate MFA, passkey, OAuth/OIDC, API-key, and WebSocket
+  reference attributes.
+* ``litestar_security.testing`` now exports reference resolvers, revocation
+  sources, and conformance helpers for the shipped atomic security contracts and
+  protectors. ``StoreConformanceFactories`` and
+  ``assert_security_backend_conformance`` run an application's selected
+  backend scenarios.
+* ``StepUpOAuthAuthorizer`` bridges OAuth link/unlink operations to local
+  step-up grants. The OAuth testing surface also includes an encrypted
+  revocation-retry store and atomic OIDC session-logout references.
+
+Security
+~~~~~~~~
+
+* Bearer and session assurance is anchored to the original authentication
+  time, preserves evidence expiry through session establishment, and fails
+  closed when a token omits or corrupts the required freshness claims.
+* Recovery-code digests are account-bound. Passkey counters remain monotonic
+  from zero, clone-risk state cannot be silently cleared, and the attestation
+  trait is set only after cryptographic chain verification.
+* Discovered OIDC authorization, token, and end-session endpoints must share the
+  issuer origin or appear in ``allowed_oauth_origins``. OAuth token and
+  revocation requests pin a freshly resolved public IP while retaining the
+  original HTTP Host and TLS SNI, reject mixed/private DNS answers, compression,
+  redirects, and oversized responses, and keep JWKS trust separate. GitHub
+  profile responses are independently bounded and reject compression.
+* WebSocket connect tokens carry the account security epoch and revalidate it
+  after atomic consumption. Policy fingerprints use a versioned canonical JSON
+  encoding rather than representation-dependent values.
+* Static security headers are backfilled onto error responses as well as
+  successful responses. Dynamic nonce CSP replaces stale/conflicting response
+  values deterministically, ``SecurityHeadersConfig.hardened()`` supplies an
+  opt-in baseline, and notification destinations reject control characters.
+* Front-channel OIDC logout is browser-binding aware and rate limited. Security
+  evaluators and generated routes classify application-port failures and fail
+  closed without exposing provider or credential details.
 
 Changed
 ~~~~~~~
 
 * ``litestar_security.accounts`` and ``litestar_security.websocket`` were
-  reorganized internally. Every public import path is unchanged: the account
-  wire schemas and generated controllers moved into ``schemas`` and
-  ``controllers`` sub-packages, and the WebSocket module became a package of
-  layered modules. The worker budget, metrics port, and blocking-call bridge now
-  live in ``litestar_security.workers``; ``litestar_security.config`` re-exports
-  them, so the documented import path still resolves.
+  reorganized internally. Unrenamed account and configuration imports remain
+  available from their documented package exports: account wire schemas and
+  generated controllers moved into ``schemas`` and ``controllers``
+  sub-packages, and the WebSocket module became a package of layered modules.
+  The worker budget, metrics port, and blocking-call bridge now live in
+  ``litestar_security.workers``; ``litestar_security.config`` re-exports them.
+* OAuth now has a formal zero-dependency ``oauth`` feature marker. Core and
+  ``accounts`` imports remain usable when optional feature packages are absent;
+  accessing an unavailable feature raises an actionable installation error.
+* ``RateLimiter.acquire()`` now promises exact atomic admission. The reference
+  ``StoreRateLimiter`` serializes complete multi-bucket accounting across
+  instances in one process and documents that applications need an atomic
+  backend for multi-process deployment.
+* The default local-account rate-limit map is exhaustive and deny-by-default,
+  covering factor removal, verification confirmation, OAuth logout, and
+  step-up operations. Recovery and verification requests equalize durable-store
+  work for absent and present identifiers.
+* Authorization resolution only narrows credential-derived team roles, verifier
+  caches share configured worker budgets, and local password reauthentication
+  checks current account state and security epoch.
+* Public routes remain excluded from native CSRF unless they declare
+  ``csrf_required=True``; authentication bypass routes retain ordinary CSRF
+  derivation instead of inheriting the public-route exception.
 
 0.1.0
 -----
