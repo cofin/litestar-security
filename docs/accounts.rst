@@ -22,6 +22,48 @@ Recovery-code digests are account-bound under the current ``v2`` domain. Codes
 issued by an earlier release must be replaced with
 ``MFAService.generate_recovery_codes()`` before they can be used.
 
+MFA secret protection
+=====================
+
+``MFAConfig`` requires a ``SecretProtector``. Use the first-party
+``AESGCMSecretProtector`` unless the application has a separate protector that
+meets the same contract:
+
+.. code-block:: python
+
+   from litestar_security import MFAConfig
+   from litestar_security.accounts import AESGCMSecretProtector, SecretProtectorKey
+
+
+   # ``mfa_store`` is the application's MFAStore implementation.
+   active_key = SecretProtectorKey(
+       "v2",
+       application_secret_store.get_bytes("mfa-secret-protector/v2"),
+   )
+   previous_key = SecretProtectorKey(
+       "v1",
+       application_secret_store.get_bytes("mfa-secret-protector/v1"),
+   )
+   mfa = MFAConfig(
+       store=mfa_store,
+       secret_protector=AESGCMSecretProtector(
+           active_key=active_key,
+           retained_keys=(previous_key,),
+       ),
+       register_routes=False,
+   )
+
+Each key is exactly 32 bytes of application-owned material obtained from a KMS
+or secret store; never embed it as a source-code literal. To rotate a key, add
+the old active key to ``retained_keys`` before promoting the new ``active_key``.
+Retain it until every MFA secret encrypted with that version has been replaced
+or is no longer usable.
+
+Applications may provide their own protector. Verify it with
+:func:`~litestar_security.testing.assert_secret_protector_conformance`, which
+checks round-tripping, key-version labeling, associated-data authentication,
+and non-deterministic protection.
+
 Generated controllers are optional. Set ``register_routes=False`` and compose
 the typed services into application-owned handlers when product behavior or
 administrator workflow differs. See :doc:`customization`.

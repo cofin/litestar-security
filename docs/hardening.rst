@@ -29,6 +29,17 @@ nonces, refresh tokens, API keys, recovery codes, passkey challenges, or MFA
 login challenges. Use shared atomic rate-limit, revocation, and MFA-login
 challenge stores across workers and monitor verification-unavailable outcomes.
 
+MFA and OAuth transaction protectors also use application-owned AES-256-GCM
+key material. Load each exact 32-byte key from a KMS or secret store rather
+than placing it in source code. Construct ``AESGCMSecretProtector`` for
+``MFAConfig.secret_protector`` and ``AESGCMOAuthTransactionProtector`` for the
+OAuth transaction store and token vault. Rotate without invalidating still-live
+envelopes: add the former active ``SecretProtectorKey`` or
+``OAuthTransactionProtectorKey`` to ``retained_keys`` before promoting a new
+``active_key``. An application-owned replacement can be checked with
+:func:`~litestar_security.testing.assert_secret_protector_conformance` or
+:func:`~litestar_security.testing.assert_oauth_transaction_protector_conformance`.
+
 Before enabling ``MFAConfig.require_at_login`` in a deployment, enroll a viable
 factor for every affected account and verify the completion routes with the
 same CSRF and session middleware used in production. The MFA-login challenge
