@@ -672,6 +672,7 @@ async def test_lifecycle_callback_requires_original_step_up_context() -> None:
         {"expected_issuer": "http://issuer.example"},
         {"include_nonce": 1},
         {"end_session_endpoint": "http://issuer.example/logout"},
+        {"end_session_endpoint": "https://issuer.example/logout?next=https://evil.example"},
         {"post_logout_redirect_uri": "http://app.example/logged-out"},
         {"end_session_endpoint": "https://issuer.example/logout"},
     ],

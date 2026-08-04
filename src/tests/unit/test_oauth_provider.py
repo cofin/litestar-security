@@ -31,7 +31,7 @@ from litestar_security.providers.oauth import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Sequence
 
     Handler = Callable[[httpx.Request], httpx.Response] | Callable[[httpx.Request], Coroutine[Any, Any, httpx.Response]]
 
@@ -41,6 +41,11 @@ _AUTHORIZATION_ENDPOINT = "https://issuer.example/oauth/authorize"
 _TOKEN_ENDPOINT = "https://issuer.example/oauth/token"  # noqa: S105 - endpoint path, not a credential
 _REVOCATION_ENDPOINT = "https://issuer.example/oauth/revoke"
 _CLIENT_SECRET = SecretStr("client-secret")
+_PUBLIC_IP = "93.184.216.34"
+
+
+async def _public_resolver(_host: str, _port: int) -> Sequence[str]:
+    return (_PUBLIC_IP,)
 
 
 def _transaction(*, scopes: frozenset[str] = frozenset({"openid", "profile"})) -> OAuthTransaction:
@@ -100,7 +105,10 @@ def _client(
     handler: Handler, *, config: OAuthEndpointConfig | None = None, policy: OAuthHTTPPolicy | None = None
 ) -> OAuthProviderClient:
     return OAuthProviderClient(
-        config or _config(), policy=policy or OAuthHTTPPolicy(), transport=httpx.MockTransport(handler)
+        config or _config(),
+        policy=policy or OAuthHTTPPolicy(),
+        transport=httpx.MockTransport(handler),
+        resolver=_public_resolver,
     )
 
 
@@ -203,7 +211,9 @@ async def test_exchange_uses_basic_auth_exact_redirect_and_pkce() -> None:
 
     request = seen[0]
     form = parse_qs(request.content.decode())
-    assert request.url == _TOKEN_ENDPOINT
+    assert str(request.url) == f"https://{_PUBLIC_IP}/oauth/token"
+    assert request.headers["host"] == "issuer.example"
+    assert request.extensions["sni_hostname"] == "issuer.example"
     assert request.headers["authorization"].startswith("Basic ")
     assert form == {
         "code": ["authorization-code"],
@@ -328,7 +338,9 @@ async def test_revoke_uses_fixed_endpoint_and_hint() -> None:
         )
 
     form = parse_qs(seen[0].content.decode())
-    assert seen[0].url == _REVOCATION_ENDPOINT
+    assert str(seen[0].url) == f"https://{_PUBLIC_IP}/oauth/revoke"
+    assert seen[0].headers["host"] == "issuer.example"
+    assert seen[0].extensions["sni_hostname"] == "issuer.example"
     assert form["token"] == ["refresh-token"]
     assert form["token_type_hint"] == ["refresh_token"]
 
@@ -475,6 +487,41 @@ async def test_response_body_is_bounded_while_streaming() -> None:
     async with _client(handler, policy=policy) as client:
         with pytest.raises(OAuthProviderError, match="failed"):
             await client.exchange_code(code=SecretStr("code"), transaction=_transaction(), now=_NOW)
+
+
+@pytest.mark.anyio
+async def test_response_rejects_compressed_content_before_reading() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+            content=b"not actually compressed",
+            request=request,
+        )
+
+    async with _client(handler) as client:
+        with pytest.raises(OAuthProviderError, match="failed"):
+            await client.exchange_code(code=SecretStr("code"), transaction=_transaction(), now=_NOW)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("answers", [(), ("10.0.0.1",), ("93.184.216.34", "127.0.0.1")])
+async def test_secret_bearing_request_rejects_empty_or_non_public_dns_answers(answers: tuple[str, ...]) -> None:
+    called = False
+
+    async def resolver(_host: str, _port: int) -> tuple[str, ...]:
+        return answers
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return _json_response(request, {})
+
+    async with OAuthProviderClient(_config(), transport=httpx.MockTransport(handler), resolver=resolver) as client:
+        with pytest.raises(OAuthProviderError, match="failed"):
+            await client.refresh(SecretStr("refresh"), now=_NOW)
+
+    assert called is False
 
 
 @pytest.mark.anyio

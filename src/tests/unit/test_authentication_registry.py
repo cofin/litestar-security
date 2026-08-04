@@ -4804,17 +4804,28 @@ async def test_oidc_discovery_rejects_unsafe_optional_endpoint_urls(
 
 
 @pytest.mark.anyio
-async def test_oidc_discovery_allows_public_cross_origin_optional_endpoints() -> None:
+async def test_oidc_discovery_requires_explicit_cross_origin_oauth_endpoint_trust() -> None:
     endpoints = {
         "authorization_endpoint": "https://login.example/authorize",
         "token_endpoint": "https://login.example/token",
         "end_session_endpoint": "https://login.example/logout",
     }
-    client, _transport, resolver = _oidc_client(
+    answers = {"issuer.example": (_OIDC_PUBLIC_IP,), "login.example": (_OIDC_PUBLIC_IP,)}
+    client, _transport, _resolver = _oidc_client(
         lambda _request: _oidc_response(_oidc_document(**endpoints)),
-        answers={"issuer.example": (_OIDC_PUBLIC_IP,), "login.example": (_OIDC_PUBLIC_IP,)},
+        answers=answers,
     )
 
+    with pytest.raises(OIDCDiscoveryError):
+        await _discover_and_close(client)
+
+    client, _transport, resolver = _oidc_client(
+        lambda _request: _oidc_response(_oidc_document(**endpoints)),
+        policy=DiscoveryPolicy(
+            allowed_issuers=frozenset({_OIDC_ISSUER}), allowed_oauth_origins=frozenset({"https://login.example"})
+        ),
+        answers=answers,
+    )
     metadata = await _discover_and_close(client)
 
     assert metadata.authorization_endpoint == endpoints["authorization_endpoint"]

@@ -48,6 +48,7 @@ class DiscoveryPolicy:
 
     allowed_issuers: frozenset[str]
     allowed_jwks_origins: frozenset[str] = frozenset()
+    allowed_oauth_origins: frozenset[str] = frozenset()
     require_https: bool = True
     allow_private_hosts: bool = False
     allowed_ports: frozenset[int] = frozenset({_DEFAULT_HTTPS_PORT})
@@ -88,12 +89,19 @@ class DiscoveryPolicy:
                 ).origin
                 for origin in self.allowed_jwks_origins
             )
+            allowed_oauth_origins = frozenset(
+                normalize_url(
+                    origin, require_https=self.require_https, allowed_ports=allowed_ports, allow_origin_only=True
+                ).origin
+                for origin in self.allowed_oauth_origins
+            )
         except (TypeError, ValueError):
             raise_config("Invalid OIDC discovery URL policy")
         if not allowed_issuers:
             raise_config("OIDC discovery requires at least one allowed issuer")
         object.__setattr__(self, "allowed_issuers", allowed_issuers)
         object.__setattr__(self, "allowed_jwks_origins", allowed_jwks_origins)
+        object.__setattr__(self, "allowed_oauth_origins", allowed_oauth_origins)
         object.__setattr__(self, "allowed_ports", allowed_ports)
 
 
@@ -241,17 +249,24 @@ class OIDCDiscoveryClient:
         if not algorithms:
             raise_discovery("OIDC discovery has no compatible signing algorithm")
 
+        oauth_origins = frozenset({issuer.origin, *self.policy.allowed_oauth_origins})
         return OIDCMetadata(
             issuer=issuer.value,
             jwks_uri=normalized_jwks.value,
             authorization_endpoint=optional_url_value(
-                await self._metadata_url(document, "authorization_endpoint", resolved, required=False)
+                await self._metadata_url(
+                    document, "authorization_endpoint", resolved, required=False, allowed_origins=oauth_origins
+                )
             ),
             token_endpoint=optional_url_value(
-                await self._metadata_url(document, "token_endpoint", resolved, required=False)
+                await self._metadata_url(
+                    document, "token_endpoint", resolved, required=False, allowed_origins=oauth_origins
+                )
             ),
             end_session_endpoint=optional_url_value(
-                await self._metadata_url(document, "end_session_endpoint", resolved, required=False)
+                await self._metadata_url(
+                    document, "end_session_endpoint", resolved, required=False, allowed_origins=oauth_origins
+                )
             ),
             algorithms=frozenset(algorithms),
         )
@@ -280,7 +295,7 @@ class OIDCDiscoveryClient:
         except (TypeError, ValueError):
             raise_discovery("OIDC discovery endpoint metadata is invalid")
         if allowed_origins is not None and normalized.origin not in allowed_origins:
-            raise_discovery("OIDC discovery JWKS origin is not allowed")
+            raise_discovery(f"OIDC discovery {name} origin is not allowed")
         await self._validate_addresses(normalized, resolved)
         return normalized
 

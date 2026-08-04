@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from logging import getLogger
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast, runtime_checkable
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import msgspec
 from litestar import Controller, Request, Response, Router, get, post
@@ -92,6 +92,7 @@ OIDC_FRONTCHANNEL_LOGOUT = "oidc.logout.frontchannel"
 """Rate-limit operation name consumed by each front-channel logout attempt."""
 
 _LOGGER = getLogger(__name__)
+_MAXIMUM_TCP_PORT = 65_535
 
 
 class OAuthRouteResponse(WireStruct, frozen=True, kw_only=True, omit_defaults=True):
@@ -210,20 +211,18 @@ class OAuthProviderRegistration:
         """Require immutable registration metadata matching the provider."""
         if (
             not isinstance(cast("object", self.provider), OAuthProvider)
-            or not self.redirect_uri.startswith("https://")
+            or not _exact_https_url(self.redirect_uri)
             or self.default_scopes.__class__ is not frozenset
             or not self.default_scopes
             or any(not scope.strip() for scope in self.default_scopes)
-            or (self.expected_issuer is not None and not self.expected_issuer.startswith("https://"))
+            or (self.expected_issuer is not None and not _exact_https_url(self.expected_issuer))
             or self.include_nonce.__class__ is not bool
-            or (self.end_session_endpoint is not None and not self.end_session_endpoint.startswith("https://"))
-            or (self.post_logout_redirect_uri is not None and not self.post_logout_redirect_uri.startswith("https://"))
+            or (self.end_session_endpoint is not None and not _exact_https_url(self.end_session_endpoint))
+            or (self.post_logout_redirect_uri is not None and not _exact_https_url(self.post_logout_redirect_uri))
             or ((self.end_session_endpoint is None) != (self.post_logout_redirect_uri is None))
         ):
             message = "OAuth provider registration is invalid"
             raise ImproperlyConfiguredException(detail=message)
-
-
 @dataclass(frozen=True, slots=True)
 class OAuthStepUpAuthorization:
     """Authoritative account epoch and transport binding from consumed step-up."""
@@ -1159,3 +1158,23 @@ class _OIDCLogoutController(Controller):
     ) -> OAuthRouteResponse:
         """Verify a logout token, consume its jti, and revoke mapped sessions."""
         return await oidc_service.backchannel(provider, data.logout_token)
+
+
+def _exact_https_url(value: str) -> bool:
+    if value.__class__ is not str or value != value.strip() or "*" in value or "\\" in value:
+        return False
+    try:
+        split = urlsplit(value)
+        port = split.port
+    except ValueError:
+        return False
+    return (
+        split.scheme == "https"
+        and bool(split.netloc)
+        and split.hostname is not None
+        and split.username is None
+        and split.password is None
+        and not split.query
+        and not split.fragment
+        and (port is None or 1 <= port <= _MAXIMUM_TCP_PORT)
+    )

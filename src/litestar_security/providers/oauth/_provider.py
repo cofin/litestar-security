@@ -1,5 +1,6 @@
 """Generic OAuth provider contracts and hardened async HTTP boundary."""
 
+import ipaddress
 import json
 import math
 from collections.abc import Mapping
@@ -14,7 +15,14 @@ import httpx
 from litestar.exceptions import ImproperlyConfiguredException
 from typing_extensions import Self
 
-from litestar_security.providers._internal import reject_non_finite, unique_object, validate_depth
+from litestar_security.providers._internal import (
+    AddressResolver,
+    public_address,
+    reject_non_finite,
+    resolve_addresses,
+    unique_object,
+    validate_depth,
+)
 from litestar_security.providers.oauth._transactions import OAuthTransaction, OAuthTransactionStart, SecretStr
 
 __all__ = (
@@ -328,7 +336,7 @@ class InvalidProviderGrantError(OAuthProviderError):
 class OAuthProviderClient:
     """Lifecycle-owned fixed-endpoint OAuth HTTP client."""
 
-    __slots__ = ("_client", "_closed", "config", "policy")
+    __slots__ = ("_client", "_closed", "_resolver", "config", "policy")
 
     def __init__(
         self,
@@ -336,6 +344,7 @@ class OAuthProviderClient:
         *,
         policy: OAuthHTTPPolicy | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        resolver: AddressResolver | None = None,
     ) -> None:
         """Create one bounded async client.
 
@@ -343,6 +352,7 @@ class OAuthProviderClient:
             config: Normalized static provider configuration.
             policy: Explicit resource limits.
             transport: Optional test or application transport.
+            resolver: Optional asynchronous endpoint address resolver.
         """
         if config.__class__ is not OAuthEndpointConfig:
             _raise_config("OAuth endpoint configuration is invalid")
@@ -350,6 +360,7 @@ class OAuthProviderClient:
             _raise_config("OAuth HTTP policy is invalid")
         self.config = config
         self.policy = policy or OAuthHTTPPolicy()
+        self._resolver = resolver or resolve_addresses
         self._closed = False
         self._client = httpx.AsyncClient(
             follow_redirects=False,
@@ -488,12 +499,14 @@ class OAuthProviderClient:
             data["token_type_hint"] = token_type_hint
         auth, request_data = self._client_auth(data)
         try:
+            url, host, sni_hostname = await self._pinned_endpoint(self.config.revocation_endpoint)
             async with self._client.stream(
                 "POST",
-                self.config.revocation_endpoint,
+                url,
                 data=request_data,
                 auth=auth,
-                headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+                headers={"Accept": "application/json", "Accept-Encoding": "identity", "Host": host},
+                extensions={"sni_hostname": sni_hostname},
             ) as response:
                 if response.status_code != _HTTP_OK:
                     _raise_provider()
@@ -528,15 +541,18 @@ class OAuthProviderClient:
     ) -> ProviderTokenSet:
         auth, request_data = self._client_auth(data)
         try:
+            url, host, sni_hostname = await self._pinned_endpoint(self.config.token_endpoint)
             async with self._client.stream(
                 "POST",
-                self.config.token_endpoint,
+                url,
                 data=request_data,
                 auth=auth,
                 headers={
                     "Accept": "application/json, application/x-www-form-urlencoded",
                     "Accept-Encoding": "identity",
+                    "Host": host,
                 },
+                extensions={"sni_hostname": sni_hostname},
             ) as response:
                 body = await _read_bounded(response, self.policy.maximum_response_bytes)
                 if response.status_code != _HTTP_OK:
@@ -566,6 +582,30 @@ class OAuthProviderClient:
             secret = cast("SecretStr", self.config.client_secret)
             request_data["client_secret"] = secret.get_secret_value()
         return None, request_data
+
+    async def _pinned_endpoint(self, endpoint: str) -> tuple[httpx.URL, str, str]:
+        url = httpx.URL(endpoint)
+        hostname = url.raw_host.decode("ascii")
+        port = url.port or 443
+        try:
+            literal = ipaddress.ip_address(hostname)
+        except ValueError:
+            addresses = tuple(await self._resolver(hostname, port))
+        else:
+            addresses = (str(literal),)
+        if not addresses:
+            _raise_provider()
+        try:
+            parsed = tuple(ipaddress.ip_address(address) for address in addresses)
+        except ValueError:
+            _raise_provider()
+        if any(not public_address(address) for address in parsed):
+            _raise_provider()
+        selected = str(parsed[0])
+        default_port = 443 if url.scheme == "https" else 80
+        authority_host = f"[{hostname}]" if ":" in hostname else hostname
+        host = authority_host if port == default_port else f"{authority_host}:{port}"
+        return url.copy_with(host=selected), host, hostname
 
     def _require_open(self) -> None:
         if self._closed:
@@ -768,6 +808,8 @@ class GitHubOAuthProvider:
 
 
 async def _read_bounded(response: httpx.Response, maximum: int) -> bytes:
+    if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+        _raise_provider()
     content_length = response.headers.get("content-length")
     if content_length is not None:
         try:
@@ -777,9 +819,9 @@ async def _read_bounded(response: httpx.Response, maximum: int) -> bytes:
             raise OAuthProviderError from None
     body = bytearray()
     async for chunk in response.aiter_bytes():
-        body.extend(chunk)
-        if len(body) > maximum:
+        if len(chunk) > maximum - len(body):
             _raise_provider()
+        body.extend(chunk)
     return bytes(body)
 
 
