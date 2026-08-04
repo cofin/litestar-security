@@ -22,6 +22,7 @@ from litestar.stores.memory import MemoryStore
 from litestar.stores.registry import StoreRegistry
 
 import litestar_security
+import litestar_security._lazy as lazy_module
 import litestar_security._openapi as openapi_module
 import litestar_security.accounts as accounts_module
 import litestar_security.accounts._purpose_tokens as purpose_tokens_module
@@ -3095,6 +3096,65 @@ for name in accounts.__all__:
     result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("module_name", "name", "target_module"),
+    [
+        ("litestar_security.accounts.controllers", "LOCAL_AUTH_TAGS", "litestar_security.accounts.controllers._local"),
+        ("litestar_security.accounts.controllers", "build_mfa_routes", "litestar_security.accounts.controllers._mfa"),
+        ("litestar_security.providers", "OAuthConfig", "litestar_security.providers.oauth"),
+        ("litestar_security.providers", "OIDCMetadata", "litestar_security.providers.oidc"),
+    ],
+)
+def test_lazy_export_packages_resolve_optional_attributes(
+    module_name: str, name: str, target_module: str
+) -> None:
+    module = import_module(module_name)
+
+    assert getattr(module, name) is getattr(import_module(target_module), name)
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ["litestar_security.accounts.controllers", "litestar_security.providers"],
+)
+def test_lazy_export_packages_reject_unknown_attributes(module_name: str) -> None:
+    module = import_module(module_name)
+
+    with pytest.raises(AttributeError, match="has no attribute 'missing'"):
+        module.__getattr__("missing")
+
+
+@pytest.mark.parametrize(
+    ("missing_dependency", "dependencies", "expected_exception"),
+    [
+        ("optional_dependency", frozenset({"optional_dependency"}), ImportError),
+        ("unrelated_dependency", frozenset({"optional_dependency"}), ModuleNotFoundError),
+    ],
+)
+def test_import_optional_attribute_only_translates_declared_missing_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_dependency: str,
+    dependencies: frozenset[str],
+    expected_exception: type[Exception],
+) -> None:
+    def raise_missing_module(_module_name: str) -> None:
+        raise ModuleNotFoundError(name=missing_dependency)
+
+    monkeypatch.setattr(lazy_module, "import_module", raise_missing_module)
+
+    with pytest.raises(expected_exception) as error:
+        lazy_module.import_optional_attribute(
+            "feature.module", "export", extras="feature", dependencies=dependencies
+        )
+
+    if expected_exception is ImportError:
+        expected_message = (
+            "litestar-security feature requires the [feature] extra: "
+            "pip install 'litestar-security[feature]'"
+        )
+        assert str(error.value) == expected_message
 
 
 @pytest.mark.parametrize("blocked_dependency", ["pyotp", "webauthn", "argon2"])
