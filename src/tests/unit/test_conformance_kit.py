@@ -362,6 +362,38 @@ class _YieldingStepUpStore:
         return record
 
 
+class _ReplayStepUpStore(testing_module.InMemoryStepUpStore):
+    """Return an already-consumed grant after the atomic contention probe."""
+
+    calls: int = 0
+    consumed: StepUpRecord | None = None
+
+    async def consume(  # noqa: PLR0913 - mirrors the exact atomic public protocol
+        self,
+        grant_digest: bytes,
+        *,
+        principal_id: str,
+        security_epoch: int,
+        purpose: str,
+        transport_digest: bytes,
+        now: datetime,
+    ) -> StepUpRecord | None:
+        self.calls += 1
+        if self.calls > 2:
+            return self.consumed
+        result = await super().consume(
+            grant_digest,
+            principal_id=principal_id,
+            security_epoch=security_epoch,
+            purpose=purpose,
+            transport_digest=transport_digest,
+            now=now,
+        )
+        if result is not None:
+            self.consumed = result
+        return result
+
+
 class _BrokenTokenVault(MemoryTokenVault):
     """Report stale compare-and-swap attempts as successful."""
 
@@ -916,11 +948,25 @@ class _BrokenSessionStore:
     rebind_commits: bool = True
     checks_ownership: bool = True
     keeps_current: bool = True
+    corrupt_created_record: bool = True
+    returns_expired_record: bool = True
+    expired_record: SessionRecord | None = None
 
     async def create(self, command: CreateSessionCommand, *, event: SecurityEvent) -> SessionRecord:
-        return await self.delegate.create(command, event=event)
+        record = await self.delegate.create(command, event=event)
+        if record.expires_at <= _CONFORMANCE_NOW:
+            self.expired_record = record
+        if not self.corrupt_created_record:
+            return replace(record, display_metadata={"corrupt": "true"})
+        return record
 
     async def get(self, session_id: str) -> SessionRecord | None:
+        if (
+            not self.returns_expired_record
+            and self.expired_record is not None
+            and session_id == self.expired_record.session_id
+        ):
+            return self.expired_record
         return await self.delegate.get(session_id)
 
     async def list_for_account(self, account_id: str) -> tuple[SessionRecord, ...]:
@@ -1286,9 +1332,19 @@ async def test_session_registry_conformance_accepts_the_reference_store_in_isola
 
 
 @pytest.mark.anyio
+async def test_session_registry_conformance_rejects_a_shared_factory_instance() -> None:
+    shared = InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW).accounts
+
+    with pytest.raises(AssertionError, match=r"SessionRegistry factory invariant"):
+        await assert_session_registry_conformance(lambda: shared, now=_CONFORMANCE_NOW)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("toggle", "invariant"),
     [
+        ("corrupt_created_record", r"SessionRegistry\.create/get state invariant"),
+        ("returns_expired_record", r"SessionRegistry\.get expiry invariant"),
         ("rebind_is_atomic", r"SessionRegistry\.rebind atomicity invariant"),
         ("rebind_commits", r"SessionRegistry\.rebind partial-write invariant"),
         ("checks_ownership", r"SessionRegistry\.revoke_session_for_account ownership invariant"),
@@ -1538,6 +1594,12 @@ async def test_step_up_store_conformance_names_each_bound_value(binding: str) ->
 async def test_step_up_store_conformance_detects_yielding_double_consume() -> None:
     with pytest.raises(AssertionError, match=r"StepUpStore\.consume atomicity invariant"):
         await assert_step_up_store_conformance(_YieldingStepUpStore)
+
+
+@pytest.mark.anyio
+async def test_step_up_store_conformance_detects_a_replayed_grant() -> None:
+    with pytest.raises(AssertionError, match=r"StepUpStore\.consume replay invariant"):
+        await assert_step_up_store_conformance(_ReplayStepUpStore)
 
 
 def _token_vault() -> MemoryTokenVault:

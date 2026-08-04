@@ -6,13 +6,17 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from anyio import create_task_group
 
+import litestar_security.testing as testing_module
 from litestar_security.accounts import (
     ConsumeStatus,
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
     LocalAccountCapabilities,
+    LoginMethod,
+    MFALoginChallenge,
     NativeSessionStore,
     NotificationCommand,
+    PasswordChangeStatus,
     PasswordResetStatus,
     PrepareRefreshResult,
     PurposeTokenCodec,
@@ -22,10 +26,14 @@ from litestar_security.accounts import (
     RegistrationCommand,
     RegistrationStatus,
     RegistrationStore,
+    RevokeLoginMethodStatus,
     RotateRefreshCommand,
     SecurityEvent,
+    StepUpRecord,
     TokenIssue,
     TokenPurpose,
+    UserVerification,
+    WebAuthnChallenge,
 )
 from litestar_security.providers.api_key import APIKeyRecord
 from litestar_security.providers.oauth import OAuthOperation, OAuthTransaction, SecretStr
@@ -258,6 +266,148 @@ async def test_local_account_store_rejects_session_identifier_collisions_before_
 
     assert await backend.accounts.get(existing.session_id) is not None
     assert await backend.accounts.get(prior.session_id) is not None
+
+
+@pytest.mark.anyio
+async def test_local_account_store_reports_missing_conflicting_and_final_method_transitions() -> None:
+    backend = InMemorySecurityBackend(clock=lambda: _NOW)
+    missing = "account-missing"
+
+    assert await backend.accounts.get_password_state(missing) is None
+    assert not await backend.accounts.compare_and_replace_password(missing, "old", "test-hash-2", event=_event())
+    assert (
+        await backend.accounts.replace_password_and_bump_epoch(missing, "test-hash-2", expected_epoch=1, event=_event())
+    ).status is PasswordChangeStatus.NOT_FOUND
+
+    account_id = await _register(backend)
+    assert not await backend.accounts.compare_and_replace_password(account_id, "wrong", "new", event=_event())
+    conflict = await backend.accounts.replace_password_and_bump_epoch(
+        account_id, "test-hash-2", expected_epoch=2, event=_event()
+    )
+    changed = await backend.accounts.replace_password_and_bump_epoch(
+        account_id, "test-hash-2", expected_epoch=1, event=_event()
+    )
+    assert conflict.status is PasswordChangeStatus.CONFLICT
+    assert changed.status is PasswordChangeStatus.CHANGED
+    state = await backend.accounts.get_password_state(account_id)
+    assert state is not None
+    assert state.security_epoch == 2
+
+    primary = LoginMethod("password", "password", _NOW)
+    secondary = LoginMethod("passkey", "passkey", _NOW)
+    await backend.accounts.register_login_method(account_id, primary, event=_event())
+    assert (
+        await backend.accounts.revoke_login_method(account_id, "missing", event=_event())
+    ).status is RevokeLoginMethodStatus.NOT_FOUND
+    assert (
+        await backend.accounts.revoke_login_method(account_id, primary.method_id, event=_event())
+    ).status is RevokeLoginMethodStatus.FINAL_METHOD
+    await backend.accounts.register_login_method(account_id, secondary, event=_event())
+    assert (
+        await backend.accounts.revoke_login_method(account_id, primary.method_id, event=_event())
+    ).status is RevokeLoginMethodStatus.REVOKED
+
+
+@pytest.mark.anyio
+async def test_local_account_store_rejects_duplicate_generated_account_identifiers_and_binds_verification() -> None:
+    backend = InMemorySecurityBackend(clock=lambda: _NOW, identifiers=lambda _namespace, _sequence: "account-fixed")
+    delivery = PurposeTokenCodec(pepper=b"p" * 32, entropy=lambda length: b"v" * length).issue(
+        TokenPurpose.VERIFICATION,
+        now=_NOW,
+        lifetime=timedelta(hours=1),
+        template="verify",
+        destination="test@example.com",
+    )
+    created = await backend.accounts.register(
+        RegistrationCommand(normalized_identifier="first@example.com"),
+        "test-hash",
+        invitation_digest=None,
+        verification=delivery,
+        now=_NOW,
+        event=_event(),
+    )
+
+    assert created.account is not None
+    assert not created.account.verified
+    with pytest.raises(ValueError, match="account identifier collision"):
+        await backend.accounts.register(
+            RegistrationCommand(normalized_identifier="second@example.com"),
+            "test-hash",
+            invitation_digest=None,
+            verification=None,
+            now=_NOW,
+            event=_event(),
+        )
+
+
+@pytest.mark.anyio
+async def test_in_memory_one_time_challenge_stores_burn_invalid_presentations() -> None:
+    expires_at = _NOW + timedelta(minutes=1)
+    webauthn = WebAuthnChallenge(
+        challenge_digest=b"c" * 32,
+        binding_digest=b"b" * 32,
+        purpose="register",
+        account_id="account-1",
+        rp_id="example.test",
+        origins=("https://example.test",),
+        user_verification=UserVerification.REQUIRED,
+        algorithms=(-7,),
+        expires_at=expires_at,
+    )
+    backend = InMemorySecurityBackend()
+    await backend.challenges.put(webauthn)
+    assert (
+        await backend.challenges.consume(
+            b"c" * 32, binding_digest=b"wrong" * 7 + b"!", purpose="register", now=_NOW
+        )
+    ) is None
+
+    mfa = MFALoginChallenge(
+        challenge_digest=b"m" * 32,
+        account_id="account-1",
+        security_epoch=1,
+        client_key=None,
+        issued_at=_NOW,
+        expires_at=expires_at,
+    )
+    await backend.mfa_login.put(mfa)
+    assert await backend.mfa_login.consume(b"m" * 32, account_id="other", security_epoch=1, now=_NOW) is None
+
+    step_up = StepUpRecord(
+        grant_digest=b"g" * 32,
+        transport_digest=b"t" * 32,
+        principal_id="account-1",
+        security_epoch=1,
+        purpose="transfer",
+        methods=frozenset({"totp"}),
+        traits=frozenset(),
+        authenticated_at=_NOW,
+        expires_at=expires_at,
+    )
+    await backend.step_up.put(step_up)
+    assert (
+        await backend.step_up.consume(
+            b"g" * 32,
+            principal_id="account-1",
+            security_epoch=1,
+            purpose="other",
+            transport_digest=b"t" * 32,
+            now=_NOW,
+        )
+    ) is None
+
+
+@pytest.mark.anyio
+async def test_in_memory_oidc_logout_reference_rejects_missing_and_replayed_mappings() -> None:
+    store = testing_module.InMemoryOIDCSessionLogoutStore(
+        session_mappings=(("provider", "issuer", "subject", "sid"),),
+        frontchannel_bindings={("provider", "issuer", "sid"): "binding"},
+    )
+
+    assert await store.revoke_frontchannel("provider", "issuer", "missing", binding="binding", now=_NOW) is None
+    assert await store.revoke_frontchannel("provider", "issuer", "sid", binding="wrong", now=_NOW) is None
+    assert await store.revoke_frontchannel("provider", "issuer", "sid", binding="binding", now=_NOW) == 1
+    assert await store.revoke_frontchannel("provider", "issuer", "sid", binding="binding", now=_NOW) is None
 
 
 @pytest.mark.anyio
