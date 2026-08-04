@@ -250,6 +250,13 @@ class _AlwaysConsumeRecoveryStore(testing_module.InMemoryMFAStore):
         return True
 
 
+class _RejectingMFAActivationStore(testing_module.InMemoryMFAStore):
+    """Reject an otherwise valid fresh TOTP activation."""
+
+    async def activate_totp(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+
 class _EqualCounterMFAStore(testing_module.InMemoryMFAStore):
     """Accept the equal counter after the atomic contender probe completes."""
 
@@ -315,6 +322,46 @@ class _RetainedExpiredMFAStore(testing_module.InMemoryMFALoginChallengeStore):
         return await super().consume(challenge_digest, account_id=account_id, security_epoch=security_epoch, now=now)
 
 
+class _UnburnedMFAEpochStore(testing_module.InMemoryMFALoginChallengeStore):
+    """Reject an epoch mismatch without burning its challenge."""
+
+    async def consume(
+        self, challenge_digest: bytes, *, account_id: str, security_epoch: int, now: datetime
+    ) -> MFALoginChallenge | None:
+        challenge = self.challenges.get(challenge_digest)
+        if challenge is not None and challenge.account_id == account_id and challenge.security_epoch != security_epoch:
+            return None
+        return await super().consume(challenge_digest, account_id=account_id, security_epoch=security_epoch, now=now)
+
+
+class _ReplayingMFAChallengeStore(testing_module.InMemoryMFALoginChallengeStore):
+    """Return the winning challenge to both atomic contenders."""
+
+    consumed: MFALoginChallenge | None = None
+
+    async def consume(
+        self, challenge_digest: bytes, *, account_id: str, security_epoch: int, now: datetime
+    ) -> MFALoginChallenge | None:
+        result = await super().consume(challenge_digest, account_id=account_id, security_epoch=security_epoch, now=now)
+        if result is not None:
+            self.consumed = result
+        if result is None and challenge_digest == b"w" * 32:
+            return self.consumed
+        return result
+
+
+class _UnburnedExpiredMFAStore(testing_module.InMemoryMFALoginChallengeStore):
+    """Reject an expired challenge without removing it."""
+
+    async def consume(
+        self, challenge_digest: bytes, *, account_id: str, security_epoch: int, now: datetime
+    ) -> MFALoginChallenge | None:
+        challenge = self.challenges.get(challenge_digest)
+        if challenge is not None and challenge.expires_at <= now:
+            return None
+        return await super().consume(challenge_digest, account_id=account_id, security_epoch=security_epoch, now=now)
+
+
 class _BrokenWebAuthnChallengeStore(testing_module.InMemoryWebAuthnChallengeStore):
     """Leave rejected WebAuthn bindings available for a later retry."""
 
@@ -368,6 +415,34 @@ class _RetainedExpiredWebAuthnStore(testing_module.InMemoryWebAuthnChallengeStor
         return await super().consume(challenge_digest, binding_digest=binding_digest, purpose=purpose, now=now)
 
 
+class _UnburnedWebAuthnPurposeStore(testing_module.InMemoryWebAuthnChallengeStore):
+    """Reject a purpose mismatch without burning its challenge."""
+
+    async def consume(
+        self, challenge_digest: bytes, *, binding_digest: bytes, purpose: str, now: datetime
+    ) -> WebAuthnChallenge | None:
+        challenge = self.challenges.get(challenge_digest)
+        if challenge is not None and challenge.binding_digest == binding_digest and challenge.purpose != purpose:
+            return None
+        return await super().consume(challenge_digest, binding_digest=binding_digest, purpose=purpose, now=now)
+
+
+class _ReplayingWebAuthnChallengeStore(testing_module.InMemoryWebAuthnChallengeStore):
+    """Return the winning challenge to both atomic contenders."""
+
+    consumed: WebAuthnChallenge | None = None
+
+    async def consume(
+        self, challenge_digest: bytes, *, binding_digest: bytes, purpose: str, now: datetime
+    ) -> WebAuthnChallenge | None:
+        result = await super().consume(challenge_digest, binding_digest=binding_digest, purpose=purpose, now=now)
+        if result is not None:
+            self.consumed = result
+        if result is None and challenge_digest == b"w" * 32:
+            return self.consumed
+        return result
+
+
 @dataclass
 class _BrokenOAuthTransactionStore:
     """Ignore callback provider when consuming transaction state."""
@@ -387,6 +462,38 @@ class _BrokenOAuthTransactionStore:
         return self.records.pop(state_digest)
 
 
+@dataclass
+class _ConfigurableOAuthTransactionStore:
+    """Raw transaction store with one selected conformance violation."""
+
+    failure: str
+    records: dict[bytes, OAuthTransaction] = field(default_factory=dict[bytes, OAuthTransaction])
+
+    async def create(self, transaction: OAuthTransaction) -> None:
+        self.records[transaction.state_digest] = transaction
+
+    async def consume(  # noqa: PLR0911 - each selected failure remains explicit
+        self, *, state_digest: bytes, binding_digest: bytes, provider: str, now: datetime
+    ) -> OAuthTransaction | None:
+        transaction = self.records.get(state_digest)
+        if transaction is None:
+            return None
+        if transaction.binding_digest != binding_digest:
+            return transaction if self.failure == "binding" else None
+        if transaction.provider != provider:
+            return None
+        if transaction.expires_at <= now and self.failure != "expiry":
+            return None
+        if self.failure == "matching" and state_digest == b"s" * 32:
+            self.records.pop(state_digest)
+            return replace(transaction, provider="wrong-provider")
+        if self.failure == "replay" and state_digest == b"s" * 32:
+            return transaction
+        if self.failure == "atomicity" and state_digest == b"c" * 32:
+            return transaction
+        return self.records.pop(state_digest)
+
+
 class _BrokenWebSocketConnectTokenStore(InMemoryWebSocketConnectTokenStore):
     """Burn a connect token before validating the presented digest."""
 
@@ -398,6 +505,26 @@ class _BrokenWebSocketConnectTokenStore(InMemoryWebSocketConnectTokenStore):
             return record
         self._records.pop(connect_token_id, None)  # pyright: ignore[reportPrivateUsage] - deliberately violates port contract
         return None
+
+
+@dataclass
+class _ConfigurableConnectTokenStore(InMemoryWebSocketConnectTokenStore):
+    """Connect-token store with one selected lookup violation."""
+
+    failure: str = "digest"
+
+    async def consume(
+        self, *, connect_token_id: str, digest: bytes, now: datetime
+    ) -> WebSocketConnectTokenRecord | None:
+        record = self._records.get(connect_token_id)  # pyright: ignore[reportPrivateUsage] - deliberate test corruption
+        if record is not None and self.failure == "digest" and record.digest != digest:
+            return record
+        if record is not None and record.expires_at <= now:
+            if self.failure == "expiry":
+                return record
+            if self.failure == "expiry_deletion":
+                return None
+        return await super().consume(connect_token_id=connect_token_id, digest=digest, now=now)
 
 
 class _BrokenOIDCReplayStore(testing_module.InMemoryOIDCSessionLogoutStore):
@@ -641,7 +768,6 @@ class _BrokenTokenVaultDelete(MemoryTokenVault):
         del provider_account_id
 
 
-
 @dataclass
 class _NonAtomicLimiter:
     """Deliberately yield between reading and incrementing one shared bucket."""
@@ -759,6 +885,42 @@ class _BrokenPasskeyCloneStateStore(testing_module.InMemoryPasskeyStore):
         )
         if clone_risk:
             self.credentials[credential_id] = replace(self.credentials[credential_id], suspect=False)
+        return result
+
+
+class _RejectingPasskeyStore(testing_module.InMemoryPasskeyStore):
+    """Reject an otherwise fresh passkey credential."""
+
+    async def add_credential(self, *args: object, **kwargs: object) -> bool:
+        del args, kwargs
+        return False
+
+
+class _NonAtomicPasskeyResultStore(testing_module.InMemoryPasskeyStore):
+    """Report both optimistic assertion contenders as recorded."""
+
+    async def record_assertion(  # noqa: PLR0913 - mirrors the explicit atomic public protocol
+        self,
+        credential_id: bytes,
+        *,
+        expected_version: int,
+        sign_count: int,
+        backup_eligible: bool,
+        backup_state: bool,
+        clone_risk: bool,
+        now: datetime,
+    ) -> AssertionRecordResult:
+        result = await super().record_assertion(
+            credential_id,
+            expected_version=expected_version,
+            sign_count=sign_count,
+            backup_eligible=backup_eligible,
+            backup_state=backup_state,
+            clone_risk=clone_risk,
+            now=now,
+        )
+        if not clone_risk and result is AssertionRecordResult.CONFLICT:
+            return AssertionRecordResult.RECORDED
         return result
 
 
@@ -1124,6 +1286,7 @@ class _BrokenSessionStore:
     keeps_current: bool = True
     corrupt_created_record: bool = True
     returns_expired_record: bool = True
+    rebind_returns_exact: bool = True
     expired_record: SessionRecord | None = None
 
     async def create(self, command: CreateSessionCommand, *, event: SecurityEvent) -> SessionRecord:
@@ -1170,6 +1333,8 @@ class _BrokenSessionStore:
             return await self.delegate.create(command, event=event)
         if not self.rebind_commits and result is not None:
             await self.delegate.revoke_session_for_account(command.account_id, command.session_id, event=event)
+        if not self.rebind_returns_exact and result is not None:
+            return replace(result, display_metadata={"corrupt": "true"})
         return result
 
 
@@ -1223,6 +1388,13 @@ class _BrokenRefreshStore:
     idempotency_receipt: bool = True
     replays_revoke: bool = True
     checks_ownership: bool = True
+    rejected_create_marker: int | None = None
+    corrupt_context_marker: int | None = None
+    accepts_shared_expiry: bool = False
+    durable_rotation_state: bool = True
+    replay_revocation_is_durable: bool = True
+    has_password_state: bool = True
+    ownership_mutates_silently: bool = False
     _commands: dict[str, CreateRefreshFamilyCommand] = field(default_factory=dict[str, CreateRefreshFamilyCommand])
     _rotations: dict[str, RotateRefreshCommand] = field(default_factory=dict[str, RotateRefreshCommand])
 
@@ -1241,12 +1413,19 @@ class _BrokenRefreshStore:
         )
 
     async def create_family(self, command: CreateRefreshFamilyCommand, *, event: SecurityEvent) -> bool:
+        if (
+            self.rejected_create_marker is not None
+            and command.token_digest == bytes((self.rejected_create_marker,)) * 32
+        ):
+            return False
         result = await self.delegate.create_family(command, event=event)
         if result:
             self._commands[command.token_id] = command
         return result or not self.create_rejects_collisions
 
     async def get_password_state(self, account_id: str) -> PasswordCredentialState | None:
+        if not self.has_password_state:
+            return None
         return await self.delegate.get_password_state(account_id)
 
     async def replace_password_and_bump_epoch(
@@ -1256,7 +1435,7 @@ class _BrokenRefreshStore:
             account_id, password_hash, expected_epoch=expected_epoch, event=event
         )
 
-    async def prepare_rotation(
+    async def prepare_rotation(  # noqa: PLR0911 - each selected failure remains explicit
         self, proof: RefreshTokenProof, idempotency_digest: bytes | None, *, now: datetime, event: SecurityEvent
     ) -> RefreshFamilyContext | RefreshReceiptReplay | PrepareRefreshResult:
         rotation = self._rotations.get(proof.token_id)
@@ -1269,8 +1448,36 @@ class _BrokenRefreshStore:
                 return PrepareRefreshResult(RefreshRotationStatus.INVALID)
             if not self.replays_revoke and idempotency_digest != rotation.idempotency_digest:
                 return PrepareRefreshResult(RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True)
+            if (
+                not self.replay_revocation_is_durable
+                and rotation.token_digest == bytes((8,)) * 32
+                and idempotency_digest != rotation.idempotency_digest
+            ):
+                return PrepareRefreshResult(RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True)
         result = await self.delegate.prepare_rotation(proof, idempotency_digest, now=now, event=event)
         command = self._commands.get(proof.token_id)
+        if (
+            command is not None
+            and self.corrupt_context_marker is not None
+            and command.token_digest == bytes((self.corrupt_context_marker,)) * 32
+            and isinstance(result, RefreshFamilyContext)
+        ):
+            return replace(result, scopes=frozenset({"corrupt"}))
+        if (
+            command is not None
+            and self.accepts_shared_expiry
+            and command.token_digest == bytes((15,)) * 32
+            and isinstance(result, PrepareRefreshResult)
+            and result.status is RefreshRotationStatus.EXPIRED
+        ):
+            return RefreshFamilyContext(
+                account_id=command.account_id,
+                family_id=command.family_id,
+                security_epoch=command.security_epoch,
+                token_expires_at=command.token_expires_at,
+                family_expires_at=command.family_expires_at,
+                scopes=command.scopes,
+            )
         if (
             not self.rejects_expiry
             and isinstance(result, PrepareRefreshResult)
@@ -1299,6 +1506,12 @@ class _BrokenRefreshStore:
         result = await self.delegate.rotate(command, now=now, event=event)
         if result.status is RefreshRotationStatus.ROTATED:
             self._rotations[command.token_id] = command
+        if (
+            not self.durable_rotation_state
+            and command.token_digest == bytes((3,)) * 32
+            and result.status is RefreshRotationStatus.ROTATED
+        ):
+            return replace(result, sealed_receipt=b"corrupt")
         if not self.rotate_is_atomic and result.status is not RefreshRotationStatus.ROTATED:
             return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
         if (
@@ -1318,6 +1531,9 @@ class _BrokenRefreshStore:
     async def revoke_token_for_account(
         self, account_id: str, token_id: str, token_digest: bytes, *, event: SecurityEvent
     ) -> bool:
+        if self.ownership_mutates_silently:
+            await self.delegate.revoke_token(token_id, token_digest, event=event)
+            return False
         if not self.checks_ownership:
             return await self.delegate.revoke_token(token_id, token_digest, event=event)
         return await self.delegate.revoke_token_for_account(account_id, token_id, token_digest, event=event)
@@ -1568,6 +1784,7 @@ async def test_session_registry_conformance_rejects_distinct_wrappers_over_share
         ("corrupt_created_record", r"SessionRegistry\.create/get state invariant"),
         ("returns_expired_record", r"SessionRegistry\.get expiry invariant"),
         ("rebind_is_atomic", r"SessionRegistry\.rebind atomicity invariant"),
+        ("rebind_returns_exact", r"SessionRegistry\.rebind state invariant"),
         ("rebind_commits", r"SessionRegistry\.rebind partial-write invariant"),
         ("checks_ownership", r"SessionRegistry\.revoke_session_for_account ownership invariant"),
         ("keeps_current", r"SessionRegistry\.revoke_other_sessions keep-current invariant"),
@@ -1598,6 +1815,22 @@ async def test_refresh_family_store_conformance_accepts_the_reference_store_in_i
 
 
 @pytest.mark.anyio
+async def test_refresh_family_store_conformance_rejects_a_shared_factory_instance() -> None:
+    shared = _BrokenRefreshStore(InMemorySecurityBackend(clock=lambda: _NOW).accounts)
+
+    with pytest.raises(AssertionError, match=r"RefreshTokenFamilyStore factory invariant"):
+        await assert_refresh_family_store_conformance(lambda: shared)
+
+
+@pytest.mark.anyio
+async def test_refresh_family_store_conformance_rejects_distinct_wrappers_over_shared_storage() -> None:
+    shared = InMemorySecurityBackend(clock=lambda: _NOW).accounts
+
+    with pytest.raises(AssertionError, match=r"RefreshTokenFamilyStore factory isolation invariant"):
+        await assert_refresh_family_store_conformance(lambda: _BrokenRefreshStore(shared))
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("toggle", "invariant"),
     [
@@ -1616,6 +1849,40 @@ async def test_refresh_family_store_conformance_names_each_broken_invariant(togg
     def factory() -> _BrokenRefreshStore:
         store = _BrokenRefreshStore(InMemorySecurityBackend(clock=lambda: _NOW).accounts)
         setattr(store, toggle, False)
+        return store
+
+    with pytest.raises(AssertionError, match=invariant):
+        await assert_refresh_family_store_conformance(factory)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("attribute", "value", "invariant"),
+    [
+        ("rejected_create_marker", 1, r"create_family state invariant"),
+        ("corrupt_context_marker", 1, r"prepare_rotation state invariant"),
+        ("rejected_create_marker", 2, r"create_family expiry setup invariant"),
+        ("rejected_create_marker", 15, r"prepare_rotation expiry setup invariant"),
+        ("accepts_shared_expiry", True, r"prepare_rotation shared-expiry invariant"),
+        ("rejected_create_marker", 3, r"rotate atomicity setup invariant"),
+        ("durable_rotation_state", False, r"rotate durable-state invariant"),
+        ("rejected_create_marker", 6, r"rotate partial-write setup invariant"),
+        ("rejected_create_marker", 10, r"rotate late-expiry setup invariant"),
+        ("corrupt_context_marker", 10, r"rotate late-expiry setup invariant"),
+        ("rejected_create_marker", 13, r"rotate epoch setup invariant"),
+        ("has_password_state", False, r"rotate epoch setup invariant"),
+        ("rejected_create_marker", 8, r"prepare_rotation replay setup invariant"),
+        ("replay_revocation_is_durable", False, r"prepare_rotation replay invariant"),
+        ("rejected_create_marker", 11, r"revoke_token_for_account ownership setup invariant"),
+        ("ownership_mutates_silently", True, r"revoke_token_for_account ownership invariant"),
+    ],
+)
+async def test_refresh_family_store_conformance_names_setup_and_exact_state_invariants(
+    attribute: str, value: object, invariant: str
+) -> None:
+    def factory() -> _BrokenRefreshStore:
+        store = _BrokenRefreshStore(InMemorySecurityBackend(clock=lambda: _NOW).accounts)
+        setattr(store, attribute, value)
         return store
 
     with pytest.raises(AssertionError, match=invariant):
@@ -1645,6 +1912,12 @@ async def test_mfa_store_conformance_names_atomic_invariants(
 
 
 @pytest.mark.anyio
+async def test_mfa_store_conformance_names_activation_setup_invariant() -> None:
+    with pytest.raises(AssertionError, match=r"MFAStore setup invariant"):
+        await assert_mfa_store_conformance(_RejectingMFAActivationStore)
+
+
+@pytest.mark.anyio
 async def test_mfa_login_challenge_conformance_rejects_an_unburned_binding() -> None:
     with pytest.raises(AssertionError, match="account-binding burn invariant"):
         await assert_mfa_login_challenge_store_conformance(_BrokenMFALoginChallengeStore)
@@ -1657,6 +1930,9 @@ async def test_mfa_login_challenge_conformance_rejects_an_unburned_binding() -> 
         (_WrongMFAAccountStore, r"MFALoginChallengeStore binding invariant"),
         (_WrongMFAEpochStore, r"MFALoginChallengeStore epoch invariant"),
         (_RetainedExpiredMFAStore, r"MFALoginChallengeStore expiry invariant"),
+        (_UnburnedMFAEpochStore, r"MFALoginChallengeStore epoch-binding burn invariant"),
+        (_ReplayingMFAChallengeStore, r"MFALoginChallengeStore atomicity invariant"),
+        (_UnburnedExpiredMFAStore, r"MFALoginChallengeStore expiry burn invariant"),
     ],
 )
 async def test_mfa_login_challenge_conformance_names_rejected_value_invariants(
@@ -1679,6 +1955,8 @@ async def test_webauthn_challenge_conformance_rejects_an_unburned_binding() -> N
         (_WrongWebAuthnBindingStore, r"WebAuthnChallengeStore binding invariant"),
         (_WrongWebAuthnPurposeStore, r"WebAuthnChallengeStore purpose invariant"),
         (_RetainedExpiredWebAuthnStore, r"WebAuthnChallengeStore expiry invariant"),
+        (_UnburnedWebAuthnPurposeStore, r"WebAuthnChallengeStore purpose burn invariant"),
+        (_ReplayingWebAuthnChallengeStore, r"WebAuthnChallengeStore atomicity invariant"),
     ],
 )
 async def test_webauthn_challenge_conformance_names_rejected_value_invariants(
@@ -1695,15 +1973,60 @@ async def test_oauth_transaction_conformance_rejects_a_provider_blind_store() ->
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("failure", "invariant"),
+    [
+        ("binding", r"OAuthTransactionStore binding invariant"),
+        ("matching", r"OAuthTransactionStore matching invariant"),
+        ("replay", r"OAuthTransactionStore consume-once invariant"),
+        ("atomicity", r"OAuthTransactionStore atomicity invariant"),
+        ("expiry", r"OAuthTransactionStore expiry invariant"),
+    ],
+)
+async def test_oauth_transaction_conformance_names_each_remaining_invariant(failure: str, invariant: str) -> None:
+    with pytest.raises(AssertionError, match=invariant):
+        await assert_oauth_transaction_store_conformance(lambda: _ConfigurableOAuthTransactionStore(failure))
+
+
+@pytest.mark.anyio
 async def test_websocket_connect_token_conformance_rejects_digest_burn() -> None:
     with pytest.raises(AssertionError, match="digest preservation invariant"):
         await assert_websocket_connect_token_store_conformance(_BrokenWebSocketConnectTokenStore)
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("failure", "invariant"),
+    [
+        ("digest", r"digest invariant"),
+        ("expiry", r"expiry invariant"),
+        ("expiry_deletion", r"expiry deletion invariant"),
+    ],
+)
+async def test_websocket_connect_token_conformance_names_lookup_invariants(failure: str, invariant: str) -> None:
+    with pytest.raises(AssertionError, match=invariant):
+        await assert_websocket_connect_token_store_conformance(lambda: _ConfigurableConnectTokenStore(failure))
+
+
+@pytest.mark.anyio
 async def test_passkey_conformance_rejects_unpersisted_assertion_state() -> None:
     with pytest.raises(AssertionError, match="state invariant"):
         await assert_passkey_store_conformance(_BrokenPasskeyStore)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("store", "invariant"),
+    [
+        (_RejectingPasskeyStore, r"PasskeyStore setup invariant"),
+        (_NonAtomicPasskeyResultStore, r"PasskeyStore\.record_assertion atomicity invariant"),
+    ],
+)
+async def test_passkey_conformance_names_setup_and_atomicity_invariants(
+    store: Callable[[], testing_module.InMemoryPasskeyStore], invariant: str
+) -> None:
+    with pytest.raises(AssertionError, match=invariant):
+        await assert_passkey_store_conformance(store)
 
 
 @pytest.mark.anyio
