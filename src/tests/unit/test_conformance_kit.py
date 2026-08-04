@@ -1221,13 +1221,9 @@ async def test_oidc_session_logout_store_conformance_accepts_seeded_reference_st
 @pytest.mark.anyio
 async def test_oidc_session_logout_store_conformance_rejects_replay_and_wrong_binding() -> None:
     with pytest.raises(AssertionError, match=r"OIDCSessionLogoutStore\.consume_backchannel replay invariant"):
-        await assert_oidc_session_logout_store_conformance(
-            lambda: _oidc_logout_store(_BrokenOIDCReplayStore)
-        )
+        await assert_oidc_session_logout_store_conformance(lambda: _oidc_logout_store(_BrokenOIDCReplayStore))
     with pytest.raises(AssertionError, match=r"OIDCSessionLogoutStore\.revoke_frontchannel binding invariant"):
-        await assert_oidc_session_logout_store_conformance(
-            lambda: _oidc_logout_store(_BrokenOIDCBindingStore)
-        )
+        await assert_oidc_session_logout_store_conformance(lambda: _oidc_logout_store(_BrokenOIDCBindingStore))
 
 
 @pytest.mark.anyio
@@ -1274,9 +1270,7 @@ async def test_step_up_store_conformance_detects_yielding_double_consume() -> No
 
 def _token_vault() -> MemoryTokenVault:
     return MemoryTokenVault(
-        provider="conformance-provider",
-        client_id="conformance-client",
-        protector=_ConformanceTransactionProtector(),
+        provider="conformance-provider", client_id="conformance-client", protector=_ConformanceTransactionProtector()
     )
 
 

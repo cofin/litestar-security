@@ -2762,16 +2762,13 @@ async def assert_oidc_session_logout_store_conformance(factory: Callable[[], OID
         )
     if await store.consume_backchannel(identity, now=_DEFAULT_NOW) is not None:
         raise AssertionError(
-            "OIDCSessionLogoutStore.consume_backchannel replay invariant: "
-            "a consumed token id must return None"
+            "OIDCSessionLogoutStore.consume_backchannel replay invariant: a consumed token id must return None"
         )
     for name, mismatch in (
         (
             "provider",
             replace(
-                identity,
-                provider="other-provider",
-                token_id=_conformance_oidc_logout_identity("provider").token_id,
+                identity, provider="other-provider", token_id=_conformance_oidc_logout_identity("provider").token_id
             ),
         ),
         (
@@ -2789,9 +2786,7 @@ async def assert_oidc_session_logout_store_conformance(factory: Callable[[], OID
         (
             "session",
             replace(
-                identity,
-                session_id="other-session",
-                token_id=_conformance_oidc_logout_identity("session").token_id,
+                identity, session_id="other-session", token_id=_conformance_oidc_logout_identity("session").token_id
             ),
         ),
     ):
@@ -2840,8 +2835,7 @@ async def assert_oidc_session_logout_store_conformance(factory: Callable[[], OID
         is not None
     ):
         raise AssertionError(
-            "OIDCSessionLogoutStore.revoke_frontchannel replay invariant: "
-            "consumed mapping must return None"
+            "OIDCSessionLogoutStore.revoke_frontchannel replay invariant: consumed mapping must return None"
         )
 
 
@@ -3515,10 +3509,7 @@ class InMemoryOIDCSessionLogoutStore:
         del now
         key = (provider, issuer, session_id)
         async with self._lock:
-            if (
-                key in self._consumed_frontchannel_mappings
-                or self._frontchannel_bindings.get(key) != binding
-            ):
+            if key in self._consumed_frontchannel_mappings or self._frontchannel_bindings.get(key) != binding:
                 return None
             matching_indexes = tuple(
                 index

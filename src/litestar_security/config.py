@@ -266,9 +266,7 @@ class SecurityConfig(Generic[UserT]):
         self.slots = tuple(self.slots)
         self.mechanisms = tuple(self.mechanisms)
         if self.local_auth is not None and self.websocket.current_security_epoch is None:
-            self.websocket = replace(
-                self.websocket, current_security_epoch=self.local_auth.accounts.current_epoch
-            )
+            self.websocket = replace(self.websocket, current_security_epoch=self.local_auth.accounts.current_epoch)
         jwks_providers = list(self.jwks_providers)
         for provider in (
             None if self.iap is None else self.iap.jwks,

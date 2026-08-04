@@ -494,9 +494,9 @@ class InMemoryOAuthRevocationRetryStore:
         Returns:
             A copy of the current metadata indexed by provider account id.
         """
-        return MappingProxyType(
-            {provider_account_id: record.failure for provider_account_id, record in self._records.items()}
-        )
+        return MappingProxyType({
+            provider_account_id: record.failure for provider_account_id, record in self._records.items()
+        })
 
     async def schedule(self, failure: OAuthRevocationFailure, tokens: ProviderTokenSet) -> None:
         """Encrypt and atomically replace retry material for one provider account.
