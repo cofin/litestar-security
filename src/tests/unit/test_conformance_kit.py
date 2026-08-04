@@ -234,6 +234,34 @@ class _BrokenMFAStore(testing_module.InMemoryMFAStore):
         return await super().advance_totp_counter(method_id, accepted_counter=accepted_counter, now=now)
 
 
+class _AlwaysAdvanceMFAStore(testing_module.InMemoryMFAStore):
+    """Accept every TOTP advancement, including concurrent and stale values."""
+
+    async def advance_totp_counter(self, method_id: str, *, accepted_counter: int, now: datetime) -> bool:
+        del method_id, accepted_counter, now
+        return True
+
+
+class _AlwaysConsumeRecoveryStore(testing_module.InMemoryMFAStore):
+    """Report duplicate recovery-code consumption as successful."""
+
+    async def consume_recovery_code(self, account_id: str, digest: bytes, *, now: datetime) -> bool:
+        await super().consume_recovery_code(account_id, digest, now=now)
+        return True
+
+
+class _EqualCounterMFAStore(testing_module.InMemoryMFAStore):
+    """Accept the equal counter after the atomic contender probe completes."""
+
+    calls: int = 0
+
+    async def advance_totp_counter(self, method_id: str, *, accepted_counter: int, now: datetime) -> bool:
+        self.calls += 1
+        if self.calls > 2:
+            return True
+        return await super().advance_totp_counter(method_id, accepted_counter=accepted_counter, now=now)
+
+
 class _BrokenMFALoginChallengeStore(testing_module.InMemoryMFALoginChallengeStore):
     """Leave a rejected account binding available for a later retry."""
 
@@ -1527,6 +1555,13 @@ async def test_session_registry_conformance_rejects_a_shared_factory_instance() 
 
 
 @pytest.mark.anyio
+async def test_session_registry_conformance_rejects_distinct_wrappers_over_shared_storage() -> None:
+    shared = InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW).accounts
+    with pytest.raises(AssertionError, match=r"SessionRegistry factory isolation invariant"):
+        await assert_session_registry_conformance(lambda: _BrokenSessionStore(shared), now=_CONFORMANCE_NOW)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("toggle", "invariant"),
     [
@@ -1591,6 +1626,22 @@ async def test_refresh_family_store_conformance_names_each_broken_invariant(togg
 async def test_mfa_store_conformance_rejects_a_non_monotonic_store() -> None:
     with pytest.raises(AssertionError, match="monotonicity invariant"):
         await assert_mfa_store_conformance(_BrokenMFAStore)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("factory", "invariant"),
+    [
+        (_AlwaysAdvanceMFAStore, r"MFAStore\.advance_totp_counter atomicity invariant"),
+        (_EqualCounterMFAStore, r"MFAStore\.advance_totp_counter monotonicity invariant"),
+        (_AlwaysConsumeRecoveryStore, r"MFAStore\.consume_recovery_code atomicity invariant"),
+    ],
+)
+async def test_mfa_store_conformance_names_atomic_invariants(
+    factory: Callable[[], testing_module.MFAStore], invariant: str
+) -> None:
+    with pytest.raises(AssertionError, match=invariant):
+        await assert_mfa_store_conformance(factory)
 
 
 @pytest.mark.anyio
