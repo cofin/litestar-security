@@ -13815,20 +13815,14 @@ async def test_aesgcm_secret_protectors_reject_invalid_configuration_entropy_and
             await protector.unprotect(protected, associated_data=b"bound")
 
 
-@pytest.mark.parametrize(
-    ("key_version", "key"),
-    [("", b"o" * 32), ("v1", b"o" * 31), ("v1", bytearray(b"o" * 32))],
-)
+@pytest.mark.parametrize(("key_version", "key"), [("", b"o" * 32), ("v1", b"o" * 31), ("v1", bytearray(b"o" * 32))])
 def test_oauth_transaction_protector_key_rejects_invalid_key_material(key_version: str, key: object) -> None:
     """OAuth transaction encryption only accepts exact versioned AES-256 keys."""
     with pytest.raises(ImproperlyConfiguredException, match="32-byte key"):
         OAuthTransactionProtectorKey(key_version, key)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize(
-    ("key_version", "key"),
-    [("", b"m" * 32), ("v1", b"m" * 31), ("v1", bytearray(b"m" * 32))],
-)
+@pytest.mark.parametrize(("key_version", "key"), [("", b"m" * 32), ("v1", b"m" * 31), ("v1", bytearray(b"m" * 32))])
 def test_mfa_secret_protector_key_rejects_invalid_key_material(key_version: str, key: object) -> None:
     """MFA secret encryption only accepts exact versioned AES-256 keys."""
     with pytest.raises(ImproperlyConfiguredException, match="32-byte key"):

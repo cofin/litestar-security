@@ -1592,18 +1592,9 @@ async def test_oauth_transaction_protector_conformance_rejects_deterministic_pro
 @pytest.mark.parametrize(
     ("factory", "invariant"),
     [
-        (
-            _WrongOAuthRoundTripProtector,
-            r"OAuthTransactionProtector round-trip invariant",
-        ),
-        (
-            _WrongOAuthVersionProtector,
-            r"OAuthTransactionProtector key-version invariant",
-        ),
-        (
-            _ConformanceTransactionProtector,
-            r"OAuthTransactionProtector associated data invariant",
-        ),
+        (_WrongOAuthRoundTripProtector, r"OAuthTransactionProtector round-trip invariant"),
+        (_WrongOAuthVersionProtector, r"OAuthTransactionProtector key-version invariant"),
+        (_ConformanceTransactionProtector, r"OAuthTransactionProtector associated data invariant"),
     ],
 )
 async def test_oauth_transaction_protector_conformance_names_the_remaining_invariants(
@@ -2139,8 +2130,7 @@ async def test_oidc_session_logout_store_allows_exactly_one_backchannel_contende
 @pytest.mark.anyio
 async def test_oidc_reference_frontchannel_handles_missing_and_already_revoked_mappings() -> None:
     missing = testing_module.InMemoryOIDCSessionLogoutStore(
-        session_mappings=(),
-        frontchannel_bindings={("provider", "https://issuer.example", "session"): "binding"},
+        session_mappings=(), frontchannel_bindings={("provider", "https://issuer.example", "session"): "binding"}
     )
     assert (
         await missing.revoke_frontchannel(

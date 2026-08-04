@@ -3107,18 +3107,13 @@ for name in accounts.__all__:
         ("litestar_security.providers", "OIDCMetadata", "litestar_security.providers.oidc"),
     ],
 )
-def test_lazy_export_packages_resolve_optional_attributes(
-    module_name: str, name: str, target_module: str
-) -> None:
+def test_lazy_export_packages_resolve_optional_attributes(module_name: str, name: str, target_module: str) -> None:
     module = import_module(module_name)
 
     assert getattr(module, name) is getattr(import_module(target_module), name)
 
 
-@pytest.mark.parametrize(
-    "module_name",
-    ["litestar_security.accounts.controllers", "litestar_security.providers"],
-)
+@pytest.mark.parametrize("module_name", ["litestar_security.accounts.controllers", "litestar_security.providers"])
 def test_lazy_export_packages_reject_unknown_attributes(module_name: str) -> None:
     module = import_module(module_name)
 
@@ -3145,14 +3140,11 @@ def test_import_optional_attribute_only_translates_declared_missing_dependencies
     monkeypatch.setattr(lazy_module, "import_module", raise_missing_module)
 
     with pytest.raises(expected_exception) as error:
-        lazy_module.import_optional_attribute(
-            "feature.module", "export", extras="feature", dependencies=dependencies
-        )
+        lazy_module.import_optional_attribute("feature.module", "export", extras="feature", dependencies=dependencies)
 
     if expected_exception is ImportError:
         expected_message = (
-            "litestar-security feature requires the [feature] extra: "
-            "pip install 'litestar-security[feature]'"
+            "litestar-security feature requires the [feature] extra: pip install 'litestar-security[feature]'"
         )
         assert str(error.value) == expected_message
 

@@ -652,18 +652,10 @@ def test_websocket_policy_fingerprint_uses_canonical_versioned_json_primitives()
     "plan",
     [
         SimpleNamespace(
-            authenticate=True,
-            required=True,
-            allow_anonymous=False,
-            participant_names=("bearer",),
-            alternatives=(),
+            authenticate=True, required=True, allow_anonymous=False, participant_names=("bearer",), alternatives=()
         ),
         SimpleNamespace(
-            authenticate=True,
-            required=True,
-            allow_anonymous=False,
-            participant_names=frozenset({""}),
-            alternatives=(),
+            authenticate=True, required=True, allow_anonymous=False, participant_names=frozenset({""}), alternatives=()
         ),
         SimpleNamespace(
             authenticate=True,
@@ -702,11 +694,7 @@ def test_websocket_policy_fingerprint_rejects_malformed_plan_shapes(plan: object
 
 def test_websocket_policy_fingerprint_accepts_an_absent_participant_set() -> None:
     plan = SimpleNamespace(
-        authenticate=False,
-        required=False,
-        allow_anonymous=True,
-        participant_names=None,
-        alternatives=(),
+        authenticate=False, required=False, allow_anonymous=True, participant_names=None, alternatives=()
     )
 
     assert len(websocket_module.websocket_policy_fingerprint(plan)) == 64

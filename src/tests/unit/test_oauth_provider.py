@@ -496,10 +496,7 @@ async def test_response_rejects_compressed_content_before_reading() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
-            200,
-            headers={"content-type": "application/json", "content-encoding": "gzip"},
-            content=body,
-            request=request,
+            200, headers={"content-type": "application/json", "content-encoding": "gzip"}, content=body, request=request
         )
 
     async with _client(handler) as client:
@@ -508,9 +505,7 @@ async def test_response_rejects_compressed_content_before_reading() -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "answers", [(), ("not-an-ip-address",), ("10.0.0.1",), ("93.184.216.34", "127.0.0.1")]
-)
+@pytest.mark.parametrize("answers", [(), ("not-an-ip-address",), ("10.0.0.1",), ("93.184.216.34", "127.0.0.1")])
 async def test_secret_bearing_request_rejects_empty_or_non_public_dns_answers(answers: tuple[str, ...]) -> None:
     called = False
 
@@ -542,8 +537,7 @@ async def test_literal_public_ip_endpoint_does_not_require_dns_resolution() -> N
         assert request.url.host == _PUBLIC_IP
         assert request.headers["host"] == _PUBLIC_IP
         return _json_response(
-            request,
-            {"access_token": "access-token", "token_type": "Bearer", "expires_in": 60, "scope": "openid"},
+            request, {"access_token": "access-token", "token_type": "Bearer", "expires_in": 60, "scope": "openid"}
         )
 
     config = replace(_config(), token_endpoint=f"https://{_PUBLIC_IP}/oauth/token")

@@ -357,9 +357,7 @@ async def test_in_memory_one_time_challenge_stores_burn_invalid_presentations() 
     backend = InMemorySecurityBackend()
     await backend.challenges.put(webauthn)
     assert (
-        await backend.challenges.consume(
-            b"c" * 32, binding_digest=b"wrong" * 7 + b"!", purpose="register", now=_NOW
-        )
+        await backend.challenges.consume(b"c" * 32, binding_digest=b"wrong" * 7 + b"!", purpose="register", now=_NOW)
     ) is None
 
     mfa = MFALoginChallenge(
@@ -387,12 +385,7 @@ async def test_in_memory_one_time_challenge_stores_burn_invalid_presentations() 
     await backend.step_up.put(step_up)
     assert (
         await backend.step_up.consume(
-            b"g" * 32,
-            principal_id="account-1",
-            security_epoch=1,
-            purpose="other",
-            transport_digest=b"t" * 32,
-            now=_NOW,
+            b"g" * 32, principal_id="account-1", security_epoch=1, purpose="other", transport_digest=b"t" * 32, now=_NOW
         )
     ) is None
 
@@ -659,10 +652,7 @@ async def test_local_account_store_refresh_revocation_and_epoch_outcomes() -> No
         family_expires_at=_NOW + timedelta(hours=2),
     )
     second = replace(
-        command,
-        token_id=_REFRESH_SUCCESSOR_ID,
-        token_digest=b"s" * 32,
-        family_id="rf_bm5ubm5ubm5ubm5ubm5ubg",
+        command, token_id=_REFRESH_SUCCESSOR_ID, token_digest=b"s" * 32, family_id="rf_bm5ubm5ubm5ubm5ubm5ubg"
     )
     assert await backend.accounts.create_family(command, event=_event())
     assert await backend.accounts.create_family(second, event=_event())
