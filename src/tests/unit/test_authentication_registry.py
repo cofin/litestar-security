@@ -6645,16 +6645,16 @@ def test_password_change_rejects_invalid_configuration(kwargs: dict[str, object]
 @pytest.mark.parametrize(
     ("case", "outcome_type"),
     [
-        ("change_time", accounts_module.InvalidLifecycleRequest),
-        ("force_time", accounts_module.InvalidLifecycleRequest),
+        ("change_time", accounts_module.LifecycleRejected),
+        ("force_time", accounts_module.LifecycleRejected),
         ("invalid_proof", InvalidCredentials),
-        ("blank_account", accounts_module.InvalidLifecycleRequest),
-        ("compromise_rebind", accounts_module.InvalidLifecycleRequest),
-        ("missing_replacement", accounts_module.InvalidLifecycleRequest),
-        ("missing_current", accounts_module.InvalidLifecycleRequest),
-        ("no_session_registry", accounts_module.InvalidLifecycleRequest),
-        ("blank_current", accounts_module.InvalidLifecycleRequest),
-        ("naive_expiry", accounts_module.InvalidLifecycleRequest),
+        ("blank_account", accounts_module.LifecycleRejected),
+        ("compromise_rebind", accounts_module.LifecycleRejected),
+        ("missing_replacement", accounts_module.LifecycleRejected),
+        ("missing_current", accounts_module.LifecycleRejected),
+        ("no_session_registry", accounts_module.LifecycleRejected),
+        ("blank_current", accounts_module.LifecycleRejected),
+        ("naive_expiry", accounts_module.LifecycleRejected),
         ("policy_failure", VerificationUnavailable),
         ("policy_rejection", accounts_module.PasswordPolicyResult),
         ("hash_failure", VerificationUnavailable),
@@ -7157,7 +7157,7 @@ async def test_registration_service_returns_secret_free_domain_failures(failure:
     assert isinstance(
         outcome,
         (
-            accounts_module.InvalidLifecycleRequest
+            accounts_module.LifecycleRejected
             if failure in {"identifier", "empty_identifier"}
             else VerificationUnavailable
         ),
@@ -12515,7 +12515,7 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         ),
         change_token_password=AsyncOutcome(
             accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2),
-            accounts_module.InvalidLifecycleRequest(),
+            accounts_module.LifecycleRejected(),
         ),
         client_key_for=lambda _connection: "1.2.3.4",
     )
@@ -12832,12 +12832,11 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
     assert await services.change_session_password(request, "account-1", compromised) == changed
     assert session_auth.logout.outcomes == []
     compromised_failure = replace(
-        services,
-        password_change=cast("Any", SimpleNamespace(change=AsyncOutcome(accounts_module.InvalidLifecycleRequest()))),
+        services, password_change=cast("Any", SimpleNamespace(change=AsyncOutcome(accounts_module.LifecycleRejected())))
     )
     assert isinstance(
         await compromised_failure.change_session_password(request, "account-1", compromised),
-        accounts_module.InvalidLifecycleRequest,
+        accounts_module.LifecycleRejected,
     )
     assert await services.change_session_password(request, "account-1", password_request) == changed
     assert session_auth.activate_password_rebind.outcomes == []
@@ -12874,12 +12873,11 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
 
     services.accounts.get_by_id.outcomes.append(account)
     unchanged_services = replace(
-        services,
-        password_change=cast("Any", SimpleNamespace(change=AsyncOutcome(accounts_module.InvalidLifecycleRequest()))),
+        services, password_change=cast("Any", SimpleNamespace(change=AsyncOutcome(accounts_module.LifecycleRejected())))
     )
     assert isinstance(
         await unchanged_services.change_session_password(request, "account-1", password_request),
-        accounts_module.InvalidLifecycleRequest,
+        accounts_module.LifecycleRejected,
     )
 
     services.password_reauthentication.verify.outcomes.extend((InvalidCredentials(), proof))
@@ -12972,7 +12970,7 @@ def test_rate_limit_policy_rejects_unbounded_budgets(limit: object, window: obje
 )
 def test_rate_limit_request_rejects_unbounded_bucket_keys(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match="Rate limit"):
-        accounts_module.RateLimitRequest(**kwargs)
+        accounts_module.RateLimitAttempt(**kwargs)
 
 
 @pytest.mark.parametrize(
@@ -12992,7 +12990,7 @@ def test_rate_limit_decision_requires_a_retry_hint_only_on_denial(kwargs: dict[s
 @pytest.mark.anyio
 async def test_unlimited_rate_limiter_allows_every_attempt() -> None:
     decision = await accounts_module.UnlimitedRateLimiter().acquire(
-        accounts_module.RateLimitRequest(operation="local.login")
+        accounts_module.RateLimitAttempt(operation="local.login")
     )
     assert decision == accounts_module.RateLimitDecision(allowed=True)
 
@@ -13099,19 +13097,19 @@ def test_store_rate_limiter_binds_only_a_native_store() -> None:
 @pytest.mark.anyio
 async def test_store_rate_limiter_allows_unconfigured_operations_and_fails_closed_without_a_store() -> None:
     limiter = _memory_limiter()
-    assert await limiter.acquire(accounts_module.RateLimitRequest(operation="local.unbudgeted")) == (
+    assert await limiter.acquire(accounts_module.RateLimitAttempt(operation="local.unbudgeted")) == (
         accounts_module.RateLimitDecision(allowed=True)
     )
     unbound = accounts_module.StoreRateLimiter()
     with pytest.raises(RuntimeError, match="store has not been resolved"):
-        await unbound.acquire(accounts_module.RateLimitRequest(operation="local.login", client_key="1.1.1.1"))
+        await unbound.acquire(accounts_module.RateLimitAttempt(operation="local.login", client_key="1.1.1.1"))
 
 
 @pytest.mark.anyio
 async def test_store_rate_limiter_denies_after_the_window_budget_and_recovers_next_window() -> None:
     moment = [datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)]
     limiter = _memory_limiter(clock=lambda: moment[0])
-    request = accounts_module.RateLimitRequest(operation="local.login", client_key="1.1.1.1")
+    request = accounts_module.RateLimitAttempt(operation="local.login", client_key="1.1.1.1")
     decisions = [await limiter.acquire(request) for _ in range(11)]
 
     assert [decision.allowed for decision in decisions] == [True] * 10 + [False]
@@ -13127,7 +13125,7 @@ async def test_store_rate_limiter_serializes_concurrent_single_bucket_acquires()
         policies={"concurrent": accounts_module.RateLimitPolicy(limit=5, window=timedelta(minutes=1))},
         store=_InterleavingStore(),
     )
-    request = accounts_module.RateLimitRequest(operation="concurrent", client_key="shared")
+    request = accounts_module.RateLimitAttempt(operation="concurrent", client_key="shared")
     decisions: list[accounts_module.RateLimitDecision] = []
 
     async def acquire() -> None:
@@ -13146,7 +13144,7 @@ async def test_store_rate_limiter_serializes_concurrent_shared_store_acquires() 
     policies = {"concurrent": accounts_module.RateLimitPolicy(limit=5, window=timedelta(minutes=1))}
     first_limiter = accounts_module.StoreRateLimiter(policies=policies, store=store)
     second_limiter = accounts_module.StoreRateLimiter(policies=policies, store=store)
-    request = accounts_module.RateLimitRequest(operation="concurrent", client_key="shared")
+    request = accounts_module.RateLimitAttempt(operation="concurrent", client_key="shared")
     decisions: list[accounts_module.RateLimitDecision] = []
 
     async def acquire(limiter: accounts_module.StoreRateLimiter) -> None:
@@ -13251,7 +13249,7 @@ async def test_store_rate_limiter_serializes_each_multi_bucket_acquire() -> None
         async def _consume(  # noqa: PLR0913 - observe each fully named rate-limit bucket argument
             self,
             store: Store,
-            request: accounts_module.RateLimitRequest,
+            request: accounts_module.RateLimitAttempt,
             policy: accounts_module.RateLimitPolicy,
             *,
             kind: str,
@@ -13266,8 +13264,8 @@ async def test_store_rate_limiter_serializes_each_multi_bucket_acquire() -> None
         policies={"concurrent": accounts_module.RateLimitPolicy(limit=5, window=timedelta(minutes=1))},
         store=_InterleavingStore(),
     )
-    first = accounts_module.RateLimitRequest(operation="concurrent", client_key="client-a", subject_digest="subject-a")
-    second = accounts_module.RateLimitRequest(operation="concurrent", client_key="client-b", subject_digest="subject-b")
+    first = accounts_module.RateLimitAttempt(operation="concurrent", client_key="client-a", subject_digest="subject-a")
+    second = accounts_module.RateLimitAttempt(operation="concurrent", client_key="client-b", subject_digest="subject-b")
 
     async with create_task_group() as task_group:
         task_group.start_soon(limiter.acquire, first)
@@ -13282,7 +13280,7 @@ async def test_store_rate_limiter_serializes_each_multi_bucket_acquire() -> None
 @pytest.mark.anyio
 async def test_store_rate_limiter_budgets_password_verify_by_default() -> None:
     limiter = _memory_limiter()
-    request = accounts_module.RateLimitRequest(operation="local.password.verify", client_key="1.1.1.1")
+    request = accounts_module.RateLimitAttempt(operation="local.password.verify", client_key="1.1.1.1")
     decisions = [await limiter.acquire(request) for _ in range(11)]
 
     assert [decision.allowed for decision in decisions] == [True] * 10 + [False]
@@ -13292,7 +13290,7 @@ async def test_store_rate_limiter_budgets_password_verify_by_default() -> None:
 async def test_store_rate_limiter_fails_closed_on_an_unreadable_counter() -> None:
     store = MemoryStore()
     limiter = accounts_module.StoreRateLimiter(store=store)
-    request = accounts_module.RateLimitRequest(operation="local.login", client_key="1.1.1.1")
+    request = accounts_module.RateLimitAttempt(operation="local.login", client_key="1.1.1.1")
     await limiter.acquire(request)
     key = next(iter(store._store))  # noqa: SLF001 - assert the stored counter shape directly
     await store.set(key, b"not-a-number")
@@ -13305,9 +13303,9 @@ async def test_store_rate_limiter_fails_closed_on_an_unreadable_counter() -> Non
 async def test_store_rate_limiter_denies_when_either_bucket_is_exhausted() -> None:
     limiter = _memory_limiter()
     for _ in range(10):
-        await limiter.acquire(accounts_module.RateLimitRequest(operation="local.login", client_key="shared"))
+        await limiter.acquire(accounts_module.RateLimitAttempt(operation="local.login", client_key="shared"))
 
-    fresh_subject = accounts_module.RateLimitRequest(
+    fresh_subject = accounts_module.RateLimitAttempt(
         operation="local.login", client_key="shared", subject_digest="unused-digest"
     )
     decision = await limiter.acquire(fresh_subject)

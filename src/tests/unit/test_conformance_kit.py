@@ -32,10 +32,10 @@ from litestar_security.accounts import (
     PrepareRefreshResult,
     ProtectedSecret,
     PurposeTokenDelivery,
+    RateLimitAttempt,
     RateLimitDecision,
     RateLimiter,
     RateLimitPolicy,
-    RateLimitRequest,
     RefreshFamilyContext,
     RefreshReceiptReplay,
     RefreshRotationStatus,
@@ -787,7 +787,7 @@ class _NonAtomicLimiter:
     limit: int
     count: int = 0
 
-    async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
+    async def acquire(self, request: RateLimitAttempt) -> RateLimitDecision:
         """Race concurrent callers while producing an otherwise valid decision."""
         del request
         current = self.count
@@ -805,7 +805,7 @@ class _UnderAdmittingLimiter:
     limit: int
     count: int = 0
 
-    async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
+    async def acquire(self, request: RateLimitAttempt) -> RateLimitDecision:
         """Return a valid decision while failing to spend the whole budget."""
         del request
         if self.count < self.limit - 1:

@@ -80,10 +80,10 @@ if TYPE_CHECKING:
 __all__ = (
     "DEFAULT_RATE_LIMIT_POLICIES",
     "RATE_LIMIT_STORE_NAME",
+    "RateLimitAttempt",
     "RateLimitDecision",
     "RateLimitGuard",
     "RateLimitPolicy",
-    "RateLimitRequest",
     "RateLimited",
     "RateLimiter",
     "StoreRateLimiter",
@@ -173,7 +173,7 @@ assert DEFAULT_RATE_LIMIT_POLICIES.keys() == RATE_LIMITED_OPERATIONS, (  # noqa:
 
 
 @dataclass(frozen=True, slots=True)
-class RateLimitRequest:
+class RateLimitAttempt:
     """One bucketed attempt presented to a limiter.
 
     Args:
@@ -258,7 +258,7 @@ class RateLimiter(Protocol):
     to a backend outage.
     """
 
-    async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
+    async def acquire(self, request: RateLimitAttempt) -> RateLimitDecision:
         """Consume one attempt's cost and report whether it may proceed.
 
         Args:
@@ -278,7 +278,7 @@ class RateLimiter(Protocol):
 class UnlimitedRateLimiter:
     """Allow every attempt, for deployments that limit at the edge instead."""
 
-    async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
+    async def acquire(self, request: RateLimitAttempt) -> RateLimitDecision:
         """Allow one attempt without consuming any budget.
 
         Args:
@@ -354,7 +354,7 @@ class StoreRateLimiter:
             raise ImproperlyConfiguredException(detail=msg)
         self.store = store
 
-    async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
+    async def acquire(self, request: RateLimitAttempt) -> RateLimitDecision:
         """Consume one attempt from every configured bucket for the operation.
 
         A process-wide lock makes the complete multi-bucket accounting operation
@@ -395,7 +395,7 @@ class StoreRateLimiter:
             return RateLimitDecision(allowed=True)
 
     async def _consume(  # noqa: PLR0913 - one bucket read/write; every input is named
-        self, store: Store, request: RateLimitRequest, policy: RateLimitPolicy, *, kind: str, value: str, now: datetime
+        self, store: Store, request: RateLimitAttempt, policy: RateLimitPolicy, *, kind: str, value: str, now: datetime
     ) -> int | None:
         window = int(policy.window.total_seconds())
         elapsed = now.timestamp()
@@ -473,7 +473,7 @@ class RateLimitGuard:
             limiter outage fails closed, so it can never silently remove the limit.
         """
         try:
-            request = RateLimitRequest(
+            request = RateLimitAttempt(
                 operation=operation,
                 client_key=client_key,
                 subject_digest=self.subject_digest(identifier) if identifier is not None else None,

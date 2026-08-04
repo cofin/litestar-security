@@ -22,7 +22,7 @@ from litestar_security.accounts._operations import LOGIN_MFA
 from litestar_security.accounts._passwords import PasswordPolicyResult
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
-    InvalidLifecycleRequest,
+    LifecycleRejected,
     LocalAccountRecord,
     PasswordChangeResult,
     PasswordChangeStatus,
@@ -415,13 +415,7 @@ class LocalAuthService(Generic[UserT]):
 
     async def change_session_password(  # noqa: PLR0911 - preserve explicit sanitized outcomes
         self, request: Request[Any, Any, Any], account_id: str, data: LocalPasswordChange
-    ) -> (
-        PasswordChangeResult
-        | PasswordPolicyResult
-        | InvalidCredentials
-        | InvalidLifecycleRequest
-        | VerificationUnavailable
-    ):
+    ) -> PasswordChangeResult | PasswordPolicyResult | InvalidCredentials | LifecycleRejected | VerificationUnavailable:
         """Change a password and atomically prepare the current session rebind.
 
         Args:
@@ -474,13 +468,7 @@ class LocalAuthService(Generic[UserT]):
 
     async def change_token_password(
         self, account_id: str, data: LocalPasswordChange
-    ) -> (
-        PasswordChangeResult
-        | PasswordPolicyResult
-        | InvalidCredentials
-        | InvalidLifecycleRequest
-        | VerificationUnavailable
-    ):
+    ) -> PasswordChangeResult | PasswordPolicyResult | InvalidCredentials | LifecycleRejected | VerificationUnavailable:
         """Change a bearer-authenticated password and revoke local transports.
 
         Args:

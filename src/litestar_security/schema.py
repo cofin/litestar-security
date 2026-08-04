@@ -36,7 +36,7 @@ class WireStruct(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     does not model - a specification-defined body whose sender may legitimately
     add them - overrides the policy for itself and records why::
 
-        class BackchannelLogoutRequest(WireStruct, frozen=True, forbid_unknown_fields=False):
+        class BackchannelLogout(WireStruct, frozen=True, forbid_unknown_fields=False):
             '''The specification permits unrecognized members.'''
 
     Prefer that per-schema override to relaxing this base: it keeps the safe

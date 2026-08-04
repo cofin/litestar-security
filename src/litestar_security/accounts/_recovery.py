@@ -37,8 +37,8 @@ from litestar_security.accounts._passwords import PasswordHasher, PasswordPolicy
 from litestar_security.accounts._purpose_tokens import PurposeTokenCodec, approved_return_url
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, validate_rate_limits
 from litestar_security.accounts._records import (
-    InvalidLifecycleRequest,
     LifecycleAccepted,
+    LifecycleRejected,
     PasswordChangeResult,
     PasswordChangeStatus,
     PasswordReauthenticationProof,
@@ -134,13 +134,7 @@ class PasswordChangeService:
         replacement_session: CreateSessionCommand | None = None,
         compromise: bool = False,
         now: datetime | None = None,
-    ) -> (
-        PasswordChangeResult
-        | PasswordPolicyResult
-        | InvalidCredentials
-        | InvalidLifecycleRequest
-        | VerificationUnavailable
-    ):
+    ) -> PasswordChangeResult | PasswordPolicyResult | InvalidCredentials | LifecycleRejected | VerificationUnavailable:
         """Change a password after recent proof and preserve only an explicitly rebound session.
 
         Args:
@@ -161,7 +155,7 @@ class PasswordChangeService:
         try:
             occurred_at = aware_utc_time(self.clock() if now is None else now)
         except (AttributeError, TypeError, ValueError):
-            return InvalidLifecycleRequest()
+            return LifecycleRejected()
         if not self._recent_password_proof(account_id, proof, occurred_at):
             return InvalidCredentials()
         return await self._replace(
@@ -184,7 +178,7 @@ class PasswordChangeService:
         expected_epoch: int,
         normalized_identifier: str | None = None,
         now: datetime | None = None,
-    ) -> PasswordChangeResult | PasswordPolicyResult | InvalidLifecycleRequest | VerificationUnavailable:
+    ) -> PasswordChangeResult | PasswordPolicyResult | LifecycleRejected | VerificationUnavailable:
         """Perform an application-authorized reset without registering an admin route.
 
         No generated route reaches this. The library ships no administrative
@@ -204,7 +198,7 @@ class PasswordChangeService:
         try:
             occurred_at = aware_utc_time(self.clock() if now is None else now)
         except (AttributeError, TypeError, ValueError):
-            return InvalidLifecycleRequest()
+            return LifecycleRejected()
         return await self._replace(
             account_id,
             password,
@@ -229,7 +223,7 @@ class PasswordChangeService:
         compromise: bool,
         occurred_at: datetime,
         operation: str,
-    ) -> PasswordChangeResult | PasswordPolicyResult | InvalidLifecycleRequest | VerificationUnavailable:
+    ) -> PasswordChangeResult | PasswordPolicyResult | LifecycleRejected | VerificationUnavailable:
         if (
             not strict_text(account_id)
             or not valid_security_epoch(expected_epoch)
@@ -241,7 +235,7 @@ class PasswordChangeService:
                 compromise=compromise,
             )
         ):
-            return InvalidLifecycleRequest()
+            return LifecycleRejected()
         if expected_epoch == _MAXIMUM_SECURITY_EPOCH:
             return PasswordChangeResult(PasswordChangeStatus.EPOCH_EXHAUSTED)
         try:

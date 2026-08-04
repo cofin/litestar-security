@@ -41,8 +41,8 @@ from litestar_security.accounts import (
     ProtectedSecret,
     PurposeTokenCodec,
     PurposeTokenDelivery,
+    RateLimitAttempt,
     RateLimiter,
-    RateLimitRequest,
     RecoveryCodeDigest,
     RefreshFamilyContext,
     RefreshReceiptReplay,
@@ -3016,7 +3016,7 @@ async def assert_rate_limiter_conformance(
         message = "Rate limiter conformance concurrency must be an integer at least as large as limit"
         raise ValueError(message)
     limiter = factory(limit)
-    request = RateLimitRequest(operation="conformance.rate_limit", client_key="conformance-bucket")
+    request = RateLimitAttempt(operation="conformance.rate_limit", client_key="conformance-bucket")
     outcomes: list[bool] = []
 
     async def attempt() -> None:

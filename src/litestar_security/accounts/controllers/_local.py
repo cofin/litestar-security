@@ -32,8 +32,8 @@ from litestar_security.accounts._rate_limits import RateLimited
 from litestar_security.accounts._records import (
     ConsumeResult,
     ConsumeStatus,
-    InvalidLifecycleRequest,
     LifecycleAccepted,
+    LifecycleRejected,
     LocalAuthMode,
     PasswordChangeResult,
     PasswordChangeStatus,
@@ -702,7 +702,7 @@ class _LocalRegistrationController(Controller):
         """Apply the configured public registration policy."""
         registration = local_auth_service.registration
         if registration is None:
-            _route_error(InvalidLifecycleRequest())
+            _route_error(LifecycleRejected())
         result = await registration.register(
             data.identifier,
             data.password,
@@ -742,7 +742,7 @@ class _LocalInvitationRegistrationController(Controller):
         """Apply the configured invite-only registration policy."""
         registration = local_auth_service.registration
         if registration is None:
-            _route_error(InvalidLifecycleRequest())
+            _route_error(LifecycleRejected())
         result = await registration.register(
             data.identifier,
             data.password,

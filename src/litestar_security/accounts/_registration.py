@@ -24,8 +24,8 @@ from litestar_security.accounts._records import (
     ConsumeResult,
     ConsumeStatus,
     InvalidInvitation,
-    InvalidLifecycleRequest,
     LifecycleAccepted,
+    LifecycleRejected,
     RegistrationMode,
     RegistrationStatus,
     TokenPurpose,
@@ -110,7 +110,7 @@ class RegistrationService(Generic[UserT]):
     ) -> (
         LifecycleAccepted
         | InvalidInvitation
-        | InvalidLifecycleRequest
+        | LifecycleRejected
         | PasswordPolicyResult
         | RateLimited
         | VerificationUnavailable
@@ -139,9 +139,9 @@ class RegistrationService(Generic[UserT]):
             occurred_at = aware_utc_time(self.clock() if now is None else now)
             normalized_identifier = self.normalizer(identifier)
         except (TypeError, UnicodeError, ValueError):
-            return InvalidLifecycleRequest()
+            return LifecycleRejected()
         if not strict_text(normalized_identifier):
-            return InvalidLifecycleRequest()
+            return LifecycleRejected()
         limited = await self._check_rate_limit(normalized_identifier, client_key)
         if limited is not None:
             return limited

@@ -20,8 +20,8 @@ __all__ = (
     "ConsumeResult",
     "ConsumeStatus",
     "InvalidInvitation",
-    "InvalidLifecycleRequest",
     "LifecycleAccepted",
+    "LifecycleRejected",
     "LocalAccountRecord",
     "LocalAuthMode",
     "LoginMethod",
@@ -291,7 +291,7 @@ class InvalidInvitation:
 
 
 @dataclass(frozen=True, slots=True)
-class InvalidLifecycleRequest:
+class LifecycleRejected:
     """Generic malformed lifecycle request response."""
 
     detail: str = "The request is invalid."
