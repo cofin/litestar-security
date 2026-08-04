@@ -16,6 +16,7 @@ from litestar.config.csrf import CSRFConfig
 from litestar.di import NamedDependency, Provide
 from litestar.enums import ScopeType
 from litestar.exceptions import (
+    ImproperlyConfiguredException,
     NotAuthorizedException,
     PermissionDeniedException,
     ServiceUnavailableException,
@@ -116,6 +117,7 @@ from litestar_security.providers.jwt import (
 from litestar_security.testing import InMemoryMFALoginChallengeStore, InMemoryMFAStore
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,
+    WebSocketConnectTokenIssuer,
     WebSocketConnectTokenRecord,
     WebSocketConnectTokenService,
     WebSocketSecurityConfig,
@@ -2343,6 +2345,94 @@ async def test_matching_one_time_connect_token_authenticates_cross_origin_websoc
             pass
 
     assert message == {"subject": "subject-1", "mechanisms": ["websocket-connect-token"]}
+    assert replay.value.code == 4401
+
+
+@pytest.mark.anyio
+async def test_websocket_connect_tokens_dependency_mints_by_route_name_end_to_end() -> None:
+    store = InMemoryWebSocketConnectTokenStore()
+    slot = _Slot(PresentedCredential("subject-1"))
+    authenticator = _Authenticator(
+        Authenticated(
+            claims="subject-1",
+            evidence=AuthenticationEvidence(
+                mechanism="bearer", slot="authorization.bearer", authenticated_at=_NOW
+            ),
+        )
+    )
+    now = datetime.now(timezone.utc)
+    websocket_config = WebSocketSecurityConfig(
+        allowed_origins=frozenset({"https://browser.example"}), connect_token_store=store, clock=lambda: now
+    )
+
+    @post("/tickets", name="tickets", auth=required("bearer"))
+    async def mint(
+        websocket_connect_tokens: NamedDependency[WebSocketConnectTokenIssuer],
+        principal: NamedDependency[Principal[Any]],
+        security_context: NamedDependency[SecurityContext],
+    ) -> dict[str, str]:
+        issued = await websocket_connect_tokens.issue(
+            "reports.socket",
+            principal=principal,
+            context=security_context,
+            origin="https://browser.example",
+        )
+        return {"connect_token": issued.value}
+
+    @websocket("/ws", name="reports.socket", auth=required("bearer"))
+    async def handler(socket: WebSocket) -> None:
+        await socket.accept()
+        await socket.send_json({"subject": socket.user.id})
+        await socket.close()
+
+    app = Litestar(
+        route_handlers=[mint, handler],
+        openapi_config=None,
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(
+                    slots=(slot,),  # type: ignore[arg-type]
+                    mechanisms=(
+                        AuthenticationMechanism(
+                            authenticator=authenticator,  # type: ignore[arg-type]
+                            resolver=_Resolver(),
+                        ),
+                    ),
+                    websocket=websocket_config,
+                )
+            )
+        ],
+    )
+    issuer = WebSocketConnectTokenIssuer(
+        app=app,
+        store=store,
+        clock=websocket_config.clock,
+        ttl=websocket_config.connect_token_ttl,
+    )
+    principal = Principal(id="subject-1")
+    context = SecurityContext(session=NullSessionHandle())
+
+    with pytest.raises(ImproperlyConfiguredException, match="does not resolve"):
+        await issuer.issue("missing", principal=principal, context=context, origin="https://browser.example")
+    with pytest.raises(ImproperlyConfiguredException, match="does not resolve"):
+        await issuer.issue("tickets", principal=principal, context=context, origin="https://browser.example")
+
+    async with AsyncTestClient(app=app) as client:
+        response = await client.post("/tickets")
+        assert response.status_code == 201
+        connect_token = response.json()["connect_token"]
+        session = await client.websocket_connect(
+            f"/ws?connect_token={connect_token}", headers={"Origin": "https://browser.example"}
+        )
+        with session as socket:
+            message = socket.receive_json()
+        replay_session = await client.websocket_connect(
+            f"/ws?connect_token={connect_token}", headers={"Origin": "https://browser.example"}
+        )
+        with pytest.raises(WebSocketDisconnect) as replay, replay_session:
+            pass
+
+    assert message == {"subject": "subject-1"}
     assert replay.value.code == 4401
 
 
