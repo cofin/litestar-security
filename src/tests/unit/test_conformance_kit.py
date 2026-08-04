@@ -153,7 +153,7 @@ class _WrongOAuthVersionProtector(_ConformanceTransactionProtector):
     """Return ciphertext stamped with a non-active key version."""
 
     async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedOAuthSecret:
-        envelope = await super().protect(secret, associated_data=associated_data)
+        envelope = await _ConformanceTransactionProtector.protect(self, secret, associated_data=associated_data)
         return replace(envelope, key_version="retired")
 
 
@@ -177,7 +177,7 @@ class _WrongSecretVersionProtector(_AADIgnoringSecretProtector):
     """Return an MFA envelope stamped with a non-active key version."""
 
     async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedSecret:
-        envelope = await super().protect(secret, associated_data=associated_data)
+        envelope = await _AADIgnoringSecretProtector.protect(self, secret, associated_data=associated_data)
         return replace(envelope, key_version="retired")
 
 

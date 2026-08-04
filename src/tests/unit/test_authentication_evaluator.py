@@ -795,8 +795,8 @@ async def test_static_resolvers_supply_the_configured_happy_path() -> None:
     events: list[str] = []
     principal = Principal(id="user-1")
     snapshot = AuthorizationSnapshot(scopes={"reports:read"})
-    identity_resolver = StaticIdentityResolver[str, object](principal)
-    authorization_resolver = StaticAuthorizationResolver[object](snapshot)
+    identity_resolver: StaticIdentityResolver[str, object] = StaticIdentityResolver(principal)
+    authorization_resolver: StaticAuthorizationResolver[object] = StaticAuthorizationResolver(snapshot)
     registry = AuthenticationRegistry(  # type: ignore[arg-type]
         slots=[_Slot("slot-a", PresentedCredential("a"), events)],
         mechanisms=[
