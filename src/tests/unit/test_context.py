@@ -3027,6 +3027,40 @@ for module_name in sys.modules:
     assert not result.stdout
 
 
+@pytest.mark.parametrize(
+    ("blocked_dependency", "export_name", "extras"),
+    [
+        ("pyotp", "MFAService", "mfa"),
+        ("webauthn", "PasskeyService", "passkeys"),
+        ("webauthn", "build_mfa_routes", "mfa,passkeys"),
+        ("argon2", "Argon2PasswordHasher", "argon2"),
+        ("argon2", "LocalAuth", "argon2,mfa"),
+    ],
+)
+def test_accounts_lazy_optional_exports_isolate_missing_dependencies(
+    blocked_dependency: str, export_name: str, extras: str
+) -> None:
+    script = f"""
+import sys
+
+sys.modules[{blocked_dependency!r}] = None
+import litestar_security.accounts as accounts
+
+assert accounts.RateLimiter
+try:
+    getattr(accounts, {export_name!r})
+except ImportError as error:
+    expected = "litestar-security feature requires the [{extras}] extra: pip install 'litestar-security[{extras}]'"
+    assert str(error) == expected, str(error)
+else:
+    raise AssertionError("expected an actionable optional-extra ImportError")
+"""
+
+    result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
+
+    assert result.returncode == 0, result.stderr
+
+
 def _local_auth_rate_limit_config(**kwargs: Any) -> "accounts_module.LocalAuthConfig[Any]":
     return accounts_module.LocalAuth.session(
         accounts=_structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES)),
