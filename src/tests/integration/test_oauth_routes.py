@@ -21,7 +21,7 @@ from litestar_security.accounts import (
     StepUpService,
     StoreRateLimiter,
 )
-from litestar_security.authentication import AuthenticationEvidence, VerificationUnavailable
+from litestar_security.authentication import AuthenticationEvidence, InvalidCredentials, VerificationUnavailable
 from litestar_security.context import Principal
 from litestar_security.providers.oauth import (
     AccountLinkError,
@@ -59,6 +59,7 @@ from litestar_security.providers.oauth import (
     StepUpOAuthAuthorizer,
     build_oauth_routes,
 )
+from litestar_security.providers.oauth._routes import _exact_https_url
 from litestar_security.testing import FakeOAuthProvider, InMemoryStepUpStore
 
 NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
@@ -225,6 +226,25 @@ class StepUpAuthorizer:
     def session_binding(self, request: Request[Any, Any, Any]) -> str:
         del request
         return "session-binding"
+
+
+class CallbackStepUpService:
+    """Return one controlled step-up callback result."""
+
+    def __init__(self, result: object) -> None:
+        self.result = result
+
+    async def consume(self, _grant: str, **kwargs: object) -> object:
+        del kwargs
+        return self.result
+
+
+class BrokenCallbackStepUpService:
+    """Simulate an unavailable application-owned step-up service."""
+
+    async def consume(self, _grant: str, **kwargs: object) -> object:
+        del _grant, kwargs
+        raise RuntimeError
 
 
 def step_up_oauth_authorizer(
@@ -437,6 +457,128 @@ async def test_step_up_oauth_authorizer_maps_epoch_callback_failure_to_503() -> 
         await authorizer.current_security_epoch("account-1")
 
     assert unavailable.value.status_code == 503
+
+
+@pytest.mark.parametrize("invalid_dependency", ["service", "current_epoch", "transport_binding", "session_binding"])
+def test_step_up_oauth_authorizer_rejects_malformed_configuration(invalid_dependency: str) -> None:
+    async def current_epoch(_account_id: str) -> int:
+        return 2
+
+    values: dict[str, object] = {
+        "service": CallbackStepUpService(object()),
+        "current_epoch": current_epoch,
+        "transport_binding": lambda _request: b"transport-binding",
+        "session_binding": lambda _request: "session-binding",
+    }
+    values[invalid_dependency] = object()
+
+    with pytest.raises(ImproperlyConfiguredException, match="authorizer configuration"):
+        StepUpOAuthAuthorizer(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("epoch", [None, True, -1, 1 << 64])
+async def test_step_up_oauth_authorizer_rejects_malformed_epoch_callback(epoch: object) -> None:
+    async def current_epoch(_account_id: str) -> object:
+        return epoch
+
+    authorizer = StepUpOAuthAuthorizer(
+        service=CallbackStepUpService(object()),
+        current_epoch=current_epoch,  # type: ignore[arg-type]
+        transport_binding=lambda _request: b"transport-binding",
+        session_binding=lambda _request: "session-binding",
+    )
+    request = cast("Request[Any, Any, Any]", object())
+
+    with pytest.raises(ServiceUnavailableException, match="Step-up authentication is unavailable"):
+        await authorizer.authorize(grant="grant", account_id="account-1", purpose="oauth-link", request=request)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("transport_binding", "result", "exception"),
+    [
+        (None, object(), NotAuthorizedException),
+        (b"", object(), NotAuthorizedException),
+        (bytearray(b"binding"), object(), NotAuthorizedException),
+        (b"binding", InvalidCredentials(), NotAuthorizedException),
+        (b"binding", VerificationUnavailable(), ServiceUnavailableException),
+    ],
+)
+async def test_step_up_oauth_authorizer_sanitizes_transport_and_consume_results(
+    transport_binding: object, result: object, exception: type[Exception]
+) -> None:
+    async def current_epoch(_account_id: str) -> int:
+        return 2
+
+    authorizer = StepUpOAuthAuthorizer(
+        service=CallbackStepUpService(result),
+        current_epoch=current_epoch,
+        transport_binding=lambda _request: transport_binding,  # type: ignore[return-value]
+        session_binding=lambda _request: "session-binding",
+    )
+    request = cast("Request[Any, Any, Any]", object())
+
+    with pytest.raises(exception):
+        await authorizer.authorize(grant="grant", account_id="account-1", purpose="oauth-link", request=request)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("session_binding", ["", b"session-binding"])
+async def test_step_up_oauth_authorizer_rejects_malformed_session_callback(session_binding: object) -> None:
+    async def current_epoch(_account_id: str) -> int:
+        return 2
+
+    authorizer = StepUpOAuthAuthorizer(
+        service=CallbackStepUpService(object()),
+        current_epoch=current_epoch,
+        transport_binding=lambda _request: b"transport-binding",
+        session_binding=lambda _request: session_binding,  # type: ignore[return-value]
+    )
+    request = cast("Request[Any, Any, Any]", object())
+
+    with pytest.raises(ServiceUnavailableException, match="Step-up authentication is unavailable"):
+        await authorizer.authorize(grant="grant", account_id="account-1", purpose="oauth-link", request=request)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failing_callback", ["transport", "session"])
+async def test_step_up_oauth_authorizer_sanitizes_binding_callback_failures(failing_callback: str) -> None:
+    async def current_epoch(_account_id: str) -> int:
+        return 2
+
+    def broken_callback(_request: Request[Any, Any, Any]) -> bytes | str:
+        raise RuntimeError
+
+    authorizer = StepUpOAuthAuthorizer(
+        service=CallbackStepUpService(object()),
+        current_epoch=current_epoch,
+        transport_binding=(
+            broken_callback if failing_callback == "transport" else lambda _request: b"transport-binding"
+        ),
+        session_binding=(broken_callback if failing_callback == "session" else lambda _request: "session-binding"),
+    )
+    request = cast("Request[Any, Any, Any]", object())
+
+    with pytest.raises(ServiceUnavailableException, match="Step-up authentication is unavailable"):
+        await authorizer.authorize(grant="grant", account_id="account-1", purpose="oauth-link", request=request)
+
+
+@pytest.mark.anyio
+async def test_step_up_oauth_authorizer_sanitizes_consume_failure() -> None:
+    async def current_epoch(_account_id: str) -> int:
+        return 2
+
+    authorizer = StepUpOAuthAuthorizer(
+        service=BrokenCallbackStepUpService(),
+        current_epoch=current_epoch,
+        transport_binding=lambda _request: b"transport-binding",
+        session_binding=lambda _request: "session-binding",
+    )
+    request = cast("Request[Any, Any, Any]", object())
+
+    with pytest.raises(ServiceUnavailableException, match="Step-up authentication is unavailable"):
+        await authorizer.authorize(grant="grant", account_id="account-1", purpose="oauth-link", request=request)
 
 
 def test_oauth_config_caches_routes_and_plugin_registers_once() -> None:
@@ -806,6 +948,24 @@ def test_oauth_provider_registration_rejects_invalid_metadata(kwargs: dict[str, 
     values.update(kwargs)
     with pytest.raises(ImproperlyConfiguredException, match="registration"):
         OAuthProviderRegistration(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("value", "valid"),
+    [
+        ("https://app.example/callback", True),
+        (" https://app.example/callback", False),
+        ("https://app.example/*", False),
+        ("https://app.example\\callback", False),
+        ("https://app.example:65536/callback", False),
+        ("https://user@app.example/callback", False),
+        ("https://app.example/callback?next=/", False),
+        ("https://app.example/callback#fragment", False),
+        (object(), False),
+    ],
+)
+def test_exact_https_url_rejects_noncanonical_or_malformed_values(value: object, valid: object) -> None:
+    assert _exact_https_url(value) is valid  # type: ignore[arg-type]
 
 
 def test_oauth_lifecycle_rejects_invalid_dependency_graph() -> None:

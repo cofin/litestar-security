@@ -649,6 +649,28 @@ async def test_in_memory_revocation_retry_store_encrypts_secret_material_and_rep
 
 
 @pytest.mark.anyio
+async def test_revocation_retry_store_rejects_invalid_input_and_retains_metadata_on_encryption_failure() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="retry store configuration"):
+        InMemoryOAuthRevocationRetryStore(object())  # type: ignore[arg-type]
+
+    protector = FaultProtector()
+    retries = InMemoryOAuthRevocationRetryStore(protector)
+    original = OAuthRevocationFailure("provider-account", frozenset({"access_token"}), NOW)
+    replacement = OAuthRevocationFailure("provider-account", frozenset({"refresh_token"}), NOW + timedelta(minutes=1))
+    await retries.schedule(original, tokens())
+
+    with pytest.raises(OAuthAccountError):
+        await retries.schedule(replacement, object())  # type: ignore[arg-type]
+
+    protector.fail_protect = True
+    with pytest.raises(OAuthAccountError) as captured:
+        await retries.schedule(replacement, tokens())
+
+    assert captured.value.code == "oauth_vault_unavailable"
+    assert dict(retries.failures) == {"provider-account": original}
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("retries", [None, BrokenRevocationRetries()])
 async def test_revoke_retains_vault_when_retry_persistence_is_unavailable(retries: object | None) -> None:
     vault = MemoryTokenVault(provider="example", client_id="client", protector=ReversingProtector())
