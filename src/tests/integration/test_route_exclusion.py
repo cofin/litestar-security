@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from re import escape
 from typing import TYPE_CHECKING, Any, cast
+from warnings import catch_warnings, simplefilter
 
 import pytest
 from litestar import Litestar, WebSocket, asgi, get, websocket
+from litestar.config.app import AppConfig
 from litestar.exceptions import ImproperlyConfiguredException, LitestarWarning
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import SecurityScheme
@@ -203,6 +206,48 @@ def test_excluded_operation_documents_anonymous_access_while_others_document_sch
 
     assert excluded.security == [{}]
     assert included.security == [{"api-key": []}, {"service-jwt": []}]
+
+
+@pytest.mark.parametrize(
+    ("exclude", "expected"),
+    [
+        pytest.param(["^/assets", "^/nowhere"], "^/nowhere", id="sequence"),
+        pytest.param("^/nowhere", "^/nowhere", id="text"),
+    ],
+)
+def test_exclusion_pattern_matching_no_registered_route_warns_at_startup(exclude: Any, expected: str) -> None:
+    app = Litestar(
+        route_handlers=[_api_thing, _assets_manifest],
+        openapi_config=None,
+        plugins=[SecurityPlugin(_api_team_config(exclude=exclude))],
+    )
+
+    with pytest.warns(LitestarWarning, match=f"match no registered route: {escape(expected)}"), TestClient(app):
+        pass
+
+
+def test_exclusion_patterns_matching_a_route_do_not_warn() -> None:
+    app = Litestar(
+        route_handlers=[_api_thing, _assets_manifest],
+        openapi_config=None,
+        plugins=[SecurityPlugin(_api_team_config(exclude=["^/assets/manifest", "^/assets"]))],
+    )
+
+    with catch_warnings(record=True) as recorded:
+        simplefilter("always")
+        with TestClient(app):
+            pass
+
+    assert [str(warning.message) for warning in recorded if "registered route" in str(warning.message)] == []
+
+
+def test_reused_plugin_registers_one_exclusion_report() -> None:
+    plugin = SecurityPlugin(_api_team_config(exclude=["^/assets"]))
+    reused = AppConfig(openapi_config=None)
+
+    assert plugin.on_app_init(reused) is reused
+    assert plugin.on_app_init(reused) is reused
+    assert len(reused.lifespan) == 1
 
 
 def test_router_level_exclude_from_auth_is_still_rejected(static_directory: Path) -> None:

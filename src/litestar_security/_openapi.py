@@ -8,6 +8,7 @@ from inspect import iscoroutine
 from itertools import combinations
 from math import comb
 from re import Pattern
+from re import compile as recompile
 from types import MappingProxyType
 from typing import Generic, NoReturn, TypeVar, cast
 from warnings import catch_warnings, simplefilter
@@ -298,6 +299,8 @@ class RouteCompiler(Generic[UserT]):
     _policy_compiler: PolicyCompiler[UserT] = field(init=False, repr=False)
     _schemes: OpenAPISchemeSet | None = field(init=False, repr=False)
     _exclude_pattern: Pattern[str] | None = field(init=False, repr=False)
+    _reported_exclusions: tuple[tuple[str, Pattern[str]], ...] = field(init=False, repr=False)
+    _matched_exclusions: set[str] = field(init=False, repr=False, default_factory=set[str])
 
     def __post_init__(self) -> None:
         """Create one per-registry policy compiler."""
@@ -305,6 +308,11 @@ class RouteCompiler(Generic[UserT]):
             message = "Native CSRF exclusion opt key collides with reserved Litestar Security metadata"
             raise ImproperlyConfiguredException(detail=message)
         self._exclude_pattern = build_exclude_path_pattern(exclude=self.exclude, middleware_cls=type(self))
+        # build_exclude_path_pattern joins the sequence into one expression, so
+        # attributing a match back to the pattern that produced it needs the
+        # originals compiled separately. These are used for reporting only.
+        sources = (self.exclude,) if isinstance(self.exclude, str) else tuple(self.exclude or ())
+        self._reported_exclusions = tuple((source, recompile(source)) for source in sources)
         self._policy_compiler = PolicyCompiler(self.registry, max_openapi_combinations=self.max_openapi_combinations)
         self._schemes = (
             OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", self.registry))
@@ -343,6 +351,15 @@ class RouteCompiler(Generic[UserT]):
         self._attach_plan(
             asgi_route, asgi_route.route_handler, self._effective_plan(asgi_route, asgi_route.route_handler)
         )
+
+    def unmatched_exclusions(self) -> tuple[str, ...]:
+        """Report configured exclusion patterns that no compiled route has matched.
+
+        Returns:
+            The configured patterns, in declaration order, whose own expression
+            matched no route path seen so far.
+        """
+        return tuple(source for source, _ in self._reported_exclusions if source not in self._matched_exclusions)
 
     def _compile_http_handler(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> None:
         policy: AuthenticationPolicy
@@ -484,7 +501,12 @@ class RouteCompiler(Generic[UserT]):
         return self._compile_policy(route, route_handler, required())
 
     def _is_excluded(self, route: BaseRoute) -> bool:
-        return self._exclude_pattern is not None and bool(self._exclude_pattern.match(route.path))
+        if self._exclude_pattern is None or not self._exclude_pattern.match(route.path):
+            return False
+        self._matched_exclusions.update(
+            source for source, pattern in self._reported_exclusions if pattern.match(route.path)
+        )
+        return True
 
     def _reject_excluded_policy(
         self, route: BaseRoute, route_handler: BaseRouteHandler, policy: AuthenticationPolicy | None

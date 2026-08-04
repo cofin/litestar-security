@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Callable, Iterator, Mapping, Sequenc
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Generic, TypeAlias, TypeVar, cast
+from warnings import warn
 
 from click import Group as ClickGroup
 from litestar import Litestar
@@ -13,7 +14,7 @@ from litestar.config.app import AppConfig
 from litestar.controller import Controller
 from litestar.di import NamedDependency, Provide
 from litestar.enums import ScopeType
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar.exceptions import ImproperlyConfiguredException, LitestarWarning
 from litestar.handlers.base import BaseRouteHandler
 from litestar.middleware import DefineMiddleware
 from litestar.middleware.session.base import SessionMiddleware
@@ -65,6 +66,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     __slots__ = (
         "_api_key_lifespan",
         "_api_key_service",
+        "_exclusion_lifespan",
         "_headers_hooks",
         "_jwks_lifespan",
         "_local_auth_route_handlers",
@@ -102,6 +104,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._oauth_route_handlers: tuple[Router, ...] | None = None
         self._oauth_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
         self._rate_limit_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
+        self._exclusion_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
 
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
         """Validate ownership and install one typed security runtime.
@@ -168,6 +171,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 websocket_config=self.config.websocket,
                 exclude=self.config.exclude,
             )
+        self._configure_exclusion_report(app_config)
         app_config.dependencies.update(self._providers)
         for name, value in _SIGNATURE_NAMESPACE.items():
             app_config.signature_namespace.setdefault(name, value)
@@ -346,6 +350,34 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         )
         if self._api_key_lifespan not in lifespan_handlers:
             lifespan_handlers.append(self._api_key_lifespan)
+
+    def _configure_exclusion_report(self, app_config: AppConfig) -> None:
+        # Every route is known once the application has finished building, so an
+        # exclusion pattern that still matches nothing is reported at startup.
+        # It warns rather than raises, matching Litestar's own posture towards
+        # exclude patterns: a pattern that greedily disables the middleware
+        # entirely is a warning there too, and a pattern for a route mounted
+        # only in production or only with an optional plugin stays legitimate.
+        if not self.config.exclude:
+            return
+        if self._exclusion_lifespan is None:
+            compiler = cast("RouteCompiler[UserT]", self._route_compiler)
+
+            @asynccontextmanager
+            async def exclusion_lifespan(_app: Litestar) -> AsyncGenerator[None, None]:
+                unmatched = compiler.unmatched_exclusions()
+                if unmatched:
+                    message = f"Litestar Security exclusion patterns match no registered route: {', '.join(unmatched)}"
+                    warn(message, category=LitestarWarning, stacklevel=1)
+                yield
+
+            self._exclusion_lifespan = exclusion_lifespan
+        lifespan_handlers = cast(
+            "list[Callable[[Litestar], AbstractAsyncContextManager[None]]]",
+            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType] - third-party callable is untyped
+        )
+        if self._exclusion_lifespan not in lifespan_handlers:
+            lifespan_handlers.append(self._exclusion_lifespan)
 
     def _validate_dependency_map(self, dependencies: Mapping[str, object] | None, owner: str) -> None:
         for name in _RESERVED_DEPENDENCIES:
