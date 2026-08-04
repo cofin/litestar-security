@@ -57,6 +57,7 @@ from litestar_security.accounts import (
     RevokeLoginMethodStatus,
     RotateRefreshCommand,
     RotateRefreshResult,
+    SecretProtector,
     SecurityEvent,
     SessionRecord,
     SessionRegistry,
@@ -118,10 +119,12 @@ __all__ = (
     "assert_mfa_login_challenge_store_conformance",
     "assert_mfa_store_conformance",
     "assert_oauth_account_store_conformance",
+    "assert_oauth_transaction_protector_conformance",
     "assert_oauth_transaction_store_conformance",
     "assert_passkey_store_conformance",
     "assert_rate_limiter_conformance",
     "assert_refresh_family_store_conformance",
+    "assert_secret_protector_conformance",
     "assert_security_backend_conformance",
     "assert_session_registry_conformance",
     "assert_webauthn_challenge_store_conformance",
@@ -1090,12 +1093,57 @@ class StoreConformanceFactories:
     mfa_login_challenge_store: Callable[[], MFALoginChallengeStore] | None = None
     mfa_store: Callable[[], MFAStore] | None = None
     oauth_account_store: Callable[[], OAuthAccountStore] | None = None
+    oauth_transaction_protector: Callable[[], OAuthTransactionProtector] | None = None
     oauth_transaction_store: Callable[[], OAuthTransactionStore] | None = None
     passkey_store: Callable[[], PasskeyStore] | None = None
     refresh_family_store: "Callable[[], _ConformanceRefreshFamilyStore] | None" = None
+    secret_protector: Callable[[], SecretProtector] | None = None
     session_registry: Callable[[], SessionRegistry] | None = None
     webauthn_challenge_store: Callable[[], WebAuthnChallengeStore] | None = None
     websocket_connect_token_store: Callable[[], WebSocketConnectTokenStore] | None = None
+
+
+async def assert_oauth_transaction_protector_conformance(factory: Callable[[], OAuthTransactionProtector]) -> None:
+    """Assert OAuth transaction protection preserves all required AEAD properties.
+
+    Args:
+        factory: Isolated zero-argument protector factory.
+
+    Returns:
+        None when the protector authenticates associated data and uses a fresh ciphertext.
+
+    Raises:
+        AssertionError: If the protector violates a round-trip, key-version,
+            associated-data, or non-determinism invariant.
+    """
+    protector = factory()
+    associated_data = b"conformance|transaction=a|purpose=pkce"
+    other_associated_data = b"conformance|transaction=b|purpose=pkce"
+    secret = b"conformance-secret-value"
+    envelope: ProtectedOAuthSecret = await protector.protect(secret, associated_data=associated_data)
+    if await protector.unprotect(envelope, associated_data=associated_data) != secret:
+        message = (
+            "OAuthTransactionProtector round-trip invariant: matching associated data must recover the original secret"
+        )
+        raise AssertionError(message)
+    if not envelope.key_version or envelope.key_version != protector.active_key_version:
+        message = (
+            "OAuthTransactionProtector key-version invariant: envelope version must be the non-empty active key version"
+        )
+        raise AssertionError(message)
+    try:
+        await protector.unprotect(envelope, associated_data=other_associated_data)
+    except Exception:  # noqa: BLE001, S110 - conforming protectors may raise implementation-specific authentication errors
+        pass
+    else:
+        message = "OAuthTransactionProtector associated data invariant: altered associated data must fail closed"
+        raise AssertionError(message)
+    second_envelope = await protector.protect(secret, associated_data=associated_data)
+    if second_envelope.ciphertext == envelope.ciphertext:
+        message = (
+            "OAuthTransactionProtector non-determinism invariant: equivalent protections require distinct ciphertext"
+        )
+        raise AssertionError(message)
 
 
 async def assert_api_key_store_conformance(factory: Callable[[], APIKeyStore]) -> None:
@@ -1152,6 +1200,43 @@ async def assert_api_key_store_conformance(factory: Callable[[], APIKeyStore]) -
     current_after = await store.get(current.key_id)
     if current_after is None or current_after.revoked_at != _DEFAULT_NOW:
         message = "APIKeyStore.rotate current-state invariant: the winning transition must revoke the current key"
+        raise AssertionError(message)
+
+
+async def assert_secret_protector_conformance(factory: Callable[[], SecretProtector]) -> None:
+    """Assert MFA-secret protection preserves all required AEAD properties.
+
+    Args:
+        factory: Isolated zero-argument protector factory.
+
+    Returns:
+        None when the protector authenticates associated data and uses a fresh ciphertext.
+
+    Raises:
+        AssertionError: If the protector violates a round-trip, key-version,
+            associated-data, or non-determinism invariant.
+    """
+    protector = factory()
+    associated_data = b"conformance|account=a|purpose=totp"
+    other_associated_data = b"conformance|account=b|purpose=totp"
+    secret = b"conformance-secret-value"
+    envelope: ProtectedSecret = await protector.protect(secret, associated_data=associated_data)
+    if await protector.unprotect(envelope, associated_data=associated_data) != secret:
+        message = "SecretProtector round-trip invariant: matching associated data must recover the original secret"
+        raise AssertionError(message)
+    if not envelope.key_version or envelope.key_version != protector.active_key_version:
+        message = "SecretProtector key-version invariant: envelope version must be the non-empty active key version"
+        raise AssertionError(message)
+    try:
+        await protector.unprotect(envelope, associated_data=other_associated_data)
+    except Exception:  # noqa: BLE001, S110 - conforming protectors may raise implementation-specific authentication errors
+        pass
+    else:
+        message = "SecretProtector associated data invariant: altered associated data must fail closed"
+        raise AssertionError(message)
+    second_envelope = await protector.protect(secret, associated_data=associated_data)
+    if second_envelope.ciphertext == envelope.ciphertext:
+        message = "SecretProtector non-determinism invariant: equivalent protections require distinct ciphertext"
         raise AssertionError(message)
 
 
@@ -2601,7 +2686,7 @@ async def assert_rate_limiter_conformance(
         raise AssertionError(message)
 
 
-async def assert_security_backend_conformance(  # noqa: C901 - explicit public capability dispatch preserves field order
+async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit public capability dispatch preserves field order
     factories: StoreConformanceFactories,
 ) -> None:
     """Run only the conformance scenarios whose factories were supplied.
@@ -2625,12 +2710,16 @@ async def assert_security_backend_conformance(  # noqa: C901 - explicit public c
         await assert_mfa_store_conformance(factories.mfa_store)
     if factories.oauth_account_store is not None:
         await assert_oauth_account_store_conformance(factories.oauth_account_store)
+    if factories.oauth_transaction_protector is not None:
+        await assert_oauth_transaction_protector_conformance(factories.oauth_transaction_protector)
     if factories.oauth_transaction_store is not None:
         await assert_oauth_transaction_store_conformance(factories.oauth_transaction_store)
     if factories.passkey_store is not None:
         await assert_passkey_store_conformance(factories.passkey_store)
     if factories.refresh_family_store is not None:
         await assert_refresh_family_store_conformance(factories.refresh_family_store)
+    if factories.secret_protector is not None:
+        await assert_secret_protector_conformance(factories.secret_protector)
     if factories.session_registry is not None:
         await assert_session_registry_conformance(factories.session_registry)
     if factories.webauthn_challenge_store is not None:

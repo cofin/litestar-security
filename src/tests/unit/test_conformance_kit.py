@@ -12,6 +12,7 @@ from litestar.stores.memory import MemoryStore
 
 import litestar_security.testing as testing_module
 from litestar_security.accounts import (
+    AESGCMSecretProtector,
     AssertionRecordResult,
     ConsumeResult,
     ConsumeStatus,
@@ -28,6 +29,7 @@ from litestar_security.accounts import (
     PasswordResetResult,
     PasswordResetStatus,
     PrepareRefreshResult,
+    ProtectedSecret,
     PurposeTokenDelivery,
     RateLimitDecision,
     RateLimiter,
@@ -46,6 +48,7 @@ from litestar_security.accounts import (
     RevokeLoginMethodStatus,
     RotateRefreshCommand,
     RotateRefreshResult,
+    SecretProtectorKey,
     SecurityEvent,
     SessionRecord,
     SessionRegistry,
@@ -55,9 +58,11 @@ from litestar_security.accounts import (
 )
 from litestar_security.providers.api_key import APIKeyRecord, APIKeyStore
 from litestar_security.providers.oauth import (
+    AESGCMOAuthTransactionProtector,
     MemoryOAuthAccountStore,
     MemoryOAuthTransactionStore,
     OAuthTransaction,
+    OAuthTransactionProtectorKey,
     ProtectedOAuthSecret,
     UnlinkResult,
     UnlinkStatus,
@@ -71,10 +76,12 @@ from litestar_security.testing import (
     assert_mfa_login_challenge_store_conformance,
     assert_mfa_store_conformance,
     assert_oauth_account_store_conformance,
+    assert_oauth_transaction_protector_conformance,
     assert_oauth_transaction_store_conformance,
     assert_passkey_store_conformance,
     assert_rate_limiter_conformance,
     assert_refresh_family_store_conformance,
+    assert_secret_protector_conformance,
     assert_security_backend_conformance,
     assert_session_registry_conformance,
     assert_webauthn_challenge_store_conformance,
@@ -97,6 +104,21 @@ class _ConformanceTransactionProtector:
         return ProtectedOAuthSecret(ciphertext=secret, key_version=self.active_key_version)
 
     async def unprotect(self, protected: ProtectedOAuthSecret, *, associated_data: bytes) -> bytes:
+        del associated_data
+        return protected.ciphertext
+
+
+@dataclass(frozen=True, slots=True)
+class _AADIgnoringSecretProtector:
+    """Deliberately fail to bind MFA ciphertext to its associated data."""
+
+    active_key_version: str = "test-v1"
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedSecret:
+        del associated_data
+        return ProtectedSecret(ciphertext=secret, key_version=self.active_key_version)
+
+    async def unprotect(self, protected: ProtectedSecret, *, associated_data: bytes) -> bytes:
         del associated_data
         return protected.ciphertext
 
@@ -797,6 +819,33 @@ async def test_api_key_conformance_accepts_the_reference_store_in_isolation() ->
 
 
 @pytest.mark.anyio
+async def test_secret_protector_conformance_accepts_the_reference_protector() -> None:
+    await assert_secret_protector_conformance(
+        lambda: AESGCMSecretProtector(active_key=SecretProtectorKey("v1", b"s" * 32))
+    )
+
+
+@pytest.mark.anyio
+async def test_oauth_transaction_protector_conformance_accepts_the_reference_protector() -> None:
+    await assert_oauth_transaction_protector_conformance(
+        lambda: AESGCMOAuthTransactionProtector(active_key=OAuthTransactionProtectorKey("v1", b"o" * 32))
+    )
+
+
+@pytest.mark.anyio
+async def test_oauth_transaction_protector_conformance_rejects_deterministic_protection() -> None:
+    deterministic_protector = testing_module._DeterministicProtector  # noqa: SLF001  # pyright: ignore[reportPrivateUsage] - required private deterministic fixture
+    with pytest.raises(AssertionError, match="non-determinism"):
+        await assert_oauth_transaction_protector_conformance(deterministic_protector)
+
+
+@pytest.mark.anyio
+async def test_secret_protector_conformance_rejects_ignored_associated_data() -> None:
+    with pytest.raises(AssertionError, match="associated data"):
+        await assert_secret_protector_conformance(_AADIgnoringSecretProtector)
+
+
+@pytest.mark.anyio
 async def test_local_account_store_conformance_accepts_the_reference_store_in_isolation() -> None:
     await assert_local_account_store_conformance(lambda: InMemorySecurityBackend(clock=lambda: _NOW).accounts)
 
@@ -1048,11 +1097,17 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
     def oauth_transactions() -> MemoryOAuthTransactionStore:
         return MemoryOAuthTransactionStore(protector=_ConformanceTransactionProtector())
 
+    def oauth_transaction_protector() -> AESGCMOAuthTransactionProtector:
+        return AESGCMOAuthTransactionProtector(active_key=OAuthTransactionProtectorKey("v1", b"o" * 32))
+
     def passkeys() -> testing_module.InMemoryPasskeyStore:
         return testing_module.InMemoryPasskeyStore()
 
     def sessions() -> testing_module.InMemoryLocalAccountStore:
         return InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW).accounts
+
+    def secret_protector() -> AESGCMSecretProtector:
+        return AESGCMSecretProtector(active_key=SecretProtectorKey("v1", b"s" * 32))
 
     def webauthn_challenges() -> testing_module.InMemoryWebAuthnChallengeStore:
         return testing_module.InMemoryWebAuthnChallengeStore()
@@ -1072,9 +1127,11 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
         ("assert_mfa_login_challenge_store_conformance", "mfa_login_challenge_store"),
         ("assert_mfa_store_conformance", "mfa_store"),
         ("assert_oauth_account_store_conformance", "oauth_account_store"),
+        ("assert_oauth_transaction_protector_conformance", "oauth_transaction_protector"),
         ("assert_oauth_transaction_store_conformance", "oauth_transaction_store"),
         ("assert_passkey_store_conformance", "passkey_store"),
         ("assert_refresh_family_store_conformance", "refresh_family_store"),
+        ("assert_secret_protector_conformance", "secret_protector"),
         ("assert_session_registry_conformance", "session_registry"),
         ("assert_webauthn_challenge_store_conformance", "webauthn_challenge_store"),
         ("assert_websocket_connect_token_store_conformance", "websocket_connect_token_store"),
@@ -1088,9 +1145,11 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
             mfa_login_challenge_store=mfa_login_challenges,
             mfa_store=mfa,
             oauth_account_store=oauth_accounts,
+            oauth_transaction_protector=oauth_transaction_protector,
             oauth_transaction_store=oauth_transactions,
             passkey_store=passkeys,
             refresh_family_store=accounts,
+            secret_protector=secret_protector,
             session_registry=sessions,
             webauthn_challenge_store=webauthn_challenges,
             websocket_connect_token_store=websocket_connect_tokens,
@@ -1103,9 +1162,11 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
         "mfa_login_challenge_store",
         "mfa_store",
         "oauth_account_store",
+        "oauth_transaction_protector",
         "oauth_transaction_store",
         "passkey_store",
         "refresh_family_store",
+        "secret_protector",
         "session_registry",
         "webauthn_challenge_store",
         "websocket_connect_token_store",
@@ -1144,10 +1205,12 @@ def test_testing_surface_is_explicit_and_stable() -> None:
         "assert_mfa_login_challenge_store_conformance",
         "assert_mfa_store_conformance",
         "assert_oauth_account_store_conformance",
+        "assert_oauth_transaction_protector_conformance",
         "assert_oauth_transaction_store_conformance",
         "assert_passkey_store_conformance",
         "assert_rate_limiter_conformance",
         "assert_refresh_family_store_conformance",
+        "assert_secret_protector_conformance",
         "assert_security_backend_conformance",
         "assert_session_registry_conformance",
         "assert_webauthn_challenge_store_conformance",
