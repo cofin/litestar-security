@@ -116,6 +116,7 @@ _REFRESH_CAPABILITIES = {
 }
 _PUBLIC_API = (
     "CSRF_REQUIRED_OPT_KEY",
+    "AESGCMOAuthTransactionProtector",
     "AssuranceRequirement",
     "AssuranceTrait",
     "Authenticated",
@@ -153,6 +154,7 @@ _PUBLIC_API = (
     "OAuthConfig",
     "OAuthProvider",
     "OAuthRouteService",
+    "OAuthTransactionProtectorKey",
     "PasskeyConfig",
     "PresentedCredential",
     "Principal",
@@ -171,6 +173,7 @@ _PUBLIC_API = (
     "VerificationUnavailable",
     "WebSocketBinding",
     "WebSocketCloseCodes",
+    "WebSocketConnectTokenIssuer",
     "WebSocketConnectTokenRecord",
     "WebSocketConnectTokenService",
     "WebSocketConnectTokenStore",
@@ -970,6 +973,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
 
     providers = import_module("litestar_security.providers")
     assert providers.__all__ == (
+        "AESGCMOAuthTransactionProtector",
         "APIKeyClaims",
         "APIKeyCodec",
         "APIKeyConfig",
@@ -1009,6 +1013,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "OAuthConfig",
         "OAuthProvider",
         "OAuthRouteService",
+        "OAuthTransactionProtectorKey",
         "OIDCDiscoveryClient",
         "OIDCDiscoveryError",
         "OIDCJWTLogoutTokenConsumer",
@@ -1044,12 +1049,14 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     capability_module = import_module("litestar_security.providers.jwt._capabilities")
     oidc_module = import_module("litestar_security.providers.oidc")
     oauth_exports = {
+        "AESGCMOAuthTransactionProtector",
         "GitHubOAuthProvider",
         "OAuthAccountService",
         "OAuthAccountStore",
         "OAuthConfig",
         "OAuthProvider",
         "OAuthRouteService",
+        "OAuthTransactionProtectorKey",
         "TokenVault",
     }
     assert set(api_key_module.__all__).union(
