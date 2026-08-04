@@ -57,6 +57,7 @@ from litestar_security.guards import (
     requires_tenant,
 )
 from litestar_security.providers.jwt import BearerTokenSlot, LocalKeyRing
+from litestar_security.testing import StaticAuthorizationSnapshotRefresher
 
 _DUPLICATE_GUARD = requires_authenticated()
 _ACCOUNT_NOW = datetime(2026, 7, 27, tzinfo=timezone.utc)
@@ -594,6 +595,21 @@ def test_authorization_snapshot_defensively_freezes_input() -> None:
 def test_authorization_snapshot_rejects_blank_values(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="must not be blank"):
         AuthorizationSnapshot(**kwargs)
+
+
+@pytest.mark.anyio
+async def test_static_authorization_snapshot_refresher_returns_its_immutable_snapshot() -> None:
+    previous = AuthorizationSnapshot(attributes={"previous": "value"})
+    snapshot = AuthorizationSnapshot(scopes={"reports:read"}, attributes={"source": "static"})
+
+    refreshed = await StaticAuthorizationSnapshotRefresher(snapshot).refresh(
+        principal=Principal(id="user-1"), previous=previous, route_name="reports.socket"
+    )
+
+    assert refreshed is snapshot
+    assert previous.attributes == {"previous": "value"}
+    with pytest.raises(TypeError):
+        refreshed.attributes["mutated"] = True  # type: ignore[index]
 
 
 def test_native_authorization_guard_allows_matching_scope_and_denies_without_leaking_grant() -> None:

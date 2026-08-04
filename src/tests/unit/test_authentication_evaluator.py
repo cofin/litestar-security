@@ -41,6 +41,7 @@ from litestar_security.context import (
     resolve_authorization,
 )
 from litestar_security.guards import requires_team_role
+from litestar_security.testing import StaticAuthorizationResolver, StaticIdentityResolver
 
 if TYPE_CHECKING:
     from litestar.connection import ASGIConnection
@@ -782,11 +783,36 @@ async def test_authorization_resolution_preserves_structured_failure(
     evaluator, _, _, _ = _evaluator(
         [("a", PresentedCredential("a"), _success("a", "slot-a"), Principal(id="user-1"))],
         events,
-        authorization_resolver=_AuthorizationResolver(resolution, events),
+        authorization_resolver=StaticAuthorizationResolver(resolution),  # type: ignore[arg-type]
     )
 
     with pytest.raises(error):
         await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True)
+
+
+@pytest.mark.anyio
+async def test_static_resolvers_supply_the_configured_happy_path() -> None:
+    events: list[str] = []
+    principal = Principal(id="user-1")
+    snapshot = AuthorizationSnapshot(scopes={"reports:read"})
+    identity_resolver = StaticIdentityResolver[str, object](principal)
+    authorization_resolver = StaticAuthorizationResolver[object](snapshot)
+    registry = AuthenticationRegistry(  # type: ignore[arg-type]
+        slots=[_Slot("slot-a", PresentedCredential("a"), events)],
+        mechanisms=[
+            AuthenticationMechanism(
+                authenticator=_Authenticator("a", "slot-a", _success("a", "slot-a"), events), resolver=identity_resolver
+            )
+        ],
+        authorization_resolver=authorization_resolver,
+    )
+
+    assert await identity_resolver.resolve("claims-not-retained") is principal
+    assert await authorization_resolver.resolve(principal) is snapshot
+    resolved_principal, context = await registry.evaluator().evaluate(_CONNECTION, NullSessionHandle(), required=True)
+
+    assert resolved_principal is principal
+    assert context.authorization == snapshot
 
 
 def test_registry_rejects_malformed_authorization_resolver() -> None:

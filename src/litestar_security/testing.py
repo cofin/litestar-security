@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import compare_digest
 from types import MappingProxyType
-from typing import Protocol, TypeVar, cast
+from typing import Generic, Protocol, TypeVar, cast
 from urllib.parse import parse_qsl
 
 import httpx
@@ -70,7 +70,8 @@ from litestar_security.accounts import (
     WebAuthnChallenge,
     WebAuthnChallengeStore,
 )
-from litestar_security.context import CredentialRestrictions
+from litestar_security.authentication import AuthorizationResolution, IdentityResolution
+from litestar_security.context import AuthorizationSnapshot, CredentialRestrictions, Principal
 from litestar_security.providers.api_key import APIKeyRecord, APIKeyStore
 from litestar_security.providers.oauth import (
     MemoryOAuthAccountStore,
@@ -91,6 +92,7 @@ from litestar_security.providers.oauth import (
 )
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,
+    WebSocketBinding,
     WebSocketConnectTokenRecord,
     WebSocketConnectTokenStore,
 )
@@ -109,10 +111,14 @@ __all__ = (
     "InMemorySecurityBackend",
     "InMemoryStepUpStore",
     "InMemoryWebAuthnChallengeStore",
+    "InMemoryWebSocketRevocationSource",
     "MemoryOAuthAccountStore",
     "MemoryOAuthTransactionStore",
     "MemoryTokenVault",
     "OAuthHTTPRequest",
+    "StaticAuthorizationResolver",
+    "StaticAuthorizationSnapshotRefresher",
+    "StaticIdentityResolver",
     "StoreConformanceFactories",
     "assert_api_key_store_conformance",
     "assert_local_account_store_conformance",
@@ -133,7 +139,9 @@ __all__ = (
 
 _DEFAULT_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _DEFAULT_CREDENTIAL_HASH = "$litestar-security$deterministic-test-hash"
+ClaimsT = TypeVar("ClaimsT")
 ResultT = TypeVar("ResultT")
+UserT = TypeVar("UserT")
 
 
 def _default_identifier(namespace: str, sequence: int) -> str:
@@ -270,6 +278,128 @@ class FakeClock:
             raise ValueError(message)
         self._now += delta
         return self._now
+
+
+@dataclass(frozen=True, slots=True)
+class StaticIdentityResolver(Generic[ClaimsT, UserT]):
+    """Identity resolver that returns one configured outcome without retaining claims."""
+
+    resolution: IdentityResolution[UserT]
+
+    async def resolve(self, claims: ClaimsT) -> IdentityResolution[UserT]:
+        """Return the configured identity-resolution outcome.
+
+        Args:
+            claims: Ignored verified claims, which are never retained.
+
+        Returns:
+            The configured principal or sanitized identity-resolution outcome.
+
+        Raises:
+            None.
+        """
+        del claims
+        return self.resolution
+
+
+@dataclass(frozen=True, slots=True)
+class StaticAuthorizationResolver(Generic[UserT]):
+    """Authorization resolver that returns one configured detached outcome."""
+
+    resolution: AuthorizationResolution
+
+    async def resolve(self, principal: Principal[UserT]) -> AuthorizationResolution:
+        """Return the configured authorization-resolution outcome.
+
+        Args:
+            principal: Ignored authenticated principal, which is never mutated.
+
+        Returns:
+            The configured immutable snapshot or sanitized authorization-resolution outcome.
+
+        Raises:
+            None.
+        """
+        del principal
+        return self.resolution
+
+
+class InMemoryWebSocketRevocationSource:
+    """Deterministic per-binding WebSocket revocation source for tests."""
+
+    __slots__ = ("_events",)
+
+    def __init__(self) -> None:
+        """Initialize an isolated set of per-binding revocation events.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        self._events: dict[WebSocketBinding, Event] = {}
+
+    def _event(self, binding: WebSocketBinding) -> Event:
+        """Return the private revocation event for one complete binding."""
+        return self._events.setdefault(binding, Event())
+
+    async def wait(self, binding: WebSocketBinding) -> None:
+        """Block until the exact binding has been revoked.
+
+        Args:
+            binding: The complete secret-free binding to supervise.
+
+        Returns:
+            None after ``revoke()`` releases this exact binding.
+
+        Raises:
+            None.
+        """
+        await self._event(binding).wait()
+
+    def revoke(self, binding: WebSocketBinding) -> None:
+        """Release waiters for one exact binding.
+
+        Args:
+            binding: The complete secret-free binding to revoke.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        self._event(binding).set()
+
+
+@dataclass(frozen=True, slots=True)
+class StaticAuthorizationSnapshotRefresher(Generic[UserT]):
+    """WebSocket snapshot refresher that returns one configured immutable snapshot."""
+
+    snapshot: AuthorizationSnapshot
+
+    async def refresh(
+        self, *, principal: Principal[UserT], previous: AuthorizationSnapshot, route_name: str
+    ) -> AuthorizationSnapshot:
+        """Return the configured immutable authorization snapshot.
+
+        Args:
+            principal: Ignored authenticated principal, which is never mutated.
+            previous: Ignored prior snapshot, which is never mutated or returned.
+            route_name: Ignored bound route name.
+
+        Returns:
+            The configured immutable authorization snapshot.
+
+        Raises:
+            None.
+        """
+        del principal, previous, route_name
+        return self.snapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -2953,6 +3083,7 @@ def _conformance_connect_token_record(
         connect_token_id=connect_token_id,
         digest=digest,
         subject_id="conformance-subject",
+        security_epoch=0,
         route_name="conformance-route",
         origin="https://app.example",
         restrictions=CredentialRestrictions(),
