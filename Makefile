@@ -58,7 +58,7 @@ install: destroy clean setup-env                    ## Install all locked develo
 	@echo "${INFO} Starting fresh installation... ⚡"
 	@uv python pin $(PYTHON_VERSION) >/dev/null 2>&1
 	@uv venv >/dev/null 2>&1
-	@uv sync --all-extras $(UV_SYNC_ARGS)
+	@uv sync $(UV_SYNC_ARGS)
 	@echo "${OK} Installation complete! 🎉"
 
 .PHONY: destroy
