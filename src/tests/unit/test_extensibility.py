@@ -31,7 +31,7 @@ from litestar_security.accounts import (
     WebAuthnChallengeStore,
 )
 from litestar_security.providers.api_key import APIKeyStore
-from litestar_security.providers.oauth import OAuthAccountStore, OAuthTransactionStore
+from litestar_security.providers.oauth import OAuthAccountStore, OAuthTransactionStore, OIDCSessionLogoutStore
 from litestar_security.websocket import WebSocketConnectTokenStore
 
 _PACKAGE_ROOT = Path(__file__).parents[2] / "litestar_security"
@@ -56,6 +56,7 @@ _ATOMIC_METHODS = {
     LoginMethodStore: ("revoke_login_method",),
     RefreshTokenFamilyStore: ("rotate",),
     MFAStore: ("advance_totp_counter", "consume_recovery_code"),
+    OIDCSessionLogoutStore: ("consume_backchannel", "revoke_frontchannel"),
     MFALoginChallengeStore: ("consume",),
     WebAuthnChallengeStore: ("consume",),
     PasskeyStore: ("record_assertion",),

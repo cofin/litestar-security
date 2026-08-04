@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 import pytest
-from anyio import Event, Lock, fail_after
+from anyio import Event, Lock, create_task_group, fail_after
 from anyio.lowlevel import checkpoint
 from litestar.stores.memory import MemoryStore
 
@@ -63,6 +63,7 @@ from litestar_security.providers.oauth import (
     MemoryOAuthTransactionStore,
     OAuthTransaction,
     OAuthTransactionProtectorKey,
+    OIDCLogoutIdentity,
     ProtectedOAuthSecret,
     UnlinkResult,
     UnlinkStatus,
@@ -78,6 +79,7 @@ from litestar_security.testing import (
     assert_oauth_account_store_conformance,
     assert_oauth_transaction_protector_conformance,
     assert_oauth_transaction_store_conformance,
+    assert_oidc_session_logout_store_conformance,
     assert_passkey_store_conformance,
     assert_rate_limiter_conformance,
     assert_refresh_family_store_conformance,
@@ -216,6 +218,26 @@ class _BrokenWebSocketConnectTokenStore(InMemoryWebSocketConnectTokenStore):
             return record
         self._records.pop(connect_token_id, None)  # pyright: ignore[reportPrivateUsage] - deliberately violates port contract
         return None
+
+
+class _BrokenOIDCReplayStore(testing_module.InMemoryOIDCSessionLogoutStore):
+    """Return a false successful result after a back-channel replay."""
+
+    async def consume_backchannel(self, identity: OIDCLogoutIdentity, *, now: datetime) -> int | None:
+        result = await super().consume_backchannel(identity, now=now)
+        return 2 if result is None else result
+
+
+class _BrokenOIDCBindingStore(testing_module.InMemoryOIDCSessionLogoutStore):
+    """Ignore the browser binding during front-channel logout."""
+
+    async def revoke_frontchannel(
+        self, provider: str, issuer: str, session_id: str, *, binding: str, now: datetime
+    ) -> int | None:
+        del binding
+        return await super().revoke_frontchannel(
+            provider, issuer, session_id, binding="conformance-browser-binding", now=now
+        )
 
 
 @dataclass
@@ -1073,6 +1095,63 @@ async def test_oauth_account_conformance_rejects_final_identity_removal() -> Non
         await assert_oauth_account_store_conformance(_BrokenOAuthAccountStore)
 
 
+def _oidc_logout_store(
+    store_type: type[testing_module.InMemoryOIDCSessionLogoutStore] = testing_module.InMemoryOIDCSessionLogoutStore,
+) -> testing_module.InMemoryOIDCSessionLogoutStore:
+    """Return the fixed mapped-session fixture required by OIDC conformance."""
+    return store_type(
+        session_mappings=(
+            ("conformance-provider", "https://issuer.example", "conformance-subject", "conformance-session"),
+            ("conformance-provider", "https://issuer.example", "conformance-subject", "conformance-session"),
+            ("conformance-provider", "https://issuer.example", "other-subject", "other-session"),
+        ),
+        frontchannel_bindings={
+            ("conformance-provider", "https://issuer.example", "conformance-session"): "conformance-browser-binding"
+        },
+    )
+
+
+@pytest.mark.anyio
+async def test_oidc_session_logout_store_conformance_accepts_seeded_reference_store() -> None:
+    await assert_oidc_session_logout_store_conformance(_oidc_logout_store)
+
+
+@pytest.mark.anyio
+async def test_oidc_session_logout_store_conformance_rejects_replay_and_wrong_binding() -> None:
+    with pytest.raises(AssertionError, match=r"OIDCSessionLogoutStore\.consume_backchannel replay invariant"):
+        await assert_oidc_session_logout_store_conformance(
+            lambda: _oidc_logout_store(_BrokenOIDCReplayStore)
+        )
+    with pytest.raises(AssertionError, match=r"OIDCSessionLogoutStore\.revoke_frontchannel binding invariant"):
+        await assert_oidc_session_logout_store_conformance(
+            lambda: _oidc_logout_store(_BrokenOIDCBindingStore)
+        )
+
+
+@pytest.mark.anyio
+async def test_oidc_session_logout_store_allows_exactly_one_backchannel_contender() -> None:
+    store = _oidc_logout_store()
+    identity = OIDCLogoutIdentity(
+        provider="conformance-provider",
+        issuer="https://issuer.example",
+        subject="conformance-subject",
+        session_id="conformance-session",
+        token_id=f"conformance-token-{_CONFORMANCE_NOW.isoformat()}",
+        expires_at=_CONFORMANCE_NOW + timedelta(minutes=5),
+    )
+    outcomes: list[int | None] = []
+
+    async def consume() -> None:
+        outcomes.append(await store.consume_backchannel(identity, now=_CONFORMANCE_NOW))
+
+    async with create_task_group() as task_group:
+        task_group.start_soon(consume)
+        task_group.start_soon(consume)
+
+    assert outcomes.count(2) == 1
+    assert outcomes.count(None) == 1
+
+
 @pytest.mark.anyio
 async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # noqa: C901 - one complete dispatch matrix
     monkeypatch: pytest.MonkeyPatch,
@@ -1090,6 +1169,9 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
 
     def mfa() -> testing_module.InMemoryMFAStore:
         return testing_module.InMemoryMFAStore()
+
+    def oidc_session_logout_store() -> testing_module.InMemoryOIDCSessionLogoutStore:
+        return _oidc_logout_store()
 
     def oauth_accounts() -> MemoryOAuthAccountStore:
         return MemoryOAuthAccountStore()
@@ -1126,6 +1208,7 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
         ("assert_local_account_store_conformance", "local_account_store"),
         ("assert_mfa_login_challenge_store_conformance", "mfa_login_challenge_store"),
         ("assert_mfa_store_conformance", "mfa_store"),
+        ("assert_oidc_session_logout_store_conformance", "oidc_session_logout_store"),
         ("assert_oauth_account_store_conformance", "oauth_account_store"),
         ("assert_oauth_transaction_protector_conformance", "oauth_transaction_protector"),
         ("assert_oauth_transaction_store_conformance", "oauth_transaction_store"),
@@ -1144,6 +1227,7 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
             local_account_store=accounts,
             mfa_login_challenge_store=mfa_login_challenges,
             mfa_store=mfa,
+            oidc_session_logout_store=oidc_session_logout_store,
             oauth_account_store=oauth_accounts,
             oauth_transaction_protector=oauth_transaction_protector,
             oauth_transaction_store=oauth_transactions,
@@ -1161,6 +1245,7 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
         "local_account_store",
         "mfa_login_challenge_store",
         "mfa_store",
+        "oidc_session_logout_store",
         "oauth_account_store",
         "oauth_transaction_protector",
         "oauth_transaction_store",
@@ -1191,6 +1276,7 @@ def test_testing_surface_is_explicit_and_stable() -> None:
         "InMemoryLocalAccountStore",
         "InMemoryMFALoginChallengeStore",
         "InMemoryMFAStore",
+        "InMemoryOIDCSessionLogoutStore",
         "InMemoryPasskeyStore",
         "InMemorySecurityBackend",
         "InMemoryStepUpStore",
@@ -1208,6 +1294,7 @@ def test_testing_surface_is_explicit_and_stable() -> None:
         "assert_local_account_store_conformance",
         "assert_mfa_login_challenge_store_conformance",
         "assert_mfa_store_conformance",
+        "assert_oidc_session_logout_store_conformance",
         "assert_oauth_account_store_conformance",
         "assert_oauth_transaction_protector_conformance",
         "assert_oauth_transaction_store_conformance",

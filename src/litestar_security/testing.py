@@ -83,6 +83,8 @@ from litestar_security.providers.oauth import (
     OAuthTransactionProtector,
     OAuthTransactionStart,
     OAuthTransactionStore,
+    OIDCLogoutIdentity,
+    OIDCSessionLogoutStore,
     ProtectedOAuthSecret,
     ProviderGrant,
     ProviderIdentity,
@@ -107,6 +109,7 @@ __all__ = (
     "InMemoryLocalAccountStore",
     "InMemoryMFALoginChallengeStore",
     "InMemoryMFAStore",
+    "InMemoryOIDCSessionLogoutStore",
     "InMemoryPasskeyStore",
     "InMemorySecurityBackend",
     "InMemoryStepUpStore",
@@ -127,6 +130,7 @@ __all__ = (
     "assert_oauth_account_store_conformance",
     "assert_oauth_transaction_protector_conformance",
     "assert_oauth_transaction_store_conformance",
+    "assert_oidc_session_logout_store_conformance",
     "assert_passkey_store_conformance",
     "assert_rate_limiter_conformance",
     "assert_refresh_family_store_conformance",
@@ -1222,6 +1226,7 @@ class StoreConformanceFactories:
     local_account_store: "Callable[[], _ConformanceLocalAccountStore] | None" = None
     mfa_login_challenge_store: Callable[[], MFALoginChallengeStore] | None = None
     mfa_store: Callable[[], MFAStore] | None = None
+    oidc_session_logout_store: Callable[[], OIDCSessionLogoutStore] | None = None
     oauth_account_store: Callable[[], OAuthAccountStore] | None = None
     oauth_transaction_protector: Callable[[], OAuthTransactionProtector] | None = None
     oauth_transaction_store: Callable[[], OAuthTransactionStore] | None = None
@@ -2722,6 +2727,116 @@ async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) 
         raise AssertionError("PasskeyStore.record_assertion clone-state invariant: clone risk must persist suspicion")
 
 
+async def assert_oidc_session_logout_store_conformance(factory: Callable[[], OIDCSessionLogoutStore]) -> None:
+    """Assert atomic OIDC logout against a fixed seeded mapped-session scenario.
+
+    The factory must return a fresh store seeded with two active mappings for
+    ``("conformance-provider", "https://issuer.example", "conformance-subject",
+    "conformance-session")``, one unrelated mapping, and the exact
+    ``"conformance-browser-binding"`` front-channel binding for that tuple.
+
+    Args:
+        factory: Isolated zero-argument factory that returns the required seeded store.
+
+    Returns:
+        None when the store preserves exact OIDC ownership and one-shot semantics.
+
+    Raises:
+        AssertionError: If the seeded mappings can be incorrectly revoked or replayed.
+    """
+    identity = _conformance_oidc_logout_identity("backchannel")
+    expected_count = 2
+    store = factory()
+    if await store.consume_backchannel(identity, now=_DEFAULT_NOW) != expected_count:
+        raise AssertionError(
+            "OIDCSessionLogoutStore.consume_backchannel mapped-session invariant: "
+            "exact identity must revoke two mappings"
+        )
+    if await store.consume_backchannel(identity, now=_DEFAULT_NOW) is not None:
+        raise AssertionError(
+            "OIDCSessionLogoutStore.consume_backchannel replay invariant: "
+            "a consumed token id must return None"
+        )
+    for name, mismatch in (
+        (
+            "provider",
+            replace(
+                identity,
+                provider="other-provider",
+                token_id=_conformance_oidc_logout_identity("provider").token_id,
+            ),
+        ),
+        (
+            "issuer",
+            replace(
+                identity,
+                issuer="https://other-issuer.example",
+                token_id=_conformance_oidc_logout_identity("issuer").token_id,
+            ),
+        ),
+        (
+            "subject",
+            replace(identity, subject="other-subject", token_id=_conformance_oidc_logout_identity("subject").token_id),
+        ),
+        (
+            "session",
+            replace(
+                identity,
+                session_id="other-session",
+                token_id=_conformance_oidc_logout_identity("session").token_id,
+            ),
+        ),
+    ):
+        if await factory().consume_backchannel(mismatch, now=_DEFAULT_NOW) != 0:
+            message = (
+                f"OIDCSessionLogoutStore.consume_backchannel {name} invariant: "
+                "non-matching identities must revoke nothing"
+            )
+            raise AssertionError(message)
+    frontchannel = factory()
+    if (
+        await frontchannel.revoke_frontchannel(
+            identity.provider,
+            identity.issuer,
+            cast("str", identity.session_id),
+            binding="other-browser-binding",
+            now=_DEFAULT_NOW,
+        )
+        is not None
+    ):
+        raise AssertionError(
+            "OIDCSessionLogoutStore.revoke_frontchannel binding invariant: wrong browser binding must return None"
+        )
+    if (
+        await frontchannel.revoke_frontchannel(
+            identity.provider,
+            identity.issuer,
+            cast("str", identity.session_id),
+            binding="conformance-browser-binding",
+            now=_DEFAULT_NOW,
+        )
+        != expected_count
+    ):
+        raise AssertionError(
+            "OIDCSessionLogoutStore.revoke_frontchannel mapped-session invariant: "
+            "owned mapping must revoke two sessions"
+        )
+    if (
+        await frontchannel.revoke_frontchannel(
+            identity.provider,
+            identity.issuer,
+            cast("str", identity.session_id),
+            binding="conformance-browser-binding",
+            now=_DEFAULT_NOW,
+        )
+        is not None
+    ):
+        raise AssertionError(
+            "OIDCSessionLogoutStore.revoke_frontchannel replay invariant: "
+            "consumed mapping must return None"
+        )
+
+
 async def assert_oauth_account_store_conformance(factory: Callable[[], OAuthAccountStore]) -> None:
     """Assert final-method protection and atomic OAuth identity unlinking.
 
@@ -2838,6 +2953,8 @@ async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit
         await assert_mfa_login_challenge_store_conformance(factories.mfa_login_challenge_store)
     if factories.mfa_store is not None:
         await assert_mfa_store_conformance(factories.mfa_store)
+    if factories.oidc_session_logout_store is not None:
+        await assert_oidc_session_logout_store_conformance(factories.oidc_session_logout_store)
     if factories.oauth_account_store is not None:
         await assert_oauth_account_store_conformance(factories.oauth_account_store)
     if factories.oauth_transaction_protector is not None:
@@ -3127,6 +3244,18 @@ def _conformance_provider_grant() -> ProviderGrant:
     return ProviderGrant(scopes=frozenset({"profile"}), expires_at=_DEFAULT_NOW + timedelta(hours=1))
 
 
+def _conformance_oidc_logout_identity(token_id: str) -> OIDCLogoutIdentity:
+    """Build one fixed verified OIDC logout identity for a seeded store."""
+    return OIDCLogoutIdentity(
+        provider="conformance-provider",
+        issuer="https://issuer.example",
+        subject="conformance-subject",
+        session_id="conformance-session",
+        token_id=f"conformance-{token_id}",
+        expires_at=_DEFAULT_NOW + timedelta(minutes=5),
+    )
+
+
 async def _presence(operation: Awaitable[object | None]) -> bool:
     """Project an optional async result to the shared winner boolean shape."""
     return _won_by_presence(await operation)
@@ -3188,6 +3317,86 @@ class _DeterministicProtector:
             message = "Protected test secret has different associated data"
             raise ValueError(message)
         return protected.ciphertext[len(prefix) :][::-1]
+
+
+class InMemoryOIDCSessionLogoutStore:
+    """Lock-protected OIDC mapped-session logout reference for deterministic tests."""
+
+    __slots__ = (
+        "_consumed_frontchannel_mappings",
+        "_consumed_token_ids",
+        "_frontchannel_bindings",
+        "_lock",
+        "_revoked_mappings",
+        "_session_mappings",
+    )
+
+    def __init__(
+        self,
+        *,
+        session_mappings: tuple[tuple[str, str, str | None, str | None], ...],
+        frontchannel_bindings: Mapping[tuple[str, str, str], str],
+    ) -> None:
+        """Initialize fixed secret-free mappings and browser bindings.
+
+        Args:
+            session_mappings: ``(provider, issuer, subject, session_id)`` rows, one per local session.
+            frontchannel_bindings: Browser binding by exact provider, issuer, and provider-session tuple.
+        """
+        self._lock = Lock()
+        self._session_mappings = session_mappings
+        self._frontchannel_bindings = dict(frontchannel_bindings)
+        self._consumed_token_ids: set[str] = set()
+        self._consumed_frontchannel_mappings: set[tuple[str, str, str]] = set()
+        self._revoked_mappings: set[int] = set()
+
+    async def consume_backchannel(self, identity: OIDCLogoutIdentity, *, now: datetime) -> int | None:
+        """Consume one token id and revoke every active exact identity mapping."""
+        del now
+        async with self._lock:
+            if identity.token_id in self._consumed_token_ids:
+                return None
+            self._consumed_token_ids.add(identity.token_id)
+            revoked = 0
+            for index, (provider, issuer, subject, session_id) in enumerate(self._session_mappings):
+                if (
+                    index in self._revoked_mappings
+                    or provider != identity.provider
+                    or issuer != identity.issuer
+                    or (identity.subject is not None and subject != identity.subject)
+                    or (identity.session_id is not None and session_id != identity.session_id)
+                ):
+                    continue
+                self._revoked_mappings.add(index)
+                revoked += 1
+            return revoked
+
+    async def revoke_frontchannel(
+        self, provider: str, issuer: str, session_id: str, *, binding: str, now: datetime
+    ) -> int | None:
+        """Consume one exact browser-bound mapping and revoke its active local sessions."""
+        del now
+        key = (provider, issuer, session_id)
+        async with self._lock:
+            if (
+                key in self._consumed_frontchannel_mappings
+                or self._frontchannel_bindings.get(key) != binding
+            ):
+                return None
+            matching_indexes = tuple(
+                index
+                for index, mapping in enumerate(self._session_mappings)
+                if mapping[0] == provider and mapping[1] == issuer and mapping[3] == session_id
+            )
+            if not matching_indexes:
+                return None
+            self._consumed_frontchannel_mappings.add(key)
+            revoked = 0
+            for index in matching_indexes:
+                if index not in self._revoked_mappings:
+                    self._revoked_mappings.add(index)
+                    revoked += 1
+            return revoked
 
 
 class InMemoryMFAStore:
