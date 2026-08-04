@@ -20,7 +20,7 @@ for the store contracts; it is not a production persistence implementation.
 
    * - Protocol
      - Conformance helper
-     - Reference attribute
+     - Reference
    * - ``APIKeyStore``
      - :func:`~litestar_security.testing.assert_api_key_store_conformance`
      - ``InMemorySecurityBackend.api_keys``
@@ -33,6 +33,9 @@ for the store contracts; it is not a production persistence implementation.
    * - ``MFAStore``
      - :func:`~litestar_security.testing.assert_mfa_store_conformance`
      - ``InMemorySecurityBackend.mfa``
+   * - ``OIDCSessionLogoutStore``
+     - :func:`~litestar_security.testing.assert_oidc_session_logout_store_conformance`
+     - ``InMemoryOIDCSessionLogoutStore`` with the documented seed
    * - ``OAuthAccountStore``
      - :func:`~litestar_security.testing.assert_oauth_account_store_conformance`
      - ``InMemorySecurityBackend.oauth_accounts``
@@ -48,6 +51,12 @@ for the store contracts; it is not a production persistence implementation.
    * - ``SessionRegistry``
      - :func:`~litestar_security.testing.assert_session_registry_conformance`
      - ``InMemorySecurityBackend.accounts``
+   * - ``StepUpStore``
+     - :func:`~litestar_security.testing.assert_step_up_store_conformance`
+     - ``InMemoryStepUpStore``
+   * - ``TokenVault``
+     - :func:`~litestar_security.testing.assert_token_vault_conformance`
+     - ``MemoryTokenVault`` with an AEAD protector
    * - ``WebAuthnChallengeStore``
      - :func:`~litestar_security.testing.assert_webauthn_challenge_store_conformance`
      - ``InMemorySecurityBackend.challenges``
@@ -80,6 +89,42 @@ shared state:
 Rate limiters use the standalone
 :func:`~litestar_security.testing.assert_rate_limiter_conformance` helper,
 because their factory is not a security-store factory.
+
+The OIDC logout helper requires each fresh factory to seed two matching local
+session mappings, one unrelated mapping, and the exact front-channel browser
+binding described by the helper docstring. This fixed scenario makes replay,
+ownership, binding, and contention results portable across backends.
+
+``InMemoryOAuthRevocationRetryStore`` is an encrypted retry-persistence
+reference, not a universal conformance scenario: the retry protocol deliberately
+does not expose stored payloads. It accepts an ``OAuthTransactionProtector`` and
+exposes only immutable, secret-free failure metadata.
+
+Testing-only resolver and WebSocket lifetime references keep examples small:
+
+.. code-block:: python
+
+   from litestar_security import Principal
+   from litestar_security.context import AuthorizationSnapshot
+   from litestar_security.testing import (
+       InMemoryWebSocketRevocationSource,
+       StaticAuthorizationResolver,
+       StaticAuthorizationSnapshotRefresher,
+       StaticIdentityResolver,
+   )
+
+
+   identity = StaticIdentityResolver(Principal(id="test-user"))
+   authorization = StaticAuthorizationResolver(
+       AuthorizationSnapshot(scopes={"reports:read"})
+   )
+   revocations = InMemoryWebSocketRevocationSource()
+   refresher = StaticAuthorizationSnapshotRefresher(
+       AuthorizationSnapshot(scopes={"reports:read"})
+   )
+
+These deterministic objects are for tests and examples, not production identity
+resolution, authorization, or cross-worker revocation delivery.
 
 Async implementations stay on the event loop. Wrap a complete synchronous port
 in ``BlockingIntegration`` so the runtime can use the configured bounded worker
