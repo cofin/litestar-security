@@ -2918,6 +2918,7 @@ def test_security_config_is_typed_and_slotted() -> None:
         "mechanisms",
         "max_openapi_combinations",
         "external_csrf",
+        "exclude",
         "require_default",
         "local_auth",
         "local_jwks",
@@ -2946,6 +2947,20 @@ def test_security_config_rejects_invalid_jwks_warmup_failure_mode() -> None:
 def test_security_config_rejects_invalid_headers_config() -> None:
     with pytest.raises(ImproperlyConfiguredException, match="Browser security headers"):
         litestar_security.SecurityConfig(headers=object())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("exclude", [object(), 5, [object()], ["/ok", 5], (name for name in ())])
+def test_security_config_rejects_invalid_exclude_patterns(exclude: object) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Route exclusion patterns"):
+        litestar_security.SecurityConfig(exclude=cast("Any", exclude))
+
+
+@pytest.mark.parametrize(
+    ("exclude", "expected"),
+    [(None, None), ("^/static", "^/static"), (["^/static", "^/assets"], ("^/static", "^/assets"))],
+)
+def test_security_config_freezes_exclude_patterns(exclude: object, expected: object) -> None:
+    assert litestar_security.SecurityConfig(exclude=cast("Any", exclude)).exclude == expected
 
 
 def test_local_route_schemas_redact_every_secret_they_carry() -> None:

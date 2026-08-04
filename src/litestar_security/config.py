@@ -227,6 +227,18 @@ def _feature_route_prefix(value: object) -> str:
     return normalized
 
 
+def _exclude_patterns(value: object) -> tuple[str, ...] | str | None:
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, Sequence):
+        given = tuple(cast("Sequence[object]", value))
+        patterns = tuple(pattern for pattern in given if isinstance(pattern, str))
+        if len(patterns) == len(given):
+            return patterns
+    msg = "Route exclusion patterns must be text or a sequence of text"
+    raise ImproperlyConfiguredException(detail=msg)
+
+
 @dataclass(slots=True)
 class SecurityConfig(Generic[UserT]):
     """Configure the per-application security runtime."""
@@ -235,6 +247,20 @@ class SecurityConfig(Generic[UserT]):
     mechanisms: Sequence[AuthenticationMechanism[Any, Any, UserT]] = ()
     max_openapi_combinations: int = 32
     external_csrf: ExternalCSRF | None = None
+    exclude: Sequence[str] | str | None = None
+    """Regular expressions matched against a route path to exclude it from security.
+
+    Mirrors ``JWTAuth.exclude``: a single pattern or a sequence of patterns,
+    joined into one expression and compiled with :mod:`re`. A pattern is
+    anchored at the start of the route path, so ``"^/static"`` and ``"/static"``
+    both exclude ``/static/{file_path:path}`` while a bare ``"static"`` does not.
+
+    Exclusion is total and applies when the route is compiled, not per request:
+    an excluded route is never authenticated, carries no principal, and
+    contributes an anonymous security requirement to OpenAPI rather than the
+    configured schemes. A route that declares its own ``auth=`` and also matches
+    a pattern is a contradiction and is rejected at startup.
+    """
     require_default: bool = False
     local_auth: "LocalAuthConfig[UserT] | None" = None
     local_jwks: "LocalJWKSConfig | None" = None
@@ -263,6 +289,7 @@ class SecurityConfig(Generic[UserT]):
         if headers is not None and not isinstance(headers, SecurityHeadersConfig):
             msg = "Browser security headers must be a SecurityHeadersConfig"
             raise ImproperlyConfiguredException(detail=msg)
+        self.exclude = _exclude_patterns(self.exclude)
         self.slots = tuple(self.slots)
         self.mechanisms = tuple(self.mechanisms)
         local_accounts = getattr(self.local_auth, "accounts", None)
