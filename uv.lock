@@ -995,11 +995,24 @@ name = "litestar-security"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
-    { name = "argon2-cffi" },
     { name = "httpx" },
     { name = "litestar" },
     { name = "pyjwt", extra = ["crypto"] },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "argon2-cffi" },
     { name = "pyotp" },
+    { name = "webauthn" },
+]
+argon2 = [
+    { name = "argon2-cffi" },
+]
+mfa = [
+    { name = "pyotp" },
+]
+passkeys = [
     { name = "webauthn" },
 ]
 
@@ -1060,13 +1073,17 @@ tests = [
 
 [package.metadata]
 requires-dist = [
-    { name = "argon2-cffi", specifier = ">=25.1,<26" },
+    { name = "argon2-cffi", marker = "extra == 'all'", specifier = ">=25.1,<26" },
+    { name = "argon2-cffi", marker = "extra == 'argon2'", specifier = ">=25.1,<26" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "litestar", specifier = ">=2.24.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.13" },
-    { name = "pyotp", specifier = ">=2.10,<3" },
-    { name = "webauthn", specifier = ">=3,<4" },
+    { name = "pyotp", marker = "extra == 'all'", specifier = ">=2.10,<3" },
+    { name = "pyotp", marker = "extra == 'mfa'", specifier = ">=2.10,<3" },
+    { name = "webauthn", marker = "extra == 'all'", specifier = ">=3,<4" },
+    { name = "webauthn", marker = "extra == 'passkeys'", specifier = ">=3,<4" },
 ]
+provides-extras = ["all", "argon2", "mfa", "oauth", "passkeys"]
 
 [package.metadata.requires-dev]
 benchmark = [{ name = "pytest-benchmark" }]

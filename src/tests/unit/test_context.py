@@ -1088,11 +1088,17 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     )
 
 
-def test_accounts_package_declares_argon2_without_backend_dependencies() -> None:
+def test_package_declares_feature_dependencies_only_through_extras() -> None:
     declared = tuple(requirement.lower().replace(" ", "") for requirement in requires("litestar-security") or ())
 
-    assert any(
-        requirement.startswith("argon2-cffi") and ">=25.1" in requirement and "<26" in requirement
+    assert "argon2-cffi<26,>=25.1;extra=='argon2'" in declared
+    assert "pyotp<3,>=2.10;extra=='mfa'" in declared
+    assert "webauthn<4,>=3;extra=='passkeys'" in declared
+    assert "argon2-cffi<26,>=25.1;extra=='all'" in declared
+    assert "pyotp<3,>=2.10;extra=='all'" in declared
+    assert "webauthn<4,>=3;extra=='all'" in declared
+    assert not any(
+        requirement.startswith(("argon2-cffi", "pyotp", "webauthn")) and ";extra==" not in requirement
         for requirement in declared
     )
     assert all(

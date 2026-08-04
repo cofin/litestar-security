@@ -39,13 +39,17 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "argon2-cffi>=25.1,<26",
   "httpx>=0.28.1",
   "litestar>=2.24.0",
-  "PyOTP>=2.10,<3",
   "PyJWT[crypto]>=2.13",
-  "webauthn>=3,<4",
 ]
+
+[project.optional-dependencies]
+all = ["argon2-cffi>=25.1,<26", "PyOTP>=2.10,<3", "webauthn>=3,<4"]
+argon2 = ["argon2-cffi>=25.1,<26"]
+mfa = ["PyOTP>=2.10,<3"]
+oauth = []
+passkeys = ["webauthn>=3,<4"]
 
 [project.urls]
 Documentation = "https://cofin.github.io/litestar-security/"

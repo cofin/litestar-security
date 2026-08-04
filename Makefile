@@ -10,7 +10,7 @@ SHELL := /bin/bash
 .EXPORT_ALL_VARIABLES:
 MAKEFLAGS += --no-print-directory
 PYTHON_VERSION ?= 3.10
-UV_SYNC_ARGS ?= --all-groups
+UV_SYNC_ARGS ?= --all-groups --all-extras
 
 # Detect Rodete and configure index URLs for Python tools
 ifneq ($(shell grep -s -q "rodete" /etc/os-release && echo "yes"),)
