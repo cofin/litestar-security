@@ -133,7 +133,7 @@ success case:
        satisfies the account security epoch.
    * - ``403``
      - A password was verified but a configured second factor is still owed.
-       The typed ``LocalMFARequiredResponse`` contains ``code="mfa_required"``,
+       The typed ``LocalMFAChallenge`` contains ``code="mfa_required"``,
        ``detail``, ``account_id``, ``challenge``, ``expires_at``, and
        ``methods``.
    * - ``429``
