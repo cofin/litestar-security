@@ -44,6 +44,7 @@ will open the connection:
    async def mint_connect_token(
        principal: NamedDependency[Principal[Any]],
        security_context: NamedDependency[SecurityContext],
+       security_epoch: NamedDependency[int],
        websocket_connect_tokens: NamedDependency[WebSocketConnectTokenIssuer],
    ) -> dict[str, str]:
        issued = await websocket_connect_tokens.issue(
@@ -51,8 +52,14 @@ will open the connection:
            principal=principal,
            context=security_context,
            origin="https://browser.example",
+           security_epoch=security_epoch,
        )
        return {"connect_token": issued.value}
+
+The application-owned ``security_epoch`` dependency must return the account's
+current authoritative epoch; password resets and other security changes then
+invalidate outstanding connect tokens. Local-auth configuration automatically
+wires its account store for handshake-time epoch revalidation.
 
 The client supplies ``connect_token`` to the WebSocket handshake and presents
 that exact Origin. ``issue_websocket_connect_token()`` and
