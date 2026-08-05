@@ -26,6 +26,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
+from litestar_security._docs import ROUTE_TAGS
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa_login import MFARequired
 from litestar_security.accounts._rate_limits import RateLimited
@@ -66,52 +67,14 @@ if TYPE_CHECKING:
 __all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "requires_local_bearer")
 
 
-_SESSIONS_TAG = "Local sessions"
-_TOKENS_TAG = "Local tokens"
-_REGISTRATION_TAG = "Local registration"
-_PASSWORDS_TAG = "Local passwords"
-_VERIFICATION_TAG = "Local verification"
+_SESSIONS_TAG = ROUTE_TAGS["local.sessions"].name
+_TOKENS_TAG = ROUTE_TAGS["local.tokens"].name
+_REGISTRATION_TAG = ROUTE_TAGS["local.registration"].name
+_PASSWORDS_TAG = ROUTE_TAGS["local.passwords"].name
+_VERIFICATION_TAG = ROUTE_TAGS["local.verification"].name
 
 
-# Declaration order is display order: a reader meets the two ways to log in before
-# the flows that repair an account they cannot log in to.
-LOCAL_AUTH_TAGS: tuple[Tag, ...] = (
-    Tag(
-        name=_SESSIONS_TAG,
-        description=(
-            "Cookie-based login for browser clients, plus the caller's own session inventory. "
-            "Every route here is scoped to the authenticated caller: there is no administrative view."
-        ),
-    ),
-    Tag(
-        name=_TOKENS_TAG,
-        description=(
-            "Bearer login for non-browser clients. Refresh tokens rotate strictly, so replaying a "
-            "consumed token revokes its whole family rather than returning a new pair."
-        ),
-    ),
-    Tag(
-        name=_REGISTRATION_TAG,
-        description=(
-            "Self-service account creation under the configured registration policy. The response is "
-            "identical whether or not the identifier was already taken, so it never confirms an account."
-        ),
-    ),
-    Tag(
-        name=_PASSWORDS_TAG,
-        description=(
-            "Password change for an authenticated caller and the recovery flow for one who cannot sign in. "
-            "Both raise the account security epoch, which invalidates credentials issued before the change."
-        ),
-    ),
-    Tag(
-        name=_VERIFICATION_TAG,
-        description=(
-            "Account-verification token issue and consumption. Requesting a token returns the same response "
-            "for every identifier, so it never confirms an account."
-        ),
-    ),
-)
+LOCAL_AUTH_TAGS: tuple[Tag, ...] = tuple(tag for key, tag in ROUTE_TAGS.items() if key.startswith("local."))
 
 
 _LOCAL_BAD_REQUEST_RESPONSES = {

@@ -118,6 +118,7 @@ _REFRESH_CAPABILITIES = {
 }
 _PUBLIC_API = (
     "CSRF_REQUIRED_OPT_KEY",
+    "ROUTE_TAGS",
     "AESGCMOAuthTransactionProtector",
     "AssuranceRequirement",
     "AssuranceTrait",

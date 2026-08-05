@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 from litestar_security.__metadata__ import __project__, __version__
+from litestar_security._docs import ROUTE_TAGS
 from litestar_security._lazy import import_optional_attribute
 from litestar_security.authentication import (
     CSRF_REQUIRED_OPT_KEY,
@@ -98,6 +99,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "CSRF_REQUIRED_OPT_KEY",
+    "ROUTE_TAGS",
     "AESGCMOAuthTransactionProtector",
     "AssuranceRequirement",
     "AssuranceTrait",

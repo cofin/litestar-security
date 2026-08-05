@@ -36,6 +36,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
+from litestar_security._docs import ROUTE_TAGS
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import Principal
 from litestar_security.providers.oauth._accounts import (
@@ -93,6 +94,8 @@ OIDC_FRONTCHANNEL_LOGOUT = "oidc.logout.frontchannel"
 """Rate-limit operation name consumed by each front-channel logout attempt."""
 
 _LOGGER = getLogger(__name__)
+_OAUTH_PROVIDERS_TAG = ROUTE_TAGS["oauth.providers"].name
+_OIDC_LOGOUT_TAG = ROUTE_TAGS["oidc.logout"].name
 _MAXIMUM_TCP_PORT = 65_535
 _MAXIMUM_SECURITY_EPOCH = 9_223_372_036_854_775_807
 
@@ -985,7 +988,7 @@ def _authorization_response(result: OAuthAuthorization) -> Redirect:
 
 class _OAuthController(Controller):
     path = "/oauth/{provider:str}"
-    tags = ("OAuth providers",)
+    tags = (_OAUTH_PROVIDERS_TAG,)
 
     @get(
         "/login",
@@ -1206,7 +1209,7 @@ class _OAuthController(Controller):
 
 class _OIDCLogoutController(Controller):
     path = "/oidc/{provider:str}"
-    tags = ("OIDC logout",)
+    tags = (_OIDC_LOGOUT_TAG,)
 
     @get(
         "/frontchannel-logout",

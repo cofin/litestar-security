@@ -23,6 +23,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
+from litestar_security._docs import ROUTE_TAGS
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa import MFAService, RecoveryCodeGrant, StepUpCredential, StepUpService
 from litestar_security.accounts._operations import (
@@ -65,9 +66,9 @@ from litestar_security.context import AuthenticationEvidence, Principal
 
 __all__ = ("build_mfa_routes",)
 
-_MFA_TAG = "Multi-factor authentication"
-_PASSKEY_TAG = "Passkeys"
-_STEP_UP_TAG = "Step-up authentication"
+_MFA_TAG = ROUTE_TAGS["mfa"].name
+_PASSKEY_TAG = ROUTE_TAGS["passkeys"].name
+_STEP_UP_TAG = ROUTE_TAGS["step_up"].name
 # Every step-up purpose the controller consumes, mapped to the factors that may
 # satisfy it. Deny-by-default: a purpose absent here is rejected (see issue()),
 # never treated as "any factor allowed". Only password and passkey prove
