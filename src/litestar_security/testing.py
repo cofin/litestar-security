@@ -17,8 +17,8 @@ import httpx
 from anyio import Event, Lock, create_task_group
 
 from litestar_security.accounts import (
-    AssertionRecordResult,
-    ConsumeResult,
+    AssertionRecordStatus,
+    ConsumeOutcome,
     ConsumeStatus,
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
@@ -31,13 +31,12 @@ from litestar_security.accounts import (
     NotificationCommand,
     PasskeyCredential,
     PasskeyStore,
-    PasswordChangeResult,
+    PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordCredentialState,
-    PasswordResetResult,
+    PasswordResetOutcome,
     PasswordResetStatus,
     PendingTOTPEnrollment,
-    PrepareRefreshResult,
     ProtectedSecret,
     PurposeTokenCodec,
     PurposeTokenDelivery,
@@ -45,18 +44,19 @@ from litestar_security.accounts import (
     RateLimiter,
     RecoveryCodeDigest,
     RefreshFamilyContext,
+    RefreshPreflightOutcome,
     RefreshReceiptReplay,
+    RefreshRotationOutcome,
     RefreshRotationStatus,
     RefreshTokenFamilyStore,
     RefreshTokenProof,
     RegistrationCommand,
-    RegistrationResult,
+    RegistrationOutcome,
     RegistrationStatus,
     RegistrationStore,
-    RevokeLoginMethodResult,
+    RevokeLoginMethodOutcome,
     RevokeLoginMethodStatus,
     RotateRefreshCommand,
-    RotateRefreshResult,
     SecretProtector,
     SecurityEvent,
     SessionRecord,
@@ -610,19 +610,19 @@ class InMemoryLocalAccountStore:
 
     async def replace_password_and_bump_epoch(
         self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
-    ) -> PasswordChangeResult:
+    ) -> PasswordChangeOutcome:
         """Replace a password and advance its exact security epoch."""
         del event
         await self._observe("accounts.replace_password_and_bump_epoch", {"account_id": account_id})
         async with self._lock:
             account = self._accounts.get(account_id)
             if account is None:
-                return PasswordChangeResult(PasswordChangeStatus.NOT_FOUND)
+                return PasswordChangeOutcome(PasswordChangeStatus.NOT_FOUND)
             if account.security_epoch != expected_epoch:
-                return PasswordChangeResult(PasswordChangeStatus.CONFLICT)
+                return PasswordChangeOutcome(PasswordChangeStatus.CONFLICT)
             self._password_hashes[account_id] = password_hash
             self._accounts[account_id] = replace(account, security_epoch=expected_epoch + 1)
-            return PasswordChangeResult(PasswordChangeStatus.CHANGED, expected_epoch + 1)
+            return PasswordChangeOutcome(PasswordChangeStatus.CHANGED, expected_epoch + 1)
 
     async def register_login_method(self, account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
         """Record a login method for an existing account."""
@@ -633,18 +633,18 @@ class InMemoryLocalAccountStore:
 
     async def revoke_login_method(
         self, account_id: str, method_id: str, *, require_remaining: bool = True, event: SecurityEvent
-    ) -> RevokeLoginMethodResult:
+    ) -> RevokeLoginMethodOutcome:
         """Revoke one login method while preserving the requested invariant."""
         del event
         await self._observe("accounts.revoke_login_method", {"account_id": account_id, "method_id": method_id})
         async with self._lock:
             methods = self._login_methods.get(account_id)
             if methods is None or method_id not in methods:
-                return RevokeLoginMethodResult(RevokeLoginMethodStatus.NOT_FOUND)
+                return RevokeLoginMethodOutcome(RevokeLoginMethodStatus.NOT_FOUND)
             if require_remaining and len(methods) == 1:
-                return RevokeLoginMethodResult(RevokeLoginMethodStatus.FINAL_METHOD)
+                return RevokeLoginMethodOutcome(RevokeLoginMethodStatus.FINAL_METHOD)
             del methods[method_id]
-            return RevokeLoginMethodResult(RevokeLoginMethodStatus.REVOKED)
+            return RevokeLoginMethodOutcome(RevokeLoginMethodStatus.REVOKED)
 
     async def register(  # noqa: PLR0913 - protocol has explicit registration inputs
         self,
@@ -655,7 +655,7 @@ class InMemoryLocalAccountStore:
         verification: PurposeTokenDelivery | None,
         now: datetime,
         event: SecurityEvent,
-    ) -> RegistrationResult[object]:
+    ) -> RegistrationOutcome[object]:
         """Create one account and optional verification issue atomically."""
         del event
         await self._observe("accounts.register", {"normalized_identifier": command.normalized_identifier})
@@ -663,7 +663,7 @@ class InMemoryLocalAccountStore:
             if any(
                 account.normalized_identifier == command.normalized_identifier for account in self._accounts.values()
             ):
-                return RegistrationResult(RegistrationStatus.DUPLICATE)
+                return RegistrationOutcome(RegistrationStatus.DUPLICATE)
             invitation = (
                 next(
                     (
@@ -677,7 +677,7 @@ class InMemoryLocalAccountStore:
                 else None
             )
             if invitation_digest is not None and (invitation is None or invitation.expires_at <= now):
-                return RegistrationResult(RegistrationStatus.INVALID_INVITATION)
+                return RegistrationOutcome(RegistrationStatus.INVALID_INVITATION)
             if verification is not None and self._purpose_token_id_exists_locked(verification.issue.token_id):
                 message = "In-memory purpose-token identifier collision"
                 raise ValueError(message)
@@ -702,7 +702,7 @@ class InMemoryLocalAccountStore:
             if invitation is not None:
                 del self._purpose_tokens[invitation.token_id]
                 self._used_purpose_tokens.add(invitation.token_id)
-            return RegistrationResult(RegistrationStatus.CREATED, account)
+            return RegistrationOutcome(RegistrationStatus.CREATED, account)
 
     async def issue(self, issue: TokenIssue, notification: NotificationCommand, *, event: SecurityEvent) -> None:
         """Store one purpose-token issue without retaining its delivery secret."""
@@ -722,7 +722,7 @@ class InMemoryLocalAccountStore:
 
     async def consume_and_verify(
         self, token_id: str, digest: bytes, *, now: datetime, event: SecurityEvent
-    ) -> ConsumeResult:
+    ) -> ConsumeOutcome:
         """Consume one verification token and mark its account verified."""
         del event
         await self._observe("accounts.consume_and_verify", {"token_id": token_id})
@@ -730,24 +730,24 @@ class InMemoryLocalAccountStore:
             issue = self._purpose_tokens.get(token_id)
             if issue is None or issue.purpose is not TokenPurpose.VERIFICATION:
                 status = ConsumeStatus.USED if token_id in self._used_purpose_tokens else ConsumeStatus.INVALID
-                return ConsumeResult(status)
+                return ConsumeOutcome(status)
             if not compare_digest(issue.digest, digest):
                 self._record_failed_purpose_proof_locked(issue)
-                return ConsumeResult(ConsumeStatus.INVALID)
+                return ConsumeOutcome(ConsumeStatus.INVALID)
             if issue.expires_at <= now:
-                return ConsumeResult(ConsumeStatus.EXPIRED)
+                return ConsumeOutcome(ConsumeStatus.EXPIRED)
             account = self._accounts.get(issue.account_id)
             if account is None:
-                return ConsumeResult(ConsumeStatus.INVALID)
+                return ConsumeOutcome(ConsumeStatus.INVALID)
             del self._purpose_tokens[token_id]
             self._purpose_attempts.pop(token_id, None)
             self._used_purpose_tokens.add(token_id)
             self._accounts[account.account_id] = replace(account, verified=True)
-            return ConsumeResult(ConsumeStatus.CONSUMED, account.account_id, account.security_epoch)
+            return ConsumeOutcome(ConsumeStatus.CONSUMED, account.account_id, account.security_epoch)
 
     async def consume_and_reset(
         self, token_id: str, digest: bytes, new_password_hash: str, *, now: datetime, event: SecurityEvent
-    ) -> PasswordResetResult:
+    ) -> PasswordResetOutcome:
         """Consume one recovery token and reset its account password atomically."""
         del event
         await self._observe("accounts.consume_and_reset", {"token_id": token_id})
@@ -757,22 +757,22 @@ class InMemoryLocalAccountStore:
                 status = (
                     PasswordResetStatus.USED if token_id in self._used_purpose_tokens else PasswordResetStatus.INVALID
                 )
-                return PasswordResetResult(status)
+                return PasswordResetOutcome(status)
             if not compare_digest(issue.digest, digest):
                 self._record_failed_purpose_proof_locked(issue)
-                return PasswordResetResult(PasswordResetStatus.INVALID)
+                return PasswordResetOutcome(PasswordResetStatus.INVALID)
             if issue.expires_at <= now:
-                return PasswordResetResult(PasswordResetStatus.EXPIRED)
+                return PasswordResetOutcome(PasswordResetStatus.EXPIRED)
             account = self._accounts.get(issue.account_id)
             if account is None or issue.issued_security_epoch != account.security_epoch:
-                return PasswordResetResult(PasswordResetStatus.CONFLICT)
+                return PasswordResetOutcome(PasswordResetStatus.CONFLICT)
             next_epoch = account.security_epoch + 1
             del self._purpose_tokens[token_id]
             self._purpose_attempts.pop(token_id, None)
             self._used_purpose_tokens.add(token_id)
             self._password_hashes[account.account_id] = new_password_hash
             self._accounts[account.account_id] = replace(account, security_epoch=next_epoch)
-            return PasswordResetResult(PasswordResetStatus.RESET, account.account_id, next_epoch)
+            return PasswordResetOutcome(PasswordResetStatus.RESET, account.account_id, next_epoch)
 
     async def create(self, command: CreateSessionCommand, *, event: SecurityEvent) -> SessionRecord:
         """Create one native session record."""
@@ -919,31 +919,31 @@ class InMemoryLocalAccountStore:
 
     async def prepare_rotation(  # noqa: PLR0911 - explicit refresh-state outcomes are security critical
         self, proof: RefreshTokenProof, idempotency_digest: bytes | None, *, now: datetime, event: SecurityEvent
-    ) -> RefreshFamilyContext | RefreshReceiptReplay | PrepareRefreshResult:
+    ) -> RefreshFamilyContext | RefreshReceiptReplay | RefreshPreflightOutcome:
         """Resolve one exact refresh token for a later atomic rotation."""
         del event
         await self._observe("accounts.prepare_refresh_rotation", {"token_id": proof.token_id})
         async with self._lock:
             state = self._refresh_tokens.get(proof.token_id)
             if state is None or state.token_digest != proof.digest:
-                return PrepareRefreshResult(RefreshRotationStatus.INVALID)
+                return RefreshPreflightOutcome(RefreshRotationStatus.INVALID)
             if state.revoked:
-                return PrepareRefreshResult(RefreshRotationStatus.REVOKED, family_revoked=True)
+                return RefreshPreflightOutcome(RefreshRotationStatus.REVOKED, family_revoked=True)
             if state.consumed:
                 if state.idempotency_digest == idempotency_digest and state.sealed_receipt is not None:
                     return RefreshReceiptReplay(self._refresh_context(state), state.sealed_receipt)
                 self._revoke_family_locked(state.family_id)
-                return PrepareRefreshResult(RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True)
+                return RefreshPreflightOutcome(RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True)
             if state.token_expires_at <= now or state.family_expires_at <= now:
-                return PrepareRefreshResult(RefreshRotationStatus.EXPIRED)
+                return RefreshPreflightOutcome(RefreshRotationStatus.EXPIRED)
             account = self._accounts.get(state.account_id)
             if account is None or account.security_epoch != state.security_epoch:
-                return PrepareRefreshResult(RefreshRotationStatus.EPOCH_MISMATCH)
+                return RefreshPreflightOutcome(RefreshRotationStatus.EPOCH_MISMATCH)
             return self._refresh_context(state)
 
     async def rotate(
         self, command: RotateRefreshCommand, *, now: datetime, event: SecurityEvent
-    ) -> RotateRefreshResult:
+    ) -> RefreshRotationOutcome:
         """Atomically rotate one prepared refresh token."""
         del event
         await self._observe("accounts.rotate_refresh", {"family_id": command.family_id, "token_id": command.token_id})
@@ -962,9 +962,9 @@ class InMemoryLocalAccountStore:
                 or account.security_epoch != command.security_epoch
                 or command.successor_id in self._refresh_tokens
             ):
-                return RotateRefreshResult(RefreshRotationStatus.INVALID)
+                return RefreshRotationOutcome(RefreshRotationStatus.INVALID)
             if state.token_expires_at <= now or state.family_expires_at <= now:
-                return RotateRefreshResult(RefreshRotationStatus.EXPIRED)
+                return RefreshRotationOutcome(RefreshRotationStatus.EXPIRED)
             state.consumed = True
             state.idempotency_digest = command.idempotency_digest
             state.sealed_receipt = command.sealed_receipt
@@ -978,7 +978,7 @@ class InMemoryLocalAccountStore:
                 family_expires_at=command.family_expires_at,
                 scopes=command.scopes,
             )
-            return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+            return RefreshRotationOutcome(RefreshRotationStatus.ROTATED, command.sealed_receipt)
 
     async def revoke_family(self, family_id: str, *, event: SecurityEvent) -> bool:
         """Revoke every token in one refresh family."""
@@ -1429,7 +1429,7 @@ async def _assert_registration_scenarios(
     store: _ConformanceLocalAccountStore,
 ) -> tuple[PurposeTokenDelivery, LocalAccountRecord[object]]:
     command = _conformance_registration_command("atomic-registration@example.com")
-    outcomes: list[RegistrationResult[object]] = []
+    outcomes: list[RegistrationOutcome[object]] = []
 
     async def register() -> None:
         outcomes.append(
@@ -1560,7 +1560,7 @@ async def _assert_password_epoch_bump(
         raise AssertionError(message)
     replacement_hashes = ("conformance-epoch-a", "conformance-epoch-b")
 
-    outcomes: list[PasswordChangeResult] = []
+    outcomes: list[PasswordChangeOutcome] = []
 
     async def bump_epoch(replacement_hash: str) -> None:
         outcomes.append(
@@ -1762,7 +1762,7 @@ async def _assert_recovery_attempt_exhaustion(
     issue, notification = delivery.bind(account.account_id, security_epoch=epoch)
     await store.issue(issue, notification, event=_conformance_event("issue-burned-recovery"))
     invalid_digest = _different_digest(issue.digest)
-    invalid_results: list[PasswordResetResult] = []
+    invalid_results: list[PasswordResetOutcome] = []
     for _attempt in range(issue.maximum_attempts):
         invalid_results.append(  # noqa: PERF401 - failed attempts must be sequential against one token
             await store.consume_and_reset(
@@ -1929,7 +1929,7 @@ class _ConformanceRefreshFamilyStore(RefreshTokenFamilyStore, RegistrationStore[
 
     async def replace_password_and_bump_epoch(
         self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
-    ) -> PasswordChangeResult:
+    ) -> PasswordChangeOutcome:
         """Advance an account epoch so rotation must revalidate prepared context."""
         ...  # pragma: no cover
 
@@ -1985,7 +1985,7 @@ async def assert_refresh_family_store_conformance(factory: Callable[[], _Conform
         event=_conformance_event("prepare-isolated-refresh"),
     )
     if (
-        not isinstance(isolated_result, PrepareRefreshResult)
+        not isinstance(isolated_result, RefreshPreflightOutcome)
         or isolated_result.status is not RefreshRotationStatus.INVALID
     ):
         message = "RefreshTokenFamilyStore factory isolation invariant: created families must be factory-local"
@@ -2004,7 +2004,7 @@ async def assert_refresh_family_store_conformance(factory: Callable[[], _Conform
         event=_conformance_event("prepare-expired-refresh"),
     )
     if (
-        not isinstance(expired_result, PrepareRefreshResult)
+        not isinstance(expired_result, RefreshPreflightOutcome)
         or expired_result.status is not RefreshRotationStatus.EXPIRED
     ):
         message = "RefreshTokenFamilyStore.prepare_rotation expiry invariant: expired tokens must be rejected"
@@ -2028,7 +2028,10 @@ async def assert_refresh_family_store_conformance(factory: Callable[[], _Conform
         now=_DEFAULT_NOW,
         event=_conformance_event("prepare-shared-expiry-refresh"),
     )
-    if not isinstance(shared_result, PrepareRefreshResult) or shared_result.status is not RefreshRotationStatus.EXPIRED:
+    if (
+        not isinstance(shared_result, RefreshPreflightOutcome)
+        or shared_result.status is not RefreshRotationStatus.EXPIRED
+    ):
         message = (
             "RefreshTokenFamilyStore.prepare_rotation shared-expiry invariant: "
             "the token/family deadline must bound rotation"
@@ -2051,7 +2054,7 @@ async def _assert_refresh_rotation_atomicity(
         raise AssertionError(message)
     context = _conformance_refresh_context(command)
     commands = tuple(_conformance_rotate_command(context, command, marker) for marker in (4, 5))
-    results: list[tuple[RotateRefreshCommand, RotateRefreshResult]] = []
+    results: list[tuple[RotateRefreshCommand, RefreshRotationOutcome]] = []
 
     async def rotate(candidate: RotateRefreshCommand) -> bool:
         result = await store.rotate(candidate, now=_DEFAULT_NOW, event=_conformance_event("rotate-refresh"))
@@ -2089,7 +2092,7 @@ async def _assert_refresh_rotation_atomicity(
         or loser_result.status is RefreshRotationStatus.ROTATED
         or loser_result.sealed_receipt is not None
         or winner_context != _conformance_successor_context(winner)
-        or not isinstance(loser_context, PrepareRefreshResult)
+        or not isinstance(loser_context, RefreshPreflightOutcome)
         or loser_context.status is not RefreshRotationStatus.INVALID
     ):
         message = (
@@ -2110,10 +2113,10 @@ async def _assert_refresh_rotation_atomicity(
         event=_conformance_event("prepare-atomic-revoked-successor"),
     )
     if (
-        not isinstance(replay, PrepareRefreshResult)
+        not isinstance(replay, RefreshPreflightOutcome)
         or replay.status is not RefreshRotationStatus.REPLAY_DETECTED
         or not replay.family_revoked
-        or not isinstance(revoked_successor, PrepareRefreshResult)
+        or not isinstance(revoked_successor, RefreshPreflightOutcome)
         or revoked_successor.status is not RefreshRotationStatus.REVOKED
         or not revoked_successor.family_revoked
     ):
@@ -2192,7 +2195,7 @@ async def _assert_refresh_late_rotation_rejection(
     if (
         expired_result.status is RefreshRotationStatus.ROTATED
         or expired_result.sealed_receipt is not None
-        or not isinstance(expired_successor, PrepareRefreshResult)
+        or not isinstance(expired_successor, RefreshPreflightOutcome)
         or expired_successor.status is not RefreshRotationStatus.INVALID
     ):
         message = (
@@ -2238,7 +2241,7 @@ async def _assert_refresh_late_rotation_rejection(
         changed.status is not PasswordChangeStatus.CHANGED
         or epoch_result.status is RefreshRotationStatus.ROTATED
         or epoch_result.sealed_receipt is not None
-        or not isinstance(epoch_successor, PrepareRefreshResult)
+        or not isinstance(epoch_successor, RefreshPreflightOutcome)
         or epoch_successor.status is not RefreshRotationStatus.INVALID
     ):
         message = (
@@ -2281,10 +2284,10 @@ async def _assert_refresh_replay_and_idempotency(
         event=_conformance_event("prepare-revoked-successor"),
     )
     if (
-        not isinstance(replay, PrepareRefreshResult)
+        not isinstance(replay, RefreshPreflightOutcome)
         or replay.status is not RefreshRotationStatus.REPLAY_DETECTED
         or not replay.family_revoked
-        or not isinstance(successor, PrepareRefreshResult)
+        or not isinstance(successor, RefreshPreflightOutcome)
         or successor.status is not RefreshRotationStatus.REVOKED
         or not successor.family_revoked
     ):
@@ -2690,7 +2693,7 @@ async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) 
     ):
         raise AssertionError("PasskeyStore setup invariant: a fresh credential must be added")
 
-    async def record() -> AssertionRecordResult:
+    async def record() -> AssertionRecordStatus:
         return await store.record_assertion(
             credential.credential_id,
             expected_version=0,
@@ -2701,11 +2704,11 @@ async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) 
             now=_DEFAULT_NOW,
         )
 
-    outcomes: list[AssertionRecordResult] = []
+    outcomes: list[AssertionRecordStatus] = []
     async with create_task_group() as group:
         group.start_soon(_append_result, record, outcomes)
         group.start_soon(_append_result, record, outcomes)
-    if outcomes.count(AssertionRecordResult.RECORDED) != 1 or outcomes.count(AssertionRecordResult.CONFLICT) != 1:
+    if outcomes.count(AssertionRecordStatus.RECORDED) != 1 or outcomes.count(AssertionRecordStatus.CONFLICT) != 1:
         raise AssertionError(
             "PasskeyStore.record_assertion atomicity invariant: contenders must return RECORDED and CONFLICT"
         )
@@ -2729,7 +2732,7 @@ async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) 
             clone_risk=True,
             now=_DEFAULT_NOW,
         )
-        is not AssertionRecordResult.CLONE_RISK
+        is not AssertionRecordStatus.CLONE_RISK
     ):
         raise AssertionError(
             "PasskeyStore.record_assertion clone-risk invariant: a clone-risk assertion must return CLONE_RISK"
@@ -3801,7 +3804,7 @@ class InMemoryPasskeyStore:
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordResult:
+    ) -> AssertionRecordStatus:
         """Atomically record one verified assertion.
 
         Args:
@@ -3823,7 +3826,7 @@ class InMemoryPasskeyStore:
                 or credential.version != expected_version
                 or credential.backup_eligible != backup_eligible
             ):
-                return AssertionRecordResult.CONFLICT
+                return AssertionRecordStatus.CONFLICT
             self.credentials[credential_id] = replace(
                 credential,
                 sign_count=sign_count,
@@ -3832,7 +3835,7 @@ class InMemoryPasskeyStore:
                 last_used_at=now,
                 version=credential.version + 1,
             )
-            return AssertionRecordResult.CLONE_RISK if clone_risk else AssertionRecordResult.RECORDED
+            return AssertionRecordStatus.CLONE_RISK if clone_risk else AssertionRecordStatus.RECORDED
 
     async def list_credentials(self, account_id: str) -> tuple[PasskeyCredential, ...]:
         """List an account's credentials.

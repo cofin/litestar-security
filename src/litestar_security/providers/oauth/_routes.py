@@ -72,7 +72,7 @@ __all__ = (
     "OAuthLifecycleService",
     "OAuthLink",
     "OAuthLocalTransport",
-    "OAuthLogoutResult",
+    "OAuthLogout",
     "OAuthProviderRegistration",
     "OAuthRouteService",
     "OAuthRouteStatus",
@@ -166,8 +166,8 @@ class OAuthAuthorization(msgspec.Struct, frozen=True, kw_only=True):
     binding_cookie: Cookie
 
 
-class OAuthLogoutResult(msgspec.Struct, frozen=True, kw_only=True):
-    """Local logout result plus optional validated provider redirect."""
+class OAuthLogout(msgspec.Struct, frozen=True, kw_only=True):
+    """Local logout confirmation plus optional validated provider redirect."""
 
     detail: str = "Logged out."
     redirect_url: str | None = None
@@ -470,7 +470,7 @@ class OAuthRouteService(Protocol):
         """Locally delete and attempt upstream revocation."""
         ...  # pragma: no cover
 
-    async def logout(self, *, provider: str, account_id: str, request: Request[Any, Any, Any]) -> OAuthLogoutResult:
+    async def logout(self, *, provider: str, account_id: str, request: Request[Any, Any, Any]) -> OAuthLogout:
         """Complete local logout independently of provider availability."""
         ...  # pragma: no cover
 
@@ -624,12 +624,12 @@ class OAuthLifecycleService:
         await self.accounts.revoke(linked.provider_account_id, registration.provider, now=self._now())
         return OAuthRouteStatus(detail="Revoked.", provider_account_id=linked.provider_account_id)
 
-    async def logout(self, *, provider: str, account_id: str, request: Request[Any, Any, Any]) -> OAuthLogoutResult:
+    async def logout(self, *, provider: str, account_id: str, request: Request[Any, Any, Any]) -> OAuthLogout:
         """Complete local logout before returning an optional fixed RP redirect."""
         registration = self._registration(provider)
         await self.local.logout(account_id=account_id, request=request)
         if registration.end_session_endpoint is None:
-            return OAuthLogoutResult()
+            return OAuthLogout()
         parameters: dict[str, str] = {"post_logout_redirect_uri": cast("str", registration.post_logout_redirect_uri)}
         try:
             linked = await self.accounts.store.resolve_provider_account(account_id, provider)
@@ -643,7 +643,7 @@ class OAuthLifecycleService:
         if stored is not None and stored.tokens.id_token is not None:
             parameters["id_token_hint"] = stored.tokens.id_token.get_secret_value()
         separator = "&" if "?" in registration.end_session_endpoint else "?"
-        return OAuthLogoutResult(redirect_url=f"{registration.end_session_endpoint}{separator}{urlencode(parameters)}")
+        return OAuthLogout(redirect_url=f"{registration.end_session_endpoint}{separator}{urlencode(parameters)}")
 
     def _registration(self, provider: str) -> OAuthProviderRegistration:
         registration = self._registrations.get(provider)

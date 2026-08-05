@@ -20,7 +20,7 @@ from litestar_security.accounts import (
     LoginMethod,
     ProtectedSecret,
     RecoveryCodePepper,
-    RevokeLoginMethodResult,
+    RevokeLoginMethodOutcome,
     RevokeLoginMethodStatus,
     SecurityEvent,
 )
@@ -55,9 +55,9 @@ class _MFAStore(InMemoryMFAStore):
 
     async def revoke_login_method(
         self, _account_id: str, _method_id: str, *, require_remaining: bool = True, event: SecurityEvent
-    ) -> RevokeLoginMethodResult:
+    ) -> RevokeLoginMethodOutcome:
         del require_remaining, event
-        return RevokeLoginMethodResult(RevokeLoginMethodStatus.NOT_FOUND)
+        return RevokeLoginMethodOutcome(RevokeLoginMethodStatus.NOT_FOUND)
 
 
 def _mfa_config(*, require_at_login: bool) -> MFAConfig:

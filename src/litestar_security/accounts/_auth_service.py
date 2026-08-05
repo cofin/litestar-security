@@ -19,12 +19,12 @@ from litestar_security.accounts._internal import aware_utc_time
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._mfa_login import MFALoginChallenge, MFALoginService, MFARequired
 from litestar_security.accounts._operations import LOGIN_MFA
-from litestar_security.accounts._passwords import PasswordPolicyResult
+from litestar_security.accounts._passwords import PasswordPolicyDecision
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
     LifecycleRejected,
     LocalAccountRecord,
-    PasswordChangeResult,
+    PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordReauthenticationProof,
 )
@@ -415,7 +415,13 @@ class LocalAuthService(Generic[UserT]):
 
     async def change_session_password(  # noqa: PLR0911 - preserve explicit sanitized outcomes
         self, request: Request[Any, Any, Any], account_id: str, data: LocalPasswordChange
-    ) -> PasswordChangeResult | PasswordPolicyResult | InvalidCredentials | LifecycleRejected | VerificationUnavailable:
+    ) -> (
+        PasswordChangeOutcome
+        | PasswordPolicyDecision
+        | InvalidCredentials
+        | LifecycleRejected
+        | VerificationUnavailable
+    ):
         """Change a password and atomically prepare the current session rebind.
 
         Args:
@@ -436,7 +442,7 @@ class LocalAuthService(Generic[UserT]):
             return proof
         if data.compromise:
             result = await self.password_change.change(account_id, data.password, proof=proof, compromise=True)
-            if isinstance(result, PasswordChangeResult) and result.status is PasswordChangeStatus.CHANGED:
+            if isinstance(result, PasswordChangeOutcome) and result.status is PasswordChangeStatus.CHANGED:
                 await session_auth.logout(request)
             return result
         authentication = session_auth.current_authentication(request)
@@ -459,7 +465,7 @@ class LocalAuthService(Generic[UserT]):
             replacement_session=plan.command,
         )
         if (
-            isinstance(result, PasswordChangeResult)
+            isinstance(result, PasswordChangeOutcome)
             and result.status is PasswordChangeStatus.CHANGED
             and result.security_epoch is not None
         ):
@@ -468,7 +474,13 @@ class LocalAuthService(Generic[UserT]):
 
     async def change_token_password(
         self, account_id: str, data: LocalPasswordChange
-    ) -> PasswordChangeResult | PasswordPolicyResult | InvalidCredentials | LifecycleRejected | VerificationUnavailable:
+    ) -> (
+        PasswordChangeOutcome
+        | PasswordPolicyDecision
+        | InvalidCredentials
+        | LifecycleRejected
+        | VerificationUnavailable
+    ):
         """Change a bearer-authenticated password and revoke local transports.
 
         Args:

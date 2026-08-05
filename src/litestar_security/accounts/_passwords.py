@@ -30,8 +30,8 @@ __all__ = (
     "PasswordHasher",
     "PasswordHashingUnavailableError",
     "PasswordPolicy",
-    "PasswordPolicyResult",
-    "PasswordVerificationResult",
+    "PasswordPolicyDecision",
+    "PasswordVerificationOutcome",
 )
 
 UserT = TypeVar("UserT")
@@ -51,7 +51,7 @@ _ARGON2_VERSION = 19
 
 
 @dataclass(frozen=True, slots=True)
-class PasswordPolicyResult:
+class PasswordPolicyDecision:
     """Secret-free immutable password-policy decision."""
 
     violations: frozenset[PasswordPolicyViolation] = frozenset()
@@ -93,7 +93,7 @@ class PasswordPolicy:
             msg = "Password policy compromised-password predicate must be callable"
             raise ImproperlyConfiguredException(detail=msg)
 
-    def check(self, password: str, *, normalized_identifier: str | None = None) -> PasswordPolicyResult:
+    def check(self, password: str, *, normalized_identifier: str | None = None) -> PasswordPolicyDecision:
         """Evaluate one candidate without retaining or rendering it.
 
         Args:
@@ -105,7 +105,7 @@ class PasswordPolicy:
             Violation names never echo the candidate back.
         """
         if password.__class__ is not str:
-            return PasswordPolicyResult(frozenset({PasswordPolicyViolation.INVALID_TEXT}))
+            return PasswordPolicyDecision(frozenset({PasswordPolicyViolation.INVALID_TEXT}))
         violations = _password_shape_violations(password, self)
         if normalized_identifier is not None:
             try:
@@ -122,11 +122,11 @@ class PasswordPolicy:
                 raise ImproperlyConfiguredException(detail=msg)
             if compromised_value:
                 violations.add(PasswordPolicyViolation.COMPROMISED)
-        return PasswordPolicyResult(frozenset(violations))
+        return PasswordPolicyDecision(frozenset(violations))
 
 
 @dataclass(frozen=True, slots=True)
-class PasswordVerificationResult:
+class PasswordVerificationOutcome:
     """Sanitized verification decision with an optional secret rehash value."""
 
     status: PasswordVerificationStatus
@@ -167,7 +167,7 @@ class PasswordHasher(Protocol):
         """
         ...  # pragma: no cover
 
-    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationResult:
+    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationOutcome:
         """Verify one password with constant work for absent credentials.
 
         Spend the same work on a malformed or absent hash as on a real one, so
@@ -281,7 +281,7 @@ class Argon2PasswordHasher:
         password_bytes = _password_bytes(password)
         return await self._hash_bytes(password_bytes)
 
-    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationResult:
+    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationOutcome:
         """Verify with equal Argon2 work for absent, mismatched, and malformed hashes.
 
         Args:
@@ -293,22 +293,22 @@ class Argon2PasswordHasher:
             matched and the stored parameters are weaker than the current ones.
         """
         password_input = _password_verification_input(password)
-        if isinstance(password_input, PasswordVerificationResult):
+        if isinstance(password_input, PasswordVerificationOutcome):
             return password_input
         password_bytes = password_input
         candidate_hash = self.dummy_hash if encoded_hash is None else encoded_hash
         parameters = _safe_argon2_parameters(candidate_hash, self.worker_limits)
         if parameters is None:
             await self._verify_dummy(password_bytes)
-            return PasswordVerificationResult(PasswordVerificationStatus.MALFORMED)
+            return PasswordVerificationOutcome(PasswordVerificationStatus.MALFORMED)
         matched = await self._match_candidate(candidate_hash, password_bytes)
-        if isinstance(matched, PasswordVerificationResult):
+        if isinstance(matched, PasswordVerificationOutcome):
             return matched
         if encoded_hash is None or not matched:
-            return PasswordVerificationResult(PasswordVerificationStatus.INVALID)
+            return PasswordVerificationOutcome(PasswordVerificationStatus.INVALID)
         needs_rehash = not _parameters_match_hasher(parameters, self)
         replacement = await self._hash_bytes(password_bytes) if needs_rehash else None
-        return PasswordVerificationResult(PasswordVerificationStatus.VERIFIED, replacement_hash=replacement)
+        return PasswordVerificationOutcome(PasswordVerificationStatus.VERIFIED, replacement_hash=replacement)
 
     async def _hash_bytes(self, password: bytes) -> str:
         try:
@@ -316,7 +316,7 @@ class Argon2PasswordHasher:
         except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
             raise PasswordHashingUnavailableError from None
 
-    async def _match_candidate(self, candidate_hash: str, password: bytes) -> bool | PasswordVerificationResult:
+    async def _match_candidate(self, candidate_hash: str, password: bytes) -> bool | PasswordVerificationOutcome:
         try:
             return await self._verify_once(candidate_hash, password)
         except VerifyMismatchError:
@@ -325,7 +325,7 @@ class Argon2PasswordHasher:
             if candidate_hash == self.dummy_hash:
                 raise PasswordHashingUnavailableError from None
             await self._verify_dummy(password)
-            return PasswordVerificationResult(PasswordVerificationStatus.MALFORMED)
+            return PasswordVerificationOutcome(PasswordVerificationStatus.MALFORMED)
         except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
             raise PasswordHashingUnavailableError from None
 
@@ -382,13 +382,13 @@ def _password_bytes(password: str) -> bytes:
     return value
 
 
-def _password_verification_input(password: str) -> bytes | PasswordVerificationResult:
+def _password_verification_input(password: str) -> bytes | PasswordVerificationOutcome:
     try:
         return _password_bytes(password)
     except _PasswordTooLongError:
-        return PasswordVerificationResult(PasswordVerificationStatus.TOO_LONG)
+        return PasswordVerificationOutcome(PasswordVerificationStatus.TOO_LONG)
     except ValueError:
-        return PasswordVerificationResult(PasswordVerificationStatus.INVALID)
+        return PasswordVerificationOutcome(PasswordVerificationStatus.INVALID)
 
 
 async def _run_password_worker(operation: "Callable[[], UserT]", workers: WorkerLimits) -> UserT:

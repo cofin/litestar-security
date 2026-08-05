@@ -13,8 +13,8 @@ from litestar.stores.memory import MemoryStore
 import litestar_security.testing as testing_module
 from litestar_security.accounts import (
     AESGCMSecretProtector,
-    AssertionRecordResult,
-    ConsumeResult,
+    AssertionRecordStatus,
+    ConsumeOutcome,
     ConsumeStatus,
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
@@ -24,12 +24,11 @@ from litestar_security.accounts import (
     MFALoginChallenge,
     NotificationCommand,
     PasskeyCredential,
-    PasswordChangeResult,
+    PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordCredentialState,
-    PasswordResetResult,
+    PasswordResetOutcome,
     PasswordResetStatus,
-    PrepareRefreshResult,
     ProtectedSecret,
     PurposeTokenDelivery,
     RateLimitAttempt,
@@ -37,18 +36,19 @@ from litestar_security.accounts import (
     RateLimiter,
     RateLimitPolicy,
     RefreshFamilyContext,
+    RefreshPreflightOutcome,
     RefreshReceiptReplay,
+    RefreshRotationOutcome,
     RefreshRotationStatus,
     RefreshTokenFamilyStore,
     RefreshTokenProof,
     RegistrationCommand,
-    RegistrationResult,
+    RegistrationOutcome,
     RegistrationStatus,
     RegistrationStore,
-    RevokeLoginMethodResult,
+    RevokeLoginMethodOutcome,
     RevokeLoginMethodStatus,
     RotateRefreshCommand,
-    RotateRefreshResult,
     SecretProtectorKey,
     SecurityEvent,
     SessionRecord,
@@ -71,7 +71,7 @@ from litestar_security.providers.oauth import (
     ProtectedOAuthSecret,
     ProviderTokenSet,
     SecretStr,
-    UnlinkResult,
+    UnlinkOutcome,
     UnlinkStatus,
 )
 from litestar_security.testing import (
@@ -829,7 +829,7 @@ class _BrokenPasskeyStore(testing_module.InMemoryPasskeyStore):
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordResult:
+    ) -> AssertionRecordStatus:
         result = await super().record_assertion(
             credential_id,
             expected_version=expected_version,
@@ -859,7 +859,7 @@ class _BrokenPasskeyCloneResultStore(testing_module.InMemoryPasskeyStore):
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordResult:
+    ) -> AssertionRecordStatus:
         result = await super().record_assertion(
             credential_id,
             expected_version=expected_version,
@@ -869,7 +869,7 @@ class _BrokenPasskeyCloneResultStore(testing_module.InMemoryPasskeyStore):
             clone_risk=clone_risk,
             now=now,
         )
-        return AssertionRecordResult.RECORDED if clone_risk else result
+        return AssertionRecordStatus.RECORDED if clone_risk else result
 
 
 class _BrokenPasskeyCloneStateStore(testing_module.InMemoryPasskeyStore):
@@ -885,7 +885,7 @@ class _BrokenPasskeyCloneStateStore(testing_module.InMemoryPasskeyStore):
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordResult:
+    ) -> AssertionRecordStatus:
         result = await super().record_assertion(
             credential_id,
             expected_version=expected_version,
@@ -923,7 +923,7 @@ class _NonAtomicPasskeyResultStore(testing_module.InMemoryPasskeyStore):
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordResult:
+    ) -> AssertionRecordStatus:
         result = await super().record_assertion(
             credential_id,
             expected_version=expected_version,
@@ -933,8 +933,8 @@ class _NonAtomicPasskeyResultStore(testing_module.InMemoryPasskeyStore):
             clone_risk=clone_risk,
             now=now,
         )
-        if not clone_risk and result is AssertionRecordResult.CONFLICT:
-            return AssertionRecordResult.RECORDED
+        if not clone_risk and result is AssertionRecordStatus.CONFLICT:
+            return AssertionRecordStatus.RECORDED
         return result
 
 
@@ -943,12 +943,12 @@ class _BrokenOAuthAccountStore(MemoryOAuthAccountStore):
 
     async def unlink_identity(
         self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
-    ) -> UnlinkResult:
+    ) -> UnlinkOutcome:
         result = await super().unlink_identity(
             account_id, provider_account_id, require_remaining=require_remaining, now=now
         )
         if result.status is UnlinkStatus.FINAL_METHOD:
-            return UnlinkResult(UnlinkStatus.UNLINKED, provider_account_id)
+            return UnlinkOutcome(UnlinkStatus.UNLINKED, provider_account_id)
         return result
 
 
@@ -957,11 +957,11 @@ class _BrokenOAuthOwnershipStore(MemoryOAuthAccountStore):
 
     async def unlink_identity(
         self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
-    ) -> UnlinkResult:
+    ) -> UnlinkOutcome:
         result = await super().unlink_identity(
             account_id, provider_account_id, require_remaining=require_remaining, now=now
         )
-        return UnlinkResult(UnlinkStatus.UNLINKED, provider_account_id) if account_id == "other-account" else result
+        return UnlinkOutcome(UnlinkStatus.UNLINKED, provider_account_id) if account_id == "other-account" else result
 
 
 class _BrokenOAuthPreservationStore(MemoryOAuthAccountStore):
@@ -969,7 +969,7 @@ class _BrokenOAuthPreservationStore(MemoryOAuthAccountStore):
 
     async def unlink_identity(
         self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
-    ) -> UnlinkResult:
+    ) -> UnlinkOutcome:
         result = await super().unlink_identity(
             account_id, provider_account_id, require_remaining=require_remaining, now=now
         )
@@ -984,12 +984,12 @@ class _BrokenOAuthAtomicUnlinkStore(MemoryOAuthAccountStore):
 
     async def unlink_identity(
         self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
-    ) -> UnlinkResult:
+    ) -> UnlinkOutcome:
         result = await super().unlink_identity(
             account_id, provider_account_id, require_remaining=require_remaining, now=now
         )
         if account_id == "conformance-account" and result.status is UnlinkStatus.NOT_FOUND:
-            return UnlinkResult(UnlinkStatus.UNLINKED, provider_account_id)
+            return UnlinkOutcome(UnlinkStatus.UNLINKED, provider_account_id)
         return result
 
 
@@ -1089,7 +1089,7 @@ class _BrokenAccountStore:
         verification: PurposeTokenDelivery | None,
         now: datetime,
         event: SecurityEvent,
-    ) -> RegistrationResult[object]:
+    ) -> RegistrationOutcome[object]:
         if self.registration_partial_raises and command.normalized_identifier == "partial-write@example.com":
             message = "injected partial registration failure"
             raise RuntimeError(message)
@@ -1098,7 +1098,7 @@ class _BrokenAccountStore:
         )
         if not self.register_is_atomic and result.status is RegistrationStatus.DUPLICATE:
             existing = await self.delegate.find_for_login(command.normalized_identifier)
-            return RegistrationResult(RegistrationStatus.CREATED, existing)
+            return RegistrationOutcome(RegistrationStatus.CREATED, existing)
         if not self.register_consumes_invitation and result.status is RegistrationStatus.DUPLICATE:
             await self.delegate.register(
                 RegistrationCommand(normalized_identifier="partial-write@example.com"),
@@ -1120,13 +1120,13 @@ class _BrokenAccountStore:
 
     async def replace_password_and_bump_epoch(
         self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
-    ) -> PasswordChangeResult:
+    ) -> PasswordChangeOutcome:
         self._bump_attempts += 1
         result = await self.delegate.replace_password_and_bump_epoch(
             account_id, password_hash, expected_epoch=expected_epoch, event=event
         )
         if not self.bump_epoch_is_atomic and result.status is PasswordChangeStatus.CONFLICT:
-            return PasswordChangeResult(PasswordChangeStatus.CHANGED, expected_epoch + 1)
+            return PasswordChangeOutcome(PasswordChangeStatus.CHANGED, expected_epoch + 1)
         return result
 
     async def register_login_method(self, account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
@@ -1134,22 +1134,22 @@ class _BrokenAccountStore:
 
     async def consume_and_verify(
         self, token_id: str, digest: bytes, *, now: datetime, event: SecurityEvent
-    ) -> ConsumeResult:
+    ) -> ConsumeOutcome:
         result = await self.delegate.consume_and_verify(token_id, digest, now=now, event=event)
         if result.status is ConsumeStatus.CONSUMED:
             self._consumed_verifications.add(token_id)
         elif result.status is ConsumeStatus.INVALID:
             self._invalid_verifications.add(token_id)
         if not self.verification_rejects_expired and result.status is ConsumeStatus.EXPIRED:
-            return ConsumeResult(ConsumeStatus.CONSUMED, "expired-account", 1)
+            return ConsumeOutcome(ConsumeStatus.CONSUMED, "expired-account", 1)
         if (
             not self.verification_burns_attempts
             and result.status is ConsumeStatus.USED
             and token_id in self._invalid_verifications
         ):
-            return ConsumeResult(ConsumeStatus.CONSUMED, "burned-account", 1)
+            return ConsumeOutcome(ConsumeStatus.CONSUMED, "burned-account", 1)
         if not self.verification_is_single_use and token_id in self._consumed_verifications:
-            return ConsumeResult(ConsumeStatus.CONSUMED, "replayed-account", 1)
+            return ConsumeOutcome(ConsumeStatus.CONSUMED, "replayed-account", 1)
         return result
 
     async def issue(self, issue: TokenIssue, notification: NotificationCommand, *, event: SecurityEvent) -> None:
@@ -1160,30 +1160,30 @@ class _BrokenAccountStore:
 
     async def consume_and_reset(
         self, token_id: str, digest: bytes, new_password_hash: str, *, now: datetime, event: SecurityEvent
-    ) -> PasswordResetResult:
+    ) -> PasswordResetOutcome:
         result = await self.delegate.consume_and_reset(token_id, digest, new_password_hash, now=now, event=event)
         if result.status is PasswordResetStatus.INVALID:
             self._invalid_recoveries.add(token_id)
         if not self.recovery_rejects_expired and result.status is PasswordResetStatus.EXPIRED:
-            return PasswordResetResult(PasswordResetStatus.RESET, "expired-account", 2)
+            return PasswordResetOutcome(PasswordResetStatus.RESET, "expired-account", 2)
         if (
             not self.recovery_burns_attempts
             and result.status is PasswordResetStatus.USED
             and token_id in self._invalid_recoveries
         ):
-            return PasswordResetResult(PasswordResetStatus.RESET, "burned-account", 2)
+            return PasswordResetOutcome(PasswordResetStatus.RESET, "burned-account", 2)
         if not self.recovery_checks_epoch and result.status is PasswordResetStatus.CONFLICT:
-            return PasswordResetResult(PasswordResetStatus.RESET, "stale-account", 2)
+            return PasswordResetOutcome(PasswordResetStatus.RESET, "stale-account", 2)
         return result
 
     async def revoke_login_method(
         self, account_id: str, method_id: str, *, require_remaining: bool = True, event: SecurityEvent
-    ) -> RevokeLoginMethodResult:
+    ) -> RevokeLoginMethodOutcome:
         result = await self.delegate.revoke_login_method(
             account_id, method_id, require_remaining=require_remaining, event=event
         )
         if not self.preserves_final_method and result.status is RevokeLoginMethodStatus.FINAL_METHOD:
-            return RevokeLoginMethodResult(RevokeLoginMethodStatus.REVOKED)
+            return RevokeLoginMethodOutcome(RevokeLoginMethodStatus.REVOKED)
         return result
 
 
@@ -1229,7 +1229,7 @@ class _YieldingRegistrationStore(_BrokenAccountStore):
         verification: PurposeTokenDelivery | None,
         now: datetime,
         event: SecurityEvent,
-    ) -> RegistrationResult[object]:
+    ) -> RegistrationOutcome[object]:
         if command.normalized_identifier != "atomic-registration@example.com":
             return await super().register(
                 command,
@@ -1240,7 +1240,7 @@ class _YieldingRegistrationStore(_BrokenAccountStore):
                 event=event,
             )
         if await self.delegate.find_for_login(command.normalized_identifier) is not None:
-            return RegistrationResult(RegistrationStatus.DUPLICATE)
+            return RegistrationOutcome(RegistrationStatus.DUPLICATE)
         self._started += 1
         contender = self._started
         if contender == 2:
@@ -1268,14 +1268,14 @@ class _YieldingEpochBumpStore(_BrokenAccountStore):
 
     async def replace_password_and_bump_epoch(
         self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
-    ) -> PasswordChangeResult:
+    ) -> PasswordChangeOutcome:
         if not password_hash.startswith("conformance-epoch-"):
             return await super().replace_password_and_bump_epoch(
                 account_id, password_hash, expected_epoch=expected_epoch, event=event
             )
         snapshot = await self.delegate.current_epoch(account_id)
         if snapshot != expected_epoch:
-            return PasswordChangeResult(PasswordChangeStatus.CONFLICT)
+            return PasswordChangeOutcome(PasswordChangeStatus.CONFLICT)
         self._started += 1
         if self._started == 2:
             self._release.set()
@@ -1283,7 +1283,7 @@ class _YieldingEpochBumpStore(_BrokenAccountStore):
         async with self._mutation_lock:
             current = await self.delegate.current_epoch(account_id)
             if current is None:
-                return PasswordChangeResult(PasswordChangeStatus.NOT_FOUND)
+                return PasswordChangeOutcome(PasswordChangeStatus.NOT_FOUND)
             return await self.delegate.replace_password_and_bump_epoch(
                 account_id, password_hash, expected_epoch=current, event=event
             )
@@ -1383,7 +1383,7 @@ class _RefreshRegistrationStore(RegistrationStore[object], RefreshTokenFamilySto
 
     async def replace_password_and_bump_epoch(
         self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
-    ) -> PasswordChangeResult:
+    ) -> PasswordChangeOutcome:
         """Advance the epoch used to invalidate a prepared refresh context."""
         ...
 
@@ -1421,7 +1421,7 @@ class _BrokenRefreshStore:
         verification: PurposeTokenDelivery | None,
         now: datetime,
         event: SecurityEvent,
-    ) -> RegistrationResult[object]:
+    ) -> RegistrationOutcome[object]:
         return await self.delegate.register(
             command, password_hash, invitation_digest=invitation_digest, verification=verification, now=now, event=event
         )
@@ -1444,14 +1444,14 @@ class _BrokenRefreshStore:
 
     async def replace_password_and_bump_epoch(
         self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
-    ) -> PasswordChangeResult:
+    ) -> PasswordChangeOutcome:
         return await self.delegate.replace_password_and_bump_epoch(
             account_id, password_hash, expected_epoch=expected_epoch, event=event
         )
 
     async def prepare_rotation(  # noqa: PLR0911 - each selected failure remains explicit
         self, proof: RefreshTokenProof, idempotency_digest: bytes | None, *, now: datetime, event: SecurityEvent
-    ) -> RefreshFamilyContext | RefreshReceiptReplay | PrepareRefreshResult:
+    ) -> RefreshFamilyContext | RefreshReceiptReplay | RefreshPreflightOutcome:
         rotation = self._rotations.get(proof.token_id)
         if rotation is not None:
             if (
@@ -1459,15 +1459,15 @@ class _BrokenRefreshStore:
                 and rotation.token_digest == bytes((8,)) * 32
                 and idempotency_digest == rotation.idempotency_digest
             ):
-                return PrepareRefreshResult(RefreshRotationStatus.INVALID)
+                return RefreshPreflightOutcome(RefreshRotationStatus.INVALID)
             if not self.replays_revoke and idempotency_digest != rotation.idempotency_digest:
-                return PrepareRefreshResult(RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True)
+                return RefreshPreflightOutcome(RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True)
             if (
                 not self.replay_revocation_is_durable
                 and rotation.token_digest == bytes((8,)) * 32
                 and idempotency_digest != rotation.idempotency_digest
             ):
-                return PrepareRefreshResult(RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True)
+                return RefreshPreflightOutcome(RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True)
         result = await self.delegate.prepare_rotation(proof, idempotency_digest, now=now, event=event)
         command = self._commands.get(proof.token_id)
         if (
@@ -1481,7 +1481,7 @@ class _BrokenRefreshStore:
             command is not None
             and self.accepts_shared_expiry
             and command.token_digest == bytes((15,)) * 32
-            and isinstance(result, PrepareRefreshResult)
+            and isinstance(result, RefreshPreflightOutcome)
             and result.status is RefreshRotationStatus.EXPIRED
         ):
             return RefreshFamilyContext(
@@ -1494,7 +1494,7 @@ class _BrokenRefreshStore:
             )
         if (
             not self.rejects_expiry
-            and isinstance(result, PrepareRefreshResult)
+            and isinstance(result, RefreshPreflightOutcome)
             and result.status is RefreshRotationStatus.EXPIRED
         ):
             if command is None:  # pragma: no cover - controlled test setup always records the command
@@ -1511,12 +1511,12 @@ class _BrokenRefreshStore:
 
     async def rotate(
         self, command: RotateRefreshCommand, *, now: datetime, event: SecurityEvent
-    ) -> RotateRefreshResult:
+    ) -> RefreshRotationOutcome:
         if not self.rotate_commits and command.successor_digest == bytes((7,)) * 32:
-            return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+            return RefreshRotationOutcome(RefreshRotationStatus.ROTATED, command.sealed_receipt)
         source = self._commands.get(command.token_id)
         if not self.rotate_rejects_expiry and source is not None and now >= source.token_expires_at:
-            return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+            return RefreshRotationOutcome(RefreshRotationStatus.ROTATED, command.sealed_receipt)
         result = await self.delegate.rotate(command, now=now, event=event)
         if result.status is RefreshRotationStatus.ROTATED:
             self._rotations[command.token_id] = command
@@ -1527,13 +1527,13 @@ class _BrokenRefreshStore:
         ):
             return replace(result, sealed_receipt=b"corrupt")
         if not self.rotate_is_atomic and result.status is not RefreshRotationStatus.ROTATED:
-            return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+            return RefreshRotationOutcome(RefreshRotationStatus.ROTATED, command.sealed_receipt)
         if (
             not self.rotate_revalidates_epoch
             and command.token_digest == bytes((13,)) * 32
             and result.status is not RefreshRotationStatus.ROTATED
         ):
-            return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+            return RefreshRotationOutcome(RefreshRotationStatus.ROTATED, command.sealed_receipt)
         return result
 
     async def revoke_family(self, family_id: str, *, event: SecurityEvent) -> bool:

@@ -5831,7 +5831,7 @@ async def test_argon2_hasher_uses_locked_id_parameters_and_detects_rehash(
         password_hasher.salt_len,
         password_hasher.hash_len,
     ) == (19_456, 2, 1, 16, 32)
-    assert current == accounts_module.PasswordVerificationResult(
+    assert current == accounts_module.PasswordVerificationOutcome(
         status=accounts_module.PasswordVerificationStatus.VERIFIED
     )
     assert legacy_result.verified
@@ -6068,7 +6068,7 @@ async def test_argon2_hasher_bounds_concurrency_and_maps_timeout(monkeypatch: py
         return True
 
     monkeypatch.setattr(Argon2Engine, "verify", slow_verify)
-    results: list[accounts_module.PasswordVerificationResult] = []
+    results: list[accounts_module.PasswordVerificationOutcome] = []
 
     async def verify() -> None:
         results.append(await hasher.verify(None, "constant-work password"))
@@ -6126,7 +6126,7 @@ class _PasswordStore:
         security_epoch: int = 1,
         active: bool = True,
         verified: bool = True,
-        bump_result: accounts_module.PasswordChangeResult | None = None,
+        bump_result: accounts_module.PasswordChangeOutcome | None = None,
     ) -> None:
         self.encoded_hash = encoded_hash
         self.fail_read = fail_read
@@ -6162,7 +6162,7 @@ class _PasswordStore:
 
     async def replace_password_and_bump_epoch(
         self, account_id: str, password_hash: str, *, expected_epoch: int, event: accounts_module.SecurityEvent
-    ) -> accounts_module.PasswordChangeResult:
+    ) -> accounts_module.PasswordChangeOutcome:
         self.bump_calls.append((account_id, password_hash, expected_epoch, event))
         if self.fail_bump:
             raise OSError
@@ -6170,12 +6170,12 @@ class _PasswordStore:
             return self.bump_result
         async with self._mutation_lock:
             if expected_epoch != self.security_epoch:
-                return accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CONFLICT)
+                return accounts_module.PasswordChangeOutcome(accounts_module.PasswordChangeStatus.CONFLICT)
             if expected_epoch == 9_223_372_036_854_775_807:
-                return accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.EPOCH_EXHAUSTED)
+                return accounts_module.PasswordChangeOutcome(accounts_module.PasswordChangeStatus.EPOCH_EXHAUSTED)
             self.encoded_hash = password_hash
             self.security_epoch += 1
-            return accounts_module.PasswordChangeResult(
+            return accounts_module.PasswordChangeOutcome(
                 accounts_module.PasswordChangeStatus.CHANGED, security_epoch=self.security_epoch
             )
 
@@ -6187,9 +6187,9 @@ class _PasswordStore:
 
 class _PasswordHasher:
     def __init__(
-        self, result: accounts_module.PasswordVerificationResult | None = None, *, unavailable: bool = False
+        self, result: accounts_module.PasswordVerificationOutcome | None = None, *, unavailable: bool = False
     ) -> None:
-        self.result = result or accounts_module.PasswordVerificationResult(
+        self.result = result or accounts_module.PasswordVerificationOutcome(
             accounts_module.PasswordVerificationStatus.INVALID
         )
         self.unavailable = unavailable
@@ -6202,7 +6202,7 @@ class _PasswordHasher:
             raise accounts_module.PasswordHashingUnavailableError
         return f"hashed:{password}"
 
-    async def verify(self, encoded_hash: str | None, password: str) -> accounts_module.PasswordVerificationResult:
+    async def verify(self, encoded_hash: str | None, password: str) -> accounts_module.PasswordVerificationOutcome:
         self.calls.append((encoded_hash, password))
         if self.unavailable:
             raise accounts_module.PasswordHashingUnavailableError
@@ -6249,7 +6249,7 @@ async def test_password_reauthentication_collapses_credential_failures_without_r
     status: accounts_module.PasswordVerificationStatus, encoded_hash: str | None
 ) -> None:
     store = _PasswordStore(encoded_hash)
-    hasher = _PasswordHasher(accounts_module.PasswordVerificationResult(status))
+    hasher = _PasswordHasher(accounts_module.PasswordVerificationOutcome(status))
     service = accounts_module.PasswordReauthenticationService(accounts=store, hasher=hasher)
 
     outcome = await service.verify("account-1", "presented secret", now=_JWT_NOW)
@@ -6274,7 +6274,7 @@ async def test_password_reauthentication_rejects_inactive_or_unverified_accounts
 ) -> None:
     store = _PasswordStore(active=active, verified=verified)
     hasher = _PasswordHasher(
-        accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.VERIFIED)
+        accounts_module.PasswordVerificationOutcome(accounts_module.PasswordVerificationStatus.VERIFIED)
     )
     service = accounts_module.PasswordReauthenticationService(accounts=store, hasher=hasher)
 
@@ -6292,7 +6292,7 @@ async def test_password_reauthentication_emits_sanitized_malformed_hash_event(
 ) -> None:
     store = _PasswordStore("malformed-secret-hash")
     hasher = _PasswordHasher(
-        accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.MALFORMED)
+        accounts_module.PasswordVerificationOutcome(accounts_module.PasswordVerificationStatus.MALFORMED)
     )
     events = _SecurityEvents(fail=sink_mode == "failure")
     event_options = {} if sink_mode == "default" else {"events": events}
@@ -6337,7 +6337,7 @@ async def test_password_reauthentication_locks_atomic_rehash_outcomes(
     store = _PasswordStore(replace_result=replace_result, fail_replace=fail_replace)
     replacement = "$argon2id$replacement-secret"
     hasher = _PasswordHasher(
-        accounts_module.PasswordVerificationResult(
+        accounts_module.PasswordVerificationOutcome(
             accounts_module.PasswordVerificationStatus.VERIFIED, replacement_hash=replacement
         )
     )
@@ -6377,7 +6377,7 @@ async def test_password_reauthentication_rejects_naive_time_as_unavailable(sourc
     service = accounts_module.PasswordReauthenticationService(
         accounts=_PasswordStore(),
         hasher=_PasswordHasher(
-            accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.VERIFIED)
+            accounts_module.PasswordVerificationOutcome(accounts_module.PasswordVerificationStatus.VERIFIED)
         ),
         clock=lambda: naive,
     )
@@ -6404,7 +6404,7 @@ async def test_password_reauthentication_uses_an_aware_default_clock() -> None:
     service = accounts_module.PasswordReauthenticationService(
         accounts=_PasswordStore(),
         hasher=_PasswordHasher(
-            accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.VERIFIED)
+            accounts_module.PasswordVerificationOutcome(accounts_module.PasswordVerificationStatus.VERIFIED)
         ),
     )
     before = datetime.now(timezone.utc)
@@ -6424,7 +6424,7 @@ async def test_password_reauthentication_logs_blank_event_ids_without_changing_d
     service = accounts_module.PasswordReauthenticationService(
         accounts=_PasswordStore("malformed-hash"),
         hasher=_PasswordHasher(
-            accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.MALFORMED)
+            accounts_module.PasswordVerificationOutcome(accounts_module.PasswordVerificationStatus.MALFORMED)
         ),
         events=_SecurityEvents(),
         event_ids=lambda: " ",
@@ -6441,7 +6441,7 @@ async def test_password_reauthentication_returns_fresh_evidence_and_rehashes_ato
     replacement = "$argon2id$replacement-secret"
     store = _PasswordStore()
     hasher = _PasswordHasher(
-        accounts_module.PasswordVerificationResult(
+        accounts_module.PasswordVerificationOutcome(
             accounts_module.PasswordVerificationStatus.VERIFIED, replacement_hash=replacement
         )
     )
@@ -6538,14 +6538,14 @@ class _CredentialCleanup:
     ) -> (
         accounts_module.RefreshFamilyContext
         | accounts_module.RefreshReceiptReplay
-        | accounts_module.PrepareRefreshResult
+        | accounts_module.RefreshPreflightOutcome
     ):
         del proof, idempotency_digest, now, event
-        return accounts_module.PrepareRefreshResult(accounts_module.RefreshRotationStatus.INVALID)
+        return accounts_module.RefreshPreflightOutcome(accounts_module.RefreshRotationStatus.INVALID)
 
     async def rotate(
         self, command: accounts_module.RotateRefreshCommand, *, now: datetime, event: accounts_module.SecurityEvent
-    ) -> accounts_module.RotateRefreshResult:
+    ) -> accounts_module.RefreshRotationOutcome:
         raise NotImplementedError
 
     async def revoke_family(self, family_id: str, *, event: accounts_module.SecurityEvent) -> bool:
@@ -6612,7 +6612,7 @@ async def test_password_change_requires_account_epoch_bound_recent_proof(
     outcome = await service.change("account-1", "correct horse battery staple", proof=proof, now=now)
 
     if accepted:
-        assert outcome == accounts_module.PasswordChangeResult(
+        assert outcome == accounts_module.PasswordChangeOutcome(
             accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2
         )
         assert len(store.bump_calls) == 1
@@ -6656,7 +6656,7 @@ def test_password_change_rejects_invalid_configuration(kwargs: dict[str, object]
         ("blank_current", accounts_module.LifecycleRejected),
         ("naive_expiry", accounts_module.LifecycleRejected),
         ("policy_failure", VerificationUnavailable),
-        ("policy_rejection", accounts_module.PasswordPolicyResult),
+        ("policy_rejection", accounts_module.PasswordPolicyDecision),
         ("hash_failure", VerificationUnavailable),
         ("store_failure", VerificationUnavailable),
         ("event_failure", VerificationUnavailable),
@@ -6670,7 +6670,7 @@ async def test_password_change_fails_closed_before_or_after_the_atomic_boundary(
     store = _PasswordStore(
         fail_bump=case == "store_failure",
         bump_result=(
-            accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=3)
+            accounts_module.PasswordChangeOutcome(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=3)
             if case == "wrong_epoch"
             else None
         ),
@@ -6745,7 +6745,7 @@ async def test_password_change_rebinds_only_current_session_at_new_epoch_and_rev
         now=_JWT_NOW + timedelta(seconds=1),
     )
 
-    assert outcome == accounts_module.PasswordChangeResult(
+    assert outcome == accounts_module.PasswordChangeOutcome(
         accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2
     )
     assert [(account_id, session_id) for account_id, session_id, _event in cleanup.other_revocations] == [
@@ -6784,7 +6784,7 @@ async def test_password_change_compromise_admin_and_bearer_paths_revoke_every_lo
             now=_JWT_NOW,
         )
 
-    assert outcome == accounts_module.PasswordChangeResult(
+    assert outcome == accounts_module.PasswordChangeOutcome(
         accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2
     )
     assert [account_id for account_id, _event in cleanup.session_revocations] == ["account-1"]
@@ -6811,7 +6811,7 @@ async def test_concurrent_password_changes_allow_exactly_one_epoch_compare_and_b
         task_group.start_soon(change)
         task_group.start_soon(change)
 
-    statuses = [cast("accounts_module.PasswordChangeResult", outcome).status for outcome in outcomes]
+    statuses = [cast("accounts_module.PasswordChangeOutcome", outcome).status for outcome in outcomes]
     assert statuses.count(accounts_module.PasswordChangeStatus.CHANGED) == 1
     assert statuses.count(accounts_module.PasswordChangeStatus.CONFLICT) == 1
     assert len(cleanup.session_revocations) == 1
@@ -6837,7 +6837,7 @@ async def test_password_change_never_wraps_security_epoch(
         "account-1", "correct horse battery staple", proof=_password_proof(security_epoch=epoch), now=_JWT_NOW
     )
 
-    assert isinstance(outcome, accounts_module.PasswordChangeResult)
+    assert isinstance(outcome, accounts_module.PasswordChangeOutcome)
     assert outcome.status is expected_status
     assert hasher.hash_calls == hash_calls
 
@@ -6863,7 +6863,7 @@ async def test_committed_password_change_survives_best_effort_cleanup_failure(
         now=_JWT_NOW,
     )
 
-    assert outcome == accounts_module.PasswordChangeResult(
+    assert outcome == accounts_module.PasswordChangeOutcome(
         accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2
     )
     assert "cleanup failed" in caplog.text or "rebind failed" in caplog.text
@@ -6947,7 +6947,7 @@ class _LifecycleStore:
         verification: accounts_module.PurposeTokenDelivery | None,
         now: datetime,
         event: accounts_module.SecurityEvent,
-    ) -> "accounts_module.RegistrationResult[object]":
+    ) -> "accounts_module.RegistrationOutcome[object]":
         self.registrations.append((command, password_hash, invitation_digest, verification, now, event))
         if self.fail:
             raise OSError
@@ -6963,7 +6963,7 @@ class _LifecycleStore:
             if self.registration_status is accounts_module.RegistrationStatus.CREATED
             else None
         )
-        return accounts_module.RegistrationResult(self.registration_status, account)
+        return accounts_module.RegistrationOutcome(self.registration_status, account)
 
     async def issue(
         self,
@@ -6983,13 +6983,13 @@ class _LifecycleStore:
 
     async def consume_and_verify(
         self, token_id: str, digest: bytes, *, now: datetime, event: accounts_module.SecurityEvent
-    ) -> accounts_module.ConsumeResult:
+    ) -> accounts_module.ConsumeOutcome:
         self.consumptions.append((token_id, digest, now, event))
         if self.fail:
             raise OSError
         if self.consume_status is accounts_module.ConsumeStatus.CONSUMED:
-            return accounts_module.ConsumeResult(self.consume_status, "account-1", 1)
-        return accounts_module.ConsumeResult(self.consume_status)
+            return accounts_module.ConsumeOutcome(self.consume_status, "account-1", 1)
+        return accounts_module.ConsumeOutcome(self.consume_status)
 
     async def consume_and_reset(
         self,
@@ -6999,13 +6999,13 @@ class _LifecycleStore:
         *,
         now: datetime,
         event: accounts_module.SecurityEvent,
-    ) -> accounts_module.PasswordResetResult:
+    ) -> accounts_module.PasswordResetOutcome:
         self.resets.append((token_id, digest, new_password_hash, now, event))
         if self.fail:
             raise OSError
         if self.reset_status is accounts_module.PasswordResetStatus.RESET:
-            return accounts_module.PasswordResetResult(self.reset_status, "account-1", 2)
-        return accounts_module.PasswordResetResult(self.reset_status)
+            return accounts_module.PasswordResetOutcome(self.reset_status, "account-1", 2)
+        return accounts_module.PasswordResetOutcome(self.reset_status)
 
 
 def test_notification_destination_rejects_control_characters() -> None:
@@ -7178,7 +7178,7 @@ async def test_registration_service_returns_password_policy_without_hash_or_stor
 
     outcome = await service.register("user@example.com", "short", now=_JWT_NOW)
 
-    assert outcome == accounts_module.PasswordPolicyResult(
+    assert outcome == accounts_module.PasswordPolicyDecision(
         frozenset({accounts_module.PasswordPolicyViolation.TOO_SHORT})
     )
     assert hasher.hash_calls == []
@@ -7247,7 +7247,7 @@ async def test_verification_consume_delegates_replay_and_expiry_atomically(
 
     outcome = await service.consume(issued.notification.token, now=_JWT_NOW)
 
-    assert isinstance(outcome, accounts_module.ConsumeResult)
+    assert isinstance(outcome, accounts_module.ConsumeOutcome)
     assert outcome.status is status
     assert len(store.consumptions) == 1
     token_id, digest, now, event = store.consumptions[0]
@@ -7264,7 +7264,7 @@ async def test_verification_consume_rejects_purpose_swap_without_store_access() 
 
     outcome = await service.consume(recovery.notification.token, now=_JWT_NOW)
 
-    assert outcome == accounts_module.ConsumeResult(accounts_module.ConsumeStatus.INVALID)
+    assert outcome == accounts_module.ConsumeOutcome(accounts_module.ConsumeStatus.INVALID)
     assert store.consumptions == []
 
 
@@ -7370,7 +7370,7 @@ async def test_recovery_reset_delegates_replay_expiry_and_epoch_mutation_atomica
         issued.notification.token, "correct horse battery staple", now=_JWT_NOW + timedelta(minutes=1)
     )
 
-    assert isinstance(outcome, accounts_module.PasswordResetResult)
+    assert isinstance(outcome, accounts_module.PasswordResetOutcome)
     assert outcome.status is status
     assert hasher.hash_calls == ["correct horse battery staple"]
     assert len(store.resets) == 1
@@ -7409,7 +7409,7 @@ async def test_recovery_reset_cleans_each_configured_transport_independently(
         issued.notification.token, "correct horse battery staple", now=_JWT_NOW + timedelta(minutes=1)
     )
 
-    assert outcome == accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.RESET, "account-1", 2)
+    assert outcome == accounts_module.PasswordResetOutcome(accounts_module.PasswordResetStatus.RESET, "account-1", 2)
     assert len(cleanup.session_revocations) == (1 if transport == "sessions" else 0)
     assert len(cleanup.refresh_revocations) == (0 if transport == "sessions" else 1)
     if transport == "refresh_failure":
@@ -7440,11 +7440,11 @@ async def test_recovery_reset_rejects_invalid_inputs_without_splitting_atomic_co
     outcome = await service.reset(issued.notification.token, password, now=_JWT_NOW)
 
     if case == "purpose_swap":
-        assert outcome == accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.INVALID)
+        assert outcome == accounts_module.PasswordResetOutcome(accounts_module.PasswordResetStatus.INVALID)
         assert hasher.hash_calls == []
         assert store.resets == []
     elif case == "policy":
-        assert outcome == accounts_module.PasswordPolicyResult(
+        assert outcome == accounts_module.PasswordPolicyDecision(
             frozenset({accounts_module.PasswordPolicyViolation.TOO_SHORT})
         )
         assert hasher.hash_calls == []
@@ -8546,7 +8546,7 @@ async def test_password_login_is_constant_work_and_returns_structured_outcomes(
 ) -> None:
     store = _LocalAccessStore(account, fail_lookup=fail_lookup, fail_password_read=fail_password_read)
     hasher = _PasswordHasher(
-        accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.VERIFIED),
+        accounts_module.PasswordVerificationOutcome(accounts_module.PasswordVerificationStatus.VERIFIED),
         unavailable=hasher_unavailable,
     )
     service = accounts_module.PasswordLoginService(accounts=store, hasher=hasher)
@@ -9090,11 +9090,11 @@ class _RecoveryLoginMethods:
 
     async def revoke_login_method(
         self, account_id: str, method_id: str, *, require_remaining: bool = True, event: accounts_module.SecurityEvent
-    ) -> accounts_module.RevokeLoginMethodResult:
+    ) -> accounts_module.RevokeLoginMethodOutcome:
         del account_id, method_id
         assert require_remaining
         self.events.append(event)
-        return accounts_module.RevokeLoginMethodResult(self.status)
+        return accounts_module.RevokeLoginMethodOutcome(self.status)
 
 
 def _mfa_service(
@@ -9338,7 +9338,7 @@ async def test_totp_removal_delegates_atomic_final_method_safety_and_redacts_eve
 
     outcome = await service.remove_totp_method("account-1", "method-1")
 
-    assert isinstance(outcome, accounts_module.RevokeLoginMethodResult)
+    assert isinstance(outcome, accounts_module.RevokeLoginMethodOutcome)
     assert outcome.status is expected
     assert len(login_methods.events) == 1
     assert login_methods.events[0].operation == "local.mfa.totp.remove"
@@ -9483,7 +9483,7 @@ class _PasskeyStore:
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> accounts_module.AssertionRecordResult:
+    ) -> accounts_module.AssertionRecordStatus:
         del now
         credential = self.credentials.get(credential_id)
         if self.fail:
@@ -9493,7 +9493,7 @@ class _PasskeyStore:
             or credential.version != expected_version
             or credential.backup_eligible != backup_eligible
         ):
-            return accounts_module.AssertionRecordResult.CONFLICT
+            return accounts_module.AssertionRecordStatus.CONFLICT
         self.credentials[credential_id] = replace(
             credential,
             sign_count=sign_count,
@@ -9503,8 +9503,8 @@ class _PasskeyStore:
             last_used_at=_JWT_NOW,
         )
         if clone_risk:
-            return accounts_module.AssertionRecordResult.CLONE_RISK
-        return accounts_module.AssertionRecordResult.RECORDED
+            return accounts_module.AssertionRecordStatus.CLONE_RISK
+        return accounts_module.AssertionRecordStatus.RECORDED
 
     async def list_credentials(self, account_id: str) -> tuple[accounts_module.PasskeyCredential, ...]:
         if self.fail:
@@ -9832,7 +9832,7 @@ async def test_passkey_listing_rename_and_removal_are_safe_and_final_method_guar
     assert not hasattr(summaries[0], "public_key")
     assert renamed is not None
     assert renamed.display_name == "Work key"
-    assert isinstance(removal, accounts_module.RevokeLoginMethodResult)
+    assert isinstance(removal, accounts_module.RevokeLoginMethodOutcome)
     assert removal.status is accounts_module.RevokeLoginMethodStatus.FINAL_METHOD
 
 
@@ -10055,7 +10055,7 @@ async def test_public_conformance_helpers_execute_factor_atomicity_matrix() -> N
             clone_risk=False,
             now=now,
         )
-        is accounts_module.AssertionRecordResult.CONFLICT
+        is accounts_module.AssertionRecordStatus.CONFLICT
     )
     assert len(await passkey_store.list_credentials("account-1")) == 1
     assert await passkey_store.rename_credential("other", credential.credential_id, "No") is None
@@ -10392,9 +10392,9 @@ async def test_passkey_service_defensive_store_and_ceremony_outcomes_are_sanitiz
     assert isinstance(await service.begin_authentication("account-1", binding=b""), VerificationUnavailable)
 
     class ConflictingStore(_PasskeyStore):
-        async def record_assertion(self, *args: object, **kwargs: object) -> accounts_module.AssertionRecordResult:
+        async def record_assertion(self, *args: object, **kwargs: object) -> accounts_module.AssertionRecordStatus:
             del args, kwargs
-            return accounts_module.AssertionRecordResult.CONFLICT
+            return accounts_module.AssertionRecordStatus.CONFLICT
 
     conflict_store = ConflictingStore()
     conflict_store.credentials[b"credential-1"] = _stored_passkey()
@@ -10653,13 +10653,13 @@ async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
         assert exc_info.value.detail == "Authentication service is unavailable."
     assert (
         mfa_controllers_module._removal_response(  # noqa: SLF001 - exercises the private HTTP projection matrix
-            accounts_module.RevokeLoginMethodResult(accounts_module.RevokeLoginMethodStatus.FINAL_METHOD)
+            accounts_module.RevokeLoginMethodOutcome(accounts_module.RevokeLoginMethodStatus.FINAL_METHOD)
         ).status_code
         == 409
     )
     assert (
         mfa_controllers_module._removal_response(  # noqa: SLF001 - exercises the private HTTP projection matrix
-            accounts_module.RevokeLoginMethodResult(accounts_module.RevokeLoginMethodStatus.NOT_FOUND)
+            accounts_module.RevokeLoginMethodOutcome(accounts_module.RevokeLoginMethodStatus.NOT_FOUND)
         ).status_code
         == 400
     )
@@ -10784,7 +10784,7 @@ async def test_testing_stores_cover_expiry_update_and_clone_risk_outcomes() -> N
             clone_risk=True,
             now=now,
         )
-        is accounts_module.AssertionRecordResult.CLONE_RISK
+        is accounts_module.AssertionRecordStatus.CLONE_RISK
     )
 
 
@@ -11013,7 +11013,7 @@ class _AtomicRefreshStore:
         self.revoked_families: set[str] = set()
         self.rotations: list[accounts_module.RefreshRotationStatus] = []
         self.preparations: list[
-            accounts_module.PrepareRefreshResult
+            accounts_module.RefreshPreflightOutcome
             | accounts_module.RefreshFamilyContext
             | accounts_module.RefreshReceiptReplay
         ] = []
@@ -11062,7 +11062,7 @@ class _AtomicRefreshStore:
     ) -> (
         accounts_module.RefreshFamilyContext
         | accounts_module.RefreshReceiptReplay
-        | accounts_module.PrepareRefreshResult
+        | accounts_module.RefreshPreflightOutcome
     ):
         self.preparation_events.append(event)
         async with self._lock:
@@ -11071,16 +11071,16 @@ class _AtomicRefreshStore:
                 result: (
                     accounts_module.RefreshFamilyContext
                     | accounts_module.RefreshReceiptReplay
-                    | accounts_module.PrepareRefreshResult
-                ) = accounts_module.PrepareRefreshResult(accounts_module.RefreshRotationStatus.INVALID)
+                    | accounts_module.RefreshPreflightOutcome
+                ) = accounts_module.RefreshPreflightOutcome(accounts_module.RefreshRotationStatus.INVALID)
             elif record.family_id in self.revoked_families:
-                result = accounts_module.PrepareRefreshResult(
+                result = accounts_module.RefreshPreflightOutcome(
                     accounts_module.RefreshRotationStatus.REVOKED, family_revoked=True
                 )
             elif record.security_epoch != self.accounts.security_epoch:
-                result = accounts_module.PrepareRefreshResult(accounts_module.RefreshRotationStatus.EPOCH_MISMATCH)
+                result = accounts_module.RefreshPreflightOutcome(accounts_module.RefreshRotationStatus.EPOCH_MISMATCH)
             elif now >= record.token_expires_at or now >= record.family_expires_at:
-                result = accounts_module.PrepareRefreshResult(accounts_module.RefreshRotationStatus.EXPIRED)
+                result = accounts_module.RefreshPreflightOutcome(accounts_module.RefreshRotationStatus.EXPIRED)
             elif record.consumed:
                 same_key = (
                     record.idempotency_digest is not None
@@ -11102,7 +11102,7 @@ class _AtomicRefreshStore:
                     )
                 else:
                     self.revoked_families.add(record.family_id)
-                    result = accounts_module.PrepareRefreshResult(
+                    result = accounts_module.RefreshPreflightOutcome(
                         accounts_module.RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True
                     )
             else:
@@ -11126,7 +11126,7 @@ class _AtomicRefreshStore:
 
     async def rotate(  # noqa: C901, PLR0911 - explicit atomic state-machine outcomes
         self, command: accounts_module.RotateRefreshCommand, *, now: datetime, event: accounts_module.SecurityEvent
-    ) -> accounts_module.RotateRefreshResult:
+    ) -> accounts_module.RefreshRotationOutcome:
         del event
         if self._expected_atomic_rotations:
             async with self._atomic_rotation_lock:
@@ -11245,9 +11245,9 @@ class _AtomicRefreshStore:
         *,
         sealed_receipt: bytes | None = None,
         family_revoked: bool = False,
-    ) -> accounts_module.RotateRefreshResult:
+    ) -> accounts_module.RefreshRotationOutcome:
         self.rotations.append(status)
-        return accounts_module.RotateRefreshResult(
+        return accounts_module.RefreshRotationOutcome(
             status=status, sealed_receipt=sealed_receipt, family_revoked=family_revoked
         )
 
@@ -11837,7 +11837,7 @@ async def test_refresh_replay_without_exact_live_key_revokes_family(second_key: 
 
     assert isinstance(replay, InvalidCredentials)
     assert any(
-        isinstance(prepared, accounts_module.PrepareRefreshResult)
+        isinstance(prepared, accounts_module.RefreshPreflightOutcome)
         and prepared.status is accounts_module.RefreshRotationStatus.REPLAY_DETECTED
         and prepared.family_revoked
         for prepared in store.preparations
@@ -11970,7 +11970,7 @@ async def test_refresh_atomic_rotate_revalidates_preserved_scopes() -> None:
     ) -> (
         accounts_module.RefreshFamilyContext
         | accounts_module.RefreshReceiptReplay
-        | accounts_module.PrepareRefreshResult
+        | accounts_module.RefreshPreflightOutcome
     ):
         prepared = await prepare_rotation(proof, idempotency_digest, now=now, event=event)
         return (
@@ -12255,7 +12255,7 @@ async def test_refresh_rotate_sanitizes_invalid_and_unavailable_composition(  # 
             *,
             now: datetime,
             event: accounts_module.SecurityEvent,
-        ) -> accounts_module.PrepareRefreshResult:
+        ) -> accounts_module.RefreshPreflightOutcome:
             del now, event
             raise OSError
 
@@ -12334,7 +12334,7 @@ async def test_refresh_rotate_sanitizes_invalid_and_unavailable_composition(  # 
 
         async def rotate(
             _command: accounts_module.RotateRefreshCommand, *, now: datetime, event: accounts_module.SecurityEvent
-        ) -> accounts_module.RotateRefreshResult:
+        ) -> accounts_module.RefreshRotationOutcome:
             del now, event
             raise OSError
 
@@ -12493,28 +12493,28 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         recovery=SimpleNamespace(
             request=AsyncOutcome(accounts_module.LifecycleAccepted()),
             reset=AsyncOutcome(
-                accounts_module.PasswordResetResult(
+                accounts_module.PasswordResetOutcome(
                     accounts_module.PasswordResetStatus.RESET, account_id="account-1", security_epoch=2
                 ),
-                accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.INVALID),
+                accounts_module.PasswordResetOutcome(accounts_module.PasswordResetStatus.INVALID),
             ),
         ),
         verification=SimpleNamespace(
             resend=AsyncOutcome(accounts_module.LifecycleAccepted()),
             consume=AsyncOutcome(
-                accounts_module.ConsumeResult(accounts_module.ConsumeStatus.CONSUMED, "account-1", 1),
-                accounts_module.ConsumeResult(accounts_module.ConsumeStatus.INVALID),
+                accounts_module.ConsumeOutcome(accounts_module.ConsumeStatus.CONSUMED, "account-1", 1),
+                accounts_module.ConsumeOutcome(accounts_module.ConsumeStatus.INVALID),
             ),
         ),
         registration=SimpleNamespace(
             register=AsyncOutcome(accounts_module.LifecycleAccepted(), accounts_module.InvalidInvitation())
         ),
         change_session_password=AsyncOutcome(
-            accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2),
+            accounts_module.PasswordChangeOutcome(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2),
             InvalidCredentials(),
         ),
         change_token_password=AsyncOutcome(
-            accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2),
+            accounts_module.PasswordChangeOutcome(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2),
             accounts_module.LifecycleRejected(),
         ),
         client_key_for=lambda _connection: "1.2.3.4",
@@ -12758,7 +12758,7 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
     )
     authentication = SimpleNamespace(account_id="account-1", session_id="session-old")
     plan = SimpleNamespace(prior_session_id="session-old", command=object())
-    changed = accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2)
+    changed = accounts_module.PasswordChangeOutcome(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2)
     refresh_response = accounts_module.TokenPair(
         access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
         refresh_token=accounts_module
@@ -13483,7 +13483,7 @@ async def test_password_login_emits_one_decision_event_per_outcome() -> None:
     service = accounts_module.PasswordLoginService(
         accounts=_LocalAccessStore(_local_access_account()),
         hasher=_PasswordHasher(
-            accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.VERIFIED)
+            accounts_module.PasswordVerificationOutcome(accounts_module.PasswordVerificationStatus.VERIFIED)
         ),
         events=sink,
         event_ids=lambda: "event-1",
@@ -13670,7 +13670,7 @@ async def test_password_login_emits_an_attempt_event_for_a_known_account_with_a_
     service = accounts_module.PasswordLoginService(
         accounts=_LocalAccessStore(_local_access_account()),
         hasher=_PasswordHasher(
-            accounts_module.PasswordVerificationResult(accounts_module.PasswordVerificationStatus.INVALID)
+            accounts_module.PasswordVerificationOutcome(accounts_module.PasswordVerificationStatus.INVALID)
         ),
         events=sink,
         event_ids=lambda: "event-1",

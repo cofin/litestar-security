@@ -69,7 +69,7 @@ from litestar_security.accounts import (
     RefreshReceiptSealer,
     RefreshTokenCodec,
     RegistrationPolicy,
-    RevokeLoginMethodResult,
+    RevokeLoginMethodOutcome,
     RevokeLoginMethodStatus,
     SessionBindingConfig,
     SessionSummary,
@@ -504,7 +504,7 @@ class _RouteMFAService:
         del account_id, method_id
         if self.failure == "remove":
             return VerificationUnavailable()
-        return RevokeLoginMethodResult(RevokeLoginMethodStatus.REVOKED)
+        return RevokeLoginMethodOutcome(RevokeLoginMethodStatus.REVOKED)
 
 
 class _RoutePasskeyService:
@@ -554,7 +554,7 @@ class _RoutePasskeyService:
         del account_id, credential_id
         if self.failure == "remove":
             return VerificationUnavailable()
-        return RevokeLoginMethodResult(RevokeLoginMethodStatus.REVOKED)
+        return RevokeLoginMethodOutcome(RevokeLoginMethodStatus.REVOKED)
 
 
 class _RouteStepUpService:

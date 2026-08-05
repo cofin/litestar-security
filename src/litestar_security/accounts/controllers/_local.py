@@ -30,14 +30,14 @@ from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa_login import MFARequired
 from litestar_security.accounts._rate_limits import RateLimited
 from litestar_security.accounts._records import (
-    ConsumeResult,
+    ConsumeOutcome,
     ConsumeStatus,
     LifecycleAccepted,
     LifecycleRejected,
     LocalAuthMode,
-    PasswordChangeResult,
+    PasswordChangeOutcome,
     PasswordChangeStatus,
-    PasswordResetResult,
+    PasswordResetOutcome,
     PasswordResetStatus,
     RegistrationMode,
 )
@@ -615,7 +615,7 @@ class _LocalLifecycleController(Controller):
         result = await local_auth_service.recovery.reset(
             data.token, data.password, client_key=local_auth_service.client_key_for(request)
         )
-        if isinstance(result, PasswordResetResult) and result.status is PasswordResetStatus.RESET:
+        if isinstance(result, PasswordResetOutcome) and result.status is PasswordResetStatus.RESET:
             return _route_response(RouteStatus(detail="Password reset complete."), status_code=HTTP_200_OK)
         _route_error(result)
 
@@ -670,7 +670,7 @@ class _LocalLifecycleController(Controller):
         result = await local_auth_service.verification.consume(
             data.token, client_key=local_auth_service.client_key_for(request)
         )
-        if isinstance(result, ConsumeResult) and result.status is ConsumeStatus.CONSUMED:
+        if isinstance(result, ConsumeOutcome) and result.status is ConsumeStatus.CONSUMED:
             return _route_response(RouteStatus(detail="Account verified."), status_code=HTTP_200_OK)
         _route_error(result)
 
@@ -857,7 +857,7 @@ class _LocalTokenOnlyPasswordController(Controller):
 
 
 def _password_change_response(result: object) -> Response[RouteStatus]:
-    if isinstance(result, PasswordChangeResult) and result.status is PasswordChangeStatus.CHANGED:
+    if isinstance(result, PasswordChangeOutcome) and result.status is PasswordChangeStatus.CHANGED:
         return _route_response(RouteStatus(detail="Password changed."), status_code=HTTP_200_OK)
     if isinstance(result, InvalidCredentials):
         _route_error(result)

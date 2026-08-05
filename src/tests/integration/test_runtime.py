@@ -35,7 +35,7 @@ from litestar.testing import AsyncTestClient, TestClient
 
 from litestar_security import MFAConfig, SecurityConfig, SecurityPlugin, authentication
 from litestar_security.accounts import (
-    ConsumeResult,
+    ConsumeOutcome,
     ConsumeStatus,
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
@@ -44,12 +44,12 @@ from litestar_security.accounts import (
     LocalAuthSecrets,
     LoginMethod,
     NotificationCommand,
-    PasswordChangeResult,
+    PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordCredentialState,
-    PasswordResetResult,
+    PasswordResetOutcome,
     PasswordResetStatus,
-    PasswordVerificationResult,
+    PasswordVerificationOutcome,
     PasswordVerificationStatus,
     ProtectedSecret,
     PurposeTokenCodec,
@@ -58,16 +58,16 @@ from litestar_security.accounts import (
     RefreshFamilyContext,
     RefreshReceiptKey,
     RefreshReceiptSealer,
+    RefreshRotationOutcome,
     RefreshRotationStatus,
     RefreshTokenCodec,
     RefreshTokenProof,
+    RegistrationOutcome,
     RegistrationPolicy,
-    RegistrationResult,
     RegistrationStatus,
-    RevokeLoginMethodResult,
+    RevokeLoginMethodOutcome,
     RevokeLoginMethodStatus,
     RotateRefreshCommand,
-    RotateRefreshResult,
     SecurityEvent,
     SessionBindingConfig,
     SessionRecord,
@@ -831,8 +831,8 @@ class _RoutePasswordHasher:
     async def hash(self, password: str) -> str:
         return f"test-hash:{password}"
 
-    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationResult:
-        return PasswordVerificationResult(
+    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationOutcome:
+        return PasswordVerificationOutcome(
             PasswordVerificationStatus.VERIFIED
             if encoded_hash == f"test-hash:{password}"
             else PasswordVerificationStatus.INVALID
@@ -864,9 +864,9 @@ class _RouteMFAStore(InMemoryMFAStore):
 
     async def revoke_login_method(
         self, _account_id: str, _method_id: str, *, require_remaining: bool = True, event: SecurityEvent
-    ) -> RevokeLoginMethodResult:
+    ) -> RevokeLoginMethodOutcome:
         del require_remaining, event
-        return RevokeLoginMethodResult(RevokeLoginMethodStatus.NOT_FOUND)
+        return RevokeLoginMethodOutcome(RevokeLoginMethodStatus.NOT_FOUND)
 
 
 @dataclass(slots=True)
@@ -926,19 +926,19 @@ class _GeneratedRouteAccounts:
 
     async def replace_password_and_bump_epoch(
         self, account_id: str, password_hash: str, *, expected_epoch: int, **_kwargs: object
-    ) -> PasswordChangeResult:
+    ) -> PasswordChangeOutcome:
         account = await self.get_by_id(account_id)
         if account is None or account.security_epoch != expected_epoch:
-            return PasswordChangeResult(PasswordChangeStatus.CONFLICT)
+            return PasswordChangeOutcome(PasswordChangeStatus.CONFLICT)
         self.password_hash = password_hash
         self.account = replace(account, security_epoch=expected_epoch + 1)
-        return PasswordChangeResult(PasswordChangeStatus.CHANGED, expected_epoch + 1)
+        return PasswordChangeOutcome(PasswordChangeStatus.CHANGED, expected_epoch + 1)
 
     async def register(
         self, command: object, password_hash: str, *, verification: object | None, **_kwargs: object
-    ) -> RegistrationResult[object]:
+    ) -> RegistrationOutcome[object]:
         if self.account is not None:
-            return RegistrationResult(RegistrationStatus.DUPLICATE)
+            return RegistrationOutcome(RegistrationStatus.DUPLICATE)
         self.account = LocalAccountRecord(
             account_id="account-1",
             normalized_identifier=cast("Any", command).normalized_identifier,
@@ -952,7 +952,7 @@ class _GeneratedRouteAccounts:
         if verification is not None:
             issue, notification = cast("Any", verification).bind(self.account.account_id)
             await self.issue(issue, notification)
-        return RegistrationResult(RegistrationStatus.CREATED, self.account)
+        return RegistrationOutcome(RegistrationStatus.CREATED, self.account)
 
     async def issue(self, issue: TokenIssue, notification: NotificationCommand, **_kwargs: object) -> None:
         self.purpose_tokens[issue.token_id] = issue
@@ -964,22 +964,22 @@ class _GeneratedRouteAccounts:
     async def issue_absent(self) -> None:
         self.absent_probes += 1
 
-    async def consume_and_verify(self, token_id: str, digest: bytes, **_kwargs: object) -> ConsumeResult:
+    async def consume_and_verify(self, token_id: str, digest: bytes, **_kwargs: object) -> ConsumeOutcome:
         issue = self.purpose_tokens.pop(token_id, None)
         if issue is None or issue.digest != digest or self.account is None:
-            return ConsumeResult(ConsumeStatus.INVALID)
+            return ConsumeOutcome(ConsumeStatus.INVALID)
         self.account = replace(self.account, verified=True)
-        return ConsumeResult(ConsumeStatus.CONSUMED, self.account.account_id, self.account.security_epoch)
+        return ConsumeOutcome(ConsumeStatus.CONSUMED, self.account.account_id, self.account.security_epoch)
 
     async def consume_and_reset(
         self, token_id: str, digest: bytes, new_password_hash: str, **_kwargs: object
-    ) -> PasswordResetResult:
+    ) -> PasswordResetOutcome:
         issue = self.purpose_tokens.pop(token_id, None)
         if issue is None or issue.digest != digest or self.account is None:
-            return PasswordResetResult(PasswordResetStatus.INVALID)
+            return PasswordResetOutcome(PasswordResetStatus.INVALID)
         self.password_hash = new_password_hash
         self.account = replace(self.account, security_epoch=self.account.security_epoch + 1)
-        return PasswordResetResult(PasswordResetStatus.RESET, self.account.account_id, self.account.security_epoch)
+        return PasswordResetOutcome(PasswordResetStatus.RESET, self.account.account_id, self.account.security_epoch)
 
     async def register_login_method(self, *_args: object, **_kwargs: object) -> None:
         return None
@@ -1074,7 +1074,7 @@ class _GeneratedRouteAccounts:
             scopes=state.scopes,
         )
 
-    async def rotate(self, command: RotateRefreshCommand, **_kwargs: object) -> RotateRefreshResult:
+    async def rotate(self, command: RotateRefreshCommand, **_kwargs: object) -> RefreshRotationOutcome:
         current = self.refresh_tokens.pop(command.token_id)
         assert current.token_digest == command.token_digest
         assert not current.revoked
@@ -1088,7 +1088,7 @@ class _GeneratedRouteAccounts:
             family_expires_at=command.family_expires_at,
             scopes=command.scopes,
         )
-        return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+        return RefreshRotationOutcome(RefreshRotationStatus.ROTATED, command.sealed_receipt)
 
     async def revoke_family(self, family_id: str, **_kwargs: object) -> bool:
         matches = [state for state in self.refresh_tokens.values() if state.family_id == family_id]

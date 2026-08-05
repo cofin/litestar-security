@@ -41,7 +41,7 @@ from litestar_security.accounts._passkeys import PasskeyRecord, PasskeyService, 
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
     PasswordReauthenticationProof,
-    RevokeLoginMethodResult,
+    RevokeLoginMethodOutcome,
     RevokeLoginMethodStatus,
 )
 from litestar_security.accounts._stores import SecurityEpochStore
@@ -849,7 +849,7 @@ def _summary_response(summary: PasskeyRecord) -> PasskeySummary:
     )
 
 
-def _removal_response(result: RevokeLoginMethodResult | VerificationUnavailable) -> Response[RouteStatus]:
+def _removal_response(result: RevokeLoginMethodOutcome | VerificationUnavailable) -> Response[RouteStatus]:
     if isinstance(result, VerificationUnavailable):
         _error(result)
     if result.status is RevokeLoginMethodStatus.REVOKED:

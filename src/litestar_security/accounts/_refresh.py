@@ -57,11 +57,11 @@ if TYPE_CHECKING:
 __all__ = (
     "REFRESH_RESPONSE_HEADERS",
     "CreateRefreshFamilyCommand",
-    "PrepareRefreshResult",
+    "RefreshPreflightOutcome",
+    "RefreshRotationOutcome",
     "RefreshTokenFamilyStore",
     "RefreshTokenService",
     "RotateRefreshCommand",
-    "RotateRefreshResult",
 )
 
 UserT = TypeVar("UserT")
@@ -188,7 +188,7 @@ class RotateRefreshCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class RotateRefreshResult:
+class RefreshRotationOutcome:
     """Atomic strict rotation, idempotent receipt, or replay outcome."""
 
     status: RefreshRotationStatus
@@ -198,7 +198,7 @@ class RotateRefreshResult:
     def __post_init__(self) -> None:
         """Reject contradictory receipt and revocation outcomes."""
         if self.status.__class__ is not RefreshRotationStatus or self.family_revoked.__class__ is not bool:
-            msg = "Refresh rotation result is invalid"
+            msg = "Refresh rotation outcome is invalid"
             raise ValueError(msg)
         receipt_status = self.status in {RefreshRotationStatus.ROTATED, RefreshRotationStatus.IDEMPOTENT_REPLAY}
         if (
@@ -213,16 +213,16 @@ class RotateRefreshResult:
                 )
             )
         ):
-            msg = "Successful refresh rotation results require exactly one sealed receipt"
+            msg = "Successful refresh rotation outcomes require exactly one sealed receipt"
             raise ValueError(msg)
         revoked_status = self.status in {RefreshRotationStatus.REPLAY_DETECTED, RefreshRotationStatus.REVOKED}
         if revoked_status != self.family_revoked:
-            msg = "Replay or revoked refresh results must report family revocation"
+            msg = "Replay or revoked refresh outcomes must report family revocation"
             raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
-class PrepareRefreshResult:
+class RefreshPreflightOutcome:
     """Proof-checked negative preflight outcome with exact revocation evidence."""
 
     status: RefreshRotationStatus
@@ -238,11 +238,11 @@ class PrepareRefreshResult:
             RefreshRotationStatus.INVALID,
         }
         if self.status.__class__ is not RefreshRotationStatus or self.status not in allowed:
-            msg = "Refresh preparation result requires a negative status"
+            msg = "Refresh preflight outcome requires a negative status"
             raise ValueError(msg)
         revoked_status = self.status in {RefreshRotationStatus.REPLAY_DETECTED, RefreshRotationStatus.REVOKED}
         if self.family_revoked.__class__ is not bool or revoked_status != self.family_revoked:
-            msg = "Refresh preparation revocation status is invalid"
+            msg = "Refresh preflight revocation status is invalid"
             raise ValueError(msg)
 
 
@@ -266,7 +266,7 @@ class RefreshTokenFamilyStore(Protocol):
 
     async def prepare_rotation(
         self, proof: RefreshTokenProof, idempotency_digest: bytes | None, *, now: "datetime", event: "SecurityEvent"
-    ) -> RefreshFamilyContext | RefreshReceiptReplay | PrepareRefreshResult:
+    ) -> RefreshFamilyContext | RefreshReceiptReplay | RefreshPreflightOutcome:
         """Atomically return active state, recover a receipt, or revoke and record consumed reuse.
 
         This is where reuse detection lives. A token that was already consumed
@@ -290,7 +290,7 @@ class RefreshTokenFamilyStore(Protocol):
 
     async def rotate(
         self, command: RotateRefreshCommand, *, now: "datetime", event: "SecurityEvent"
-    ) -> RotateRefreshResult:
+    ) -> RefreshRotationOutcome:
         """Atomically revalidate context/current epoch and rotate or revoke.
 
         Revalidate rather than trusting the prepared context: the epoch can move
@@ -582,7 +582,7 @@ class RefreshTokenService(Generic[UserT]):
                 idempotency_digest=idempotency_digest,
                 occurred_at=rotated_at,
             )
-        if isinstance(prepared, PrepareRefreshResult):
+        if isinstance(prepared, RefreshPreflightOutcome):
             return InvalidCredentials()
         if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
             prepared, RefreshFamilyContext
@@ -654,7 +654,7 @@ class RefreshTokenService(Generic[UserT]):
             )
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
-        if not isinstance(result_value, RotateRefreshResult):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
+        if not isinstance(result_value, RefreshRotationOutcome):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
             return VerificationUnavailable()
         result = result_value
         if result.status not in {RefreshRotationStatus.ROTATED, RefreshRotationStatus.IDEMPOTENT_REPLAY}:

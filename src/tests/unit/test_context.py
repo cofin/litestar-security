@@ -1140,13 +1140,13 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
         "AESGCMSecretProtector",
         "AccountLookup",
         "Argon2PasswordHasher",
-        "AssertionRecordResult",
+        "AssertionRecordStatus",
         "AssuranceRequirement",
         "AssuranceTrait",
         "AttestationTrustMapper",
         "AuthenticationVerification",
         "CloneRiskPolicy",
-        "ConsumeResult",
+        "ConsumeOutcome",
         "ConsumeStatus",
         "CreateRefreshFamilyCommand",
         "CreateSessionCommand",
@@ -1196,7 +1196,7 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
         "PasskeyStore",
         "PasskeySummary",
         "PasskeyVerification",
-        "PasswordChangeResult",
+        "PasswordChangeOutcome",
         "PasswordChangeService",
         "PasswordChangeStatus",
         "PasswordCredentialState",
@@ -1205,17 +1205,16 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
         "PasswordHashingUnavailableError",
         "PasswordLoginService",
         "PasswordPolicy",
-        "PasswordPolicyResult",
+        "PasswordPolicyDecision",
         "PasswordPolicyViolation",
         "PasswordReauthenticationProof",
         "PasswordReauthenticationService",
-        "PasswordResetResult",
+        "PasswordResetOutcome",
         "PasswordResetStatus",
-        "PasswordVerificationResult",
+        "PasswordVerificationOutcome",
         "PasswordVerificationStatus",
         "PendingTOTPEnrollment",
         "PendingTokenIssue",
-        "PrepareRefreshResult",
         "ProtectedSecret",
         "PurposeTokenCodec",
         "PurposeTokenDelivery",
@@ -1235,10 +1234,12 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
         "RecoveryTokenService",
         "RecoveryTokenStore",
         "RefreshFamilyContext",
+        "RefreshPreflightOutcome",
         "RefreshReceiptContext",
         "RefreshReceiptKey",
         "RefreshReceiptReplay",
         "RefreshReceiptSealer",
+        "RefreshRotationOutcome",
         "RefreshRotationStatus",
         "RefreshTokenCodec",
         "RefreshTokenFamilyStore",
@@ -1247,16 +1248,15 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
         "RefreshTokenService",
         "RegistrationCommand",
         "RegistrationMode",
+        "RegistrationOutcome",
         "RegistrationPolicy",
-        "RegistrationResult",
         "RegistrationService",
         "RegistrationStatus",
         "RegistrationStore",
         "RegistrationVerification",
-        "RevokeLoginMethodResult",
+        "RevokeLoginMethodOutcome",
         "RevokeLoginMethodStatus",
         "RotateRefreshCommand",
-        "RotateRefreshResult",
         "RouteStatus",
         "SecretProtector",
         "SecretProtectorKey",
@@ -1469,11 +1469,11 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
         accounts_module.PasswordReauthenticationProof(
             account_id=account.account_id, security_epoch=1, authenticated_at=now, expires_at=now + timedelta(minutes=5)
         ),
-        accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2),
-        accounts_module.RevokeLoginMethodResult(accounts_module.RevokeLoginMethodStatus.REVOKED),
-        accounts_module.RegistrationResult(accounts_module.RegistrationStatus.CREATED, account),
-        accounts_module.ConsumeResult(accounts_module.ConsumeStatus.CONSUMED, account.account_id, 1),
-        accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.RESET, account.account_id, 2),
+        accounts_module.PasswordChangeOutcome(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2),
+        accounts_module.RevokeLoginMethodOutcome(accounts_module.RevokeLoginMethodStatus.REVOKED),
+        accounts_module.RegistrationOutcome(accounts_module.RegistrationStatus.CREATED, account),
+        accounts_module.ConsumeOutcome(accounts_module.ConsumeStatus.CONSUMED, account.account_id, 1),
+        accounts_module.PasswordResetOutcome(accounts_module.PasswordResetStatus.RESET, account.account_id, 2),
         accounts_module.RegistrationPolicy.disabled(),
         accounts_module.SessionBindingConfig(pepper=b"p" * 32),
         accounts_module.SessionAuthentication(
@@ -1522,7 +1522,7 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
             sealed_receipt=receipt,
             receipt_expires_at=now + timedelta(seconds=30),
         ),
-        accounts_module.RotateRefreshResult(accounts_module.RefreshRotationStatus.ROTATED, receipt),
+        accounts_module.RefreshRotationOutcome(accounts_module.RefreshRotationStatus.ROTATED, receipt),
     )
 
     event_correlation["request_id"] = "changed"
@@ -1554,26 +1554,26 @@ def test_atomic_results_reject_contradictory_status_payloads() -> None:
         security_epoch=1,
     )
     invalid_results = (
-        partial(accounts_module.PasswordChangeResult, accounts_module.PasswordChangeStatus.CHANGED),
-        partial(accounts_module.PasswordChangeResult, accounts_module.PasswordChangeStatus.CONFLICT, 2),
-        partial(accounts_module.RegistrationResult, accounts_module.RegistrationStatus.CREATED),
-        partial(accounts_module.RegistrationResult, accounts_module.RegistrationStatus.DUPLICATE, account),
-        partial(accounts_module.ConsumeResult, accounts_module.ConsumeStatus.CONSUMED),
-        partial(accounts_module.ConsumeResult, accounts_module.ConsumeStatus.INVALID, account.account_id, 1),
-        partial(accounts_module.PasswordResetResult, accounts_module.PasswordResetStatus.RESET),
+        partial(accounts_module.PasswordChangeOutcome, accounts_module.PasswordChangeStatus.CHANGED),
+        partial(accounts_module.PasswordChangeOutcome, accounts_module.PasswordChangeStatus.CONFLICT, 2),
+        partial(accounts_module.RegistrationOutcome, accounts_module.RegistrationStatus.CREATED),
+        partial(accounts_module.RegistrationOutcome, accounts_module.RegistrationStatus.DUPLICATE, account),
+        partial(accounts_module.ConsumeOutcome, accounts_module.ConsumeStatus.CONSUMED),
+        partial(accounts_module.ConsumeOutcome, accounts_module.ConsumeStatus.INVALID, account.account_id, 1),
+        partial(accounts_module.PasswordResetOutcome, accounts_module.PasswordResetStatus.RESET),
         partial(
-            accounts_module.PasswordResetResult, accounts_module.PasswordResetStatus.INVALID, account.account_id, 1
+            accounts_module.PasswordResetOutcome, accounts_module.PasswordResetStatus.INVALID, account.account_id, 1
         ),
-        partial(accounts_module.RotateRefreshResult, accounts_module.RefreshRotationStatus.ROTATED),
+        partial(accounts_module.RefreshRotationOutcome, accounts_module.RefreshRotationStatus.ROTATED),
         partial(
-            accounts_module.RotateRefreshResult,
+            accounts_module.RefreshRotationOutcome,
             accounts_module.RefreshRotationStatus.ROTATED,
             sealed_receipt=b"receipt",
             family_revoked=True,
         ),
-        partial(accounts_module.RotateRefreshResult, accounts_module.RefreshRotationStatus.REPLAY_DETECTED),
+        partial(accounts_module.RefreshRotationOutcome, accounts_module.RefreshRotationStatus.REPLAY_DETECTED),
         partial(
-            accounts_module.RotateRefreshResult, accounts_module.RefreshRotationStatus.INVALID, family_revoked=True
+            accounts_module.RefreshRotationOutcome, accounts_module.RefreshRotationStatus.INVALID, family_revoked=True
         ),
     )
 
@@ -1581,17 +1581,17 @@ def test_atomic_results_reject_contradictory_status_payloads() -> None:
         with pytest.raises(ValueError, match=r"require|must report"):
             result()
 
-    assert accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CONFLICT).security_epoch is None
-    assert accounts_module.RegistrationResult(accounts_module.RegistrationStatus.DUPLICATE).account is None
-    assert accounts_module.ConsumeResult(accounts_module.ConsumeStatus.INVALID).account_id is None
-    assert accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.EXPIRED).account_id is None
+    assert accounts_module.PasswordChangeOutcome(accounts_module.PasswordChangeStatus.CONFLICT).security_epoch is None
+    assert accounts_module.RegistrationOutcome(accounts_module.RegistrationStatus.DUPLICATE).account is None
+    assert accounts_module.ConsumeOutcome(accounts_module.ConsumeStatus.INVALID).account_id is None
+    assert accounts_module.PasswordResetOutcome(accounts_module.PasswordResetStatus.EXPIRED).account_id is None
     assert (
-        accounts_module.RotateRefreshResult(
+        accounts_module.RefreshRotationOutcome(
             accounts_module.RefreshRotationStatus.IDEMPOTENT_REPLAY, b"receipt"
         ).sealed_receipt
         == b"receipt"
     )
-    assert accounts_module.RotateRefreshResult(
+    assert accounts_module.RefreshRotationOutcome(
         accounts_module.RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True
     ).family_revoked
 
@@ -1961,9 +1961,9 @@ def test_rotate_refresh_command_rejects_invalid_state(overrides: dict[str, objec
         {"status": accounts_module.RefreshRotationStatus.INVALID, "family_revoked": True},
     ],
 )
-def test_rotate_refresh_result_rejects_invalid_state(kwargs: dict[str, object]) -> None:
+def test_refresh_rotation_outcome_rejects_invalid_state(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError, match=r"Refresh|Successful|Replay"):
-        accounts_module.RotateRefreshResult(**kwargs)  # type: ignore[arg-type]
+        accounts_module.RefreshRotationOutcome(**kwargs)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -1998,9 +1998,9 @@ def test_refresh_receipt_replay_rejects_invalid_state(kwargs: dict[str, object])
         {"status": accounts_module.RefreshRotationStatus.INVALID, "family_revoked": 1},
     ],
 )
-def test_prepare_refresh_result_rejects_invalid_state(kwargs: dict[str, object]) -> None:
-    with pytest.raises(ValueError, match="preparation"):
-        accounts_module.PrepareRefreshResult(**kwargs)  # type: ignore[arg-type]
+def test_refresh_preflight_outcome_rejects_invalid_state(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="preflight"):
+        accounts_module.RefreshPreflightOutcome(**kwargs)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("epoch", [-1, True, 9_223_372_036_854_775_808])
@@ -2017,8 +2017,8 @@ def test_account_password_session_and_refresh_contracts_share_one_strict_epoch_d
         ),
         lambda: accounts_module.PasswordCredentialState("encoded-hash", epoch, active=True, verified=True),
         lambda: accounts_module.PasswordReauthenticationProof("account-1", epoch, now, now + timedelta(minutes=5)),
-        lambda: accounts_module.PasswordChangeResult(accounts_module.PasswordChangeStatus.CHANGED, epoch),
-        lambda: accounts_module.PasswordResetResult(accounts_module.PasswordResetStatus.RESET, "account-1", epoch),
+        lambda: accounts_module.PasswordChangeOutcome(accounts_module.PasswordChangeStatus.CHANGED, epoch),
+        lambda: accounts_module.PasswordResetOutcome(accounts_module.PasswordResetStatus.RESET, "account-1", epoch),
         lambda: accounts_module.SessionAuthentication(
             _SESSION_ID, _BINDING_ID, "account-1", epoch, now, now + timedelta(hours=1)
         ),
@@ -2046,10 +2046,10 @@ def test_account_password_session_and_refresh_contracts_share_one_strict_epoch_d
     for factory in factories:
         with pytest.raises(ValueError, match="epoch"):
             factory()
-    assert accounts_module.RotateRefreshResult(
+    assert accounts_module.RefreshRotationOutcome(
         accounts_module.RefreshRotationStatus.REVOKED, family_revoked=True
     ).family_revoked
-    assert not accounts_module.RotateRefreshResult(accounts_module.RefreshRotationStatus.EXPIRED).family_revoked
+    assert not accounts_module.RefreshRotationOutcome(accounts_module.RefreshRotationStatus.EXPIRED).family_revoked
 
 
 @pytest.mark.parametrize(("field_name", "value"), [("active", 1), ("verified", "false")])
@@ -2893,19 +2893,19 @@ def test_password_policy_handles_invalid_runtime_text_and_normalizer_failures() 
         (accounts_module.PasswordVerificationStatus.TOO_LONG, None),
     ],
 )
-def test_password_verification_results_are_discriminated_and_redacted(
+def test_password_verification_outcomes_are_discriminated_and_redacted(
     status: "accounts_module.PasswordVerificationStatus", replacement_hash: str | None
 ) -> None:
-    result = accounts_module.PasswordVerificationResult(status=status, replacement_hash=replacement_hash)
+    result = accounts_module.PasswordVerificationOutcome(status=status, replacement_hash=replacement_hash)
 
     assert result.verified is (status is accounts_module.PasswordVerificationStatus.VERIFIED)
     assert "replacement-secret" not in repr(result)
     assert not hasattr(result, "__dict__")
 
 
-def test_password_verification_result_rejects_replacement_for_failure() -> None:
+def test_password_verification_outcome_rejects_replacement_for_failure() -> None:
     with pytest.raises(ValueError, match="replacement"):
-        accounts_module.PasswordVerificationResult(
+        accounts_module.PasswordVerificationOutcome(
             status=accounts_module.PasswordVerificationStatus.INVALID, replacement_hash="replacement-secret"
         )
 

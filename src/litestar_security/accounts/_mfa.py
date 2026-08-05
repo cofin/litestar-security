@@ -35,7 +35,7 @@ from litestar_security.accounts._operations import (
 from litestar_security.accounts._records import (
     LoginMethod,
     NoOpSecurityEventSink,
-    RevokeLoginMethodResult,
+    RevokeLoginMethodOutcome,
     SecurityEvent,
     SecurityEventSink,
 )
@@ -873,7 +873,7 @@ class MFAService:
 
     async def remove_totp_method(
         self, account_id: str, method_id: str
-    ) -> RevokeLoginMethodResult | VerificationUnavailable:
+    ) -> RevokeLoginMethodOutcome | VerificationUnavailable:
         """Remove a TOTP method through the shared final-method-safe operation.
 
         Args:

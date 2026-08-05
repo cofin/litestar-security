@@ -38,7 +38,7 @@ from litestar_security.providers.oauth import (
     OAuthLifecycleService,
     OAuthLink,
     OAuthLocalAuthTransport,
-    OAuthLogoutResult,
+    OAuthLogout,
     OAuthOperation,
     OAuthProviderError,
     OAuthProviderRegistration,
@@ -137,9 +137,9 @@ class RouteService:
         del kwargs
         return OAuthRouteStatus(detail="Revoked.")
 
-    async def logout(self, **kwargs: object) -> OAuthLogoutResult:
+    async def logout(self, **kwargs: object) -> OAuthLogout:
         del kwargs
-        return OAuthLogoutResult(redirect_url="https://issuer.example/logout" if self.logout_redirect else None)
+        return OAuthLogout(redirect_url="https://issuer.example/logout" if self.logout_redirect else None)
 
 
 class Protector:

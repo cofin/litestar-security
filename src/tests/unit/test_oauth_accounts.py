@@ -33,7 +33,7 @@ from litestar_security.providers.oauth import (
     SecretStr,
     StoredProviderTokens,
     TokenVault,
-    UnlinkResult,
+    UnlinkOutcome,
     UnlinkStatus,
 )
 from litestar_security.testing import FakeOAuthHTTPTransport, FakeOAuthProvider
@@ -199,7 +199,7 @@ def test_oauth_account_lifecycle_public_contracts_import() -> None:
     assert OAuthLinkProof.__name__ == "OAuthLinkProof"
     assert OAuthLoginResolution.__name__ == "OAuthLoginResolution"
     assert LinkedProviderAccount.__name__ == "LinkedProviderAccount"
-    assert UnlinkResult.__name__ == "UnlinkResult"
+    assert UnlinkOutcome.__name__ == "UnlinkOutcome"
     assert ProviderTokenReference.__name__ == "ProviderTokenReference"
     assert MemoryOAuthAccountStore.__name__ == "MemoryOAuthAccountStore"
     assert MemoryTokenVault.__name__ == "MemoryTokenVault"
@@ -211,7 +211,7 @@ def test_oauth_account_lifecycle_public_contracts_import() -> None:
     "factory",
     [
         lambda: LinkedProviderAccount("", "account", "provider", "issuer", "subject", grant(), NOW),
-        lambda: UnlinkResult(UnlinkStatus.UNLINKED),
+        lambda: UnlinkOutcome(UnlinkStatus.UNLINKED),
         lambda: ProviderTokenReference("", 0, frozenset(), NOW),
     ],
 )

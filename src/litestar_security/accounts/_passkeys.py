@@ -49,7 +49,7 @@ from litestar_security.accounts._operations import (
 from litestar_security.accounts._records import (
     LoginMethod,
     NoOpSecurityEventSink,
-    RevokeLoginMethodResult,
+    RevokeLoginMethodOutcome,
     SecurityEvent,
     SecurityEventSink,
 )
@@ -58,7 +58,7 @@ from litestar_security.authentication import InvalidCredentials, VerificationUna
 from litestar_security.context import AuthenticationEvidence
 
 __all__ = (
-    "AssertionRecordResult",
+    "AssertionRecordStatus",
     "AttestationTrustMapper",
     "AuthenticationVerification",
     "CloneRiskPolicy",
@@ -97,7 +97,7 @@ class UserVerification(str, Enum):
     DISCOURAGED = "discouraged"
 
 
-class AssertionRecordResult(str, Enum):
+class AssertionRecordStatus(str, Enum):
     """Atomic assertion-recording outcome."""
 
     RECORDED = "recorded"
@@ -349,7 +349,7 @@ class PasskeyStore(Protocol):
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordResult:
+    ) -> AssertionRecordStatus:
         """Atomically persist a verified assertion against an optimistic version.
 
         Args:
@@ -863,13 +863,13 @@ class PasskeyService:
                 clone_risk=clone_risk,
                 now=now,
             )
-            if result is AssertionRecordResult.CONFLICT:
+            if result is AssertionRecordStatus.CONFLICT:
                 return InvalidCredentials()
         except InvalidWebAuthnResponseError:
             return InvalidCredentials()
         except Exception:  # noqa: BLE001 - sanitize application stores and dependency failures
             return VerificationUnavailable()
-        if result is AssertionRecordResult.CLONE_RISK:
+        if result is AssertionRecordStatus.CLONE_RISK:
             await self._emit_event(
                 operation=PASSKEY_ASSERT, outcome=OUTCOME_CLONE_RISK, account_id=account_id, occurred_at=now
             )
@@ -917,7 +917,7 @@ class PasskeyService:
 
     async def remove_credential(
         self, account_id: str, credential_id: bytes
-    ) -> RevokeLoginMethodResult | VerificationUnavailable:
+    ) -> RevokeLoginMethodOutcome | VerificationUnavailable:
         """Remove one credential through the shared final-method-safe operation."""
         login_methods = self.login_methods
         if login_methods is None:

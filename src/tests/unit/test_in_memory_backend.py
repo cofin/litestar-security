@@ -18,8 +18,8 @@ from litestar_security.accounts import (
     NotificationCommand,
     PasswordChangeStatus,
     PasswordResetStatus,
-    PrepareRefreshResult,
     PurposeTokenCodec,
+    RefreshPreflightOutcome,
     RefreshRotationStatus,
     RefreshTokenFamilyStore,
     RefreshTokenProof,
@@ -440,9 +440,9 @@ async def test_local_account_store_keeps_refresh_families_revoked_and_does_not_r
         RefreshTokenProof(create.token_id, create.token_digest), rotate.idempotency_digest, now=_NOW, event=_event()
     )
 
-    assert isinstance(replay, PrepareRefreshResult)
+    assert isinstance(replay, RefreshPreflightOutcome)
     assert replay.status is RefreshRotationStatus.REPLAY_DETECTED
-    assert isinstance(after_revoke, PrepareRefreshResult)
+    assert isinstance(after_revoke, RefreshPreflightOutcome)
     assert after_revoke.status is RefreshRotationStatus.REVOKED
 
     expired_backend = InMemorySecurityBackend(clock=lambda: _NOW)
@@ -457,7 +457,7 @@ async def test_local_account_store_keeps_refresh_families_revoked_and_does_not_r
         await expired_backend.accounts.prepare_rotation(
             RefreshTokenProof(expired_create.token_id, expired_create.token_digest), None, now=_NOW, event=_event()
         ),
-        PrepareRefreshResult,
+        RefreshPreflightOutcome,
     )
 
 
@@ -504,7 +504,7 @@ async def test_local_account_store_rejects_refresh_identifier_collisions_before_
         await backend.accounts.prepare_rotation(
             RefreshTokenProof(create.token_id, create.token_digest), None, now=_NOW, event=_event()
         ),
-        PrepareRefreshResult,
+        RefreshPreflightOutcome,
     )
 
 
@@ -676,7 +676,7 @@ async def test_local_account_store_refresh_revocation_and_epoch_outcomes() -> No
         RefreshTokenProof(current.token_id, current.token_digest), None, now=_NOW, event=_event()
     )
 
-    assert isinstance(prepared, PrepareRefreshResult)
+    assert isinstance(prepared, RefreshPreflightOutcome)
     assert prepared.status is RefreshRotationStatus.EPOCH_MISMATCH
 
 
