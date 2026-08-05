@@ -23,7 +23,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
-from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs
+from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa import MFAService, RecoveryCodeGrant, StepUpCredential, StepUpService
 from litestar_security.accounts._operations import (
@@ -225,11 +225,13 @@ async def _consume_step_up(
     )
 
 
+# Raised denials carry the exception body; the 409 below is returned by the
+# handler and keeps its own schema.
 _MFA_BAD_REQUEST_RESPONSES = {
-    HTTP_400_BAD_REQUEST: ResponseSpec(RouteStatus, description="The request is invalid."),
-    HTTP_401_UNAUTHORIZED: ResponseSpec(RouteStatus, description="Authentication or step-up is required."),
-    HTTP_429_TOO_MANY_REQUESTS: ResponseSpec(RouteStatus, description="The operation exceeded its rate limit."),
-    HTTP_503_SERVICE_UNAVAILABLE: ResponseSpec(RouteStatus, description="The factor service is unavailable."),
+    HTTP_400_BAD_REQUEST: raised_denial("The request is invalid."),
+    HTTP_401_UNAUTHORIZED: raised_denial("Authentication or step-up is required."),
+    HTTP_429_TOO_MANY_REQUESTS: raised_denial("The operation exceeded its rate limit."),
+    HTTP_503_SERVICE_UNAVAILABLE: raised_denial("The factor service is unavailable."),
 }
 
 

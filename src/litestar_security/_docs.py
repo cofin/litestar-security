@@ -11,15 +11,51 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
+from litestar.enums import MediaType
 from litestar.exceptions import ImproperlyConfiguredException
+from litestar.openapi.datastructures import ResponseSpec
 from litestar.openapi.spec import Tag
+
+from litestar_security.schema import RouteError
 
 if TYPE_CHECKING:
     from litestar import Router
     from litestar.handlers import BaseRouteHandler
     from litestar.handlers.http_handlers import HTTPRouteHandler
 
-__all__ = ("LOCAL_TAG_KEYS", "ROUTE_TAGS", "RouteDocs", "apply_route_docs", "merge_route_tags", "resolve_tags")
+__all__ = (
+    "LOCAL_TAG_KEYS",
+    "ROUTE_TAGS",
+    "RouteDocs",
+    "apply_route_docs",
+    "merge_route_tags",
+    "raised_denial",
+    "resolve_tags",
+)
+
+
+def raised_denial(description: str) -> ResponseSpec:
+    """Describe a status a generated route raises rather than returns.
+
+    A raised status never reaches the handler's return value, so its body is
+    whatever the application's exception handling renders - by default
+    Litestar's :class:`RouteError` shape at ``application/json``. Every
+    generated route family builds its denial specs here so one edit moves all
+    of them together.
+
+    Examples are switched off deliberately. ``ResponseSpec.generate_examples``
+    defaults to ``True`` and, unlike the rest of the document, is honored
+    regardless of ``OpenAPIConfig.create_examples``; the values it invents are
+    random, so leaving it on makes two builds of the same application publish
+    different documents.
+
+    Args:
+        description: What this status means on the route documenting it.
+
+    Returns:
+        One response specification for a raised status.
+    """
+    return ResponseSpec(RouteError, description=description, media_type=MediaType.JSON, generate_examples=False)
 
 
 ROUTE_TAGS: Mapping[str, Tag] = MappingProxyType({

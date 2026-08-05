@@ -26,7 +26,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
-from litestar_security._docs import ROUTE_TAGS, apply_route_docs
+from litestar_security._docs import ROUTE_TAGS, apply_route_docs, raised_denial
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa_login import MFARequired
 from litestar_security.accounts._rate_limits import RateLimited
@@ -77,15 +77,17 @@ _VERIFICATION_TAG = ROUTE_TAGS["local.verification"].name
 LOCAL_AUTH_TAGS: tuple[Tag, ...] = tuple(tag for key, tag in ROUTE_TAGS.items() if key.startswith("local."))
 
 
+# Every status below is raised, so the body is the one exception handling
+# renders. RouteStatus stays on the statuses these handlers return.
 _LOCAL_BAD_REQUEST_RESPONSES = {
-    HTTP_400_BAD_REQUEST: ResponseSpec(RouteStatus, description="The lifecycle request is invalid."),
-    HTTP_429_TOO_MANY_REQUESTS: ResponseSpec(RouteStatus, description="The operation exceeded its rate limit."),
-    HTTP_503_SERVICE_UNAVAILABLE: ResponseSpec(RouteStatus, description="The authentication service is unavailable."),
+    HTTP_400_BAD_REQUEST: raised_denial("The lifecycle request is invalid."),
+    HTTP_429_TOO_MANY_REQUESTS: raised_denial("The operation exceeded its rate limit."),
+    HTTP_503_SERVICE_UNAVAILABLE: raised_denial("The authentication service is unavailable."),
 }
 
 
 _LOCAL_AUTH_REQUIRED_RESPONSES = {
-    HTTP_401_UNAUTHORIZED: ResponseSpec(RouteStatus, description="Authentication is required."),
+    HTTP_401_UNAUTHORIZED: raised_denial("Authentication is required."),
     HTTP_503_SERVICE_UNAVAILABLE: _LOCAL_BAD_REQUEST_RESPONSES[HTTP_503_SERVICE_UNAVAILABLE],
 }
 

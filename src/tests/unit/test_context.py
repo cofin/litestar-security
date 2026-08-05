@@ -165,6 +165,7 @@ _PUBLIC_API = (
     "RequestAuthenticator",
     "ResourcePermission",
     "RouteDocs",
+    "RouteError",
     "SecureController",
     "SecurityConfig",
     "SecurityContext",
@@ -3006,8 +3007,8 @@ def test_every_wire_schema_in_the_tree_shares_one_casing_and_strictness_policy()
 
     schemas = descendants(litestar_security.WireStruct)
     # A schema that must tolerate members it does not model states so on itself and
-    # is listed here with the reason. Nothing needs the exemption today.
-    tolerant: dict[str, str] = {}
+    # is listed here with the reason.
+    tolerant = {"RouteError": "Litestar renders this body, and an application exception handler may add members."}
 
     assert len(schemas) >= 30
     for schema in schemas:

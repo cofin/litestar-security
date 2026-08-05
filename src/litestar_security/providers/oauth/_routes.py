@@ -23,7 +23,6 @@ from litestar.exceptions import (
 from litestar.exceptions.responses import (
     create_exception_response,  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized Response
 )
-from litestar.openapi.datastructures import ResponseSpec
 from litestar.params import Body, FromPath, FromQuery, JSONBody, QueryParameter, SkipValidation
 from litestar.response import Redirect
 from litestar.status_codes import (
@@ -36,7 +35,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
-from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs
+from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import Principal
 from litestar_security.providers.oauth._accounts import (
@@ -181,22 +180,24 @@ class OAuthLogout(msgspec.Struct, frozen=True, kw_only=True):
         return f"{type(self).__name__}(detail={self.detail!r}, redirect_url={redirect})"
 
 
+# Every status below is raised, so the body is the one exception handling
+# renders. OAuthRouteStatus stays on the statuses these routes return.
 _OAUTH_PUBLIC_RESPONSES = {
-    HTTP_400_BAD_REQUEST: ResponseSpec(OAuthRouteStatus, description="The provider request is invalid."),
-    HTTP_401_UNAUTHORIZED: ResponseSpec(OAuthRouteStatus, description="The provider exchange was rejected."),
-    HTTP_503_SERVICE_UNAVAILABLE: ResponseSpec(OAuthRouteStatus, description="The provider is unavailable."),
+    HTTP_400_BAD_REQUEST: raised_denial("The provider request is invalid."),
+    HTTP_401_UNAUTHORIZED: raised_denial("The provider exchange was rejected."),
+    HTTP_503_SERVICE_UNAVAILABLE: raised_denial("The provider is unavailable."),
 }
 
 
 _OAUTH_AUTHENTICATED_RESPONSES = {
     **_OAUTH_PUBLIC_RESPONSES,
-    HTTP_401_UNAUTHORIZED: ResponseSpec(OAuthRouteStatus, description="Authentication or step-up is required."),
+    HTTP_401_UNAUTHORIZED: raised_denial("Authentication or step-up is required."),
 }
 
 
 _OIDC_FRONTCHANNEL_RESPONSES = {
     **_OAUTH_PUBLIC_RESPONSES,
-    HTTP_429_TOO_MANY_REQUESTS: ResponseSpec(OAuthRouteStatus, description="The request exceeded its rate limit."),
+    HTTP_429_TOO_MANY_REQUESTS: raised_denial("The request exceeded its rate limit."),
 }
 
 

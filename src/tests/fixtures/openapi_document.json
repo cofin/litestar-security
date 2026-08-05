@@ -519,6 +519,37 @@
         "title": "RecoveryCodes",
         "type": "object"
       },
+      "RouteError": {
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "extra": {
+            "oneOf": [
+              {
+                "additionalProperties": {},
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status_code": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "detail",
+          "status_code"
+        ],
+        "title": "RouteError",
+        "type": "object"
+      },
       "RouteStatus": {
         "properties": {
           "detail": {
@@ -724,7 +755,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -744,7 +775,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -754,7 +785,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -806,7 +837,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -816,7 +847,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -880,7 +911,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -890,7 +921,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -900,7 +931,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -910,7 +941,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -977,7 +1008,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -987,7 +1018,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -997,7 +1028,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1007,7 +1038,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1074,7 +1105,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1084,7 +1115,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1094,7 +1125,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1104,7 +1135,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1182,7 +1213,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1192,7 +1223,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1212,7 +1243,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1222,7 +1253,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1306,7 +1337,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1316,7 +1347,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1326,7 +1357,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1400,7 +1431,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1410,7 +1441,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1420,7 +1451,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1507,7 +1538,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1517,7 +1548,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1527,7 +1558,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1608,7 +1639,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1618,7 +1649,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1628,7 +1659,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1696,7 +1727,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1706,7 +1737,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1716,7 +1747,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1794,7 +1825,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1804,7 +1835,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1814,7 +1845,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1893,7 +1924,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1903,7 +1934,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1913,7 +1944,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -1991,7 +2022,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2001,7 +2032,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2011,7 +2042,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2096,7 +2127,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2106,7 +2137,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2116,7 +2147,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2126,7 +2157,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2181,7 +2212,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2191,7 +2222,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2201,7 +2232,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2211,7 +2242,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2278,7 +2309,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2288,7 +2319,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2298,7 +2329,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2308,7 +2339,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2374,7 +2405,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2384,7 +2415,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2394,7 +2425,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2404,7 +2435,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2464,7 +2495,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2474,7 +2505,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2484,7 +2515,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2494,7 +2525,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2556,7 +2587,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2566,7 +2597,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2576,7 +2607,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2586,7 +2617,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2653,7 +2684,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2663,7 +2694,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2673,7 +2704,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2683,7 +2714,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2761,7 +2792,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2771,7 +2802,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2791,7 +2822,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2801,7 +2832,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2868,7 +2899,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2878,7 +2909,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2888,7 +2919,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2898,7 +2929,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2962,7 +2993,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2972,7 +3003,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -2982,7 +3013,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3044,7 +3075,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3054,7 +3085,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3064,7 +3095,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3126,7 +3157,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3136,7 +3167,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3146,7 +3177,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3198,7 +3229,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3208,7 +3239,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3311,7 +3342,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3321,7 +3352,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3396,7 +3427,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3406,7 +3437,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3416,7 +3447,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3426,7 +3457,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3477,7 +3508,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3497,7 +3528,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3507,7 +3538,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3569,7 +3600,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3579,7 +3610,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3589,7 +3620,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3599,7 +3630,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3681,7 +3712,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3691,7 +3722,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3701,7 +3732,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3801,7 +3832,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3811,7 +3842,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3875,7 +3906,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3885,7 +3916,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3895,7 +3926,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3957,7 +3988,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3967,7 +3998,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
@@ -3977,7 +4008,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/RouteError"
                 }
               }
             },
