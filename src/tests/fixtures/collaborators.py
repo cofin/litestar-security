@@ -663,3 +663,72 @@ def _next_response(responses: list[object], requests: list[JWKSFetchRequest], re
     if isinstance(response, Exception):
         raise response
     return response(request) if callable(response) else response
+
+
+class NotifyingLocalAccountStore(kit.InMemoryLocalAccountStore):
+    """A kit account store that keeps the one-time tokens it was asked to deliver.
+
+    The bundled store discards the delivery command deliberately: a real adapter
+    hands it to an email service rather than storing it. A test driving the
+    generated routes through registration, verification, or recovery needs the
+    token those routes never return, so this subclass records each command it
+    receives and delegates the rest unchanged.
+    """
+
+    __slots__ = ("delivered",)
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Record deliveries alongside the store's own state.
+
+        Args:
+            *args: Positional arguments for the bundled store.
+            **kwargs: Keyword arguments for the bundled store.
+        """
+        super().__init__(*args, **kwargs)
+        self.delivered: list[Any] = []
+
+    async def issue(self, issue: Any, notification: Any, *, event: Any) -> None:
+        """Record one delivery command, then store the issue as the kit does.
+
+        Args:
+            issue: The purpose-token issue to store.
+            notification: The delivery command carrying the one-time token.
+            event: The durable security event committed with the issue.
+        """
+        self.delivered.append(notification)
+        await super().issue(issue, notification, event=event)
+
+    async def register(self, command: Any, password_hash: str, **kwargs: Any) -> Any:
+        """Record the verification delivery registration commits alongside the account.
+
+        Registration is one atomic call rather than an account write followed by
+        an issue, so the delivery command reaches the store only here.
+
+        Args:
+            command: The registration command.
+            password_hash: The hash to store for the new account.
+            **kwargs: The remaining registration inputs, passed through.
+
+        Returns:
+            The registration outcome the kit produced.
+        """
+        verification = kwargs.get("verification")
+        if verification is not None:
+            self.delivered.append(verification.notification)
+        return await super().register(command, password_hash, **kwargs)
+
+    def token_for(self, template: str) -> str:
+        """Return the most recent one-time token issued under one template.
+
+        Args:
+            template: The delivery template, such as ``"verification"``.
+
+        Returns:
+            The token the route delivered but never returned.
+
+        Raises:
+            AssertionError: If no delivery under that template was recorded.
+        """
+        tokens = [command.token for command in self.delivered if command.template == template]
+        assert tokens, f"no {template} token was delivered"
+        return tokens[-1]

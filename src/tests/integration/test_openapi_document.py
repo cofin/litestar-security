@@ -69,6 +69,7 @@ from litestar_security.providers.oauth import (
     OIDCLogoutIdentity,
     OIDCLogoutLifecycleService,
 )
+from litestar_security.schema import WirePolicy
 from litestar_security.testing import (
     InMemoryLocalAccountStore,
     InMemoryMFAStore,
@@ -139,6 +140,7 @@ def build_documented_app(  # noqa: PLR0913 - one variation point per configurabl
     response_class: type[Response[Any]] | None = None,
     route_handlers: list[Any] | None = None,
     plugins: list[Any] | None = None,
+    wire: WirePolicy | None = None,
 ) -> Litestar:
     """Build the application every generated route family is documented from.
 
@@ -152,6 +154,7 @@ def build_documented_app(  # noqa: PLR0913 - one variation point per configurabl
         route_handlers: Handlers the application owns alongside the generated
             ones.
         plugins: Further plugins installed beside the security plugin.
+        wire: How the generated bodies are spelled on the wire.
 
     Returns:
         One application with local auth, MFA, passkeys, OAuth, and OIDC logout.
@@ -212,7 +215,16 @@ def build_documented_app(  # noqa: PLR0913 - one variation point per configurabl
         middleware=[CookieBackendConfig(secret=bytes(range(16)), secure=True, httponly=True).middleware],
         openapi_config=OpenAPIConfig(title="Litestar Security", version="0.0.0"),
         plugins=[
-            SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa, passkeys=passkeys, oauth=oauth)),
+            SecurityPlugin(
+                SecurityConfig(
+                    local_auth=local_auth,
+                    mfa=mfa,
+                    passkeys=passkeys,
+                    oauth=oauth,
+                    wire_rename=wire.rename if wire is not None else None,
+                    wire_forbid_unknown_fields=wire.forbid_unknown_fields if wire is not None else True,
+                )
+            ),
             *(plugins or []),
         ],
         **optional,
