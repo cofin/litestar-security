@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast
 
 from litestar.exceptions import ImproperlyConfiguredException
 
+from litestar_security._docs import RouteDocs
 from litestar_security.authentication import (
     AuthenticationMechanism,
     AuthenticationPolicy,
@@ -97,6 +98,7 @@ class MFAConfig:
     route_prefix: str = "/auth"
     issuer: str = "Litestar Security"
     register_routes: bool = True
+    docs: RouteDocs = field(default_factory=RouteDocs, repr=False)
     mfa_service: object = field(init=False, repr=False, compare=False)
     step_up_service: object | None = field(init=False, repr=False, compare=False)
 
@@ -131,6 +133,9 @@ class MFAConfig:
         register_routes_value = cast("object", self.register_routes)
         if register_routes_value.__class__ is not bool:
             msg = "MFA route registration must be boolean"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.docs.__class__ is not RouteDocs:
+            msg = "MFA documentation metadata must be RouteDocs"
             raise ImproperlyConfiguredException(detail=msg)
         require_at_login_value = cast("object", self.require_at_login)
         if require_at_login_value.__class__ is not bool:
@@ -167,6 +172,7 @@ class PasskeyConfig:
     step_up_store: object | None = field(default=None, repr=False)
     route_prefix: str = "/auth"
     register_routes: bool = True
+    docs: RouteDocs = field(default_factory=RouteDocs, repr=False)
     passkey_service: object = field(init=False, repr=False, compare=False)
     step_up_service: object | None = field(init=False, repr=False, compare=False)
 
@@ -205,6 +211,9 @@ class PasskeyConfig:
         register_routes_value = cast("object", self.register_routes)
         if register_routes_value.__class__ is not bool:
             msg = "Passkey route registration must be boolean"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.docs.__class__ is not RouteDocs:
+            msg = "Passkey documentation metadata must be RouteDocs"
             raise ImproperlyConfiguredException(detail=msg)
         if self.register_routes and self.login_methods is None:
             msg = "Generated passkey routes require a login-method store"

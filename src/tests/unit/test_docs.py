@@ -1,11 +1,39 @@
 """Unit contracts for the generated-route documentation registry and metadata type."""
 
-from typing import Any, cast
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security._docs import ROUTE_TAGS, RouteDocs
+from litestar_security.accounts import (
+    AESGCMSecretProtector,
+    LocalAuth,
+    LocalAuthSecrets,
+    PurposeTokenCodec,
+    RefreshReceiptKey,
+    RefreshReceiptSealer,
+    RefreshTokenCodec,
+    SecretProtectorKey,
+    SessionBindingConfig,
+)
+from litestar_security.config import MFAConfig, PasskeyConfig
+from litestar_security.providers import LocalKeyRing, SigningKey
+from litestar_security.providers.oauth import OAuthConfig
+from litestar_security.testing import (
+    InMemoryLocalAccountStore,
+    InMemoryMFAStore,
+    InMemoryPasskeyStore,
+    InMemoryWebAuthnChallengeStore,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+
+async def _observe(*_args: object, **_kwargs: object) -> None:
+    return None
 
 
 def test_every_generated_tag_group_has_a_stable_key() -> None:
@@ -142,3 +170,126 @@ def test_route_docs_is_part_of_the_public_surface() -> None:
 
     assert litestar_security.RouteDocs is RouteDocs
     assert "RouteDocs" in litestar_security.__all__
+
+
+def _local_auth_kwargs(*, refresh: bool = False) -> "dict[str, Any]":
+    accounts = InMemoryLocalAccountStore(
+        _observe,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
+        identifiers=str.casefold,
+        entropy=lambda size: b"e" * size,
+    )
+    return {
+        "accounts": cast("Any", accounts),
+        "secrets": LocalAuthSecrets(
+            purpose_tokens=PurposeTokenCodec(pepper=b"p" * 32),
+            refresh_codec=RefreshTokenCodec(pepper=b"q" * 32) if refresh else None,
+            refresh_receipts=(RefreshReceiptSealer(active_key=RefreshReceiptKey("k", b"r" * 32)) if refresh else None),
+        ),
+        "binding": SessionBindingConfig(pepper=b"b" * 32, max_age=600),
+    }
+
+
+def _mfa_kwargs() -> "dict[str, Any]":
+    return {
+        "store": InMemoryMFAStore(),
+        "secret_protector": AESGCMSecretProtector(active_key=SecretProtectorKey("v1", b"s" * 32)),
+        "register_routes": False,
+    }
+
+
+def _passkey_kwargs() -> "dict[str, Any]":
+    return {
+        "store": InMemoryPasskeyStore(),
+        "challenge_store": InMemoryWebAuthnChallengeStore(),
+        "rp_id": "example.com",
+        "origins": ("https://example.com",),
+        "register_routes": False,
+    }
+
+
+def _oauth_kwargs() -> "dict[str, Any]":
+    class _Service:
+        provider_names = frozenset({"example"})
+
+        async def begin(self, **kwargs: object) -> None:
+            del kwargs
+
+        async def callback(self, **kwargs: object) -> None:
+            del kwargs
+
+        async def unlink(self, **kwargs: object) -> None:
+            del kwargs
+
+        async def revoke(self, **kwargs: object) -> None:
+            del kwargs
+
+        async def logout(self, **kwargs: object) -> None:
+            del kwargs
+
+    class _Provider:
+        name = "example"
+
+    return {"oauth_service": cast("Any", _Service()), "providers": (_Provider(),), "register_routes": False}
+
+
+def test_every_feature_config_carries_documentation_metadata_by_default() -> None:
+    """An unconfigured feature documents its routes exactly as it always has."""
+    configs = (
+        LocalAuth.session(**_local_auth_kwargs(), register_routes=False),
+        MFAConfig(**_mfa_kwargs()),
+        PasskeyConfig(**_passkey_kwargs()),
+        OAuthConfig(**_oauth_kwargs()),
+    )
+
+    assert all(config.docs == RouteDocs() for config in configs)
+
+
+@pytest.mark.parametrize("profile", ["session", "tokens", "hybrid"])
+def test_every_local_auth_profile_threads_documentation_metadata_through(
+    profile: str, jwt_key_material: "Mapping[str, tuple[bytes, bytes]]"
+) -> None:
+    """``docs`` travels beside ``route_prefix`` on all three profile constructors."""
+    docs = RouteDocs(tags={"local.sessions": "Sessions"})
+    kwargs = _local_auth_kwargs(refresh=profile != "session")
+    if profile != "session":
+        kwargs |= {
+            "key_ring": LocalKeyRing(
+                issuer="https://local.example",
+                active_signing_key=SigningKey(
+                    key_id="active", algorithm="EdDSA", private_key=jwt_key_material["EdDSA"][0]
+                ),
+            ),
+            "token_audience": "local-client",
+        }
+    if profile == "tokens":
+        del kwargs["binding"]
+
+    config = getattr(LocalAuth, profile)(**kwargs, register_routes=False, docs=docs)
+
+    assert config.docs is docs
+
+
+@pytest.mark.parametrize(
+    ("factory", "kwargs"), [(MFAConfig, _mfa_kwargs), (PasskeyConfig, _passkey_kwargs), (OAuthConfig, _oauth_kwargs)]
+)
+def test_every_feature_config_preserves_supplied_documentation_metadata(factory: "Any", kwargs: "Any") -> None:
+    """The configured object is preserved by identity, not rebuilt."""
+    docs = RouteDocs(tag_descriptions={"mfa": "How this deployment does second factors."})
+
+    assert factory(**kwargs(), docs=docs).docs is docs
+
+
+@pytest.mark.parametrize(
+    ("factory", "kwargs"),
+    [
+        (LocalAuth.session, _local_auth_kwargs),
+        (MFAConfig, _mfa_kwargs),
+        (PasskeyConfig, _passkey_kwargs),
+        (OAuthConfig, _oauth_kwargs),
+    ],
+)
+def test_documentation_metadata_must_be_route_docs(factory: "Any", kwargs: "Any") -> None:
+    """A mapping passed where a RouteDocs belongs is rejected at configuration time."""
+    with pytest.raises(ImproperlyConfiguredException, match="documentation"):
+        factory(**kwargs(), docs=cast("Any", {"mfa": "Two-factor"}))

@@ -36,7 +36,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
-from litestar_security._docs import ROUTE_TAGS
+from litestar_security._docs import ROUTE_TAGS, RouteDocs
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import Principal
 from litestar_security.providers.oauth._accounts import (
@@ -839,9 +839,17 @@ class OIDCLogoutLifecycleService:
 class OAuthConfig:
     """Interactive provider route configuration and service graph."""
 
-    __slots__ = ("_route_handlers", "oauth_service", "oidc_service", "providers", "register_routes", "route_prefix")
+    __slots__ = (
+        "_route_handlers",
+        "docs",
+        "oauth_service",
+        "oidc_service",
+        "providers",
+        "register_routes",
+        "route_prefix",
+    )
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - explicit configuration surface; every input is named
         self,
         *,
         oauth_service: OAuthRouteService,
@@ -849,6 +857,7 @@ class OAuthConfig:
         oidc_service: OIDCLogoutLifecycleService | None = None,
         route_prefix: str = "/auth",
         register_routes: bool = True,
+        docs: "RouteDocs | None" = None,
     ) -> None:
         """Validate provider uniqueness and generated-route ownership.
 
@@ -858,6 +867,12 @@ class OAuthConfig:
             oidc_service: Optional verified OIDC logout workflow.
             route_prefix: Absolute non-root mount path.
             register_routes: Whether the plugin installs generated routes.
+            docs: Application-owned OpenAPI documentation for the generated
+                routes: tag renames, tag descriptions, and optional operation-id
+                and route-name transforms.
+
+        Raises:
+            ImproperlyConfiguredException: If any input is invalid.
         """
         oauth_service_value = cast("object", oauth_service)
         if not isinstance(oauth_service_value, OAuthRouteService):
@@ -891,6 +906,10 @@ class OAuthConfig:
         if register_routes_value.__class__ is not bool:
             message = "OAuth route registration flag is invalid"
             raise ImproperlyConfiguredException(detail=message)
+        if docs is not None and docs.__class__ is not RouteDocs:
+            message = "OAuth documentation metadata must be RouteDocs"
+            raise ImproperlyConfiguredException(detail=message)
+        self.docs = RouteDocs() if docs is None else docs
         self.oauth_service = oauth_service
         self.providers = providers
         self.oidc_service = oidc_service
