@@ -41,6 +41,7 @@ from litestar.types import Empty
 from litestar.utils.scope.state import ScopeState
 
 from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
+from litestar_security._dto import apply_wire_dtos
 from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import Principal
@@ -949,15 +950,17 @@ class OAuthConfig:
         policy = WirePolicy() if wire is None else wire
         cached = self._route_handlers.get(policy)
         if cached is None:
-            cached = self._route_handlers[policy] = (build_oauth_routes(self),)
+            cached = self._route_handlers[policy] = (build_oauth_routes(self, policy),)
         return cached
 
 
-def build_oauth_routes(config: OAuthConfig) -> Router:
+def build_oauth_routes(config: OAuthConfig, wire: "WirePolicy | None" = None) -> Router:
     """Build native generated OAuth lifecycle routes.
 
     Args:
         config: Validated provider route configuration.
+        wire: How the request and response bodies are spelled. Defaults to the
+            field names as Python spells them, with unknown members rejected.
 
     Returns:
         One no-store router.
@@ -974,20 +977,26 @@ def build_oauth_routes(config: OAuthConfig) -> Router:
 
         oidc_dependencies["oidc_service"] = Provide(provide_oidc_service, sync_to_thread=False, use_cache=False)
 
-    return apply_route_docs(
-        Router(
-            path=config.route_prefix,
-            route_handlers=[_OAuthController, *([_OIDCLogoutController] if config.oidc_service is not None else [])],
-            cache_control=CacheControlHeader(no_store=True),
-            response_headers={"Pragma": "no-cache"},
-            opt={GENERATED_ROUTE_OPT_KEY: True},
-            exception_handlers=_oauth_exception_handlers(),
-            dependencies={
-                "oauth_service": Provide(provide_oauth_service, sync_to_thread=False, use_cache=False),
-                **oidc_dependencies,
-            },
+    return apply_wire_dtos(
+        apply_route_docs(
+            Router(
+                path=config.route_prefix,
+                route_handlers=[
+                    _OAuthController,
+                    *([_OIDCLogoutController] if config.oidc_service is not None else []),
+                ],
+                cache_control=CacheControlHeader(no_store=True),
+                response_headers={"Pragma": "no-cache"},
+                opt={GENERATED_ROUTE_OPT_KEY: True},
+                exception_handlers=_oauth_exception_handlers(),
+                dependencies={
+                    "oauth_service": Provide(provide_oauth_service, sync_to_thread=False, use_cache=False),
+                    **oidc_dependencies,
+                },
+            ),
+            config.docs,
         ),
-        config.docs,
+        WirePolicy() if wire is None else wire,
     )
 
 

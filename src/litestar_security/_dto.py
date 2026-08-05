@@ -27,22 +27,25 @@ points in every respect except their module name, and keeping the imports in
 one file is what makes them one deletion when they are exported.
 """
 
-from collections.abc import Collection
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, Union, cast, get_args
 
-import msgspec
-from litestar import Response
+from litestar import MediaType, Response
 from litestar.dto import DTOConfig, MsgspecDTO
 from litestar.dto._backend import DTOBackend, build_annotation_for_backend
 from litestar.dto._codegen_backend import DTOCodegenBackend
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.typing import FieldDefinition
+from litestar.utils.signature import ParsedSignature
 
 from litestar_security.schema import WirePolicy, WireStruct
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
     from collections.abc import Set as AbstractSet
 
+    import msgspec
+    from litestar import Router
     from litestar.connection import ASGIConnection
     from litestar.dto import AbstractDTO
     from litestar.dto._types import TransferDTOFieldDefinition
@@ -53,6 +56,7 @@ __all__ = (
     "WireDTO",
     "WireUnionBackend",
     "WireUnionDTO",
+    "apply_wire_dtos",
     "union_wire_dto",
     "wire_dto",
     "wire_struct",
@@ -70,6 +74,33 @@ with room above the deepest generated schema. It is not an application setting -
 it describes this library's own schemas, and the only thing an application could
 achieve by lowering it is losing data.
 """
+
+
+def apply_wire_dtos(router: "Router", policy: WirePolicy) -> "Router":
+    """Spell every body one freshly built generated router sends or accepts alike.
+
+    Handler decorators are module-level literals shared by every application in
+    the process, so the policy is applied here instead: every layer of a freshly
+    built router is private to the configuration that built it, and Litestar
+    copies the router again when an application registers it.
+
+    Args:
+        router: The router the feature just built.
+        policy: How its bodies are spelled on the wire.
+
+    Returns:
+        The same router.
+    """
+    # A handler declaring several paths appears on several routes; identity
+    # keeps each one visited exactly once.
+    handlers: dict[int, Any] = {
+        id(handler): handler
+        for route in router.routes
+        for handler in cast("tuple[Any, ...]", getattr(route, "route_handlers", ()))
+    }
+    for handler in handlers.values():
+        _apply_wire_dto(handler, policy)
+    return router
 
 
 def wire_dto(schema: "type[WireStruct]", policy: WirePolicy) -> "type[WireDTO[Any]]":
@@ -91,7 +122,10 @@ def wire_dto(schema: "type[WireStruct]", policy: WirePolicy) -> "type[WireDTO[An
     return cached
 
 
-def union_wire_dto(union: Any, policy: WirePolicy) -> "type[WireUnionDTO[Any]]":
+def union_wire_dto(
+    union: Any,  # noqa: ANN401 - a union of schemas is not itself a type
+    policy: WirePolicy,
+) -> "type[WireUnionDTO[Any]]":
     """Build the DTO wrapper for a handler that returns one of several bodies.
 
     Args:
@@ -162,7 +196,11 @@ class WireBackend(DTOCodegenBackend):
     _transfer_shapes: ClassVar[dict[tuple[Any, ...], tuple[Any, ...]]] = {}
 
     @classmethod
-    def transfer_model_for(cls, model_type: Any, config: DTOConfig) -> "type[msgspec.Struct] | None":
+    def transfer_model_for(
+        cls,
+        model_type: Any,  # noqa: ANN401 - Litestar hands a backend an unconstrained model
+        config: DTOConfig,
+    ) -> "type[msgspec.Struct] | None":
         """Return the struct already built for one model under one configuration.
 
         Args:
@@ -178,7 +216,7 @@ class WireBackend(DTOCodegenBackend):
 
     def parse_model(
         self,
-        model_type: Any,
+        model_type: Any,  # noqa: ANN401 - the signature Litestar reduces a model with
         exclude: "AbstractSet[str]",
         include: "AbstractSet[str]",
         rename_fields: dict[str, str],
@@ -230,7 +268,9 @@ class WireBackend(DTOCodegenBackend):
                 serve.
         """
         entry = self._model_of_fields.get(id(field_definitions))
-        model_type = entry[1] if entry is not None and entry[0] is field_definitions else self.model_type
+        if entry is None or entry[0] is not field_definitions:  # pragma: no cover - every parse records its model
+            return super().create_transfer_model_type(model_name=model_name, field_definitions=field_definitions)
+        model_type = entry[1]
         name_key = (model_type, _policy_key(cast("DTOConfig", cast("Any", self).dto_factory.config)))
         shape = tuple(
             (field.name, field.is_excluded, field.is_partial, field.serialization_name) for field in field_definitions
@@ -295,13 +335,13 @@ class WireUnionBackend(DTOBackend):
 
     __slots__ = ("arm_backends",)
 
-    def __init__(  # noqa: PLR0913 - the signature Litestar constructs a backend with
+    def __init__(  # noqa: PLR0913, PLR0917 - the signature Litestar constructs a backend with
         self,
         dto_factory: "type[AbstractDTO[Any]]",
         field_definition: FieldDefinition,
         handler_id: str,
-        is_data_field: bool,
-        model_type: Any,
+        is_data_field: bool,  # noqa: FBT001 - same
+        model_type: Any,  # noqa: ANN401 - the union this backend was built for
         wrapper_attribute_name: str | None,
     ) -> None:
         """Compose one backend per struct arm.
@@ -344,10 +384,10 @@ class WireUnionBackend(DTOBackend):
             annotation = build_annotation_for_backend(
                 arm, FieldDefinition.from_annotation(annotation), backend.transfer_model_type
             )
-        self.transfer_model_type = Union[tuple(transfer_arms)]  # type: ignore[assignment]  # a union of arms, not one struct
+        self.transfer_model_type = Union[tuple(transfer_arms)]  # type: ignore[assignment]  # noqa: UP007 - Union[] is the only form that accepts a tuple
         self.annotation = annotation
 
-    def encode_data(self, data: Any) -> Any:
+    def encode_data(self, data: Any) -> Any:  # noqa: ANN401 - Litestar transfers whatever the handler returned
         """Transfer whichever arm the handler actually returned.
 
         Args:
@@ -375,7 +415,7 @@ class WireUnionBackend(DTOBackend):
             response.content = _encoded(inner, content)
         return response
 
-    def populate_data_from_raw(self, raw: bytes, asgi_connection: "ASGIConnection[Any, Any, Any, Any]") -> Any:
+    def populate_data_from_raw(self, raw: bytes, asgi_connection: "ASGIConnection[Any, Any, Any, Any]") -> Any:  # noqa: ANN401 - the signature Litestar decodes a body with
         """Reject a request body narrowed to a union.
 
         Args:
@@ -391,7 +431,7 @@ class WireUnionBackend(DTOBackend):
         message = "A generated request body cannot be narrowed to a union of schemas"
         raise ImproperlyConfiguredException(detail=message)
 
-    def _backend_for(self, value: Any) -> "WireBackend | None":
+    def _backend_for(self, value: Any) -> "WireBackend | None":  # noqa: ANN401 - any returned value may be an arm
         return next((backend for arm, backend in self.arm_backends.items() if isinstance(value, arm)), None)
 
 
@@ -413,7 +453,7 @@ class WireDTO(MsgspecDTO[T]):
             field_definition=field_definition, handler_id=handler_id, backend_cls=backend_cls or WireBackend
         )
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
+    def __init_subclass__(cls, **kwargs: Any) -> None:  # noqa: ANN401 - the class creation keywords Python passes
         """Give every narrowed DTO class its own backend registry.
 
         ``AbstractDTO._dto_backends`` is one dictionary shared by every DTO in
@@ -433,7 +473,7 @@ class WireDTO(MsgspecDTO[T]):
 class WireUnionDTO(WireDTO[T]):
     """A wire DTO for a handler that returns one of several bodies."""
 
-    def __class_getitem__(cls, annotation: Any) -> "type[WireUnionDTO[T]]":
+    def __class_getitem__(cls, annotation: Any) -> "type[WireUnionDTO[T]]":  # noqa: ANN401 - a union is not a type
         """Narrow this DTO to a union, which the base class refuses.
 
         Args:
@@ -516,7 +556,10 @@ _DTO_TYPES: "dict[tuple[Any, WirePolicy], type[WireDTO[Any]]]" = {}
 _UNION_DTO_TYPES: "dict[tuple[Any, WirePolicy], type[WireUnionDTO[Any]]]" = {}
 
 
-def _annotated(annotation: Any, policy: WirePolicy) -> Any:
+def _annotated(
+    annotation: Any,  # noqa: ANN401 - carries a schema or a union of them
+    policy: WirePolicy,
+) -> Any:  # noqa: ANN401 - an Annotated alias is not a type
     from typing import Annotated  # noqa: PLC0415 - subscripting Annotated needs the runtime name
 
     return Annotated[
@@ -529,7 +572,48 @@ def _annotated(annotation: Any, policy: WirePolicy) -> Any:
     ]
 
 
-def _encoded(backend: "WireBackend", value: Any) -> Any:
+def _apply_wire_dto(handler: Any, policy: WirePolicy) -> None:  # noqa: ANN401 - one of several Litestar handler types
+    signature = ParsedSignature.from_fn(handler.fn, handler.resolve_signature_namespace())
+    attached = False
+    data_field = signature.parameters.get("data")
+    if data_field is not None and (found := _wire_model(data_field)) is not None and not found[1]:
+        handler.dto = wire_dto(found[0], policy)
+        attached = True
+    if (found := _wire_model(signature.return_type)) is not None:
+        model, is_union = found
+        handler.return_dto = union_wire_dto(model, policy) if is_union else wire_dto(model, policy)
+        attached = True
+    if handler.responses:
+        handler.responses = {
+            status: (
+                replace(spec, data_container=wire_struct(spec.data_container, policy))
+                if _renames(spec.data_container)
+                else spec
+            )
+            for status, spec in cast("dict[int, Any]", handler.responses).items()
+        }
+    if attached and not handler.media_type:
+        # A handler returning `Response[X]` publishes an empty media-type key
+        # once it carries a response DTO: Litestar defaults the media type on
+        # every other branch of its success-response builder but that one.
+        handler.media_type = MediaType.JSON
+
+
+def _wire_model(field_definition: FieldDefinition) -> tuple[Any, bool] | None:
+    """Return the schema a handler sends or accepts, and whether it is a union of them."""
+    resolved = MsgspecDTO.resolve_model_type(field_definition)
+    if _renames(resolved.annotation):
+        return resolved.annotation, False
+    if resolved.is_union:
+        arms = get_args(resolved.annotation)
+        return (resolved.annotation, True) if any(_renames(arm) for arm in arms) else None
+    for inner in resolved.inner_types:
+        if (found := _wire_model(inner)) is not None:
+            return found
+    return None
+
+
+def _encoded(backend: "WireBackend", value: Any) -> Any:  # noqa: ANN401 - transfers whatever the handler returned
     """Transfer one value through a backend without inheriting Litestar's open return type."""
     return cast(
         "Any",
@@ -537,7 +621,10 @@ def _encoded(backend: "WireBackend", value: Any) -> Any:
     )
 
 
-def _mirroring_defaults(struct: "type[msgspec.Struct]", model_type: Any) -> "type[msgspec.Struct]":
+def _mirroring_defaults(
+    struct: "type[msgspec.Struct]",
+    model_type: Any,  # noqa: ANN401 - the model a transfer struct mirrors
+) -> "type[msgspec.Struct]":
     """Carry the model's ``omit_defaults`` onto the struct that replaces it on the wire.
 
     Litestar builds every transfer struct with the same fixed configuration, so a
@@ -564,5 +651,5 @@ def _policy_key(config: DTOConfig) -> tuple[Any, ...]:
     return (config.rename_strategy, config.forbid_unknown_fields, config.max_nested_depth)
 
 
-def _renames(annotation: Any) -> bool:
+def _renames(annotation: Any) -> bool:  # noqa: ANN401 - classifies any annotation a handler declares
     return isinstance(annotation, type) and issubclass(annotation, WireStruct) and annotation.__wire_casing__

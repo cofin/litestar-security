@@ -24,6 +24,7 @@ from litestar.status_codes import (
 )
 
 from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
+from litestar_security._dto import apply_wire_dtos
 from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa import MFAService, RecoveryCodeGrant, StepUpCredential, StepUpService
@@ -64,6 +65,7 @@ from litestar_security.accounts.schemas import (
 )
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, optional, public, required
 from litestar_security.context import AuthenticationEvidence, Principal
+from litestar_security.schema import WirePolicy
 
 __all__ = ("build_mfa_routes",)
 
@@ -109,6 +111,7 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
     token_capable: bool = False,
     route_prefix: str = "/auth",
     docs: RouteDocs | None = None,
+    wire: "WirePolicy | None" = None,
 ) -> Router:
     """Build generated MFA and passkey routes around explicit services.
 
@@ -124,6 +127,8 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
         token_capable: Whether passkey login may issue local access/refresh tokens.
         route_prefix: Absolute path under which the route bundle is mounted.
         docs: Application-owned OpenAPI documentation for the generated routes.
+        wire: How the request and response bodies are spelled. Defaults to the
+            field names as Python spells them, with unknown members rejected.
 
     Returns:
         One native Litestar router containing only enabled feature controllers.
@@ -154,16 +159,19 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
             handlers.append(
                 _PasskeySessionAuthenticationController if session_capable else _PasskeyTokenAuthenticationController
             )
-    return apply_route_docs(
-        Router(
-            path=route_prefix,
-            route_handlers=handlers,
-            cache_control=CacheControlHeader(no_store=True),
-            response_headers={"Pragma": "no-cache"},
-            opt={GENERATED_ROUTE_OPT_KEY: True},
-            dependencies={"mfa_service": Provide(lambda: mfa_service, sync_to_thread=False, use_cache=False)},
+    return apply_wire_dtos(
+        apply_route_docs(
+            Router(
+                path=route_prefix,
+                route_handlers=handlers,
+                cache_control=CacheControlHeader(no_store=True),
+                response_headers={"Pragma": "no-cache"},
+                opt={GENERATED_ROUTE_OPT_KEY: True},
+                dependencies={"mfa_service": Provide(lambda: mfa_service, sync_to_thread=False, use_cache=False)},
+            ),
+            RouteDocs() if docs is None else docs,
         ),
-        RouteDocs() if docs is None else docs,
+        WirePolicy() if wire is None else wire,
     )
 
 

@@ -15,7 +15,7 @@ import anyio.lowlevel
 import click
 import pytest
 from click.testing import CliRunner
-from litestar import Controller, Litestar, Response, Router, WebSocket, asgi, get, post, route, websocket
+from litestar import Controller, Litestar, MediaType, Response, Router, WebSocket, asgi, get, post, route, websocket
 from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
 from litestar.di import NamedDependency, Provide
@@ -40,6 +40,7 @@ from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRo
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED, HTTP_400_BAD_REQUEST
 from litestar.testing import TestClient
+from litestar.types import Empty
 
 import litestar_security.accounts as accounts_module
 from litestar_security import (
@@ -54,6 +55,7 @@ from litestar_security import (
 )
 from litestar_security._cli import register, security_group
 from litestar_security._docs import RouteDocs
+from litestar_security._dto import wire_struct
 from litestar_security.accounts import (
     LOCAL_AUTH_TAGS,
     LifecycleAccepted,
@@ -61,6 +63,7 @@ from litestar_security.accounts import (
     LocalAuth,
     LocalAuthSecrets,
     LocalCredentials,
+    LocalMFAChallenge,
     PasskeyRecord,
     PasswordReauthenticationProof,
     ProtectedSecret,
@@ -120,7 +123,7 @@ from litestar_security.providers.jwt import (
     VerificationKey,
 )
 from litestar_security.providers.oidc import ServiceTokenConfig
-from litestar_security.schema import WirePolicy
+from litestar_security.schema import RouteError, WirePolicy
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,
     WebSocketConnectTokenIssuer,
@@ -4394,3 +4397,35 @@ def test_cli_registration_is_idempotent() -> None:
     SecurityPlugin().on_cli_init(cli)
 
     assert list(cli.commands) == ["security"]
+
+
+def _generated_handlers(router: Any) -> dict[str, Any]:
+    return {
+        f"{handler.handler_name}{min(handler.paths)}": handler
+        for route in router.routes
+        for handler in route.route_handlers
+        if handler.handler_name != "options_handler"
+    }
+
+
+def test_generated_handlers_carry_the_wire_dto_and_document_what_they_send() -> None:
+    local_auth = _routed_local_session_auth()
+
+    (router,) = local_auth.build_route_handlers(wire=WirePolicy())
+    handlers = _generated_handlers(router)
+
+    login = handlers["login/login"]
+    assert login.dto is not Empty
+    assert login.return_dto is not Empty
+    # A handler returning Response[X] with a DTO publishes an empty media-type
+    # key unless the media type is pinned.
+    assert login.media_type is MediaType.JSON
+    assert login.responses[200].data_container is wire_struct(LocalAccount, WirePolicy())
+    assert login.responses[403].data_container is wire_struct(LocalMFAChallenge, WirePolicy())
+    # A raised status is rendered by exception handling, not by the DTO, so its
+    # documented body stays exactly what Litestar sends.
+    assert login.responses[400].data_container is RouteError
+
+    sessions = handlers["list_sessions/sessions"]
+    assert sessions.return_dto is not Empty
+    assert sessions.dto is Empty

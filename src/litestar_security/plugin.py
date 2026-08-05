@@ -617,6 +617,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 token_capable=local_auth.local_auth_service.refresh_tokens is not None,
                 route_prefix=prefixes.pop(),
                 docs=docs,
+                wire=self.config.wire_policy(),
             )
             route_handlers = (router,)
             self._mfa_route_handlers = route_handlers

@@ -27,6 +27,7 @@ from litestar.status_codes import (
 )
 
 from litestar_security._docs import ROUTE_TAGS, apply_route_docs, raised_denial
+from litestar_security._dto import apply_wire_dtos
 from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa_login import MFARequired
@@ -61,6 +62,7 @@ from litestar_security.accounts.schemas import (
 )
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import Principal, SecurityContext
+from litestar_security.schema import WirePolicy
 
 if TYPE_CHECKING:
     from litestar_security.accounts._profiles import LocalAuthConfig
@@ -131,7 +133,7 @@ def requires_local_bearer(connection: ASGIConnection[Any, Any, Any, Any], _: Bas
         raise NotAuthorizedException(detail="Authentication required")
 
 
-def build_local_auth_routes(config: "LocalAuthConfig[Any]") -> Router:
+def build_local_auth_routes(config: "LocalAuthConfig[Any]", wire: "WirePolicy | None" = None) -> Router:
     """Build one native Litestar route tree for an explicit local-auth profile.
 
     Which controllers are mounted follows the profile: session routes for a
@@ -140,6 +142,8 @@ def build_local_auth_routes(config: "LocalAuthConfig[Any]") -> Router:
 
     Args:
         config: The configured profile the routes are built for.
+        wire: How the request and response bodies are spelled. Defaults to the
+            field names as Python spells them, with unknown members rejected.
 
     Returns:
         One router mounted at the profile's route prefix, with caching disabled
@@ -167,18 +171,21 @@ def build_local_auth_routes(config: "LocalAuthConfig[Any]") -> Router:
         route_handlers.append(_LocalRegistrationController)
     elif config.registration.mode is RegistrationMode.INVITE_ONLY:
         route_handlers.append(_LocalInvitationRegistrationController)
-    return apply_route_docs(
-        Router(
-            path=config.route_prefix,
-            route_handlers=route_handlers,
-            cache_control=CacheControlHeader(no_store=True),
-            dependencies={
-                "local_auth_service": Provide(provide_local_auth_service, sync_to_thread=False, use_cache=False)
-            },
-            opt={GENERATED_ROUTE_OPT_KEY: True},
-            response_headers={"Pragma": "no-cache"},
+    return apply_wire_dtos(
+        apply_route_docs(
+            Router(
+                path=config.route_prefix,
+                route_handlers=route_handlers,
+                cache_control=CacheControlHeader(no_store=True),
+                dependencies={
+                    "local_auth_service": Provide(provide_local_auth_service, sync_to_thread=False, use_cache=False)
+                },
+                opt={GENERATED_ROUTE_OPT_KEY: True},
+                response_headers={"Pragma": "no-cache"},
+            ),
+            config.docs,
         ),
-        config.docs,
+        WirePolicy() if wire is None else wire,
     )
 
 

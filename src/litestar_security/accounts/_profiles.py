@@ -521,7 +521,7 @@ class LocalAuthConfig(Generic[UserT]):
         policy = WirePolicy() if wire is None else wire
         cached = self._route_handlers.get(policy)
         if cached is None:
-            cached = self._route_handlers[policy] = (build_local_auth_routes(self),)
+            cached = self._route_handlers[policy] = (build_local_auth_routes(self, policy),)
         return cached
 
     def openapi_tags(self) -> "tuple[Tag, ...]":

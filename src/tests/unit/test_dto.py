@@ -1,18 +1,18 @@
 """Unit tests for the DTO types that spell generated bodies in one convention."""
 
-from collections.abc import Iterator
-from typing import Any, cast, get_args, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Any, cast, get_args, get_type_hints
 
 import msgspec
 import pytest
 from litestar import Litestar, Response, get, post
+from litestar.dto import DTOConfig
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.openapi.config import OpenAPIConfig
 from litestar.params import FromQuery
-from litestar.typing import FieldDefinition
 from litestar.testing import TestClient
+from litestar.typing import FieldDefinition
 
-from litestar_security._dto import MAX_NESTED_DEPTH, WireBackend, union_wire_dto, wire_dto, wire_struct
+from litestar_security._dto import MAX_NESTED_DEPTH, WireBackend, WireDTO, union_wire_dto, wire_dto, wire_struct
 from litestar_security.accounts import (
     LocalAccount,
     LocalCredentials,
@@ -25,6 +25,8 @@ from litestar_security.accounts import (
 from litestar_security.providers.oauth import OAuthRouteStatus
 from litestar_security.schema import WirePolicy, WireStruct
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 from tests.fixtures.collaborators import build_token_pair
 
 SNAKE = WirePolicy()
@@ -149,7 +151,7 @@ def test_the_configured_nesting_depth_covers_every_generated_schema() -> None:
     deepest = max((_nesting_depth(schema), schema.__name__) for schema in _generated_schemas())
 
     assert deepest[0] >= 1, "no generated schema nests, so this guard is watching nothing"
-    assert MAX_NESTED_DEPTH >= deepest[0]
+    assert deepest[0] <= MAX_NESTED_DEPTH
 
 
 def test_a_schema_deeper_than_the_limit_loses_its_leaf_with_no_error_raised() -> None:
@@ -172,7 +174,7 @@ def test_a_schema_deeper_than_the_limit_loses_its_leaf_with_no_error_raised() ->
     with TestClient(app=app) as client:
         body = client.get("/deep").json()
 
-    kept = MAX_NESTED_DEPTH >= _nesting_depth(Top)
+    kept = _nesting_depth(Top) <= MAX_NESTED_DEPTH
     assert kept, "raise MAX_NESTED_DEPTH or this schema silently loses its leaf"
     assert body == {"mid": {"leaf": {"leafName": "l"}}}
 
@@ -226,7 +228,7 @@ def test_a_union_return_renames_each_arm_and_publishes_both() -> None:
     arms = LocalAccount | LocalMFAChallenge
 
     @get("/login", return_dto=union_wire_dto(arms, CAMEL))
-    async def login(mfa: FromQuery[bool] = False) -> "Response[LocalAccount | LocalMFAChallenge]":
+    async def login(*, mfa: FromQuery[bool] = False) -> "Response[LocalAccount | LocalMFAChallenge]":
         challenge = LocalMFAChallenge(
             challenge="c", account_id="a", expires_at=_session().created_at, methods=("totp",)
         )
@@ -257,7 +259,7 @@ def test_a_union_arm_carried_inside_a_response_is_still_renamed() -> None:
     arms = Response[OAuthRouteStatus] | OAuthRouteStatus
 
     @get("/logout", return_dto=union_wire_dto(arms, CAMEL))
-    async def logout(redirected: FromQuery[bool] = False) -> "Response[OAuthRouteStatus] | OAuthRouteStatus":
+    async def logout(*, redirected: FromQuery[bool] = False) -> "Response[OAuthRouteStatus] | OAuthRouteStatus":
         status = OAuthRouteStatus(detail="Logged out.", revoked_sessions=2)
         return Response(status, status_code=200) if redirected else status
 
@@ -270,13 +272,13 @@ def test_a_union_arm_carried_inside_a_response_is_still_renamed() -> None:
 
 
 def test_a_union_cannot_narrow_a_request_body() -> None:
+    @post("/login", dto=union_wire_dto(LocalAccount | LocalCredentials, SNAKE))
+    async def login(data: "LocalAccount | LocalCredentials") -> RouteStatus:
+        del data
+        return RouteStatus(detail="ok")
+
     with pytest.raises(ImproperlyConfiguredException, match="cannot be narrowed to a union"):
-
-        @post("/login", dto=union_wire_dto(LocalAccount | LocalCredentials, SNAKE))
-        async def login(data: LocalAccount | LocalCredentials) -> RouteStatus:
-            return RouteStatus(detail="ok")
-
-        _app(login).openapi_schema  # noqa: B018 - building the document resolves the DTO
+        _ = _app(login).openapi_schema
 
 
 def test_a_schema_that_omits_defaults_still_omits_them_after_renaming() -> None:
@@ -289,15 +291,8 @@ def test_a_schema_that_omits_defaults_still_omits_them_after_renaming() -> None:
 
 
 def test_one_schema_cannot_publish_two_wire_shapes_under_one_policy() -> None:
-    from typing import Annotated
-
-    from litestar.dto import DTOConfig
-
-    from litestar_security._dto import MAX_NESTED_DEPTH as depth
-    from litestar_security._dto import WireDTO
-
     def narrowed(exclude: set[str]) -> Any:
-        config = DTOConfig(exclude=exclude, max_nested_depth=depth)
+        config = DTOConfig(exclude=exclude, max_nested_depth=MAX_NESTED_DEPTH)
         return WireDTO[Annotated[LocalSession, config]]
 
     def backend(dto: Any) -> WireBackend:
