@@ -23,7 +23,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
-from litestar_security._docs import ROUTE_TAGS
+from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa import MFAService, RecoveryCodeGrant, StepUpCredential, StepUpService
 from litestar_security.accounts._operations import (
@@ -107,6 +107,7 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
     session_capable: bool = False,
     token_capable: bool = False,
     route_prefix: str = "/auth",
+    docs: RouteDocs | None = None,
 ) -> Router:
     """Build generated MFA and passkey routes around explicit services.
 
@@ -121,6 +122,7 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
         session_capable: Whether passkey login may establish a browser session.
         token_capable: Whether passkey login may issue local access/refresh tokens.
         route_prefix: Absolute path under which the route bundle is mounted.
+        docs: Application-owned OpenAPI documentation for the generated routes.
 
     Returns:
         One native Litestar router containing only enabled feature controllers.
@@ -151,12 +153,15 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
             handlers.append(
                 _PasskeySessionAuthenticationController if session_capable else _PasskeyTokenAuthenticationController
             )
-    return Router(
-        path=route_prefix,
-        route_handlers=handlers,
-        cache_control=CacheControlHeader(no_store=True),
-        response_headers={"Pragma": "no-cache"},
-        dependencies={"mfa_service": Provide(lambda: mfa_service, sync_to_thread=False, use_cache=False)},
+    return apply_route_docs(
+        Router(
+            path=route_prefix,
+            route_handlers=handlers,
+            cache_control=CacheControlHeader(no_store=True),
+            response_headers={"Pragma": "no-cache"},
+            dependencies={"mfa_service": Provide(lambda: mfa_service, sync_to_thread=False, use_cache=False)},
+        ),
+        RouteDocs() if docs is None else docs,
     )
 
 

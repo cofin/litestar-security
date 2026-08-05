@@ -31,10 +31,13 @@ import pytest
 from litestar import Litestar
 from litestar.config.csrf import CSRFConfig
 from litestar.datastructures import Cookie
+from litestar.exceptions import ImproperlyConfiguredException
 from litestar.middleware.session.client_side import CookieBackendConfig
 from litestar.openapi.config import OpenAPIConfig
+from litestar.openapi.spec import Tag
 
-from litestar_security import SecurityConfig, SecurityPlugin
+from litestar_security import ROUTE_TAGS, RouteDocs, SecurityConfig, SecurityPlugin
+from litestar_security._openapi import merge_openapi_tags
 from litestar_security.accounts import (
     AESGCMSecretProtector,
     LocalAuth,
@@ -120,15 +123,21 @@ class _LogoutTokenConsumer:
         )
 
 
-def build_documented_app(private_key: bytes) -> Litestar:
+def build_documented_app(
+    private_key: bytes, *, docs: RouteDocs | None = None, passkey_docs: RouteDocs | None = None
+) -> Litestar:
     """Build the application every generated route family is documented from.
 
     Args:
         private_key: PKCS8 PEM signing material for the local token issuer.
+        docs: Documentation metadata applied to every configured feature.
+        passkey_docs: Documentation metadata for the passkey feature alone, so a
+            test can make the MFA and passkey configurations disagree.
 
     Returns:
         One application with local auth, MFA, passkeys, OAuth, and OIDC logout.
     """
+    docs = RouteDocs() if docs is None else docs
     accounts = InMemoryLocalAccountStore(
         _observe, clock=lambda: _NOW, identifiers=str.casefold, entropy=lambda size: b"e" * size
     )
@@ -146,6 +155,7 @@ def build_documented_app(private_key: bytes) -> Litestar:
         ),
         token_audience="local-client",  # noqa: S106 - public JWT audience
         registration=RegistrationPolicy.public(),
+        docs=docs,
     )
     step_up_store = InMemoryStepUpStore()
     mfa = MFAConfig(
@@ -154,6 +164,7 @@ def build_documented_app(private_key: bytes) -> Litestar:
         recovery_peppers=(RecoveryCodePepper("v1", b"p" * 32),),
         login_methods=cast("Any", accounts),
         step_up_store=step_up_store,
+        docs=docs,
     )
     passkeys = PasskeyConfig(
         store=InMemoryPasskeyStore(),
@@ -162,6 +173,7 @@ def build_documented_app(private_key: bytes) -> Litestar:
         origins=("https://example.com",),
         login_methods=cast("Any", accounts),
         step_up_store=step_up_store,
+        docs=docs if passkey_docs is None else passkey_docs,
     )
     oauth = OAuthConfig(
         oauth_service=cast("Any", _OAuthRouteService()),
@@ -172,6 +184,7 @@ def build_documented_app(private_key: bytes) -> Litestar:
             sessions=InMemoryOIDCSessionLogoutStore(session_mappings={}, frontchannel_bindings={}),
             clock=lambda: _NOW,
         ),
+        docs=docs,
     )
     return Litestar(
         route_handlers=[],
@@ -187,9 +200,9 @@ def canonical(document: Mapping[str, Any]) -> str:
     return json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
-def emitted_document(private_key: bytes) -> dict[str, Any]:
+def emitted_document(private_key: bytes, *, docs: RouteDocs | None = None) -> dict[str, Any]:
     """Return the OpenAPI document the documented application emits."""
-    return cast("dict[str, Any]", build_documented_app(private_key).openapi_schema.to_schema())
+    return cast("dict[str, Any]", build_documented_app(private_key, docs=docs).openapi_schema.to_schema())
 
 
 def _operation_ids(document: Mapping[str, Any]) -> set[str]:
@@ -254,3 +267,71 @@ if __name__ == "__main__":  # pragma: no cover - deliberate fixture regeneration
         encryption_algorithm=serialization.NoEncryption(),
     )
     GOLDEN_DOCUMENT.write_text(canonical(emitted_document(_key)), encoding="utf-8")
+
+
+def _used_tags(document: Mapping[str, Any]) -> set[str]:
+    return {
+        tag
+        for path_item in document["paths"].values()
+        for method, operation in path_item.items()
+        if isinstance(operation, dict) and method != "parameters"
+        for tag in operation.get("tags", ())
+    }
+
+
+def test_every_tag_group_the_routes_use_is_declared_and_described(emitted: Mapping[str, Any]) -> None:
+    """All ten groups reach the OpenAPI config, not only the five local-auth ones."""
+    declared = _tag_groups(emitted)
+
+    assert set(declared) == _used_tags(emitted)
+    assert len(declared) == len(ROUTE_TAGS)
+    assert all(description for description in declared.values())
+
+
+def test_renaming_a_tag_group_regroups_its_routes(jwt_key_material: Mapping[str, tuple[bytes, bytes]]) -> None:
+    """An application renames a built-in group and its routes move with the name."""
+    docs = RouteDocs(
+        tags={"mfa": "Two-factor", "oidc.logout": "Single sign-out"},
+        tag_descriptions={"mfa": "How this deployment does second factors."},
+    )
+    document = emitted_document(jwt_key_material["EdDSA"][0], docs=docs)
+    declared = _tag_groups(document)
+
+    assert "Multi-factor authentication" not in declared
+    assert "OIDC logout" not in declared
+    assert declared["Two-factor"] == "How this deployment does second factors."
+    assert declared["Single sign-out"] == ROUTE_TAGS["oidc.logout"].description
+    assert set(declared) == _used_tags(document)
+    assert document["paths"]["/auth/mfa/totp/enroll"]["post"]["tags"] == ["Two-factor"]
+
+
+def test_two_groups_renamed_to_one_name_become_one_group(jwt_key_material: Mapping[str, tuple[bytes, bytes]]) -> None:
+    """Merging two built-in groups is a legitimate rename, not an error."""
+    docs = RouteDocs(tags={"mfa": "Second factors", "passkeys": "Second factors"})
+    document = emitted_document(jwt_key_material["EdDSA"][0], docs=docs)
+    declared = _tag_groups(document)
+
+    assert declared["Second factors"] == ROUTE_TAGS["mfa"].description
+    assert len(declared) == len(ROUTE_TAGS) - 1
+    assert document["paths"]["/auth/passkeys"]["get"]["tags"] == ["Second factors"]
+
+
+def test_an_application_declared_tag_still_wins(jwt_key_material: Mapping[str, tuple[bytes, bytes]]) -> None:
+    """A description the application pre-declared is documentation it already owns."""
+    caller = Tag(name="Passkeys", description="Caller owns this description.")
+    app = build_documented_app(jwt_key_material["EdDSA"][0])
+    openapi_config = OpenAPIConfig(title="Litestar Security", version="0.0.0", tags=[caller])
+    declared = {tag.name: tag for tag in merge_openapi_tags(openapi_config, ROUTE_TAGS.values()).tags or ()}
+
+    assert declared["Passkeys"] is caller
+    assert app.openapi_schema is not None
+
+
+def test_mfa_and_passkey_documentation_must_agree(jwt_key_material: Mapping[str, tuple[bytes, bytes]]) -> None:
+    """One router serves both features, so two disagreeing configurations cannot both apply."""
+    with pytest.raises(ImproperlyConfiguredException, match="documentation"):
+        build_documented_app(
+            jwt_key_material["EdDSA"][0],
+            docs=RouteDocs(tags={"step_up": "Re-authentication"}),
+            passkey_docs=RouteDocs(tags={"step_up": "Confirmation"}),
+        )

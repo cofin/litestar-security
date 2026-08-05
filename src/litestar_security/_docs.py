@@ -6,14 +6,19 @@ group keeps addressing it by the same key. Declaration order below is display
 order in the emitted document.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, cast
 
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.openapi.spec import Tag
 
-__all__ = ("ROUTE_TAGS", "RouteDocs")
+if TYPE_CHECKING:
+    from litestar import Router
+    from litestar.handlers import BaseRouteHandler
+
+__all__ = ("LOCAL_TAG_KEYS", "ROUTE_TAGS", "RouteDocs", "apply_route_docs", "merge_route_tags", "resolve_tags")
 
 
 ROUTE_TAGS: Mapping[str, Tag] = MappingProxyType({
@@ -142,3 +147,99 @@ class RouteDocs:
             if transform is not None and not callable(transform):
                 message = f"Generated-route {name} transform must be callable"
                 raise ImproperlyConfiguredException(detail=message)
+
+
+LOCAL_TAG_KEYS: frozenset[str] = frozenset(key for key in ROUTE_TAGS if key.startswith("local."))
+"""The tag groups the generated local-auth routes are filed under."""
+
+
+def resolve_tags(keys: "Iterable[str]", docs: "RouteDocs") -> "tuple[Tag, ...]":
+    """Return the effective tags for one feature's groups, in registry order.
+
+    Args:
+        keys: The stable keys of the groups the feature's routes are filed under.
+        docs: The application's documentation metadata for that feature.
+
+    Returns:
+        One tag per distinct effective display name. Two keys renamed to the same
+        name deliberately collapse into one group, described by the first of them
+        in registry order.
+    """
+    return merge_route_tags(((keys, docs),))
+
+
+def merge_route_tags(sources: "Iterable[tuple[Iterable[str], RouteDocs]]") -> "tuple[Tag, ...]":
+    """Return the effective tags for every configured feature, in registry order.
+
+    Args:
+        sources: The configured groups paired with the metadata that documents them.
+
+    Returns:
+        One tag per distinct effective display name, ordered by the registry
+        rather than by the order the features were configured in.
+    """
+    documented: dict[str, RouteDocs] = {}
+    for keys, docs in sources:
+        for key in keys:
+            documented.setdefault(key, docs)
+    tags: dict[str, Tag] = {}
+    for key, default in ROUTE_TAGS.items():
+        if key not in documented:
+            continue
+        configured = documented[key]
+        name = configured.tags.get(key, default.name)
+        description = configured.tag_descriptions.get(key, default.description)
+        tags.setdefault(
+            name,
+            default
+            if name == default.name and description == default.description
+            else Tag(name=name, description=description),
+        )
+    return tuple(tags.values())
+
+
+def apply_route_docs(router: "Router", docs: "RouteDocs") -> "Router":
+    """Rewrite the documentation metadata of one freshly built generated router.
+
+    Controller tags are class attributes fixed at import, so the effective name is
+    resolved here instead: every layer of a freshly built router is private to the
+    configuration that built it, and Litestar deep-copies the router again when the
+    application registers it.
+
+    Args:
+        router: The router the feature just built.
+        docs: The application's documentation metadata for that feature.
+
+    Returns:
+        The same router.
+    """
+    renames = {ROUTE_TAGS[key].name: name for key, name in docs.tags.items() if ROUTE_TAGS[key].name != name}
+    if not renames:
+        return router
+    retagged: set[int] = set()
+    for route in router.routes:
+        for handler in cast("tuple[BaseRouteHandler, ...]", getattr(route, "route_handlers", ())):
+            for layer in _documentation_layers(handler, router):
+                if id(layer) in retagged:
+                    continue
+                retagged.add(id(layer))
+                layer.tags = _renamed(layer.tags, renames)
+    return router
+
+
+def _renamed(tags: "Sequence[str] | None", renames: "Mapping[str, str]") -> "tuple[str, ...] | None":
+    return None if tags is None else tuple(renames.get(tag, tag) for tag in tags)
+
+
+def _documentation_layers(handler: "BaseRouteHandler", router: "Router") -> "Iterator[Any]":
+    """Yield every ownership layer from one handler up to the router that owns it.
+
+    Litestar unions tags up the ownership chain, and a controller contributes its
+    class-level tags as an intermediate router, so renaming a group means visiting
+    every layer rather than the handler alone.
+    """
+    layer: Any = handler
+    while layer is not router:
+        yield layer
+        layer = layer.owner
+    yield router

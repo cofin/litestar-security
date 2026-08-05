@@ -18,12 +18,13 @@ from litestar.exceptions import ImproperlyConfiguredException, LitestarWarning
 from litestar.handlers.base import BaseRouteHandler
 from litestar.middleware import DefineMiddleware
 from litestar.middleware.session.base import SessionMiddleware
-from litestar.openapi.spec import SecurityScheme
+from litestar.openapi.spec import SecurityScheme, Tag
 from litestar.plugins import CLIPlugin, InitPlugin, ReceiveRoutePlugin
 from litestar.router import Router
 from litestar.routes import BaseRoute
 from litestar.types import Scope
 
+from litestar_security._docs import LOCAL_TAG_KEYS, RouteDocs, merge_route_tags
 from litestar_security._openapi import OpenAPISchemeSet, RouteCompiler, merge_openapi_tags, prepare_openapi_config
 from litestar_security.authentication import (
     AuthenticationMechanism,
@@ -33,7 +34,7 @@ from litestar_security.authentication import (
     SecurityRuntimeConfig,
     VerificationUnavailable,
 )
-from litestar_security.config import SecurityConfig
+from litestar_security.config import MFAConfig, PasskeyConfig, SecurityConfig
 from litestar_security.context import Principal, SecurityContext
 from litestar_security.headers import CSPHook, configure_security_headers
 from litestar_security.websocket import WebSocketConnectTokenIssuer
@@ -156,9 +157,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if openapi_config is not None:
             schemes = OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", runtime.registry))
             openapi_config = prepare_openapi_config(openapi_config, schemes)
-            local_auth = self.config.local_auth
-            if local_auth is not None:
-                openapi_config = merge_openapi_tags(openapi_config, local_auth.openapi_tags())
+            openapi_config = merge_openapi_tags(openapi_config, self._generated_openapi_tags())
             app_config.openapi_config = openapi_config
         if self._route_compiler is None:
             self._route_compiler = RouteCompiler(
@@ -483,6 +482,48 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         _validate_local_auth(local_auth)
         local_auth.bind_mfa_login(mfa)
 
+    @staticmethod
+    def _shared_factor_docs(mfa: MFAConfig | None, passkeys: PasskeyConfig | None) -> RouteDocs:
+        """Return the one documentation configuration the shared factor router is built with.
+
+        MFA and passkey routes are one router, and the step-up group belongs to
+        both, so two disagreeing configurations cannot both apply.
+
+        Args:
+            mfa: The MFA configuration, when it generates routes.
+            passkeys: The passkey configuration, when it generates routes.
+
+        Returns:
+            The agreed documentation metadata.
+
+        Raises:
+            ImproperlyConfiguredException: If both features are configured with
+                different documentation metadata.
+        """
+        configured = [config.docs for config in (mfa, passkeys) if config is not None]
+        if any(docs != configured[0] for docs in configured):
+            message = "Generated MFA and passkey routes must share one documentation configuration"
+            raise ImproperlyConfiguredException(detail=message)
+        return configured[0]
+
+    def _generated_openapi_tags(self) -> tuple[Tag, ...]:
+        """Return the effective tag groups every configured generated route is filed under."""
+        sources: list[tuple[frozenset[str], RouteDocs]] = []
+        local_auth = self.config.local_auth
+        if local_auth is not None and local_auth.register_routes:
+            sources.append((LOCAL_TAG_KEYS, local_auth.docs))
+        mfa = self.config.mfa
+        if mfa is not None and mfa.register_routes:
+            sources.append((frozenset({"mfa", "step_up"}), mfa.docs))
+        passkeys = self.config.passkeys
+        if passkeys is not None and passkeys.register_routes:
+            sources.append((frozenset({"passkeys", "step_up"}), passkeys.docs))
+        oauth = self.config.oauth
+        if oauth is not None and oauth.register_routes:
+            oauth_keys = {"oauth.providers"} if oauth.oidc_service is None else {"oauth.providers", "oidc.logout"}
+            sources.append((frozenset(oauth_keys), oauth.docs))
+        return merge_route_tags(sources)
+
     def _configure_mfa_routes(self, app_config: AppConfig) -> None:
         mfa_config = self.config.mfa
         passkey_config = self.config.passkeys
@@ -498,6 +539,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if len(prefixes) != 1:
             message = "Generated MFA and passkey routes must share one route prefix"
             raise ImproperlyConfiguredException(detail=message)
+        docs = self._shared_factor_docs(enabled_mfa, enabled_passkeys)
         step_up = (
             enabled_mfa.step_up_service
             if enabled_mfa is not None and enabled_mfa.step_up_service is not None
@@ -539,6 +581,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 session_capable=local_auth.session_auth is not None,
                 token_capable=local_auth.local_auth_service.refresh_tokens is not None,
                 route_prefix=prefixes.pop(),
+                docs=docs,
             )
             route_handlers = (router,)
             self._mfa_route_handlers = route_handlers

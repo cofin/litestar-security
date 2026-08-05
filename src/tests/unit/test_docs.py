@@ -293,3 +293,18 @@ def test_documentation_metadata_must_be_route_docs(factory: "Any", kwargs: "Any"
     """A mapping passed where a RouteDocs belongs is rejected at configuration time."""
     with pytest.raises(ImproperlyConfiguredException, match="documentation"):
         factory(**kwargs(), docs=cast("Any", {"mfa": "Two-factor"}))
+
+
+def test_local_auth_reports_its_effective_tags_for_a_custom_controller_mount() -> None:
+    """A profile that generates no routes contributes no tags; one that does reports its own."""
+    silent = LocalAuth.session(**_local_auth_kwargs(), register_routes=False)
+    documented = LocalAuth.session(**_local_auth_kwargs(), docs=RouteDocs(tags={"local.sessions": "Sessions"}))
+
+    assert silent.openapi_tags() == ()
+    assert [tag.name for tag in documented.openapi_tags()] == [
+        "Sessions",
+        "Local tokens",
+        "Local registration",
+        "Local passwords",
+        "Local verification",
+    ]

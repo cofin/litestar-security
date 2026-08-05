@@ -4019,6 +4019,26 @@
     {
       "description": "Account-verification token issue and consumption. Requesting a token returns the same response for every identifier, so it never confirms an account.",
       "name": "Local verification"
+    },
+    {
+      "description": "Enrollment and removal of time-based codes and recovery codes. Changing how an account is protected consumes a fresh step-up grant, so a stolen session cannot weaken it silently.",
+      "name": "Multi-factor authentication"
+    },
+    {
+      "description": "WebAuthn credential registration and assertion. Each challenge is single-use and bound to the browser that requested it, and the credential's private key never leaves the authenticator.",
+      "name": "Passkeys"
+    },
+    {
+      "description": "Re-proof of a strong factor immediately before a sensitive operation. A grant is bound to one purpose at one security epoch and is consumed on first use, so it cannot be replayed or reused.",
+      "name": "Step-up authentication"
+    },
+    {
+      "description": "Interactive provider login, account linking, scope upgrades, and token revocation. Every authorization round trip is bound to a cookie the same browser must present at the callback.",
+      "name": "OAuth providers"
+    },
+    {
+      "description": "Provider-initiated front- and back-channel logout. A logout token is verified against the configured issuer and its identifier is consumed once, so a replayed notification revokes nothing.",
+      "name": "OIDC logout"
     }
   ]
 }

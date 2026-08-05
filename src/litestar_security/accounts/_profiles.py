@@ -12,7 +12,7 @@ from litestar import Router
 from litestar.connection import ASGIConnection
 from litestar.exceptions import ImproperlyConfiguredException
 
-from litestar_security._docs import RouteDocs
+from litestar_security._docs import LOCAL_TAG_KEYS, RouteDocs, resolve_tags
 from litestar_security.accounts._access_tokens import (
     LocalAccessTokenIssuer,
     LocalAccessVerifier,
@@ -54,7 +54,7 @@ from litestar_security.accounts._stores import (
     SecurityEpochStore,
     VerificationTokenStore,
 )
-from litestar_security.accounts.controllers import LOCAL_AUTH_TAGS, build_local_auth_routes
+from litestar_security.accounts.controllers import build_local_auth_routes
 from litestar_security.providers.jwt import BearerSlotSelector, BearerTokenSlot, JWTValidationConfig, LocalKeyRing
 
 if TYPE_CHECKING:
@@ -513,11 +513,12 @@ class LocalAuthConfig(Generic[UserT]):
         """Return the documented tag groups the generated routes are filed under.
 
         Returns:
-            The tags, or an empty tuple when no routes are generated.
+            The effective tags after this profile's documentation metadata is
+            applied, or an empty tuple when no routes are generated.
         """
         if not self.register_routes:
             return ()
-        return LOCAL_AUTH_TAGS
+        return resolve_tags(LOCAL_TAG_KEYS, self.docs)
 
 
 class LocalAuth:

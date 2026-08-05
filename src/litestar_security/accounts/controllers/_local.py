@@ -26,7 +26,7 @@ from litestar.status_codes import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
-from litestar_security._docs import ROUTE_TAGS
+from litestar_security._docs import ROUTE_TAGS, apply_route_docs
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa_login import MFARequired
 from litestar_security.accounts._rate_limits import RateLimited
@@ -164,12 +164,17 @@ def build_local_auth_routes(config: "LocalAuthConfig[Any]") -> Router:
         route_handlers.append(_LocalRegistrationController)
     elif config.registration.mode is RegistrationMode.INVITE_ONLY:
         route_handlers.append(_LocalInvitationRegistrationController)
-    return Router(
-        path=config.route_prefix,
-        route_handlers=route_handlers,
-        cache_control=CacheControlHeader(no_store=True),
-        dependencies={"local_auth_service": Provide(provide_local_auth_service, sync_to_thread=False, use_cache=False)},
-        response_headers={"Pragma": "no-cache"},
+    return apply_route_docs(
+        Router(
+            path=config.route_prefix,
+            route_handlers=route_handlers,
+            cache_control=CacheControlHeader(no_store=True),
+            dependencies={
+                "local_auth_service": Provide(provide_local_auth_service, sync_to_thread=False, use_cache=False)
+            },
+            response_headers={"Pragma": "no-cache"},
+        ),
+        config.docs,
     )
 
 

@@ -53,6 +53,7 @@ from litestar_security import (
     csp_nonce,
 )
 from litestar_security._cli import register, security_group
+from litestar_security._docs import RouteDocs
 from litestar_security.accounts import (
     LOCAL_AUTH_TAGS,
     LifecycleAccepted,
@@ -1071,6 +1072,7 @@ def test_generated_local_route_errors_raise_interceptable_classified_exceptions(
         mode=accounts_module.LocalAuthMode.SESSION,
         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
         route_prefix="/identity",
+        docs=RouteDocs(),
     )
     intercepted: list[int] = []
 
@@ -1118,6 +1120,7 @@ def test_generated_credential_bearing_route_errors_raise_unauthorized() -> None:
         mode=accounts_module.LocalAuthMode.SESSION,
         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
         route_prefix="/identity",
+        docs=RouteDocs(),
     )
     csrf_secret = token_hex()
     app = Litestar(
@@ -1174,6 +1177,7 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
         mode=accounts_module.LocalAuthMode.HYBRID,
         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
         route_prefix="/identity",
+        docs=RouteDocs(),
     )
     csrf_secret = token_hex()
     app = Litestar(
@@ -1306,6 +1310,7 @@ def test_session_mfa_completion_translates_a_sanitized_failure() -> None:
                         mode=accounts_module.LocalAuthMode.SESSION,
                         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
                         route_prefix="/identity",
+                        docs=RouteDocs(),
                     ),
                 )
             )
@@ -1375,6 +1380,7 @@ def test_generated_mfa_completion_routes_follow_local_auth_transport_and_csrf_mo
                         mode=accounts_module.LocalAuthMode(mode),
                         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
                         route_prefix="/identity",
+                        docs=RouteDocs(),
                     ),
                 )
             )
@@ -1447,6 +1453,7 @@ def test_generated_token_mfa_completion_surfaces_controlled_login_mfa_rate_limit
                         mode=accounts_module.LocalAuthMode.TOKENS,
                         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
                         route_prefix="/identity",
+                        docs=RouteDocs(),
                     ),
                 )
             )
