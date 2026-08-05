@@ -149,7 +149,7 @@ dev = [
 # Testing #
 ###########
 [tool.pytest.ini_options]
-addopts = ["-ra", "--strict-config", "--strict-markers"]
+addopts = ["-ra", "--strict-config", "--strict-markers", "-m", "not performance"]
 markers = ["performance: deterministic local regression gates excluded from the normal suite"]
 norecursedirs = [".hypothesis", "src/tests/fixtures"]
 pythonpath = ["."]
