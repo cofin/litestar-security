@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
@@ -1512,11 +1513,22 @@ class RaisingRouteService(RouteService):
         raise self.exception
 
 
-def raising_oauth_app(exception: Exception) -> Litestar:
+def raising_oauth_app(exception: Exception, *, exception_handlers: Mapping[Any, Any] | None = None) -> Litestar:
+    """Build one OAuth application whose callback raises the given domain failure.
+
+    Args:
+        exception: The failure the callback route raises.
+        exception_handlers: Application-level handlers, when a test needs to
+            observe whether its own error format reaches the OAuth routes.
+
+    Returns:
+        One application exposing only the generated OAuth route tree.
+    """
     config = OAuthConfig(oauth_service=RaisingRouteService(exception), providers=(Provider(),))
     return Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
+        exception_handlers=dict(exception_handlers or {}),
         openapi_config=None,
         debug=True,
     )

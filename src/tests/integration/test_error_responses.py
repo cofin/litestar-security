@@ -22,10 +22,25 @@ from collections.abc import Mapping
 from typing import Any, NamedTuple, cast
 
 import pytest
-from litestar import Litestar
-from litestar.status_codes import HTTP_400_BAD_REQUEST, HTTP_401_UNAUTHORIZED
-from litestar.testing import TestClient
+from litestar import Litestar, Request, Response
+from litestar.exceptions import HTTPException, TooManyRequestsException
+from litestar.status_codes import (
+    HTTP_400_BAD_REQUEST,
+    HTTP_401_UNAUTHORIZED,
+    HTTP_409_CONFLICT,
+    HTTP_429_TOO_MANY_REQUESTS,
+    HTTP_503_SERVICE_UNAVAILABLE,
+)
+from litestar.testing import AsyncTestClient, TestClient
 
+from litestar_security.providers.oauth import (
+    AccountLinkError,
+    InvalidOAuthCallback,
+    OAuthAccountError,
+    OAuthProviderError,
+    OAuthTransactionUnavailable,
+)
+from tests.integration.test_oauth_routes import raising_oauth_app
 from tests.integration.test_openapi_document import build_documented_app
 
 
@@ -152,6 +167,79 @@ def test_a_documented_denial_declares_every_member_the_wire_sends(
     assert not undeclared, f"{denial.path} sends undeclared members {undeclared} against {schema.get('title')}"
     missing = sorted(set(schema.get("required", ())) - set(payload))
     assert not missing, f"{denial.path} omits required members {missing} of {schema.get('title')}"
+
+
+class _OAuthFailure(NamedTuple):
+    """One OAuth domain failure, the status it answers with, and its sanitized message."""
+
+    exception: Exception
+    status: int
+    detail: str
+
+
+_OAUTH_FAILURES = (
+    pytest.param(
+        _OAuthFailure(InvalidOAuthCallback(), HTTP_401_UNAUTHORIZED, "OAuth callback is invalid"), id="invalid-callback"
+    ),
+    pytest.param(
+        _OAuthFailure(
+            OAuthProviderError(retry_after=30), HTTP_503_SERVICE_UNAVAILABLE, "OAuth provider is unavailable"
+        ),
+        id="provider-unavailable",
+    ),
+    pytest.param(
+        _OAuthFailure(
+            OAuthTransactionUnavailable(), HTTP_503_SERVICE_UNAVAILABLE, "OAuth transaction service is unavailable"
+        ),
+        id="transaction-unavailable",
+    ),
+    pytest.param(
+        _OAuthFailure(AccountLinkError(), HTTP_409_CONFLICT, "OAuth account operation denied"), id="link-conflict"
+    ),
+    pytest.param(
+        _OAuthFailure(OAuthAccountError(), HTTP_400_BAD_REQUEST, "OAuth account operation denied"), id="account-denied"
+    ),
+    pytest.param(
+        _OAuthFailure(TooManyRequestsException(detail="Too many requests."), HTTP_429_TOO_MANY_REQUESTS, "Too many"),
+        id="rate-limited-control",
+    ),
+)
+
+
+def _application_error_format(request: Request[Any, Any, Any], exc: HTTPException) -> Response[Any]:
+    """Stand in for an application that publishes an error format of its own."""
+    del request
+    return Response(
+        content={"error": {"origin": "application", "status": exc.status_code, "message": exc.detail}},
+        status_code=exc.status_code,
+    )
+
+
+async def _oauth_failure_response(failure: _OAuthFailure) -> Any:
+    app = raising_oauth_app(failure.exception, exception_handlers={HTTPException: _application_error_format})
+    async with AsyncTestClient(app=app) as client:
+        return await client.get("/auth/oauth/example/callback", params={"code": "code", "state": "state"})
+
+
+@pytest.mark.parametrize("failure", _OAUTH_FAILURES)
+async def test_an_application_error_format_reaches_an_oauth_failure(failure: _OAuthFailure) -> None:
+    """Answering a failure inside the route tree would silently override the application's own format."""
+    response = await _oauth_failure_response(failure)
+
+    assert response.status_code == failure.status
+    assert response.json()["error"]["origin"] == "application"
+
+
+@pytest.mark.parametrize("failure", _OAUTH_FAILURES)
+async def test_an_oauth_failure_still_reveals_nothing_about_its_cause(failure: _OAuthFailure) -> None:
+    """Routing a failure through the application must not widen what the caller learns."""
+    response = await _oauth_failure_response(failure)
+    body = response.text
+
+    assert response.status_code == failure.status
+    assert failure.detail in body
+    assert type(failure.exception).__name__ not in body
+    assert "Traceback" not in body
 
 
 def test_a_returned_body_keeps_its_own_typed_schema(documented_schema: Mapping[str, Any]) -> None:

@@ -23,6 +23,9 @@ from litestar.exceptions import (
 from litestar.exceptions.responses import (
     create_exception_response,  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized Response
 )
+from litestar.middleware._internal.exceptions.middleware import (
+    get_exception_handler,  # pyright: ignore[reportUnknownVariableType] - Litestar types the resolved handler unparameterized
+)
 from litestar.params import Body, FromPath, FromQuery, JSONBody, QueryParameter, SkipValidation
 from litestar.response import Redirect
 from litestar.status_codes import (
@@ -34,6 +37,8 @@ from litestar.status_codes import (
     HTTP_429_TOO_MANY_REQUESTS,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
+from litestar.types import Empty
+from litestar.utils.scope.state import ScopeState
 
 from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
@@ -967,7 +972,33 @@ def build_oauth_routes(config: OAuthConfig) -> Router:
 def _oauth_exception_handlers() -> (
     "dict[int | type[Exception], Callable[[Request[Any, Any, Any], Any], Response[Any]]]"
 ):
+    """Classify each OAuth domain failure as the HTTP error it means.
+
+    Classification has to happen somewhere the domain exception is still
+    visible, and a router-level exception handler is the only layer Litestar
+    offers that sees it: user middleware is installed *outside* the route's own
+    ``ExceptionHandlerMiddleware``, so a failure raised by a handler never
+    reaches it.
+
+    What each entry must not do is answer the request itself. Litestar resolves
+    one flattened handler map per route and calls a single winner, so a handler
+    that builds the response here wins over every application-level handler for
+    the resulting HTTP error - an application publishing its own error format
+    would receive it on every route except its OAuth ones. Each entry therefore
+    classifies and then hands the mapped exception to whichever handler the
+    application would have used, falling back to Litestar's own rendering when
+    the application configured none.
+
+    Returns:
+        The handler map registered on the generated OAuth router.
+    """
+
     def _classified(request: Request[Any, Any, Any], mapped: HTTPException) -> Response[Any]:
+        state = cast("Any", ScopeState.from_scope(request.scope))
+        handlers = state.exception_handlers
+        application_handler = None if handlers is Empty else cast("Any", get_exception_handler(handlers, mapped))
+        if application_handler is not None:
+            return cast("Response[Any]", application_handler(request, mapped))
         # The cast is redundant to mypy yet required by pyright, which sees the
         # native helper return an unparameterized Response.
         return cast("Response[Any]", create_exception_response(request=request, exc=mapped))  # type: ignore[redundant-cast]
