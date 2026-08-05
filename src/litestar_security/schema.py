@@ -11,11 +11,53 @@ import from ``accounts/``, and the body it describes is Litestar's rather than
 this library's.
 """
 
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
+from litestar.exceptions import ImproperlyConfiguredException
 
-__all__ = ("ProblemDetail", "RouteError", "WireStruct")
+if TYPE_CHECKING:
+    from litestar.dto.types import RenameStrategy
+
+__all__ = ("ProblemDetail", "RouteError", "WirePolicy", "WireStruct")
+
+RENAME_STRATEGIES: frozenset[str] = frozenset({"lower", "upper", "camel", "pascal", "kebab"})
+"""The named casing strategies :class:`WirePolicy` accepts by name."""
+
+
+@dataclass(frozen=True, slots=True)
+class WirePolicy:
+    """How generated request and response bodies are spelled on the wire.
+
+    One value carries both halves of the convention, and it is hashable, so the
+    generated routers a feature configuration caches stay one router per policy
+    rather than one router that a second application can find already built for
+    a casing it did not ask for.
+    """
+
+    rename: "RenameStrategy | None" = None
+    """The casing strategy, or ``None`` for the field names as Python spells them."""
+    forbid_unknown_fields: bool = True
+    """Whether an unrecognized member is a decoding error rather than ignored."""
+
+    def __post_init__(self) -> None:
+        """Reject a strategy no schema could be built with.
+
+        Raises:
+            ImproperlyConfiguredException: If the strategy is neither one of the
+                named strategies nor a callable, or the unknown-field policy is
+                not boolean.
+        """
+        rename: object = self.rename
+        if rename is not None and not callable(rename) and rename not in RENAME_STRATEGIES:
+            named = ", ".join(sorted(RENAME_STRATEGIES))
+            message = f"Wire rename strategy must be callable or one of: {named}"
+            raise ImproperlyConfiguredException(detail=message)
+        forbid_unknown_fields = cast("object", self.forbid_unknown_fields)
+        if forbid_unknown_fields.__class__ is not bool:
+            message = "Wire unknown-field policy must be boolean"
+            raise ImproperlyConfiguredException(detail=message)
 
 
 class WireStruct(msgspec.Struct, frozen=True, forbid_unknown_fields=True):

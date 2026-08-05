@@ -17,10 +17,13 @@ from litestar_security.authentication import (
     CredentialSlot,
 )
 from litestar_security.headers import SecurityHeadersConfig
+from litestar_security.schema import WirePolicy
 from litestar_security.websocket import WebSocketSecurityConfig
 from litestar_security.workers import BlockingIntegration, NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 
 if TYPE_CHECKING:
+    from litestar.dto.types import RenameStrategy
+
     from litestar_security.accounts import (
         AttestationTrustMapper,
         LocalAuthConfig,
@@ -293,6 +296,28 @@ class SecurityConfig(Generic[UserT]):
     authorization_resolver: AuthorizationResolver[UserT] | None = field(default=None, repr=False)
     jwks_providers: Sequence["JWKSProvider"] = ()
     jwks_warmup_failure: Literal["fail_startup", "lazy"] = "fail_startup"
+    wire_rename: "RenameStrategy | None" = None
+    """How generated request and response members are spelled on the wire.
+
+    ``None`` keeps the field names as Python spells them, which is snake_case.
+    Any of ``"lower"``, ``"upper"``, ``"camel"``, ``"pascal"``, and ``"kebab"``
+    selects a named strategy, and a ``Callable[[str], str]`` covers a house
+    convention outside those five. The choice reaches the OpenAPI document as
+    well as the wire, so a generated client follows it without further work.
+
+    A handful of generated schemas opt out because their member names belong to
+    a specification rather than to this library - the RFC 6749 token response,
+    the OIDC back-channel logout form, and the bodies Litestar's own exception
+    handling renders.
+    """
+    wire_forbid_unknown_fields: bool = True
+    """Whether an unrecognized member in a request body is a decoding error.
+
+    Strictness applies to decoding, so it constrains request schemas only.
+    Rejecting the unknown member is what keeps a stale or misspelled optional
+    field from resolving to its default and producing a wrong but successful
+    request.
+    """
 
     def __post_init__(self) -> None:
         """Freeze ordered authentication collections."""
@@ -326,6 +351,20 @@ class SecurityConfig(Generic[UserT]):
         if self.jwks_warmup_failure not in {"fail_startup", "lazy"}:
             msg = "JWKS warmup failure mode must be 'fail_startup' or 'lazy'"
             raise ImproperlyConfiguredException(detail=msg)
+        self.wire_policy()
+
+    def wire_policy(self) -> WirePolicy:
+        """Return the wire convention every generated route body is built with.
+
+        Returns:
+            The casing strategy and unknown-field policy as one hashable value.
+
+        Raises:
+            ImproperlyConfiguredException: If the strategy is neither one of the
+                named strategies nor a callable, or the unknown-field policy is
+                not boolean.
+        """
+        return WirePolicy(rename=self.wire_rename, forbid_unknown_fields=self.wire_forbid_unknown_fields)
 
     def _validate_protected_resource(self) -> None:
         if self.protected_resource is None:

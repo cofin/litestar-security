@@ -499,7 +499,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             return
         route_handlers = self._local_auth_route_handlers
         if route_handlers is None:
-            route_handlers = local_auth.build_route_handlers()
+            route_handlers = local_auth.build_route_handlers(wire=self.config.wire_policy())
             self._local_auth_route_handlers = route_handlers
         for route_handler in route_handlers:
             if not any(existing is route_handler for existing in app_config.route_handlers):
@@ -630,7 +630,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             return
         route_handlers = self._oauth_route_handlers
         if route_handlers is None:
-            route_handlers = oauth.build_route_handlers()
+            route_handlers = oauth.build_route_handlers(wire=self.config.wire_policy())
             self._oauth_route_handlers = route_handlers
         for route_handler in route_handlers:
             if not any(existing is route_handler for existing in app_config.route_handlers):

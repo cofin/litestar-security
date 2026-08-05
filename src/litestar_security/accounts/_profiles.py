@@ -56,6 +56,7 @@ from litestar_security.accounts._stores import (
 )
 from litestar_security.accounts.controllers import build_local_auth_routes
 from litestar_security.providers.jwt import BearerSlotSelector, BearerTokenSlot, JWTValidationConfig, LocalKeyRing
+from litestar_security.schema import WirePolicy
 
 if TYPE_CHECKING:
     from litestar.openapi.spec import Tag
@@ -193,7 +194,9 @@ class LocalAuthConfig(Generic[UserT]):
     local_auth_service: LocalAuthService[UserT] = field(init=False, repr=False, compare=False)
     mfa_login: "MFALoginService | None" = field(init=False, default=None, repr=False, compare=False)
     _mfa_login_config: object | None = field(init=False, default=None, repr=False, compare=False)
-    _route_handlers: tuple[Router, ...] | None = field(init=False, default=None, repr=False, compare=False)
+    _route_handlers: "dict[WirePolicy, tuple[Router, ...]]" = field(
+        init=False, default_factory=dict[WirePolicy, "tuple[Router, ...]"], repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:  # noqa: C901, PLR0915 - transport invariants remain centralized
         """Validate transport-specific values and structural capabilities."""
@@ -339,7 +342,7 @@ class LocalAuthConfig(Generic[UserT]):
                 return
             msg = "Local authentication MFA login is already bound to a different MFA configuration"
             raise ImproperlyConfiguredException(detail=msg)
-        if self._route_handlers is not None:
+        if self._route_handlers:
             msg = "Local authentication MFA login must bind before route handlers are cached"
             raise ImproperlyConfiguredException(detail=msg)
         store = mfa.login_challenge_store
@@ -496,18 +499,30 @@ class LocalAuthConfig(Generic[UserT]):
             ),
         )
 
-    def build_route_handlers(self) -> tuple[Router, ...]:
+    def build_route_handlers(self, *, wire: "WirePolicy | None" = None) -> tuple[Router, ...]:
         """Build and cache the standard end-user route tree.
+
+        One router is cached per wire policy rather than one overall, so a
+        router stays a pure function of the configuration that caches it. Two
+        applications sharing this configuration with different casing each get
+        their own, and neither finds the other's already built.
+
+        Args:
+            wire: How the generated bodies are spelled on the wire. Defaults to
+                the field names as Python spells them, with unknown members
+                rejected.
 
         Returns:
             One router, or an empty tuple when ``register_routes`` is ``False``.
-            The same object is returned on every call.
+            The same object is returned for every call naming the same policy.
         """
         if not self.register_routes:
             return ()
-        if self._route_handlers is None:
-            object.__setattr__(self, "_route_handlers", (build_local_auth_routes(self),))
-        return cast("tuple[Router, ...]", self._route_handlers)
+        policy = WirePolicy() if wire is None else wire
+        cached = self._route_handlers.get(policy)
+        if cached is None:
+            cached = self._route_handlers[policy] = (build_local_auth_routes(self),)
+        return cached
 
     def openapi_tags(self) -> "tuple[Tag, ...]":
         """Return the documented tag groups the generated routes are filed under.

@@ -58,6 +58,7 @@ from litestar_security.guards import (
     requires_tenant,
 )
 from litestar_security.providers.jwt import BearerTokenSlot, LocalKeyRing
+from litestar_security.schema import WirePolicy
 from litestar_security.testing import StaticAuthorizationSnapshotRefresher
 
 _DUPLICATE_GUARD = requires_authenticated()
@@ -2944,10 +2945,48 @@ def test_security_config_is_typed_and_slotted() -> None:
         "authorization_resolver",
         "jwks_providers",
         "jwks_warmup_failure",
+        "wire_rename",
+        "wire_forbid_unknown_fields",
     )
     assert tuple(field.name for field in fields(config)) == expected_fields
     assert config.__slots__ == expected_fields
     assert not hasattr(config, "__dict__")
+
+
+def test_security_config_wire_casing_defaults_to_snake_case_and_strict() -> None:
+    config = litestar_security.SecurityConfig()
+
+    assert config.wire_rename is None
+    assert config.wire_forbid_unknown_fields is True
+    assert config.wire_policy() == WirePolicy()
+
+
+@pytest.mark.parametrize("rename", ["lower", "upper", "camel", "pascal", "kebab", str.upper])
+def test_security_config_accepts_every_supported_wire_rename_strategy(rename: object) -> None:
+    config = litestar_security.SecurityConfig(wire_rename=cast("Any", rename))
+
+    assert config.wire_policy() == WirePolicy(rename=cast("Any", rename))
+
+
+@pytest.mark.parametrize("rename", ["snake", "", object(), 5, True])
+def test_security_config_rejects_an_unsupported_wire_rename_strategy(rename: object) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Wire rename strategy"):
+        litestar_security.SecurityConfig(wire_rename=cast("Any", rename))
+
+
+@pytest.mark.parametrize("forbid", [object(), 1, None])
+def test_security_config_rejects_a_non_boolean_wire_strictness(forbid: object) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Wire unknown-field policy"):
+        litestar_security.SecurityConfig(wire_forbid_unknown_fields=cast("Any", forbid))
+
+
+def test_wire_policy_is_frozen_slotted_and_hashable() -> None:
+    policy = WirePolicy(rename="camel", forbid_unknown_fields=False)
+
+    assert {policy: "cached"}[WirePolicy(rename="camel", forbid_unknown_fields=False)] == "cached"
+    assert not hasattr(policy, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        cast("Any", policy).rename = "kebab"
 
 
 def test_security_config_rejects_invalid_jwks_warmup_failure_mode() -> None:

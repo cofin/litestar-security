@@ -66,7 +66,7 @@ from litestar_security.providers.oauth._transactions import (
     SecretStr,
     oauth_binding_cookie,
 )
-from litestar_security.schema import WireStruct
+from litestar_security.schema import WirePolicy, WireStruct
 
 if TYPE_CHECKING:
     from litestar_security.accounts import RateLimitGuard, StepUpService
@@ -922,15 +922,32 @@ class OAuthConfig:
         self.oidc_service = oidc_service
         self.route_prefix = normalized_prefix
         self.register_routes = register_routes
-        self._route_handlers: tuple[Router, ...] | None = None
+        self._route_handlers: dict[WirePolicy, tuple[Router, ...]] = {}
 
-    def build_route_handlers(self) -> tuple[Router, ...]:
-        """Build and cache generated OAuth routes."""
+    def build_route_handlers(self, *, wire: "WirePolicy | None" = None) -> tuple[Router, ...]:
+        """Build and cache generated OAuth routes.
+
+        One router is cached per wire policy rather than one overall, so a
+        router stays a pure function of the configuration that caches it and two
+        applications sharing this configuration with different casing each get
+        their own.
+
+        Args:
+            wire: How the generated bodies are spelled on the wire. Defaults to
+                the field names as Python spells them, with unknown members
+                rejected.
+
+        Returns:
+            One router, or an empty tuple when ``register_routes`` is ``False``.
+            The same object is returned for every call naming the same policy.
+        """
         if not self.register_routes:
             return ()
-        if self._route_handlers is None:
-            self._route_handlers = (build_oauth_routes(self),)
-        return self._route_handlers
+        policy = WirePolicy() if wire is None else wire
+        cached = self._route_handlers.get(policy)
+        if cached is None:
+            cached = self._route_handlers[policy] = (build_oauth_routes(self),)
+        return cached
 
 
 def build_oauth_routes(config: OAuthConfig) -> Router:

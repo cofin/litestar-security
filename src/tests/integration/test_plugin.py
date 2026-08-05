@@ -120,6 +120,7 @@ from litestar_security.providers.jwt import (
     VerificationKey,
 )
 from litestar_security.providers.oidc import ServiceTokenConfig
+from litestar_security.schema import WirePolicy
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,
     WebSocketConnectTokenIssuer,
@@ -1623,6 +1624,36 @@ async def test_plugin_binds_login_mfa_before_local_route_caching_and_gates_passw
         LocalCredentials(identifier="person@example.com", password="password"),  # noqa: S106
     )
     assert isinstance(outcome, MFARequired)
+
+
+def _routed_local_session_auth() -> Any:
+    return LocalAuth.session(
+        accounts=cast("Any", _local_session_accounts()),
+        secrets=_local_auth_secrets(),
+        binding=SessionBindingConfig(pepper=b"binding-pepper-for-plugin-tests!", max_age=600),
+    )
+
+
+def test_local_auth_caches_one_generated_router_per_wire_policy() -> None:
+    local_auth = _routed_local_session_auth()
+    camel = WirePolicy(rename="camel")
+
+    default_router = local_auth.build_route_handlers()
+
+    assert local_auth.build_route_handlers() is default_router
+    assert local_auth.build_route_handlers(wire=WirePolicy()) is default_router
+    assert local_auth.build_route_handlers(wire=camel) is local_auth.build_route_handlers(wire=camel)
+    assert local_auth.build_route_handlers(wire=camel) is not default_router
+
+
+def test_plugin_builds_generated_routes_with_the_configured_wire_policy() -> None:
+    local_auth = _routed_local_session_auth()
+    plugin = SecurityPlugin(SecurityConfig(local_auth=local_auth, wire_rename="camel"))
+    app_config = AppConfig()
+
+    plugin._configure_local_auth_routes(app_config)  # noqa: SLF001 - plugin composition boundary
+
+    assert app_config.route_handlers == [local_auth.build_route_handlers(wire=WirePolicy(rename="camel"))[0]]
 
 
 def test_plugin_mfa_login_binding_validates_configuration_and_is_idempotent() -> None:
