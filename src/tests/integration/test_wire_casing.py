@@ -13,7 +13,6 @@ from litestar.status_codes import HTTP_200_OK, HTTP_202_ACCEPTED, HTTP_400_BAD_R
 from litestar.testing import TestClient, create_test_client
 
 from litestar_security import SecurityConfig, SecurityPlugin
-from litestar_security.authentication import public
 from litestar_security.accounts import (
     LocalAuth,
     LocalAuthSecrets,
@@ -24,6 +23,7 @@ from litestar_security.accounts import (
     RegistrationPolicy,
     SessionBindingConfig,
 )
+from litestar_security.authentication import public
 from litestar_security.providers import LocalKeyRing, SigningKey
 from litestar_security.providers.oauth import ProtectedResourceConfig
 from litestar_security.schema import WirePolicy
@@ -168,7 +168,7 @@ def test_no_documented_response_publishes_an_empty_media_type(documents: dict[st
 @get("/csrf", auth=public(), csrf_required=True)
 async def _csrf_seed() -> None:
     """Establish the CSRF cookie a session-establishing route requires."""
-    return None
+    return
 
 
 def _runtime_app(policy: WirePolicy, accounts: NotifyingLocalAccountStore, private_key: bytes) -> Litestar:

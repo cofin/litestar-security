@@ -61,13 +61,20 @@ class WirePolicy:
 
 
 class WireStruct(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    """Base for every generated-route wire schema: snake_case, strict fields.
+    """Base for every generated-route wire schema, and the default it is spelled in.
 
     Field names reach the wire exactly as they are spelled in Python, and an
     unrecognized member is a decoding error rather than a silently discarded
     key. Rejecting the unknown member is what keeps a stale or misspelled
     optional field from resolving to its default and producing a wrong but
     successful request.
+
+    That is the default rather than a fixed policy. An application chooses the
+    convention through ``SecurityConfig.wire_rename`` and
+    ``wire_forbid_unknown_fields``, and the generated routes carry the choice
+    into the request body, the response body, and the OpenAPI schema together.
+    A schema declares what it is called here; the configuration decides how it
+    is spelled.
 
     Subclasses restate ``frozen=True``::
 

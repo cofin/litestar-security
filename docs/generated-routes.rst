@@ -20,9 +20,9 @@ profile receives neither a session backend nor a session store; configure
 Wire format
 ===========
 
-Every request and response body in the generated tree uses ``snake_case``
-members, spelled exactly as the Python attribute is spelled, and rejects a
-member it does not model. A body carrying an unrecognized field is a
+By default, every request and response body in the generated tree uses
+``snake_case`` members, spelled exactly as the Python attribute is spelled, and
+rejects a member it does not model. A body carrying an unrecognized field is a
 ``400``, not a silently discarded key.
 
 Rejecting the member is what keeps a stale or misspelled optional field from
@@ -30,15 +30,69 @@ resolving to its default. A client sending ``returnTo`` where the schema
 declares ``return_to`` gets an error naming the field, rather than a successful
 request that quietly redirected somewhere else.
 
-Two surfaces are snake_case because their specifications say so rather than
-because of this convention: the JWKS document (:rfc:`7517`), the OIDC
-back-channel logout body, and the ``token_type``/``expires_in``/
-``refresh_token`` members of the token response (:rfc:`6749`, section 5.1).
-Their member names are fixed by the specification and are not ours to rename.
+Choosing the casing
+-------------------
+
+Two settings on :class:`~litestar_security.SecurityConfig` decide how the
+generated bodies are spelled. If your API is camelCase, say so once and the
+whole ``/auth`` tree follows:
+
+.. code-block:: python
+
+   from litestar_security import SecurityConfig
+
+   config = SecurityConfig(local_auth=local_auth, wire_rename="camel")
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Setting
+     - Meaning
+   * - ``wire_rename``
+     - ``None`` (the default) keeps the names as Python spells them. Otherwise
+       one of ``"lower"``, ``"upper"``, ``"camel"``, ``"pascal"``, and
+       ``"kebab"``, or a ``Callable[[str], str]`` for a house convention
+       outside those five.
+   * - ``wire_forbid_unknown_fields``
+     - ``True`` (the default) makes an unrecognized member in a request body a
+       ``400``. ``False`` ignores it. Strictness applies to decoding, so it
+       constrains request bodies only.
+
+The choice reaches the request body, the response body, and the OpenAPI schema
+together, so a client generated from the document is already speaking the right
+convention. It does not change which routes exist, what they require, or what
+their component type names are: a casing change moves members, never the type
+names your generated client is compiled against.
+
+A callable receives the Python attribute name and returns the wire name:
+
+.. code-block:: python
+
+   config = SecurityConfig(local_auth=local_auth, wire_rename=lambda name: name.upper())
+
+Names that are not ours to rename
+---------------------------------
+
+A few members are fixed by the specification that defines them, and no casing
+setting reaches them:
+
+- the JWKS document (:rfc:`7517`) and the protected-resource metadata document
+  (:rfc:`9728`), which are published as-is;
+- the OIDC back-channel logout body, whose single member is the one the
+  identity provider sends;
+- the token response (:rfc:`6749`, section 5.1) — ``access_token``,
+  ``refresh_token``, ``expires_in``, and ``token_type``.
+
+The error body is left alone for a different reason: it is rendered by your
+application's exception handling rather than by these routes, so renaming it in
+the document would describe a body the route never sends.
+
+Sharing the convention with your own schemas
+--------------------------------------------
 
 Applications defining their own schemas alongside the generated routes can
-inherit :class:`~litestar_security.WireStruct` to hold the same convention
-across the whole tree:
+inherit :class:`~litestar_security.WireStruct` to hold the same default:
 
 .. code-block:: python
 
@@ -49,9 +103,16 @@ across the whole tree:
         team_id: str
         invited_identifier: str
 
+``WireStruct`` defines the default spelling, not the effective one — the
+setting above is applied to the generated routes when they are built, and a
+schema of your own is spelled however the handler carrying it is configured.
+
 A schema that must tolerate members it does not model - a specification-defined
 body whose sender may legitimately add them - overrides the policy for itself
-with ``forbid_unknown_fields=False`` rather than relaxing the shared base.
+with ``forbid_unknown_fields=False`` rather than relaxing the shared base. A
+schema whose member names belong to a specification rather than to your API
+declares ``__wire_casing__ = False`` for the same reason, and no casing setting
+touches it.
 
 Tag groups
 ==========
