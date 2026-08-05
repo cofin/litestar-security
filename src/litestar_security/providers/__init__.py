@@ -67,6 +67,7 @@ if TYPE_CHECKING:
         OAuthProvider,
         OAuthRouteService,
         OAuthTransactionProtectorKey,
+        ProtectedResourceConfig,
         TokenVault,
     )
     from litestar_security.providers.oidc import (
@@ -131,6 +132,7 @@ __all__ = (
     "OIDCJWTLogoutTokenConsumer",
     "OIDCMetadata",
     "OIDCProvider",
+    "ProtectedResourceConfig",
     "SecurityMetrics",
     "ServiceTokenConfig",
     "SigningKey",
@@ -164,6 +166,7 @@ _OAUTH_EXPORTS = frozenset({
     "OAuthProvider",
     "OAuthRouteService",
     "OAuthTransactionProtectorKey",
+    "ProtectedResourceConfig",
     "TokenVault",
 })
 _OIDC_EXPORTS = frozenset({

@@ -34,6 +34,7 @@ from litestar_security.providers.oauth._provider import (
     ProviderIdentity,
     ProviderTokenSet,
 )
+from litestar_security.providers.oauth._resource_server import ProtectedResourceConfig
 from litestar_security.providers.oauth._routes import (
     OIDC_FRONTCHANNEL_LOGOUT,
     OAuthAuthorization,
@@ -135,6 +136,7 @@ __all__ = (
     "OIDCLogoutTokenConsumer",
     "OIDCSessionLogoutStore",
     "ProtectedOAuthSecret",
+    "ProtectedResourceConfig",
     "ProviderGrant",
     "ProviderIdentity",
     "ProviderTokenReference",

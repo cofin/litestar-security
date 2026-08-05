@@ -1036,6 +1036,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "OIDCJWTLogoutTokenConsumer",
         "OIDCMetadata",
         "OIDCProvider",
+        "ProtectedResourceConfig",
         "SecurityMetrics",
         "ServiceTokenConfig",
         "SigningKey",
@@ -1074,6 +1075,7 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         "OAuthProvider",
         "OAuthRouteService",
         "OAuthTransactionProtectorKey",
+        "ProtectedResourceConfig",
         "TokenVault",
     }
     assert set(api_key_module.__all__).union(
@@ -2923,6 +2925,7 @@ def test_security_config_is_typed_and_slotted() -> None:
         "local_auth",
         "local_jwks",
         "oauth",
+        "protected_resource",
         "mfa",
         "passkeys",
         "api_key",

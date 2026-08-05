@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from litestar_security.providers.iap import GoogleIAPConfig
     from litestar_security.providers.jwks import JWKSProvider
     from litestar_security.providers.jwt import LocalJWKSConfig
-    from litestar_security.providers.oauth import OAuthConfig
+    from litestar_security.providers.oauth import OAuthConfig, ProtectedResourceConfig
     from litestar_security.providers.oidc import ServiceTokenConfig
 
 __all__ = (
@@ -265,6 +265,15 @@ class SecurityConfig(Generic[UserT]):
     local_auth: "LocalAuthConfig[UserT] | None" = None
     local_jwks: "LocalJWKSConfig | None" = None
     oauth: "OAuthConfig | None" = None
+    protected_resource: "ProtectedResourceConfig | None" = None
+    """Describe this application as an OAuth 2.1 protected resource.
+
+    When set, the plugin publishes the RFC 9728 metadata document at
+    ``/.well-known/oauth-protected-resource`` so an authorization server or a
+    client can discover which issuers this resource trusts, which scopes it
+    understands, and how a bearer token may be presented to it. The route is
+    unauthenticated, as the specification requires.
+    """
     mfa: MFAConfig | None = None
     passkeys: PasskeyConfig | None = None
     api_key: "APIKeyConfig | None" = None
@@ -289,6 +298,7 @@ class SecurityConfig(Generic[UserT]):
         if headers is not None and not isinstance(headers, SecurityHeadersConfig):
             msg = "Browser security headers must be a SecurityHeadersConfig"
             raise ImproperlyConfiguredException(detail=msg)
+        self._validate_protected_resource()
         self.exclude = _exclude_patterns(self.exclude)
         self.slots = tuple(self.slots)
         self.mechanisms = tuple(self.mechanisms)
@@ -306,4 +316,15 @@ class SecurityConfig(Generic[UserT]):
         self.jwks_providers = tuple(jwks_providers)
         if self.jwks_warmup_failure not in {"fail_startup", "lazy"}:
             msg = "JWKS warmup failure mode must be 'fail_startup' or 'lazy'"
+            raise ImproperlyConfiguredException(detail=msg)
+
+    def _validate_protected_resource(self) -> None:
+        if self.protected_resource is None:
+            return
+        from litestar_security.providers.oauth import (  # noqa: PLC0415 - the OAuth tree loads only when configured
+            ProtectedResourceConfig,
+        )
+
+        if not isinstance(cast("object", self.protected_resource), ProtectedResourceConfig):
+            msg = "Protected resource metadata must be a ProtectedResourceConfig"
             raise ImproperlyConfiguredException(detail=msg)
