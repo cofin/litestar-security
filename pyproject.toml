@@ -125,6 +125,7 @@ tests = [
   "coverage[toml]",
   "pytest",
   "pytest-cov",
+  "pytest-xdist",
   { include-group = "property" },
 ]
 property = ["hypothesis"]
