@@ -1,6 +1,11 @@
 """Unit contracts for the generated-route documentation registry and metadata type."""
 
-from litestar_security._docs import ROUTE_TAGS
+from typing import Any, cast
+
+import pytest
+from litestar.exceptions import ImproperlyConfiguredException
+
+from litestar_security._docs import ROUTE_TAGS, RouteDocs
 
 
 def test_every_generated_tag_group_has_a_stable_key() -> None:
@@ -62,3 +67,78 @@ def test_the_registry_is_part_of_the_public_surface() -> None:
 
     assert litestar_security.ROUTE_TAGS is ROUTE_TAGS
     assert "ROUTE_TAGS" in litestar_security.__all__
+
+
+def test_route_docs_defaults_override_nothing() -> None:
+    """A default instance is the documented no-op an unconfigured feature carries."""
+    docs = RouteDocs()
+
+    assert docs.tags == {}
+    assert docs.tag_descriptions == {}
+    assert docs.operation_id is None
+    assert docs.route_name is None
+
+
+def test_route_docs_freezes_the_mappings_it_is_given() -> None:
+    """A caller keeping a reference to its own dict cannot mutate the config later."""
+    supplied = {"mfa": "Two-factor"}
+    docs = RouteDocs(tags=supplied)
+    supplied["mfa"] = "changed"
+
+    assert docs.tags == {"mfa": "Two-factor"}
+    assert not hasattr(docs.tags, "__setitem__")
+    assert not hasattr(docs.tag_descriptions, "__setitem__")
+
+
+def test_an_unknown_tag_override_key_raises() -> None:
+    """A typo'd override must not silently do nothing."""
+    with pytest.raises(ImproperlyConfiguredException, match=r"local\.session"):
+        RouteDocs(tags={"local.session": "Sessions"})
+
+
+def test_an_unknown_tag_description_key_raises() -> None:
+    """Descriptions are addressed by the same stable keys as names."""
+    with pytest.raises(ImproperlyConfiguredException, match="passkey"):
+        RouteDocs(tag_descriptions={"passkey": "WebAuthn."})
+
+
+@pytest.mark.parametrize("tags", [{"mfa": ""}, {"mfa": "   "}, {"mfa": cast("Any", 1)}])
+def test_a_tag_override_must_be_a_non_blank_name(tags: dict[str, str]) -> None:
+    """An empty display name would file the routes under a nameless group."""
+    with pytest.raises(ImproperlyConfiguredException, match="display name"):
+        RouteDocs(tags=tags)
+
+
+@pytest.mark.parametrize("descriptions", [{"mfa": ""}, {"mfa": "  "}, {"mfa": cast("Any", 1)}])
+def test_a_tag_description_override_must_be_non_blank(descriptions: dict[str, str]) -> None:
+    """A blank description is worse than the default one it replaces."""
+    with pytest.raises(ImproperlyConfiguredException, match="description"):
+        RouteDocs(tag_descriptions=descriptions)
+
+
+@pytest.mark.parametrize("field_name", ["operation_id", "route_name"])
+def test_a_transform_must_be_callable(field_name: str) -> None:
+    """A non-callable transform would fail deep inside route construction."""
+    with pytest.raises(ImproperlyConfiguredException, match="callable"):
+        RouteDocs(**{field_name: cast("Any", "camelCase")})
+
+
+def test_route_docs_accepts_every_registered_key() -> None:
+    """Every group the registry names is overridable."""
+    docs = RouteDocs(
+        tags={key: f"Group {index}" for index, key in enumerate(ROUTE_TAGS)},
+        tag_descriptions={key: f"Description {index}." for index, key in enumerate(ROUTE_TAGS)},
+        operation_id=str.lower,
+        route_name=str.upper,
+    )
+
+    assert set(docs.tags) == set(ROUTE_TAGS)
+    assert set(docs.tag_descriptions) == set(ROUTE_TAGS)
+
+
+def test_route_docs_is_part_of_the_public_surface() -> None:
+    """An application constructs this type, so it is imported from the package root."""
+    import litestar_security  # noqa: PLC0415 - asserts the package export directly
+
+    assert litestar_security.RouteDocs is RouteDocs
+    assert "RouteDocs" in litestar_security.__all__

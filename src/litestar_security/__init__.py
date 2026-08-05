@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 from litestar_security.__metadata__ import __project__, __version__
-from litestar_security._docs import ROUTE_TAGS
+from litestar_security._docs import ROUTE_TAGS, RouteDocs
 from litestar_security._lazy import import_optional_attribute
 from litestar_security.authentication import (
     CSRF_REQUIRED_OPT_KEY,
@@ -145,6 +145,7 @@ __all__ = (
     "PublicController",
     "RequestAuthenticator",
     "ResourcePermission",
+    "RouteDocs",
     "SecureController",
     "SecurityConfig",
     "SecurityContext",

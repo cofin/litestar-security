@@ -6,12 +6,14 @@ group keeps addressing it by the same key. Declaration order below is display
 order in the emitted document.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
+from litestar.exceptions import ImproperlyConfiguredException
 from litestar.openapi.spec import Tag
 
-__all__ = ("ROUTE_TAGS",)
+__all__ = ("ROUTE_TAGS", "RouteDocs")
 
 
 ROUTE_TAGS: Mapping[str, Tag] = MappingProxyType({
@@ -88,3 +90,55 @@ ROUTE_TAGS: Mapping[str, Tag] = MappingProxyType({
         ),
     ),
 })
+
+
+def _no_overrides() -> "dict[str, str]":
+    return {}
+
+
+def _frozen_overrides(values: "Mapping[str, str]", *, subject: str) -> "Mapping[str, str]":
+    unknown = sorted(set(values) - set(ROUTE_TAGS))
+    if unknown:
+        message = f"Unknown generated-route tag group: {', '.join(unknown)}"
+        raise ImproperlyConfiguredException(detail=message)
+    blank = sorted(key for key, value in values.items() if value.__class__ is not str or not value.strip())
+    if blank:
+        message = f"Generated-route tag {subject} must be a non-blank string: {', '.join(blank)}"
+        raise ImproperlyConfiguredException(detail=message)
+    return MappingProxyType(dict(values))
+
+
+@dataclass(frozen=True, slots=True)
+class RouteDocs:
+    """Application-owned OpenAPI documentation for generated routes.
+
+    Tag groups are addressed by the stable keys of :data:`ROUTE_TAGS`, never by
+    their display names, so an application that renames a group keeps addressing
+    it by the key it already used. None of this is security policy: an
+    application cannot change what a route requires by documenting it
+    differently.
+    """
+
+    tags: Mapping[str, str] = field(default_factory=_no_overrides)
+    """Replacement display name per stable tag-group key."""
+    tag_descriptions: Mapping[str, str] = field(default_factory=_no_overrides)
+    """Replacement description per stable tag-group key."""
+    operation_id: Callable[[str], str] | None = None
+    """Rewrite every generated ``operation_id``, which names the generated client function."""
+    route_name: Callable[[str], str] | None = None
+    """Rewrite every generated route ``name``, which ``route_reverse`` resolves."""
+
+    def __post_init__(self) -> None:
+        """Freeze the supplied mappings and reject an override nothing can apply to.
+
+        Raises:
+            ImproperlyConfiguredException: If a key names no generated tag group,
+                an override is blank, or a transform is not callable.
+        """
+        object.__setattr__(self, "tags", _frozen_overrides(self.tags, subject="display name"))
+        object.__setattr__(self, "tag_descriptions", _frozen_overrides(self.tag_descriptions, subject="description"))
+        for name in ("operation_id", "route_name"):
+            transform: object = getattr(self, name)
+            if transform is not None and not callable(transform):
+                message = f"Generated-route {name} transform must be callable"
+                raise ImproperlyConfiguredException(detail=message)

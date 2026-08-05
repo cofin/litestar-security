@@ -164,6 +164,7 @@ _PUBLIC_API = (
     "PublicController",
     "RequestAuthenticator",
     "ResourcePermission",
+    "RouteDocs",
     "SecureController",
     "SecurityConfig",
     "SecurityContext",
