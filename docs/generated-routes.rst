@@ -56,34 +56,60 @@ with ``forbid_unknown_fields=False`` rather than relaxing the shared base.
 Tag groups
 ==========
 
-Generated operations are filed under five tags rather than one, so the rendered
+Generated operations are filed under ten tags rather than one, so the rendered
 document separates the ways to sign in from the flows that repair an account
-nobody can sign in to:
+nobody can sign in to. Each group is addressed in configuration by a stable key
+that does not change when its display name does:
 
 .. list-table::
    :header-rows: 1
-   :widths: 25 75
+   :widths: 20 22 58
 
-   * - Tag
+   * - Key
+     - Tag
      - Operations
-   * - ``Local sessions``
+   * - ``local.sessions``
+     - ``Local sessions``
      - ``LocalSessionLogin``, ``LocalSessionLogout``, ``LocalSessionList``,
        ``LocalSessionRevoke``, ``LocalSessionMFALogin``
-   * - ``Local tokens``
+   * - ``local.tokens``
+     - ``Local tokens``
      - ``LocalTokenLogin``, ``LocalTokenRefresh``, ``LocalTokenRevoke``,
        ``LocalTokenMFALogin``
-   * - ``Local registration``
+   * - ``local.registration``
+     - ``Local registration``
      - ``LocalRegister``
-   * - ``Local passwords``
+   * - ``local.passwords``
+     - ``Local passwords``
      - ``LocalPasswordChange``, ``LocalTokenPasswordChange``,
        ``LocalPasswordRecovery``, ``LocalPasswordReset``
-   * - ``Local verification``
+   * - ``local.verification``
+     - ``Local verification``
      - ``LocalVerificationResend``, ``LocalVerificationConfirm``
+   * - ``mfa``
+     - ``Multi-factor authentication``
+     - ``MFAEnrollTOTP``, ``MFAVerifyTOTPEnrollment``, ``MFARemoveTOTP``,
+       ``MFAReplaceRecoveryCodes``
+   * - ``passkeys``
+     - ``Passkeys``
+     - ``PasskeyRegistrationOptions``, ``PasskeyRegistrationVerify``,
+       ``PasskeyAuthenticationOptions``, ``PasskeySessionAuthenticationVerify``,
+       ``PasskeyTokenAuthenticationVerify``, ``PasskeyList``, ``PasskeyRemove``
+   * - ``step_up``
+     - ``Step-up authentication``
+     - ``SecurityStepUp``
+   * - ``oauth.providers``
+     - ``OAuth providers``
+     - ``OAuthLogin``, ``OAuthCallback``, ``OAuthLink``, ``OAuthUnlink``,
+       ``OAuthScopeUpgrade``, ``OAuthRevoke``, ``OAuthLogout``
+   * - ``oidc.logout``
+     - ``OIDC logout``
+     - ``OIDCFrontchannelLogout``, ``OIDCBackchannelLogout``
 
-Descriptions for these tags are contributed to your OpenAPI config when local
-authentication is configured. Declaring a tag of the same name yourself keeps
-your description: the operations still land in that group, described the way you
-chose.
+Descriptions for every group a configured feature generates routes for are
+contributed to your OpenAPI config. Declaring a tag of the same name yourself
+keeps your description: the operations still land in that group, described the
+way you chose.
 
 .. code-block:: python
 
@@ -96,12 +122,96 @@ chose.
        tags=[Tag(name="Local sessions", description="Sign-in for the web client.")],
    )
 
-The tags are also available directly, which is useful for ordering them among
-your own:
+The defaults are also available directly, keyed by the stable key, which is
+useful for ordering them among your own:
 
 .. code-block:: python
 
-   from litestar_security.accounts import LOCAL_AUTH_TAGS
+   from litestar_security import ROUTE_TAGS
+
+   ROUTE_TAGS["local.sessions"].name  # "Local sessions"
+
+Documentation metadata
+======================
+
+Tag names, tag descriptions, operation identifiers, and route names are the
+application's to set. Pass a :class:`~litestar_security.RouteDocs` to any
+feature configuration:
+
+.. code-block:: python
+
+   from litestar_security import RouteDocs
+   from litestar_security.accounts import LocalAuth
+
+   local_auth = LocalAuth.session(
+       accounts=accounts,
+       secrets=secrets,
+       binding=binding,
+       docs=RouteDocs(
+           tags={"local.sessions": "Sign-in", "local.passwords": "Account recovery"},
+           tag_descriptions={"local.sessions": "Sign-in for the web client."},
+       ),
+   )
+
+Routes regroup under the new name, and the renamed group carries either your
+description or the built-in one. Renaming two groups to the same name merges
+them into one group deliberately. A key that names no group raises
+``ImproperlyConfiguredException`` at configuration time, so a typo never
+silently does nothing.
+
+``MFAConfig`` and ``PasskeyConfig`` generate one shared route bundle, and the
+``step_up`` group belongs to both, so when both features are configured they
+must carry the same ``RouteDocs``.
+
+Renaming operations
+-------------------
+
+``operation_id`` and ``route_name`` take a callable receiving the built-in value
+and returning the replacement, so a naming convention is one function rather
+than an override per route. Under ``litestar-vite``'s ``TypeGenConfig`` the
+operation identifier becomes the generated TypeScript client's function name,
+which is usually why an application wants to change it:
+
+.. code-block:: python
+
+   from litestar_security import RouteDocs
+
+   docs = RouteDocs(operation_id=lambda name: name[0].lower() + name[1:])
+   # LocalSessionLogin -> localSessionLogin, PasskeyList -> passkeyList
+
+The built-in identifiers are noun-first, so ``LocalSessionLogin`` and
+``LocalSessionList`` sort next to each other in a generated client. A verb-first
+convention is the same shape of transform:
+
+.. code-block:: python
+
+   _VERBS = {"Login", "Logout", "List", "Revoke", "Remove", "Refresh"}
+
+
+   def verb_first(name: str) -> str:
+       for verb in _VERBS:
+           if name.endswith(verb):
+               return verb + name[: -len(verb)]
+       return name
+
+
+   docs = RouteDocs(operation_id=verb_first)
+   # LocalSessionLogin -> LoginLocalSession
+
+Two routes resolving to the same operation identifier or the same route name
+after a transform raise ``ImproperlyConfiguredException`` when the routes are
+built. Litestar notices a duplicate operation identifier only when the OpenAPI
+schema is first generated, and a duplicate route name silently misdirects
+``route_reverse``, so both are rejected up front instead.
+
+Documentation is never policy
+-----------------------------
+
+Nothing reachable through ``RouteDocs`` changes what a route requires. Renaming
+a tag, rewriting an operation identifier, or replacing a route name leaves the
+authentication requirement, the guards, the CSRF enforcement, and the rate
+limits of every generated route exactly as they were. A route's protection is
+selected by its configuration, never by how it is documented.
 
 Operation identifiers
 =====================

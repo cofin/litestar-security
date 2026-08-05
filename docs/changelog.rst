@@ -31,6 +31,25 @@ Added
   that does not publish its metadata at
   ``{issuer}/.well-known/openid-configuration``. The override must share the
   issuer's exact origin.
+* ``RouteDocs`` puts the OpenAPI documentation of the generated routes in the
+  application's hands. Pass one to any feature configuration to rename a tag
+  group, replace its description, or rewrite every operation identifier and
+  route name through a single callable — useful when a generated TypeScript
+  client should follow the project's own naming. Groups are addressed by a
+  stable key such as ``local.sessions`` or ``oauth.providers``, so a rename does
+  not invalidate the key, and a key naming no group is rejected at startup
+  rather than silently ignored. None of it is security policy: a route's
+  protection is unaffected by how it is documented. See
+  :doc:`generated-routes`.
+
+Changed
+~~~~~~~
+
+* All ten generated tag groups now carry a description in the emitted OpenAPI
+  document. Multi-factor authentication, passkeys, step-up authentication,
+  OAuth providers, and OIDC logout previously appeared as bare names because
+  only the local-auth groups reached the OpenAPI config. Nothing else about the
+  document changes.
 
 0.2.0
 -----
