@@ -13,7 +13,7 @@ from enum import Enum
 from hashlib import sha256
 from hmac import digest as hmac_digest
 from secrets import token_bytes
-from typing import TYPE_CHECKING, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar, cast
 
 from litestar.exceptions import ImproperlyConfiguredException
 
@@ -239,6 +239,9 @@ class RefreshTokenCodec:
 
 class TokenPair(WireStruct, frozen=True):
     """Secret-safe token response recovered from a sealed rotation receipt."""
+
+    __wire_casing__: ClassVar[bool] = False
+    """RFC 6749 section 5.1 names every member below, so no policy may rename them."""
 
     access_token: str
     refresh_token: str

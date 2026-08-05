@@ -12,7 +12,7 @@ this library's.
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import msgspec
 from litestar.exceptions import ImproperlyConfiguredException
@@ -92,6 +92,15 @@ class WireStruct(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     default intact and leaves the reason beside the schema that needs it.
     """
 
+    __wire_casing__: ClassVar[bool] = True
+    """Whether the application's configured casing applies to this schema.
+
+    A schema whose member names belong to a specification, or to a sender other
+    than this library, sets this ``False`` and records why beside itself. Its
+    members then reach the wire and the document exactly as they are spelled
+    here whatever an application configures.
+    """
+
 
 class RouteError(WireStruct, frozen=True, forbid_unknown_fields=False):
     """The body a generated route sends when it *raises* rather than returns.
@@ -114,6 +123,9 @@ class RouteError(WireStruct, frozen=True, forbid_unknown_fields=False):
     future Litestar may too, and neither is a reason for a client of this
     library to fail decoding.
     """
+
+    __wire_casing__: ClassVar[bool] = False
+    """Litestar's exception handling renders this body, so its members are its own."""
 
     status_code: int
     """The HTTP status, repeated in the body by Litestar's exception handling."""
@@ -138,6 +150,9 @@ class ProblemDetail(WireStruct, frozen=True, forbid_unknown_fields=False):
     both because RFC 9457 permits extension members and because the sender is
     Litestar rather than this library.
     """
+
+    __wire_casing__: ClassVar[bool] = False
+    """Litestar's problem-details conversion renders this body, so its members are its own."""
 
     status: int
     """The HTTP status, repeated in the body."""

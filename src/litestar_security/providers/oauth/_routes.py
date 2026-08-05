@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from logging import getLogger
-from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Protocol, cast, runtime_checkable
 from urllib.parse import urlencode, urlsplit
 
 import msgspec
@@ -159,6 +159,9 @@ class OAuthStepUp(WireStruct, frozen=True, kw_only=True):
 
 class OIDCBackchannelLogout(WireStruct, frozen=True, kw_only=True):
     """OIDC back-channel logout token form, decoded from a form-encoded body."""
+
+    __wire_casing__: ClassVar[bool] = False
+    """The provider sends the member name the specification defines, so no policy may rename it."""
 
     logout_token: str
 
