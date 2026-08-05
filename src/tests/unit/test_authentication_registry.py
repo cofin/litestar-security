@@ -1798,7 +1798,9 @@ async def test_jwks_performance_single_flight_and_cache_bounds(
     assert all(result is cold_results[0] for result in cold_results)
     assert len(bounded_fetcher.requests) == 2
     assert len(cast("Any", bounded_provider)._entries) == 1  # noqa: SLF001
-    assert len(state.snapshot.keys) <= policy.maximum_keys
+    snapshot = cast("Any", bounded_provider)._cache.get(_JWT_ISSUER, _JWKS_URI)  # noqa: SLF001
+    assert snapshot is not None
+    assert len(snapshot.keys) <= policy.maximum_keys
     assert len(state.negative) <= policy.maximum_unknown_keys
 
 
