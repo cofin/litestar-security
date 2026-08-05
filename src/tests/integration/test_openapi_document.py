@@ -131,13 +131,14 @@ class _LogoutTokenConsumer:
         )
 
 
-def build_documented_app(
+def build_documented_app(  # noqa: PLR0913 - one variation point per configurable surface the document depends on
     private_key: bytes,
     *,
     docs: RouteDocs | None = None,
     passkey_docs: RouteDocs | None = None,
     response_class: type[Response[Any]] | None = None,
     route_handlers: list[Any] | None = None,
+    plugins: list[Any] | None = None,
 ) -> Litestar:
     """Build the application every generated route family is documented from.
 
@@ -150,6 +151,7 @@ def build_documented_app(
             observe what a customized one does to the generated routes.
         route_handlers: Handlers the application owns alongside the generated
             ones.
+        plugins: Further plugins installed beside the security plugin.
 
     Returns:
         One application with local auth, MFA, passkeys, OAuth, and OIDC logout.
@@ -209,7 +211,10 @@ def build_documented_app(
         csrf_config=CSRFConfig(secret="golden-file-csrf-secret"),  # noqa: S106 - fixed test secret
         middleware=[CookieBackendConfig(secret=bytes(range(16)), secure=True, httponly=True).middleware],
         openapi_config=OpenAPIConfig(title="Litestar Security", version="0.0.0"),
-        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa, passkeys=passkeys, oauth=oauth))],
+        plugins=[
+            SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa, passkeys=passkeys, oauth=oauth)),
+            *(plugins or []),
+        ],
         **optional,
     )
 

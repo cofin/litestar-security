@@ -28,6 +28,7 @@ from litestar.openapi.spec import Components, Reference, SecurityRequirement, Se
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 from litestar.types import Empty
 
+from litestar_security._docs import converted_denial, describes_raised_denial
 from litestar_security._internal import GENERATED_ROUTE_OPT_KEY, RUNTIME_PLAN_OPT_KEY
 from litestar_security.authentication import (
     AUTH_POLICY_OPT_KEY,
@@ -298,6 +299,7 @@ class RouteCompiler(Generic[UserT]):
     external_csrf: ExternalCSRF | None = None
     websocket_config: WebSocketSecurityConfig = field(default_factory=WebSocketSecurityConfig)
     exclude: Sequence[str] | str | None = None
+    converts_to_problem_details: bool = False
     _policy_compiler: PolicyCompiler[UserT] = field(init=False, repr=False)
     _schemes: OpenAPISchemeSet | None = field(init=False, repr=False)
     _exclude_pattern: Pattern[str] | None = field(init=False, repr=False)
@@ -398,8 +400,36 @@ class RouteCompiler(Generic[UserT]):
         )
         warn(message, category=LitestarWarning, stacklevel=1)
 
+    def _restate_denials_as_problem_details(self, route_handler: HTTPRouteHandler) -> None:
+        """Restate a generated route's raised denials as the bodies the application converts them to.
+
+        The denial specifications are module-level, shared by every application
+        that installs this plugin, so whether problem details are in effect
+        cannot be decided where they are declared. It is decided here, per
+        application, against the copy of the handler this registration owns -
+        by assigning a new mapping rather than mutating the shared one.
+
+        Only a specification for a status the route *raises* is restated. A
+        status the handler returns is untouched: the second-factor challenge
+        and the conflict are return values, and no exception handling sees
+        them.
+
+        Args:
+            route_handler: The handler whose response specifications are restated.
+        """
+        if not self.converts_to_problem_details or not route_handler.opt.get(GENERATED_ROUTE_OPT_KEY):
+            return
+        responses = route_handler.responses
+        if not responses or not any(describes_raised_denial(spec) for spec in responses.values()):
+            return
+        route_handler.responses = {
+            status: converted_denial(spec.description) if describes_raised_denial(spec) else spec
+            for status, spec in responses.items()
+        }
+
     def _compile_http_handler(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> None:
         self._report_customized_response_class(route, route_handler)
+        self._restate_denials_as_problem_details(route_handler)
         policy: AuthenticationPolicy
         csrf_override: bool | None
         native_exclude = self._handler_excludes_auth(route, route_handler)

@@ -15,7 +15,7 @@ from typing import Any
 
 import msgspec
 
-__all__ = ("RouteError", "WireStruct")
+__all__ = ("ProblemDetail", "RouteError", "WireStruct")
 
 
 class WireStruct(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -79,3 +79,29 @@ class RouteError(WireStruct, frozen=True, forbid_unknown_fields=False):
     """A human-readable explanation that never names an account."""
     extra: dict[str, Any] | list[Any] | None = None
     """Structured context the raised exception carried, when it carried any."""
+
+
+class ProblemDetail(WireStruct, frozen=True, forbid_unknown_fields=False):
+    """The body a denial takes when the application converts every HTTP exception.
+
+    An application installing Litestar's problem-details plugin with
+    ``enable_for_all_http_exceptions=True`` replaces :class:`RouteError` on
+    every raised status, and the response is served as
+    ``application/problem+json``.
+
+    These are the members Litestar's conversion actually emits, which is not
+    the RFC 9457 five-member shape: the raised ``detail`` is moved onto
+    ``title`` and ``detail`` falls back to the HTTP reason phrase, while
+    ``type`` and ``instance`` are never produced. Unknown members are tolerated
+    both because RFC 9457 permits extension members and because the sender is
+    Litestar rather than this library.
+    """
+
+    status: int
+    """The HTTP status, repeated in the body."""
+    title: str
+    """The raised explanation, which the conversion moves here from ``detail``."""
+    detail: str
+    """The HTTP reason phrase, which the conversion leaves as the default."""
+    extra: dict[str, Any] | list[Any] | None = None
+    """Structured context the raised exception carried, carried through unchanged."""

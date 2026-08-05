@@ -24,6 +24,7 @@ from typing import Any, NamedTuple, cast
 import pytest
 from litestar import Litestar, Request, Response, get
 from litestar.exceptions import HTTPException, LitestarWarning, TooManyRequestsException
+from litestar.plugins.problem_details import ProblemDetailsConfig, ProblemDetailsPlugin
 from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
     HTTP_401_UNAUTHORIZED,
@@ -41,7 +42,7 @@ from litestar_security.providers.oauth import (
     OAuthTransactionUnavailable,
 )
 from tests.integration.test_oauth_routes import raising_oauth_app
-from tests.integration.test_openapi_document import build_documented_app
+from tests.integration.test_openapi_document import build_documented_app, canonical
 
 
 class _Denial(NamedTuple):
@@ -145,12 +146,11 @@ def _declared_body(
     return None
 
 
-@pytest.mark.parametrize("denial", _RAISED_DENIALS)
-def test_a_documented_denial_declares_every_member_the_wire_sends(
-    documented_app: Litestar, documented_schema: Mapping[str, Any], denial: _Denial
-) -> None:
-    """A member the wire always sends but the document never declares is a member no client can read."""
-    with TestClient(app=documented_app) as client:
+def _assert_denial_is_described(app: Litestar, denial: _Denial) -> None:
+    """Assert the document's schema for one raised status describes the body that status sends."""
+    assert app.openapi_schema is not None
+    document = cast("dict[str, Any]", app.openapi_schema.to_schema())
+    with TestClient(app=app) as client:
         request: dict[str, Any] = {"follow_redirects": False}
         if denial.body is not None:
             request["json"] = denial.body
@@ -158,7 +158,7 @@ def test_a_documented_denial_declares_every_member_the_wire_sends(
 
     assert response.status_code == denial.status
     payload = response.json()
-    declared = _declared_body(documented_schema, denial.template, denial.method.lower(), str(denial.status))
+    declared = _declared_body(document, denial.template, denial.method.lower(), str(denial.status))
     assert declared is not None, f"{denial.method} {denial.template} documents no body for {denial.status}"
     media_type, schema = declared
 
@@ -167,6 +167,49 @@ def test_a_documented_denial_declares_every_member_the_wire_sends(
     assert not undeclared, f"{denial.path} sends undeclared members {undeclared} against {schema.get('title')}"
     missing = sorted(set(schema.get("required", ())) - set(payload))
     assert not missing, f"{denial.path} omits required members {missing} of {schema.get('title')}"
+
+
+@pytest.mark.parametrize("denial", _RAISED_DENIALS)
+def test_a_documented_denial_declares_every_member_the_wire_sends(documented_app: Litestar, denial: _Denial) -> None:
+    """A member the wire always sends but the document never declares is a member no client can read."""
+    _assert_denial_is_described(documented_app, denial)
+
+
+@pytest.mark.parametrize("denial", _RAISED_DENIALS)
+def test_a_converting_problem_details_configuration_is_described_too(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]], denial: _Denial
+) -> None:
+    """Converting every HTTP exception rewrites the body, so it has to rewrite the document with it."""
+    app = build_documented_app(
+        jwt_key_material["EdDSA"][0],
+        plugins=[ProblemDetailsPlugin(ProblemDetailsConfig(enable_for_all_http_exceptions=True))],
+    )
+
+    _assert_denial_is_described(app, denial)
+
+
+def test_a_problem_details_plugin_that_converts_nothing_changes_nothing(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]], documented_schema: Mapping[str, Any]
+) -> None:
+    """The default configuration converts nothing, so detecting mere presence would publish a lie."""
+    app = build_documented_app(jwt_key_material["EdDSA"][0], plugins=[ProblemDetailsPlugin()])
+    assert app.openapi_schema is not None
+
+    assert canonical(cast("dict[str, Any]", app.openapi_schema.to_schema())) == canonical(documented_schema)
+
+
+def test_detection_reads_the_plugin_class_not_its_name(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]], documented_schema: Mapping[str, Any]
+) -> None:
+    """Matching on a name string would follow any impostor and miss a Litestar reorganization."""
+
+    class ProblemDetailsPlugin:  # the impostor shares the name and nothing else
+        config = ProblemDetailsConfig(enable_for_all_http_exceptions=True)
+
+    app = build_documented_app(jwt_key_material["EdDSA"][0], plugins=[ProblemDetailsPlugin()])
+    assert app.openapi_schema is not None
+
+    assert canonical(cast("dict[str, Any]", app.openapi_schema.to_schema())) == canonical(documented_schema)
 
 
 class _OAuthFailure(NamedTuple):
@@ -283,6 +326,23 @@ def test_a_route_the_application_owns_is_its_own_business(
     build_documented_app(jwt_key_material["EdDSA"][0], route_handlers=[_application_owned_route])
 
     assert _response_class_warnings(recwarn) == []
+
+
+def test_one_application_converting_leaves_the_next_one_alone(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    """The denial specifications are module-level and shared, so restating them per application must not stick."""
+    build_documented_app(
+        jwt_key_material["EdDSA"][0],
+        plugins=[ProblemDetailsPlugin(ProblemDetailsConfig(enable_for_all_http_exceptions=True))],
+    )
+    later = build_documented_app(jwt_key_material["EdDSA"][0])
+    assert later.openapi_schema is not None
+    document = cast("dict[str, Any]", later.openapi_schema.to_schema())
+
+    declared = _declared_body(document, "/auth/sessions", "get", "401")
+    assert declared is not None
+    assert declared == ("application/json", document["components"]["schemas"]["RouteError"])
 
 
 def test_a_returned_body_keeps_its_own_typed_schema(documented_schema: Mapping[str, Any]) -> None:

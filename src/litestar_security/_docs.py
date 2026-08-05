@@ -16,7 +16,7 @@ from litestar.exceptions import ImproperlyConfiguredException
 from litestar.openapi.datastructures import ResponseSpec
 from litestar.openapi.spec import Tag
 
-from litestar_security.schema import RouteError
+from litestar_security.schema import ProblemDetail, RouteError
 
 if TYPE_CHECKING:
     from litestar import Router
@@ -28,6 +28,8 @@ __all__ = (
     "ROUTE_TAGS",
     "RouteDocs",
     "apply_route_docs",
+    "converted_denial",
+    "describes_raised_denial",
     "merge_route_tags",
     "raised_denial",
     "resolve_tags",
@@ -56,6 +58,36 @@ def raised_denial(description: str) -> ResponseSpec:
         One response specification for a raised status.
     """
     return ResponseSpec(RouteError, description=description, media_type=MediaType.JSON, generate_examples=False)
+
+
+def converted_denial(description: str) -> ResponseSpec:
+    """Restate a raised status for an application that converts to problem details.
+
+    Args:
+        description: The description carried over from the unconverted spec.
+
+    Returns:
+        The same status described as the body and media type Litestar's
+        problem-details conversion produces.
+    """
+    return ResponseSpec(
+        ProblemDetail, description=description, media_type="application/problem+json", generate_examples=False
+    )
+
+
+def describes_raised_denial(spec: ResponseSpec) -> bool:
+    """Report whether one specification describes a status the route raises.
+
+    Args:
+        spec: The response specification to classify.
+
+    Returns:
+        ``True`` when the specification is one :func:`raised_denial` produced,
+        which is what makes it eligible for restatement. A specification for a
+        status the handler *returns* is never eligible.
+    """
+    container = cast("Any", spec).data_container
+    return container is RouteError
 
 
 ROUTE_TAGS: Mapping[str, Tag] = MappingProxyType({

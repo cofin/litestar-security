@@ -170,6 +170,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 external_csrf=self.config.external_csrf,
                 websocket_config=self.config.websocket,
                 exclude=self.config.exclude,
+                converts_to_problem_details=self._converts_to_problem_details(app_config),
             )
         self._configure_exclusion_report(app_config)
         app_config.dependencies.update(self._providers)
@@ -350,6 +351,40 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         )
         if self._api_key_lifespan not in lifespan_handlers:
             lifespan_handlers.append(self._api_key_lifespan)
+
+    @staticmethod
+    def _converts_to_problem_details(app_config: AppConfig) -> bool:
+        """Report whether the application converts every HTTP exception to problem details.
+
+        Presence of the plugin is not the trigger. ``ProblemDetailsConfig``
+        leaves ``enable_for_all_http_exceptions`` off, and a plugin in that
+        default state registers one handler for ``ProblemDetailsException``
+        alone - which the generated routes never raise, so nothing they send
+        changes. Rewriting the document on presence would publish a shape no
+        response actually takes.
+
+        The match is on the class rather than on a name string, so a Litestar
+        reorganization fails at import instead of silently detecting nothing.
+        A configuration converting only selected exception types is left
+        undetected: which statuses it reaches depends on the exact types the
+        generated routes raise on each path, which no per-route specification
+        can state.
+
+        Args:
+            app_config: The application configuration being extended.
+
+        Returns:
+            Whether raised denials reach the wire as problem details.
+        """
+        from litestar.plugins.problem_details import (  # noqa: PLC0415 - the problem-details tree loads only when detected
+            ProblemDetailsPlugin,
+        )
+
+        return any(
+            plugin.config.enable_for_all_http_exceptions
+            for plugin in app_config.plugins
+            if isinstance(plugin, ProblemDetailsPlugin)
+        )
 
     def _configure_exclusion_report(self, app_config: AppConfig) -> None:
         # Every route is known once the application has finished building, so an

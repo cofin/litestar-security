@@ -161,6 +161,7 @@ _PUBLIC_API = (
     "PasskeyConfig",
     "PresentedCredential",
     "Principal",
+    "ProblemDetail",
     "PublicController",
     "RequestAuthenticator",
     "ResourcePermission",
@@ -3008,7 +3009,10 @@ def test_every_wire_schema_in_the_tree_shares_one_casing_and_strictness_policy()
     schemas = descendants(litestar_security.WireStruct)
     # A schema that must tolerate members it does not model states so on itself and
     # is listed here with the reason.
-    tolerant = {"RouteError": "Litestar renders this body, and an application exception handler may add members."}
+    tolerant = {
+        "RouteError": "Litestar renders this body, and an application exception handler may add members.",
+        "ProblemDetail": "RFC 9457 permits extension members, and Litestar renders this body.",
+    }
 
     assert len(schemas) >= 30
     for schema in schemas:
