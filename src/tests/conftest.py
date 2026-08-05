@@ -7,6 +7,9 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 
+from litestar_security.testing import FakeClock
+from tests.fixtures import collaborators
+
 # ``tests.fixtures.factories`` is the load-bearing entry: ``register_fixture``
 # applies ``pytest.fixture`` at decoration time, so pytest only needs the module
 # loaded as a plugin for the factory fixtures to resolve. ``polyfactory.pytest_plugin``
@@ -16,6 +19,17 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 # ``testpaths`` makes it an initial conftest: re-verify it if the import mode
 # changes or this file moves.
 pytest_plugins = ["polyfactory.pytest_plugin", "tests.fixtures.factories"]
+
+# Defined once in the fixtures package and re-exported here under the name the
+# whole tree uses. It matches the kit's own default instant, so a clock-driven
+# backend and a default-constructed one agree on now.
+FIXED_NOW = collaborators.FIXED_NOW
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    """Return one test-owned clock because ``advance()`` mutates it."""
+    return FakeClock(FIXED_NOW)
 
 
 def _pem_pair(private_key: object) -> tuple[bytes, bytes]:
