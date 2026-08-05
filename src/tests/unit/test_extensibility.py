@@ -118,7 +118,6 @@ def test_capability_protocols_do_not_expose_generic_persistence_methods() -> Non
         assert not {"add", "update", "delete", "query", "transaction", "connection"}.intersection(protocol.__dict__)
 
 
-@pytest.mark.anyio
 async def test_mfa_login_challenge_reference_store_is_atomic_and_burns_mismatches() -> None:
     now = datetime(2026, 8, 3, tzinfo=timezone.utc)
     challenge = MFALoginChallenge(
@@ -192,7 +191,6 @@ def test_normalized_runtime_has_no_per_call_awaitability_branch() -> None:
     assert violations == []
 
 
-@pytest.mark.anyio
 async def test_blocking_call_runner_enforces_its_capacity_limit() -> None:
     runner = workers_module.BlockingCallRunner(limiter=CapacityLimiter(1))
     first_started = Event()
@@ -228,7 +226,6 @@ async def test_blocking_call_runner_enforces_its_capacity_limit() -> None:
     assert sorted(completed) == [1, 2]
 
 
-@pytest.mark.anyio
 async def test_blocking_call_runner_finishes_in_flight_mutation_before_cancellation() -> None:
     runner = workers_module.BlockingCallRunner(limiter=CapacityLimiter(1))
     started = Event()

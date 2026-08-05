@@ -93,7 +93,6 @@ def _service_runtime(key: VerificationKey) -> tuple[object, object, _JWKS]:
     return slot, mechanism, jwks
 
 
-@pytest.mark.anyio
 async def test_service_jwt_builds_userless_principal_and_scope_restrictions(
     service_key_material: tuple[bytes, VerificationKey],
 ) -> None:
@@ -119,7 +118,6 @@ async def test_service_jwt_builds_userless_principal_and_scope_restrictions(
     assert jwks.calls == 1
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -145,7 +143,6 @@ async def test_service_jwt_rejects_invalid_trust_and_evidence_claims(
     assert isinstance(outcome, InvalidCredentials)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("provider_outcome", [InvalidCredentials(), VerificationUnavailable()])
 async def test_service_jwt_preserves_unknown_key_and_outage(
     service_key_material: tuple[bytes, VerificationKey], provider_outcome: object
@@ -161,7 +158,6 @@ async def test_service_jwt_preserves_unknown_key_and_outage(
     assert outcome == provider_outcome
 
 
-@pytest.mark.anyio
 async def test_service_jwt_accepts_rotated_jwks_key(service_key_material: tuple[bytes, VerificationKey]) -> None:
     _, first_key = service_key_material
     _, mechanism, jwks = _service_runtime(first_key)
@@ -181,7 +177,6 @@ async def test_service_jwt_accepts_rotated_jwks_key(service_key_material: tuple[
     assert isinstance(outcome, Authenticated)
 
 
-@pytest.mark.anyio
 async def test_service_jwt_multi_algorithm_config_uses_only_the_verified_header_algorithm() -> None:
     private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     public_pem = private.public_key().public_bytes(
@@ -202,7 +197,6 @@ async def test_service_jwt_multi_algorithm_config_uses_only_the_verified_header_
     assert isinstance(outcome, Authenticated)
 
 
-@pytest.mark.anyio
 async def test_service_jwt_reuses_a_cached_verifier_with_the_shared_worker_limiter(
     service_key_material: tuple[bytes, VerificationKey],
 ) -> None:
@@ -230,7 +224,6 @@ async def test_service_jwt_reuses_a_cached_verifier_with_the_shared_worker_limit
     assert cached.limiter is config.worker_limits.crypto_limiter
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("state", ["malformed", "wrong-algorithm", "missing-kid", "bad-provider", "bad-signature"])
 async def test_service_jwt_rejects_malformed_routing_and_provider_boundaries(
     service_key_material: tuple[bytes, VerificationKey], state: str
@@ -257,7 +250,6 @@ async def test_service_jwt_rejects_malformed_routing_and_provider_boundaries(
     assert isinstance(outcome, VerificationUnavailable if state == "bad-provider" else InvalidCredentials)
 
 
-@pytest.mark.anyio
 async def test_service_jwt_supports_custom_actor_and_sequence_scopes(
     service_key_material: tuple[bytes, VerificationKey],
 ) -> None:
@@ -290,7 +282,6 @@ async def test_service_jwt_supports_custom_actor_and_sequence_scopes(
     )
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("claim", "value"), [("permissions", None), ("permissions", [""]), ("actor", 1), ("amr", [""])]
 )

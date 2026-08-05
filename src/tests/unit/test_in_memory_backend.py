@@ -92,7 +92,6 @@ def test_in_memory_backend_exposes_full_local_account_store() -> None:
     assert isinstance(store, RegistrationStore)
 
 
-@pytest.mark.anyio
 async def test_local_account_store_consumes_invitations_only_with_successful_registration() -> None:
     backend = InMemorySecurityBackend(clock=lambda: _NOW)
     invitation = TokenIssue(
@@ -157,7 +156,6 @@ async def test_local_account_store_consumes_invitations_only_with_successful_reg
     assert later.status is RegistrationStatus.CREATED
 
 
-@pytest.mark.anyio
 async def test_local_account_store_rejects_registration_verification_token_collisions_before_writes() -> None:
     backend = InMemorySecurityBackend(clock=lambda: _NOW)
     delivery = PurposeTokenCodec(pepper=b"p" * 32, entropy=lambda length: b"v" * length).issue(
@@ -183,7 +181,6 @@ async def test_local_account_store_rejects_registration_verification_token_colli
     assert await backend.accounts.find_for_login("collision@example.com") is None
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("purpose", "result_status"),
     [(TokenPurpose.VERIFICATION, ConsumeStatus.USED), (TokenPurpose.RECOVERY, PasswordResetStatus.USED)],
@@ -217,7 +214,6 @@ async def test_local_account_store_burns_purpose_tokens_after_failed_attempt_lim
     assert result.status is result_status
 
 
-@pytest.mark.anyio
 async def test_local_account_store_filters_expired_sessions_using_its_clock() -> None:
     current = [_NOW]
     backend = InMemorySecurityBackend(clock=lambda: current[0])
@@ -241,7 +237,6 @@ async def test_local_account_store_filters_expired_sessions_using_its_clock() ->
     assert await backend.accounts.touch(command.session_id, now=_NOW) is None
 
 
-@pytest.mark.anyio
 async def test_local_account_store_rejects_session_identifier_collisions_before_mutation() -> None:
     backend = InMemorySecurityBackend(clock=lambda: _NOW)
     account_id = await _register(backend)
@@ -268,7 +263,6 @@ async def test_local_account_store_rejects_session_identifier_collisions_before_
     assert await backend.accounts.get(prior.session_id) is not None
 
 
-@pytest.mark.anyio
 async def test_local_account_store_reports_missing_conflicting_and_final_method_transitions() -> None:
     backend = InMemorySecurityBackend(clock=lambda: _NOW)
     missing = "account-missing"
@@ -308,7 +302,6 @@ async def test_local_account_store_reports_missing_conflicting_and_final_method_
     ).status is RevokeLoginMethodStatus.REVOKED
 
 
-@pytest.mark.anyio
 async def test_local_account_store_rejects_duplicate_generated_account_identifiers_and_binds_verification() -> None:
     backend = InMemorySecurityBackend(clock=lambda: _NOW, identifiers=lambda _namespace, _sequence: "account-fixed")
     delivery = PurposeTokenCodec(pepper=b"p" * 32, entropy=lambda length: b"v" * length).issue(
@@ -340,7 +333,6 @@ async def test_local_account_store_rejects_duplicate_generated_account_identifie
         )
 
 
-@pytest.mark.anyio
 async def test_in_memory_one_time_challenge_stores_burn_invalid_presentations() -> None:
     expires_at = _NOW + timedelta(minutes=1)
     webauthn = WebAuthnChallenge(
@@ -390,7 +382,6 @@ async def test_in_memory_one_time_challenge_stores_burn_invalid_presentations() 
     ) is None
 
 
-@pytest.mark.anyio
 async def test_in_memory_oidc_logout_reference_rejects_missing_and_replayed_mappings() -> None:
     store = testing_module.InMemoryOIDCSessionLogoutStore(
         session_mappings=(("provider", "issuer", "subject", "sid"),),
@@ -403,7 +394,6 @@ async def test_in_memory_oidc_logout_reference_rejects_missing_and_replayed_mapp
     assert await store.revoke_frontchannel("provider", "issuer", "sid", binding="binding", now=_NOW) is None
 
 
-@pytest.mark.anyio
 async def test_local_account_store_keeps_refresh_families_revoked_and_does_not_rotate_expired_tokens() -> None:
     backend = InMemorySecurityBackend(clock=lambda: _NOW)
     account_id = await _register(backend)
@@ -461,7 +451,6 @@ async def test_local_account_store_keeps_refresh_families_revoked_and_does_not_r
     )
 
 
-@pytest.mark.anyio
 async def test_local_account_store_rejects_refresh_identifier_collisions_before_mutation() -> None:
     backend = InMemorySecurityBackend(clock=lambda: _NOW)
     account_id = await _register(backend)
@@ -508,7 +497,6 @@ async def test_local_account_store_rejects_refresh_identifier_collisions_before_
     )
 
 
-@pytest.mark.anyio
 async def test_local_account_store_preserves_purpose_token_terminal_outcomes() -> None:
     backend = InMemorySecurityBackend(clock=lambda: _NOW)
     account_id = await _register(backend)
@@ -604,7 +592,6 @@ async def test_local_account_store_preserves_purpose_token_terminal_outcomes() -
     ).status is ConsumeStatus.INVALID
 
 
-@pytest.mark.anyio
 async def test_local_account_store_updates_and_revokes_owned_sessions() -> None:
     backend = InMemorySecurityBackend(clock=lambda: _NOW)
     account_id = await _register(backend)
@@ -637,7 +624,6 @@ async def test_local_account_store_updates_and_revokes_owned_sessions() -> None:
     assert rebound.session_id == successor.session_id
 
 
-@pytest.mark.anyio
 async def test_local_account_store_refresh_revocation_and_epoch_outcomes() -> None:
     backend = InMemorySecurityBackend(clock=lambda: _NOW)
     account_id = await _register(backend)
@@ -695,7 +681,6 @@ def test_in_memory_backend_accepts_injected_deterministic_sources() -> None:
     assert backend.password_hash == test_hash
 
 
-@pytest.mark.anyio
 async def test_in_memory_api_key_store_has_one_atomic_rotation_winner() -> None:
     backend = InMemorySecurityBackend(clock=lambda: _NOW)
     current = _record("a2tra2tra2tra2tr")
@@ -726,7 +711,6 @@ async def test_in_memory_api_key_store_has_one_atomic_rotation_winner() -> None:
     assert all("digest" not in event.details for event in backend.events)
 
 
-@pytest.mark.anyio
 async def test_in_memory_backend_barrier_and_failpoint_are_deterministic() -> None:
     backend = InMemorySecurityBackend()
     barrier = backend.install_barrier("api_key.create")
@@ -791,7 +775,6 @@ def test_in_memory_backend_rejects_invalid_source_results() -> None:
         InMemorySecurityBackend(entropy=lambda _length: "bad").entropy(4)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_in_memory_api_key_store_covers_duplicates_bounded_overlap_and_revoke() -> None:
     backend = InMemorySecurityBackend()
     current = APIKeyRecord(
@@ -814,7 +797,6 @@ async def test_in_memory_api_key_store_covers_duplicates_bounded_overlap_and_rev
         await backend.api_keys.revoke(key_id="Z2dnZ2dnZ2dnZ2dn", now=_NOW)
 
 
-@pytest.mark.anyio
 async def test_in_memory_backend_controls_can_be_cleared() -> None:
     backend = InMemorySecurityBackend()
     backend.install_barrier("unused")
@@ -826,7 +808,6 @@ async def test_in_memory_backend_controls_can_be_cleared() -> None:
         backend.set_failpoint("api_key.get", object())  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_in_memory_backend_default_oauth_protector_round_trips() -> None:
     backend = InMemorySecurityBackend()
     transaction = OAuthTransaction(

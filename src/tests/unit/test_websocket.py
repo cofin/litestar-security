@@ -393,7 +393,6 @@ def test_websocket_binding_validates_and_freezes_identifiers(kwargs: dict[str, o
     assert binding.credential_ids == frozenset({"bearer:authorization"})
 
 
-@pytest.mark.anyio
 async def test_in_memory_websocket_revocation_source_releases_only_the_matching_binding() -> None:
     source = InMemoryWebSocketRevocationSource()
     first = WebSocketBinding(
@@ -468,7 +467,6 @@ def test_issued_websocket_connect_token_rejects_invalid_value_and_naive_expiry()
         _connect_token_record(issued_at=_NOW.replace(tzinfo=None))
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_token_store_rejects_duplicate_and_digest_mismatch() -> None:
     store = InMemoryWebSocketConnectTokenStore()
     record = _connect_token_record()
@@ -488,7 +486,6 @@ def test_websocket_connect_token_service_rejects_invalid_configuration(kwargs: d
         WebSocketConnectTokenService(**values)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_token_service_rejects_anonymous_invalid_and_unavailable_inputs() -> None:
     service = WebSocketConnectTokenService(store=InMemoryWebSocketConnectTokenStore(), clock=lambda: _NOW)
     issue_kwargs = {
@@ -537,7 +534,6 @@ async def test_websocket_connect_token_service_rejects_anonymous_invalid_and_una
         )
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("entropy", [lambda _length: b"bad", lambda _length: object()])
 async def test_websocket_connect_token_service_rejects_invalid_entropy(entropy: object) -> None:
     service = WebSocketConnectTokenService(
@@ -556,7 +552,6 @@ async def test_websocket_connect_token_service_rejects_invalid_entropy(entropy: 
         )
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_token_service_sanitizes_entropy_failure() -> None:
     def unavailable(_length: int) -> bytes:
         raise RuntimeError
@@ -575,7 +570,6 @@ async def test_websocket_connect_token_service_sanitizes_entropy_failure() -> No
         )
 
 
-@pytest.mark.anyio
 async def test_issue_websocket_connect_token_helper_issues_bound_connect_token() -> None:
     issued = await issue_websocket_connect_token(
         principal=Principal(id="subject-1"),
@@ -700,7 +694,6 @@ def test_websocket_policy_fingerprint_accepts_an_absent_participant_set() -> Non
     assert len(websocket_module.websocket_policy_fingerprint(plan)) == 64
 
 
-@pytest.mark.anyio
 async def test_connect_token_issuer_mints_by_route_name_and_rejects_invalid_targets() -> None:
     class App:
         handlers: dict[str, object]
@@ -754,7 +747,6 @@ async def test_connect_token_issuer_mints_by_route_name_and_rejects_invalid_targ
     assert consumed.subject_id == "subject-1"
 
 
-@pytest.mark.anyio
 async def test_close_websocket_sends_sanitized_event() -> None:
     messages: list[dict[str, object]] = []
 
@@ -765,7 +757,6 @@ async def test_close_websocket_sends_sanitized_event() -> None:
     assert messages == [{"type": "websocket.close", "code": 4401, "reason": "authentication_required"}]
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_token_is_digest_only_one_time_and_exactly_bound() -> None:
     store = InMemoryWebSocketConnectTokenStore()
     service = WebSocketConnectTokenService(
@@ -820,7 +811,6 @@ def _epoch(value: object) -> Callable[[str], Awaitable[object]]:
     return current_security_epoch
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("current", [None, True, -1, RuntimeError("offline")])
 async def test_websocket_connect_token_epoch_verification_fails_unavailable_after_atomic_consume(
     current: object,
@@ -847,7 +837,6 @@ async def test_websocket_connect_token_epoch_verification_fails_unavailable_afte
     assert store.records == ()
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_token_epoch_mismatch_is_unauthorized_after_atomic_consume() -> None:
     store = InMemoryWebSocketConnectTokenStore()
     service = WebSocketConnectTokenService(store=store, clock=lambda: _NOW)
@@ -873,7 +862,6 @@ async def test_websocket_connect_token_epoch_mismatch_is_unauthorized_after_atom
     assert store.records == ()
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_token_is_consumed_before_later_binding_failure() -> None:
     service = WebSocketConnectTokenService(
         store=InMemoryWebSocketConnectTokenStore(),
@@ -908,7 +896,6 @@ async def test_websocket_connect_token_is_consumed_before_later_binding_failure(
     assert retry is None
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_token_atomic_double_consume_has_one_winner() -> None:
     async def consume(service: WebSocketConnectTokenService, value: str, results: list[object]) -> None:
         results.append(
@@ -944,7 +931,6 @@ async def test_websocket_connect_token_atomic_double_consume_has_one_winner() ->
         assert sum(result is not None for result in results) == 1
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_token_expiry_boundary_is_exclusive_and_deletes_record() -> None:
     current = [_NOW]
     store = InMemoryWebSocketConnectTokenStore()
@@ -976,7 +962,6 @@ async def test_websocket_connect_token_expiry_boundary_is_exclusive_and_deletes_
     assert store.records == ()
 
 
-@pytest.mark.anyio
 async def test_websocket_expiry_closes_once_and_cancels_idle_handler() -> None:
     messages: list[dict[str, object]] = []
     handler_cleaned = anyio.Event()
@@ -1008,7 +993,6 @@ async def test_websocket_expiry_closes_once_and_cancels_idle_handler() -> None:
     assert coordinator.state == "closed"
 
 
-@pytest.mark.anyio
 async def test_websocket_handler_return_cancels_expiry_task_without_close() -> None:
     messages: list[dict[str, object]] = []
     sleeper_cleaned = anyio.Event()
@@ -1038,7 +1022,6 @@ async def test_websocket_handler_return_cancels_expiry_task_without_close() -> N
     assert sleeper_cleaned.is_set()
 
 
-@pytest.mark.anyio
 async def test_websocket_simultaneous_terminal_causes_emit_one_close() -> None:
     messages: list[dict[str, object]] = []
 
@@ -1058,7 +1041,6 @@ async def test_websocket_simultaneous_terminal_causes_emit_one_close() -> None:
     assert messages[0]["reason"] in {"credential_expired", "credential_revoked"}
 
 
-@pytest.mark.anyio
 async def test_websocket_coordinator_ignores_events_after_close_and_duplicate_accept() -> None:
     messages: list[dict[str, object]] = []
 
@@ -1079,7 +1061,6 @@ async def test_websocket_coordinator_ignores_events_after_close_and_duplicate_ac
     ]
 
 
-@pytest.mark.anyio
 async def test_websocket_supervisor_default_path_creates_no_tasks() -> None:
     called = False
 
@@ -1100,7 +1081,6 @@ async def test_websocket_supervisor_default_path_creates_no_tasks() -> None:
     assert called
 
 
-@pytest.mark.anyio
 async def test_websocket_already_expired_closes_without_starting_handler() -> None:
     messages: list[dict[str, object]] = []
     handler_called = False
@@ -1124,7 +1104,6 @@ async def test_websocket_already_expired_closes_without_starting_handler() -> No
     assert handler_called is False
 
 
-@pytest.mark.anyio
 async def test_websocket_revocation_event_closes_and_cancels_handler() -> None:
     messages: list[dict[str, object]] = []
     cleaned = anyio.Event()
@@ -1153,7 +1132,6 @@ async def test_websocket_revocation_event_closes_and_cancels_handler() -> None:
     assert cleaned.is_set()
 
 
-@pytest.mark.anyio
 async def test_websocket_revocation_outage_closes_as_unavailable() -> None:
     messages: list[dict[str, object]] = []
 
@@ -1177,7 +1155,6 @@ async def test_websocket_revocation_outage_closes_as_unavailable() -> None:
     assert messages == [{"type": "websocket.close", "code": 1013, "reason": "verification_unavailable"}]
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("error", "code", "reason"),
     [
@@ -1215,7 +1192,6 @@ async def test_websocket_refresh_failure_has_stable_close(error: Exception, code
     assert messages == [{"type": "websocket.close", "code": code, "reason": reason}]
 
 
-@pytest.mark.anyio
 async def test_websocket_refresh_completes_short_resource_scope_and_preserves_access() -> None:
     messages: list[dict[str, object]] = []
     refreshed = anyio.Event()

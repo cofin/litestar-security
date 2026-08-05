@@ -379,7 +379,6 @@ def oauth_app(*, openapi: bool, oauth_service: RouteService | None = None, authe
     return Litestar(**kwargs) if openapi else Litestar(**kwargs, openapi_config=None)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_step_up_oauth_authorizer_consumes_one_grant_once() -> None:
     authorizer, service = step_up_oauth_authorizer(epochs={"account-1": 2})
     request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {})())
@@ -395,7 +394,6 @@ async def test_step_up_oauth_authorizer_consumes_one_grant_once() -> None:
     assert consumed.value.status_code == 401
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("issued_purpose", "requested_purpose", "issued_binding"),
     [("oauth-link", "oauth-unlink", b"transport-binding"), ("oauth-link", "oauth-link", b"other-binding")],
@@ -413,7 +411,6 @@ async def test_step_up_oauth_authorizer_rejects_wrong_purpose_or_transport_bindi
     assert denied.value.status_code == 401
 
 
-@pytest.mark.anyio
 async def test_step_up_oauth_authorizer_rechecks_epoch_for_callback_proof() -> None:
     epochs: dict[str, int | None] = {"account-1": 2}
     authorizer, step_up = step_up_oauth_authorizer(epochs=epochs)
@@ -440,7 +437,6 @@ async def test_step_up_oauth_authorizer_rechecks_epoch_for_callback_proof() -> N
         )
 
 
-@pytest.mark.anyio
 async def test_step_up_oauth_authorizer_maps_epoch_callback_failure_to_503() -> None:
     async def broken_epoch(_account_id: str) -> int | None:
         raise OSError
@@ -476,7 +472,6 @@ def test_step_up_oauth_authorizer_rejects_malformed_configuration(invalid_depend
         StepUpOAuthAuthorizer(**values)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("epoch", [None, True, -1, 1 << 64])
 async def test_step_up_oauth_authorizer_rejects_malformed_epoch_callback(epoch: object) -> None:
     async def current_epoch(_account_id: str) -> object:
@@ -494,7 +489,6 @@ async def test_step_up_oauth_authorizer_rejects_malformed_epoch_callback(epoch: 
         await authorizer.authorize(grant="grant", account_id="account-1", purpose="oauth-link", request=request)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("transport_binding", "result", "exception"),
     [
@@ -523,7 +517,6 @@ async def test_step_up_oauth_authorizer_sanitizes_transport_and_consume_results(
         await authorizer.authorize(grant="grant", account_id="account-1", purpose="oauth-link", request=request)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("session_binding", ["", b"session-binding"])
 async def test_step_up_oauth_authorizer_rejects_malformed_session_callback(session_binding: object) -> None:
     async def current_epoch(_account_id: str) -> int:
@@ -541,7 +534,6 @@ async def test_step_up_oauth_authorizer_rejects_malformed_session_callback(sessi
         await authorizer.authorize(grant="grant", account_id="account-1", purpose="oauth-link", request=request)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("failing_callback", ["transport", "session"])
 async def test_step_up_oauth_authorizer_sanitizes_binding_callback_failures(failing_callback: str) -> None:
     async def current_epoch(_account_id: str) -> int:
@@ -564,7 +556,6 @@ async def test_step_up_oauth_authorizer_sanitizes_binding_callback_failures(fail
         await authorizer.authorize(grant="grant", account_id="account-1", purpose="oauth-link", request=request)
 
 
-@pytest.mark.anyio
 async def test_step_up_oauth_authorizer_sanitizes_consume_failure() -> None:
     async def current_epoch(_account_id: str) -> int:
         return 2
@@ -600,7 +591,6 @@ def test_oauth_config_can_disable_generated_routes() -> None:
     assert SecurityPlugin(SecurityConfig[object](oauth=config)).on_app_init(AppConfig()).route_handlers == []
 
 
-@pytest.mark.anyio
 async def test_concrete_lifecycle_composes_login_transaction_provider_account_and_local_transport() -> None:
     provider = FakeOAuthProvider(
         name="example",
@@ -664,7 +654,6 @@ async def test_concrete_lifecycle_composes_login_transaction_provider_account_an
     assert provider.calls == ["authorize", "exchange", "identity"]
 
 
-@pytest.mark.anyio
 async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout() -> None:
     provider = FakeOAuthProvider(
         name="example",
@@ -745,7 +734,6 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
     assert step_up.purposes == ["oauth-link", "oauth-scope-upgrade", "oauth-provider-token-management", "oauth-unlink"]
 
 
-@pytest.mark.anyio
 async def test_lifecycle_and_local_transport_reject_invalid_or_unavailable_paths() -> None:
     provider = FakeOAuthProvider(
         name="example",
@@ -855,7 +843,6 @@ async def test_lifecycle_and_local_transport_reject_invalid_or_unavailable_paths
     assert token_calls == ["account-1"]
 
 
-@pytest.mark.anyio
 async def test_lifecycle_rejects_scope_callback_without_target_and_unlinks_missing_target() -> None:
     provider = FakeOAuthProvider(
         name="example",
@@ -904,7 +891,6 @@ async def test_lifecycle_rejects_scope_callback_without_target_and_unlinks_missi
     assert result.detail == "Provider account not unlinked."
 
 
-@pytest.mark.anyio
 async def test_lifecycle_callback_requires_original_step_up_context() -> None:
     provider = oauth_fake_provider()
     service = lifecycle_service(provider=provider)
@@ -983,7 +969,6 @@ def test_oauth_lifecycle_rejects_invalid_dependency_graph() -> None:
         )
 
 
-@pytest.mark.anyio
 async def test_lifecycle_logout_omits_unsupported_route_and_survives_provider_state_outage() -> None:
     provider = oauth_fake_provider()
     request = cast("Request[Any, Any, Any]", object())
@@ -1023,7 +1008,6 @@ def test_local_transport_rejects_incomplete_configuration(
         )
 
 
-@pytest.mark.anyio
 async def test_local_transport_logout_reports_each_unavailable_transport() -> None:
     request = cast("Request[Any, Any, Any]", object())
 
@@ -1065,7 +1049,6 @@ async def test_local_transport_logout_reports_each_unavailable_transport() -> No
         await session_only.logout(account_id="account-1", request=request)
 
 
-@pytest.mark.anyio
 async def test_oidc_front_and_backchannel_logout_routes_delegate_verified_lifecycle() -> None:
     consumer = LogoutConsumer()
     sessions = LogoutSessions()
@@ -1099,7 +1082,6 @@ async def test_oidc_front_and_backchannel_logout_routes_delegate_verified_lifecy
     assert sessions.calls == ["sid-front", "sid-1"]
 
 
-@pytest.mark.anyio
 async def test_frontchannel_logout_requires_ownership_binding_and_consumes_replay_marker() -> None:
     sessions = LogoutSessions()
     sessions.frontchannel_owners[("example", "https://issuer.example", "sid-front")] = "front-binding"
@@ -1134,7 +1116,6 @@ async def test_frontchannel_logout_requires_ownership_binding_and_consumes_repla
     assert sessions.calls == ["sid-front"]
 
 
-@pytest.mark.anyio
 async def test_frontchannel_logout_consumes_budget_and_rejects_bursts_with_retry_after() -> None:
     guard = RateLimitGuard(
         limiter=StoreRateLimiter(
@@ -1171,7 +1152,6 @@ async def test_frontchannel_logout_consumes_budget_and_rejects_bursts_with_retry
     assert int(limited.headers["retry-after"]) >= 1
 
 
-@pytest.mark.anyio
 async def test_frontchannel_logout_fails_closed_when_the_limiter_is_unavailable() -> None:
     class BrokenLimiter:
         async def acquire(self, request: object) -> object:
@@ -1201,7 +1181,6 @@ async def test_frontchannel_logout_fails_closed_when_the_limiter_is_unavailable(
     assert response.status_code == 503
 
 
-@pytest.mark.anyio
 async def test_frontchannel_logout_degrades_to_subject_limiting_when_client_key_extraction_fails() -> None:
     guard = RateLimitGuard(
         limiter=StoreRateLimiter(
@@ -1249,7 +1228,6 @@ def test_oidc_logout_lifecycle_rejects_invalid_configuration(kwargs: dict[str, o
         OIDCLogoutLifecycleService(**values)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_oidc_logout_lifecycle_rejects_mismatches_unknown_provider_and_naive_clock() -> None:
     sessions = LogoutSessions()
     request = cast(
@@ -1309,7 +1287,6 @@ async def test_oidc_logout_lifecycle_rejects_mismatches_unknown_provider_and_nai
         await naive.frontchannel("example", "https://issuer.example", "sid", request=request)
 
 
-@pytest.mark.anyio
 async def test_plugin_closes_lifecycle_owned_oauth_providers() -> None:
     events: list[str] = []
 
@@ -1331,7 +1308,6 @@ async def test_plugin_closes_lifecycle_owned_oauth_providers() -> None:
     assert events == ["close"]
 
 
-@pytest.mark.anyio
 async def test_plugin_reports_oauth_provider_shutdown_failure() -> None:
     class BrokenProvider:
         name = "example"
@@ -1376,7 +1352,6 @@ def test_oauth_config_rejects_mismatched_oidc_logout_providers() -> None:
         OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
 
 
-@pytest.mark.anyio
 async def test_public_login_and_callback_have_binding_and_no_store_headers() -> None:
     app = oauth_app(openapi=False)
 
@@ -1412,7 +1387,6 @@ def test_oauth_dtos_are_frozen_camel_case_and_redact_step_up() -> None:
     )
 
 
-@pytest.mark.anyio
 async def test_authenticated_routes_delegate_to_shared_service() -> None:
     service = RouteService()
     app = oauth_app(openapi=False, oauth_service=service)
@@ -1449,7 +1423,6 @@ async def test_authenticated_routes_delegate_to_shared_service() -> None:
     assert service.operations == [OAuthOperation.LINK, OAuthOperation.SCOPE_UPGRADE]
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("path", "payload"),
     [
@@ -1471,7 +1444,6 @@ async def test_oauth_routes_reject_unknown_and_camel_case_body_members(path: str
     assert response.status_code == 400, response.text
 
 
-@pytest.mark.anyio
 async def test_lifecycle_response_names_each_identifier_it_carries() -> None:
     oidc_logout = OIDCLogoutLifecycleService(
         provider_issuers={"example": "https://issuer.example"},
@@ -1493,7 +1465,6 @@ async def test_lifecycle_response_names_each_identifier_it_carries() -> None:
     assert logout.json() == {"detail": "OIDC sessions revoked.", "revoked_sessions": 1}
 
 
-@pytest.mark.anyio
 async def test_backchannel_logout_form_rejects_unknown_members() -> None:
     oidc_logout = OIDCLogoutLifecycleService(
         provider_issuers={"example": "https://issuer.example"},
@@ -1518,7 +1489,6 @@ async def test_backchannel_logout_form_rejects_unknown_members() -> None:
     assert rejected.status_code == 400, rejected.text
 
 
-@pytest.mark.anyio
 async def test_route_service_rejects_anonymous_principal() -> None:
     app = oauth_app(openapi=False, authenticated=False)
 
@@ -1552,7 +1522,6 @@ def raising_oauth_app(exception: Exception) -> Litestar:
     )
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("exception", "status", "retry_after"),
     [
@@ -1579,7 +1548,6 @@ async def test_oauth_routes_classify_domain_exceptions_without_tracebacks(
     assert type(exception).__name__ not in response.text
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("empty", ["code", "state"])
 async def test_empty_code_or_state_callback_classifies_as_unauthorized(empty: str) -> None:
     provider = oauth_fake_provider()
@@ -1601,7 +1569,6 @@ async def test_empty_code_or_state_callback_classifies_as_unauthorized(empty: st
     assert "Traceback" not in response.text
 
 
-@pytest.mark.anyio
 async def test_empty_cookie_binding_on_login_behaves_as_absent() -> None:
     provider = oauth_fake_provider()
     service = lifecycle_service(provider=provider)
@@ -1620,7 +1587,6 @@ async def test_empty_cookie_binding_on_login_behaves_as_absent() -> None:
     assert response.status_code == 302, response.text
 
 
-@pytest.mark.anyio
 async def test_replayed_callback_state_classifies_as_unauthorized() -> None:
     provider = oauth_fake_provider()
     service = lifecycle_service(provider=provider)

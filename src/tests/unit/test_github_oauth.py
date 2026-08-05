@@ -81,7 +81,6 @@ def test_github_authorization_uses_code_pkce_and_fixed_endpoints() -> None:
     assert query["scope"] == ["read:user user:email"]
 
 
-@pytest.mark.anyio
 async def test_github_refetches_profile_and_verified_email_each_login() -> None:
     calls: list[str] = []
 
@@ -115,7 +114,6 @@ async def test_github_refetches_profile_and_verified_email_each_login() -> None:
     assert calls == ["/user", "/user/emails", "/user", "/user/emails"]
 
 
-@pytest.mark.anyio
 async def test_github_never_uses_unverified_email() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/user":
@@ -129,7 +127,6 @@ async def test_github_never_uses_unverified_email() -> None:
     assert identity.email_verified is False
 
 
-@pytest.mark.anyio
 async def test_github_rejects_missing_required_scope() -> None:
     github = provider(lambda request: httpx.Response(500, request=request))
 
@@ -137,7 +134,6 @@ async def test_github_rejects_missing_required_scope() -> None:
         await github.resolve_identity(tokens(scopes=frozenset({"read:user"})), transaction=transaction(), now=NOW)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("status_code", [401, 403, 429, 500])
 async def test_github_collapses_api_and_rate_limit_errors(status_code: int) -> None:
     github = provider(
@@ -153,7 +149,6 @@ async def test_github_collapses_api_and_rate_limit_errors(status_code: int) -> N
     assert "secret" not in repr(captured.value)
 
 
-@pytest.mark.anyio
 async def test_github_revocation_uses_application_endpoint_and_basic_auth() -> None:
     seen: list[httpx.Request] = []
 
@@ -172,7 +167,6 @@ async def test_github_revocation_uses_application_endpoint_and_basic_auth() -> N
     assert request.read() == b'{"access_token":"access-token"}'
 
 
-@pytest.mark.anyio
 async def test_github_delegates_code_exchange_refresh_and_close() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -198,7 +192,6 @@ async def test_github_delegates_code_exchange_refresh_and_close() -> None:
     assert github.oauth.closed
 
 
-@pytest.mark.anyio
 async def test_github_rejects_invalid_or_failed_revocation() -> None:
     github = provider(lambda request: httpx.Response(500, request=request))
 
@@ -208,7 +201,6 @@ async def test_github_rejects_invalid_or_failed_revocation() -> None:
         await github.revoke(SecretStr("access"), token_type_hint=None)
 
 
-@pytest.mark.anyio
 async def test_github_sanitizes_revocation_transport_failure() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         detail = "secret"
@@ -218,7 +210,6 @@ async def test_github_sanitizes_revocation_transport_failure() -> None:
         await provider(handler).revoke(SecretStr("access"), token_type_hint=None)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     "profile",
     [
@@ -239,7 +230,6 @@ async def test_github_rejects_malformed_profile(profile: dict[str, object]) -> N
         await provider(handler).resolve_identity(tokens(), transaction=transaction(), now=NOW)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     "emails",
     [
@@ -259,7 +249,6 @@ async def test_github_rejects_malformed_email_response(emails: object) -> None:
         await provider(handler).resolve_identity(tokens(), transaction=transaction(), now=NOW)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(("content_type", "body"), [("text/plain", b"{}"), ("application/json", b"{")])
 async def test_github_rejects_invalid_api_documents(content_type: str, body: bytes) -> None:
     github = provider(
@@ -270,7 +259,6 @@ async def test_github_rejects_invalid_api_documents(content_type: str, body: byt
         await github.resolve_identity(tokens(), transaction=transaction(), now=NOW)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("profile", "emails"), [([], []), ({"id": 1, "login": "user"}, {}), ({"id": 1, "login": "user"}, [1])]
 )
@@ -282,7 +270,6 @@ async def test_github_rejects_wrong_api_shapes(profile: object, emails: object) 
         await provider(handler).resolve_identity(tokens(), transaction=transaction(), now=NOW)
 
 
-@pytest.mark.anyio
 async def test_github_sanitizes_profile_transport_failure() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         detail = "secret"
@@ -292,7 +279,6 @@ async def test_github_sanitizes_profile_transport_failure() -> None:
         await provider(handler).resolve_identity(tokens(), transaction=transaction(), now=NOW)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("retry_after", [None, "invalid", "0", "86401"])
 async def test_github_ignores_invalid_retry_after(retry_after: str | None) -> None:
     headers = {} if retry_after is None else {"retry-after": retry_after}

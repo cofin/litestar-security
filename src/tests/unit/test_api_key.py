@@ -412,7 +412,6 @@ def test_store_protocol_is_structural() -> None:
     assert isinstance(store, APIKeyStore)
 
 
-@pytest.mark.anyio
 async def test_store_conformance_create_duplicate_rotate_overlap_and_revoke() -> None:
     store = _MemoryAPIKeyStore()
     current = _record()
@@ -483,7 +482,6 @@ def test_api_key_slot_accepts_one_canonical_header() -> None:
     assert extraction == PresentedCredential("opaque")
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("state", ["malformed", "unknown", "mismatch", "expired", "revoked", "unavailable"])
 async def test_api_key_authenticator_preserves_structured_failures_and_lookup_bounds(state: str) -> None:
     store = _MemoryAPIKeyStore()
@@ -514,7 +512,6 @@ async def test_api_key_authenticator_preserves_structured_failures_and_lookup_bo
     assert slot.name == "api-key"
 
 
-@pytest.mark.anyio
 async def test_api_key_authentication_is_one_lookup_and_defers_usage_persistence() -> None:
     store = _MemoryAPIKeyStore()
     sink = _UsageSink()
@@ -549,7 +546,6 @@ async def test_api_key_authentication_is_one_lookup_and_defers_usage_persistence
     await service.close()
 
 
-@pytest.mark.anyio
 async def test_api_key_service_issues_rotates_and_revokes_through_atomic_store_ports() -> None:
     store = _MemoryAPIKeyStore()
     _, _, service, _ = _api_key_runtime(store)
@@ -572,7 +568,6 @@ async def test_api_key_service_issues_rotates_and_revokes_through_atomic_store_p
     assert store.records[replacement.key_id].overlap_until is None
 
 
-@pytest.mark.anyio
 async def test_api_key_rotation_has_one_atomic_winner() -> None:
     store = _MemoryAPIKeyStore()
     _, _, service, _ = _api_key_runtime(store)
@@ -588,7 +583,6 @@ async def test_api_key_rotation_has_one_atomic_winner() -> None:
     assert sum(isinstance(result, ValueError) for result in results) == 1
 
 
-@pytest.mark.anyio
 async def test_api_key_runtime_defaults_and_absent_usage_are_safe() -> None:
     store = _MemoryAPIKeyStore()
     resolver = _Resolver()
@@ -641,7 +635,6 @@ def test_api_key_config_names_missing_store_capabilities() -> None:
         APIKeyConfig(store=CRUDOnlyStore(), pepper=_PEPPER)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_blocking_api_key_store_is_normalized_once_per_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _SyncMemoryAPIKeyStore()
     config = APIKeyConfig(store=BlockingIntegration(store), pepper=_PEPPER)
@@ -673,7 +666,6 @@ async def test_blocking_api_key_store_is_normalized_once_per_runtime(monkeypatch
     assert config.store == BlockingIntegration(store)
 
 
-@pytest.mark.anyio
 async def test_direct_async_api_key_store_never_submits_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _MemoryAPIKeyStore()
     config = APIKeyConfig(store=store, pepper=_PEPPER)
@@ -708,7 +700,6 @@ def test_blocking_api_key_store_rejects_partial_or_async_implementation() -> Non
         APIKeyConfig(store=BlockingIntegration(_MemoryAPIKeyStore()), pepper=_PEPPER)
 
 
-@pytest.mark.anyio
 async def test_api_key_runtime_rejects_invalid_rotation_clock_and_builder_inputs() -> None:
     store = _MemoryAPIKeyStore()
     _, _, service, resolver = _api_key_runtime(store)
@@ -748,7 +739,6 @@ def test_usage_buffer_rejects_invalid_configuration(arguments: dict[str, object]
         BufferedAPIKeyUsage(**values)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_usage_buffer_coalesces_bounds_flushes_and_isolates_sink_failure() -> None:
     sink = _UsageSink()
     metrics = _Metrics()

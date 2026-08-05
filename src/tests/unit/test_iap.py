@@ -131,7 +131,6 @@ def test_iap_slot_parses_only_one_ascii_assertion(
     assert isinstance(extraction, outcome)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     "claims",
     [
@@ -157,7 +156,6 @@ async def test_iap_rejects_invalid_claims(
     assert isinstance(outcome, InvalidCredentials)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("state", ["malformed", "wrong-algorithm", "missing-kid", "naive-clock", "bad-provider"])
 async def test_iap_rejects_malformed_routes_and_invalid_runtime_boundaries(
     iap_key_material: tuple[bytes, VerificationKey], state: str
@@ -184,7 +182,6 @@ async def test_iap_rejects_malformed_routes_and_invalid_runtime_boundaries(
     assert slot.name == "google-iap"
 
 
-@pytest.mark.anyio
 async def test_iap_valid_assertion_uses_pinned_jwks_and_preserves_identity_evidence(
     iap_key_material: tuple[bytes, VerificationKey],
 ) -> None:
@@ -211,7 +208,6 @@ async def test_iap_valid_assertion_uses_pinned_jwks_and_preserves_identity_evide
     assert token not in repr(outcome)
 
 
-@pytest.mark.anyio
 async def test_iap_reuses_a_cached_verifier_with_the_shared_worker_limiter(
     iap_key_material: tuple[bytes, VerificationKey],
 ) -> None:
@@ -234,7 +230,6 @@ async def test_iap_reuses_a_cached_verifier_with_the_shared_worker_limiter(
     assert cached.limiter is config.worker_limits.crypto_limiter
 
 
-@pytest.mark.anyio
 async def test_iap_optional_evidence_claims_default_to_none(iap_key_material: tuple[bytes, VerificationKey]) -> None:
     private, key = iap_key_material
     _, mechanism, _, _ = _runtime(key)
@@ -251,7 +246,6 @@ async def test_iap_optional_evidence_claims_default_to_none(iap_key_material: tu
     assert outcome.claims.authorized_party is None
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("jwks_outcome", [InvalidCredentials(), VerificationUnavailable()])
 async def test_iap_preserves_jwks_structured_outcomes(
     iap_key_material: tuple[bytes, VerificationKey], jwks_outcome: object

@@ -189,7 +189,6 @@ def test_authorization_url_rejects_provider_or_scope_mismatch(transaction: OAuth
         client.build_authorization_url(start)
 
 
-@pytest.mark.anyio
 async def test_exchange_uses_basic_auth_exact_redirect_and_pkce() -> None:
     seen: list[httpx.Request] = []
 
@@ -231,7 +230,6 @@ async def test_exchange_uses_basic_auth_exact_redirect_and_pkce() -> None:
     assert client.closed is True
 
 
-@pytest.mark.anyio
 async def test_exchange_accepts_form_response_and_omitted_unchanged_scope() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -247,7 +245,6 @@ async def test_exchange_accepts_form_response_and_omitted_unchanged_scope() -> N
     assert tokens.scopes == frozenset({"openid", "profile"})
 
 
-@pytest.mark.anyio
 async def test_post_client_auth_and_refresh_rotation() -> None:
     seen: list[dict[str, list[str]]] = []
 
@@ -280,7 +277,6 @@ async def test_post_client_auth_and_refresh_rotation() -> None:
     assert tokens.refresh_token.get_secret_value() == "new-refresh"
 
 
-@pytest.mark.anyio
 async def test_refresh_preserves_omitted_scope_and_refresh_token() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return _json_response(request, {"access_token": "new-access", "token_type": "Bearer", "expires_in": 120})
@@ -295,7 +291,6 @@ async def test_refresh_preserves_omitted_scope_and_refresh_token() -> None:
     assert refreshed.refresh_token.get_secret_value() == "old-refresh"
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("content_type", ["application/json", "application/x-www-form-urlencoded"])
 async def test_refresh_classifies_invalid_grant(content_type: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -307,7 +302,6 @@ async def test_refresh_classifies_invalid_grant(content_type: str) -> None:
             await client.refresh(SecretStr("refresh"), current_scopes=frozenset({"openid"}), now=_NOW)
 
 
-@pytest.mark.anyio
 async def test_public_client_sends_client_id_without_secret() -> None:
     seen: list[dict[str, list[str]]] = []
 
@@ -324,7 +318,6 @@ async def test_public_client_sends_client_id_without_secret() -> None:
     assert "client_secret" not in seen[0]
 
 
-@pytest.mark.anyio
 async def test_revoke_uses_fixed_endpoint_and_hint() -> None:
     seen: list[httpx.Request] = []
 
@@ -346,7 +339,6 @@ async def test_revoke_uses_fixed_endpoint_and_hint() -> None:
     assert form["token_type_hint"] == ["refresh_token"]
 
 
-@pytest.mark.anyio
 async def test_revoke_without_hint_and_provider_failures_are_sanitized() -> None:
     requests: list[httpx.Request] = []
 
@@ -376,7 +368,6 @@ async def test_revoke_without_hint_and_provider_failures_are_sanitized() -> None
     assert "transport detail" not in repr(exc_info.value)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("config", "token", "hint"),
     [
@@ -393,7 +384,6 @@ async def test_revoke_rejects_unsupported_or_malformed_input(
             await client.revoke(token, token_type_hint=hint)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     "case",
     [
@@ -472,7 +462,6 @@ async def test_exchange_maps_malformed_or_rejected_responses_to_one_secret_free_
     assert "access-token" not in repr(exc_info.value)
 
 
-@pytest.mark.anyio
 async def test_response_body_is_bounded_while_streaming() -> None:
     body = json.dumps({"access_token": "x" * 500, "token_type": "Bearer", "expires_in": 60, "scope": "openid"}).encode()
 
@@ -490,7 +479,6 @@ async def test_response_body_is_bounded_while_streaming() -> None:
             await client.exchange_code(code=SecretStr("code"), transaction=_transaction(), now=_NOW)
 
 
-@pytest.mark.anyio
 async def test_response_rejects_compressed_content_before_reading() -> None:
     body = gzip.compress(json.dumps({"access_token": "token"}).encode())
 
@@ -504,7 +492,6 @@ async def test_response_rejects_compressed_content_before_reading() -> None:
             await client.exchange_code(code=SecretStr("code"), transaction=_transaction(), now=_NOW)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("answers", [(), ("not-an-ip-address",), ("10.0.0.1",), ("93.184.216.34", "127.0.0.1")])
 async def test_secret_bearing_request_rejects_empty_or_non_public_dns_answers(answers: tuple[str, ...]) -> None:
     called = False
@@ -524,7 +511,6 @@ async def test_secret_bearing_request_rejects_empty_or_non_public_dns_answers(an
     assert called is False
 
 
-@pytest.mark.anyio
 async def test_literal_public_ip_endpoint_does_not_require_dns_resolution() -> None:
     resolver_called = False
 
@@ -548,7 +534,6 @@ async def test_literal_public_ip_endpoint_does_not_require_dns_resolution() -> N
     assert resolver_called is False
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("case", ["invalid-length", "stream"])
 async def test_response_stream_rejects_invalid_length_and_incremental_overflow(case: str) -> None:
     body = json.dumps({"access_token": "x" * 500, "token_type": "Bearer", "expires_in": 60, "scope": "openid"}).encode()
@@ -565,7 +550,6 @@ async def test_response_stream_rejects_invalid_length_and_incremental_overflow(c
             await client.exchange_code(code=SecretStr("code"), transaction=_transaction(), now=_NOW)
 
 
-@pytest.mark.anyio
 async def test_network_failure_is_generic_and_cancellation_propagates() -> None:
     def network_failure(request: httpx.Request) -> httpx.Response:
         message = "network detail"
@@ -585,7 +569,6 @@ async def test_network_failure_is_generic_and_cancellation_propagates() -> None:
             await client.refresh(SecretStr("refresh"), now=_NOW)
 
 
-@pytest.mark.anyio
 async def test_close_is_idempotent_and_closed_client_rejects_use() -> None:
     client = _client(lambda request: httpx.Response(200, request=request))
 
@@ -603,7 +586,6 @@ def test_provider_client_requires_normalized_configuration(config: Any, policy: 
         OAuthProviderClient(config, policy=policy)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("code", "transaction"),
     [(cast("Any", "code"), _transaction()), (SecretStr("code"), replace(_transaction(), provider="other"))],
@@ -614,7 +596,6 @@ async def test_exchange_rejects_malformed_code_or_provider(code: Any, transactio
             await client.exchange_code(code=code, transaction=transaction, now=_NOW)
 
 
-@pytest.mark.anyio
 async def test_refresh_rejects_malformed_token_and_naive_time() -> None:
     async with _client(lambda request: httpx.Response(200, request=request)) as client:
         with pytest.raises(OAuthProviderError, match="failed"):

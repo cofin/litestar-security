@@ -100,7 +100,6 @@ def transaction(**overrides: object) -> OAuthTransaction:
     return OAuthTransaction(**values)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_oidc_logout_token_consumer_verifies_events_and_rejects_replay() -> None:
     base_claims = claims(events={"http://schemas.openid.net/event/backchannel-logout": {}}, sid="sid-1")
     raw = dict(base_claims.raw)
@@ -140,7 +139,6 @@ async def test_oidc_logout_token_consumer_verifies_events_and_rejects_replay() -
     assert (await consumer.consume("oidc", "sid-only-token", now=NOW)).subject is None
 
 
-@pytest.mark.anyio
 async def test_oidc_logout_token_consumer_rejects_invalid_event() -> None:
     base_invalid = claims(events={})
     invalid_raw = dict(base_invalid.raw)
@@ -180,7 +178,6 @@ def test_oidc_logout_consumer_rejects_invalid_configuration() -> None:
         OIDCJWTLogoutTokenConsumer(verifiers={"oidc": cast("Any", verifier)})
 
 
-@pytest.mark.anyio
 async def test_oidc_logout_consumer_rejects_missing_provider_and_failed_verification() -> None:
     verifier = StubVerifier(
         config=JWTValidationConfig(
@@ -201,7 +198,6 @@ async def test_oidc_logout_consumer_rejects_missing_provider_and_failed_verifica
         await consumer.consume("oidc", "signed-token", now=NOW)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("raw_overrides", "token_id"),
     [
@@ -296,7 +292,6 @@ def authenticated(claim_set: JWTClaims) -> Authenticated[JWTClaims]:
     )
 
 
-@pytest.mark.anyio
 async def test_oidc_maps_verified_identity_and_raw_assurance() -> None:
     verified = claims()
     oidc = provider(
@@ -322,7 +317,6 @@ async def test_oidc_maps_verified_identity_and_raw_assurance() -> None:
     assert identity.raw_claims["amr"] == ("pwd", "otp")
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("claim_overrides", "transaction_overrides"),
     [
@@ -356,7 +350,6 @@ async def test_oidc_rejects_invalid_claim_and_transaction_bindings(
         await oidc.resolve_identity(tokens(), transaction=transaction(**transaction_overrides), now=NOW)
 
 
-@pytest.mark.anyio
 async def test_oidc_accepts_multi_audience_with_matching_azp() -> None:
     verified = claims(aud=[CLIENT_ID, "other"], azp=CLIENT_ID)
     oidc = provider(
@@ -373,7 +366,6 @@ async def test_oidc_accepts_multi_audience_with_matching_azp() -> None:
     assert identity.subject == "subject-1"
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("outcome", [InvalidCredentials(), VerificationUnavailable()])
 async def test_oidc_collapses_verifier_failures(outcome: object) -> None:
     oidc = provider(outcome)
@@ -382,7 +374,6 @@ async def test_oidc_collapses_verifier_failures(outcome: object) -> None:
         await oidc.resolve_identity(tokens(), transaction=transaction(), now=NOW)
 
 
-@pytest.mark.anyio
 async def test_oidc_requires_id_token() -> None:
     oidc = provider(InvalidCredentials())
 
@@ -499,7 +490,6 @@ def test_keycloak_constructor_requires_exact_realm_issuer() -> None:
     assert keycloak.issuer == issuer
 
 
-@pytest.mark.anyio
 async def test_oidc_provider_delegates_lifecycle_and_close() -> None:
     async def resolver(_host: str, _port: int) -> tuple[str, ...]:
         return ("93.184.216.34",)
@@ -645,7 +635,6 @@ def test_keycloak_constructor_rejects_non_exact_realm(base_url: str, realm: str)
         )
 
 
-@pytest.mark.anyio
 async def test_oidc_optional_claim_fallbacks_and_time_validation() -> None:
     preferred = claims(name=None, preferred_username="ada", email=None, email_verified=False, acr=None, amr=None)
     oidc = provider(authenticated(preferred))
@@ -665,7 +654,6 @@ async def test_oidc_optional_claim_fallbacks_and_time_validation() -> None:
         )
 
 
-@pytest.mark.anyio
 async def test_oidc_rejects_claim_issuer_even_after_custom_verifier_success() -> None:
     oidc = provider(authenticated(claims(iss="https://other.example.com")))
 
@@ -673,7 +661,6 @@ async def test_oidc_rejects_claim_issuer_even_after_custom_verifier_success() ->
         await oidc.resolve_identity(tokens(), transaction=transaction(), now=NOW)
 
 
-@pytest.mark.anyio
 async def test_oidc_rejects_verified_email_without_email() -> None:
     oidc = provider(authenticated(claims(email=None, email_verified=True)))
 

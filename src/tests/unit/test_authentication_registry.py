@@ -191,7 +191,6 @@ def test_mfa_login_challenge_enforces_exact_positive_ten_minute_lifetime(lifetim
             accounts_module.MFALoginChallenge(**values)
 
 
-@pytest.mark.anyio
 async def test_mfa_login_issue_derives_a_domain_separated_digest_and_consumes_once() -> None:
     """Login-MFA challenges are HMAC-bound opaque, reveal-once credentials."""
     now = _JWT_NOW
@@ -232,7 +231,6 @@ async def test_mfa_login_issue_derives_a_domain_separated_digest_and_consumes_on
     )
 
 
-@pytest.mark.anyio
 async def test_mfa_login_store_burns_expired_and_missing_challenges() -> None:
     """The atomic store returns no record for expired or absent digest proofs and retains neither."""
     store = testing_module.InMemoryMFALoginChallengeStore()
@@ -251,7 +249,6 @@ async def test_mfa_login_store_burns_expired_and_missing_challenges() -> None:
     assert store.challenges == {}
 
 
-@pytest.mark.anyio
 async def test_mfa_login_rejects_malformed_challenges_and_burns_client_key_mismatches() -> None:
     """Malformed input does not reach the store, while a binding mismatch burns it."""
     now = _JWT_NOW
@@ -328,7 +325,6 @@ class _MFALoginVerificationService(accounts_module.MFAService):
         )
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("method", "method_id", "expected_call"),
     [
@@ -393,7 +389,6 @@ def test_mfa_login_service_rejects_incomplete_or_unbounded_dependencies(kwargs: 
         mfa_login_module.MFALoginService(**values)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_mfa_login_service_fail_closes_invalid_inputs_and_collaborators() -> None:
     """Invalid challenge context, entropy, clocks, stores, and factor input never leak through."""
     account = accounts_module.LocalAccountRecord(
@@ -445,7 +440,6 @@ async def test_mfa_login_service_fail_closes_invalid_inputs_and_collaborators() 
     assert await service.verify(record, method="other", method_id=None, code="123456") == InvalidCredentials()
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("failure", ["limit", "account", "consume", "verify"])
 async def test_local_auth_mfa_completion_fail_closes_collaborator_failures(failure: str) -> None:
     """Every completion boundary returns the sanitized unavailable outcome on collaborator faults."""
@@ -512,7 +506,6 @@ async def test_local_auth_mfa_completion_fail_closes_collaborator_failures(failu
     )
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("limited", "account", "expected"),
     [
@@ -573,7 +566,6 @@ async def test_local_auth_mfa_completion_stops_before_challenge_for_limited_or_i
     )
 
 
-@pytest.mark.anyio
 async def test_mfa_login_helper_boundaries_fail_closed_without_secret_processing() -> None:
     """Malformed contextual inputs and exact helper contracts take their explicit fail-closed branches."""
     service = mfa_login_module.MFALoginService(
@@ -617,7 +609,6 @@ def test_local_mfa_wire_representations_redact_challenge_and_factor_proof() -> N
     assert "factor-secret" not in repr(completion)
 
 
-@pytest.mark.anyio
 async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_key() -> None:
     """MFA login burns before factor verification and delegates with merged evidence."""
     account = accounts_module.LocalAccountRecord(
@@ -763,7 +754,6 @@ async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_ke
     assert calls[-1] == "establish"
 
 
-@pytest.mark.anyio
 async def test_local_auth_mfa_completion_rejects_an_epoch_advance_before_issuance() -> None:
     """A reset racing completion invalidates the final authoritative account read."""
     account = accounts_module.LocalAccountRecord(
@@ -835,7 +825,6 @@ async def test_local_auth_mfa_completion_rejects_an_epoch_advance_before_issuanc
     assert not sessions.issued
 
 
-@pytest.mark.anyio
 async def test_local_auth_mfa_completion_burns_a_wrong_factor_before_a_retry() -> None:
     """A failed factor consumes the opaque login challenge, so a later correct code cannot replay it."""
     account = accounts_module.LocalAccountRecord(
@@ -951,7 +940,6 @@ def test_jwks_worker_limits_reject_invalid_capacity(kwargs: dict[str, object]) -
         WorkerLimits(**kwargs)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_jwks_fetcher_normalization_selects_async_or_bounded_sync_once() -> None:
     response = JWKSFetchResponse(status_code=200, body=b'{"keys":[]}')
     metrics: list[str] = []
@@ -1002,7 +990,6 @@ def test_jwks_fetcher_normalization_rejects_invalid_configuration() -> None:
             )
 
 
-@pytest.mark.anyio
 async def test_jwks_sync_fetcher_is_bounded_without_blocking_the_event_loop() -> None:
     started = ThreadEvent()
     release = ThreadEvent()
@@ -1033,7 +1020,6 @@ async def test_jwks_sync_fetcher_is_bounded_without_blocking_the_event_loop() ->
     assert len(calls) == 2
 
 
-@pytest.mark.anyio
 async def test_sync_crypto_normalization_is_bounded_and_keeps_the_event_loop_live() -> None:  # noqa: C901, PLR0915
     release = ThreadEvent()
     saturated = ThreadEvent()
@@ -1142,7 +1128,6 @@ async def test_sync_crypto_normalization_is_bounded_and_keeps_the_event_loop_liv
     assert all(value is None or value >= 0 for _, value in records)
 
 
-@pytest.mark.anyio
 async def test_sync_crypto_timeout_is_sanitized() -> None:
     release = ThreadEvent()
 
@@ -1231,7 +1216,6 @@ def test_crypto_worker_configuration_rejects_invalid_values(
             factory()
 
 
-@pytest.mark.anyio
 async def test_jwks_sync_fetcher_timeout_maps_to_unavailable(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -1251,7 +1235,6 @@ async def test_jwks_sync_fetcher_timeout_maps_to_unavailable(
     assert isinstance(outcome, VerificationUnavailable)
 
 
-@pytest.mark.anyio
 async def test_jwks_metrics_are_vendor_neutral_and_redacted(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -1297,7 +1280,6 @@ def test_jwks_provider_rejects_invalid_runtime_configuration(kwargs: dict[str, o
 
 
 @pytest.mark.parametrize(("fetcher_owned", "expected_closes"), [(False, 0), (True, 1)])
-@pytest.mark.anyio
 async def test_jwks_provider_closes_only_owned_fetchers(
     *, fetcher_owned: bool, expected_closes: int, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -1320,7 +1302,6 @@ async def test_jwks_provider_closes_only_owned_fetchers(
     assert fetcher.closes == expected_closes
 
 
-@pytest.mark.anyio
 async def test_jwks_provider_closes_owned_sync_fetcher_in_worker() -> None:
     class SyncFetcher:
         def __init__(self) -> None:
@@ -1341,7 +1322,6 @@ async def test_jwks_provider_closes_owned_sync_fetcher_in_worker() -> None:
     assert source.closes == 1
 
 
-@pytest.mark.anyio
 async def test_jwks_provider_accepts_owned_sync_fetcher_without_close() -> None:
     class SyncFetcher:
         def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
@@ -1357,7 +1337,6 @@ async def test_jwks_provider_accepts_owned_sync_fetcher_without_close() -> None:
 
 
 @pytest.mark.parametrize("close_mode", ["absent", "sync"])
-@pytest.mark.anyio
 async def test_jwks_provider_accepts_owned_fetchers_without_async_close(close_mode: str) -> None:
     class Fetcher:
         async def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
@@ -1715,7 +1694,6 @@ def test_jwks_performance_baseline_has_relative_budget_schema() -> None:
 
 
 @pytest.mark.performance
-@pytest.mark.anyio
 async def test_jwks_performance_fresh_issuer_path_is_lock_and_fetch_free(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -1759,7 +1737,6 @@ async def test_jwks_performance_fresh_issuer_path_is_lock_and_fetch_free(
 
 
 @pytest.mark.performance
-@pytest.mark.anyio
 async def test_jwks_performance_single_flight_and_cache_bounds(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -1805,7 +1782,6 @@ async def test_jwks_performance_single_flight_and_cache_bounds(
 
 
 @pytest.mark.performance
-@pytest.mark.anyio
 async def test_jwks_performance_fresh_hit_p95_is_relative_to_direct_verification(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -1858,7 +1834,6 @@ async def test_jwks_performance_fresh_hit_p95_is_relative_to_direct_verification
 
 
 @pytest.mark.performance
-@pytest.mark.anyio
 async def test_jwks_performance_saturated_sync_verification_keeps_ticker_under_budget() -> None:
     pending = 100
     tick_overshoots_ms: list[float] = []
@@ -2084,7 +2059,6 @@ def test_security_config_requires_positive_openapi_combination_limit(limit: int)
         SecurityConfig(max_openapi_combinations=limit)
 
 
-@pytest.mark.anyio
 async def test_composite_bearer_dispatcher_selects_only_one_verifier() -> None:
     calls: list[tuple[str, str]] = []
 
@@ -2204,7 +2178,6 @@ def _routing_token(*, issuer: str, audiences: str | list[str], token_type: str |
     ("issuer", "audience", "selected_name"),
     [("https://local.example", "local-api", "local"), ("https://oidc.example", "oidc-api", "oidc")],
 )
-@pytest.mark.anyio
 async def test_composite_bearer_selects_exactly_one_trust_slot(issuer: str, audience: str, selected_name: str) -> None:
     grants = AuthorizationSnapshot(
         scopes=frozenset({"reports:read"}),
@@ -2288,7 +2261,6 @@ async def test_composite_bearer_selects_exactly_one_trust_slot(issuer: str, audi
     assert (local.calls if selected_name == "local" else oidc.calls) == [(token, _JWT_NOW)]
 
 
-@pytest.mark.anyio
 async def test_composite_bearer_cryptographically_isolates_same_kid_trust_domains(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -2363,7 +2335,6 @@ async def test_composite_bearer_cryptographically_isolates_same_kid_trust_domain
     ],
     ids=["overlapping-audience-ambiguity", "multi-audience-ambiguity", "unknown"],
 )
-@pytest.mark.anyio
 async def test_composite_bearer_rejects_unknown_or_ambiguous_routes_without_verification(
     selectors: tuple[BearerSlotSelector, BearerSlotSelector], audiences: str | list[str]
 ) -> None:
@@ -2407,7 +2378,6 @@ async def test_composite_bearer_rejects_unknown_or_ambiguous_routes_without_veri
     ],
     ids=["invalid", "unavailable", "unexpected-no-credentials"],
 )
-@pytest.mark.anyio
 async def test_composite_bearer_preserves_selected_terminal_outcomes(
     verifier_outcome: InvalidCredentials | VerificationUnavailable | NoCredentials,
     expected: InvalidCredentials | VerificationUnavailable,
@@ -2432,7 +2402,6 @@ async def test_composite_bearer_preserves_selected_terminal_outcomes(
     assert verifier.calls == [(token, _JWT_NOW)]
 
 
-@pytest.mark.anyio
 async def test_composite_bearer_rejects_malformed_routes_before_verification() -> None:
     verifier = _recording_jwt_verifier(InvalidCredentials())
     composite = CompositeBearerConfig(
@@ -2453,7 +2422,6 @@ async def test_composite_bearer_rejects_malformed_routes_before_verification() -
     assert not verifier.calls
 
 
-@pytest.mark.anyio
 async def test_composite_bearer_uses_an_aware_utc_clock_by_default() -> None:
     verifier = _recording_jwt_verifier(InvalidCredentials())
     composite = CompositeBearerConfig(
@@ -2497,7 +2465,6 @@ def test_composite_bearer_builds_one_native_registry_mechanism() -> None:
     assert mechanism_value.security_scheme == SecurityScheme(type="http", scheme="bearer", bearer_format="JWT")
 
 
-@pytest.mark.anyio
 async def test_composite_bearer_extension_dispatches_local_and_external_identity_resolvers() -> None:
     class ClaimsResolver:
         def __init__(self, prefix: str) -> None:
@@ -2554,7 +2521,6 @@ async def test_composite_bearer_extension_dispatches_local_and_external_identity
     assert tuple(slot.name for slot in extended.authenticator.config.slots) == ("external", "local")  # type: ignore[attr-defined]
 
 
-@pytest.mark.anyio
 async def test_composite_bearer_never_retains_or_represents_the_raw_token() -> None:
     verifier = _recording_jwt_verifier(InvalidCredentials())
     composite = CompositeBearerConfig(
@@ -2694,7 +2660,6 @@ def test_composite_bearer_requires_a_callable_clock() -> None:
 
 
 @pytest.mark.parametrize("algorithm", ["EdDSA", "ES256", "RS256", "HS256"])
-@pytest.mark.anyio
 async def test_local_key_ring_signs_and_verifies_every_supported_algorithm(
     algorithm: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -2726,7 +2691,6 @@ async def test_local_key_ring_signs_and_verifies_every_supported_algorithm(
     )
 
 
-@pytest.mark.anyio
 async def test_local_key_ring_rotation_accepts_retained_keys_and_rejects_removed_keys(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -3076,7 +3040,6 @@ def test_normalize_capability_claims_rejects_malformed_temporal_claims(mutation:
     )
 
 
-@pytest.mark.anyio
 async def test_mint_capability_header_is_never_accepted_by_the_access_verifier(local_key_ring: LocalKeyRing) -> None:
     with pytest.raises(ValueError, match="24 hours"):
         await local_key_ring.mint_capability(
@@ -3098,7 +3061,6 @@ async def test_mint_capability_header_is_never_accepted_by_the_access_verifier(l
     assert isinstance(await verifier.verify(token, now=_JWT_NOW), InvalidCredentials)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("case", ["access-token", "purpose", "audience", "expired", "naive-now"])
 async def test_verify_capability_rejects_untrusted_or_mismatched_tokens_as_one_outcome(
     case: str, local_key_ring: LocalKeyRing
@@ -3143,7 +3105,6 @@ async def test_verify_capability_rejects_untrusted_or_mismatched_tokens_as_one_o
     )
 
 
-@pytest.mark.anyio
 async def test_verify_capability_accepts_a_retained_rotation_key(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -3169,7 +3130,6 @@ async def test_verify_capability_accepts_a_retained_rotation_key(
     assert result.subject == "user-1"
 
 
-@pytest.mark.anyio
 async def test_capability_worker_failures_are_sanitized(
     local_key_ring: LocalKeyRing, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3195,7 +3155,6 @@ async def test_capability_worker_failures_are_sanitized(
     assert isinstance(outcome, VerificationUnavailable)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("raw", "failure", "outcome_type"),
     [("not-a-jwt", None, InvalidCredentials), (None, jwt.InvalidTokenError(), InvalidCredentials)],
@@ -3224,7 +3183,6 @@ async def test_verify_capability_sanitizes_untrusted_routes_and_crypto_failures(
     assert isinstance(outcome, outcome_type)
 
 
-@pytest.mark.anyio
 async def test_verify_capability_rejects_an_unknown_key_id(local_key_ring: LocalKeyRing) -> None:
     now = datetime.now(timezone.utc)
     payload = jwt_capabilities.build_capability_claims(
@@ -3284,7 +3242,6 @@ def test_access_token_claim_builder_rejects_invalid_inputs(overrides: dict[str, 
         build_access_token_claims(**kwargs)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_local_signer_runs_crypto_in_a_worker_and_supports_custom_signers(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3373,7 +3330,6 @@ async def test_local_signer_runs_crypto_in_a_worker_and_supports_custom_signers(
         ("scope", "profile  reports:read"),
     ],
 )
-@pytest.mark.anyio
 async def test_local_signer_rejects_nonconforming_access_claims(
     mutation: str, value: object, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -3456,7 +3412,6 @@ def test_local_keys_canonicalize_null_public_jwk_metadata(jwt_key_material: Mapp
 @pytest.mark.parametrize(
     ("algorithm", "require_key_id"), [("EdDSA", True), ("ES256", True), ("RS256", True), ("HS256", False)]
 )
-@pytest.mark.anyio
 async def test_pyjwt_verifier_accepts_supported_algorithms_and_normalizes_claims(
     algorithm: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]], *, require_key_id: bool
 ) -> None:
@@ -3486,7 +3441,6 @@ async def test_pyjwt_verifier_accepts_supported_algorithms_and_normalizes_claims
         ({"aud": [_JWT_AUDIENCE]}, frozenset()),
     ],
 )
-@pytest.mark.anyio
 async def test_pyjwt_verifier_accepts_only_documented_scope_shapes(
     scope_claims: dict[str, object], expected: frozenset[str], jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -3581,7 +3535,6 @@ def test_unverified_jwt_route_rejects_invalid_parser_limits(limits: dict[str, in
     ],
     ids=["crit", "b64", "jwk", "jku", "x5u", "x5c", "x5t", "x5t-s256"],
 )
-@pytest.mark.anyio
 async def test_pyjwt_verifier_rejects_forbidden_jose_headers(
     protected_header: dict[str, object], jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -3613,7 +3566,6 @@ async def test_pyjwt_verifier_rejects_forbidden_jose_headers(
     ],
     ids=["none", "missing-alg", "id-token-type", "missing-type", "missing-asymmetric-kid", "malformed-key-id"],
 )
-@pytest.mark.anyio
 async def test_pyjwt_verifier_rejects_algorithm_type_and_key_id_confusion(
     header: dict[str, object], algorithm: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -3633,7 +3585,6 @@ async def test_pyjwt_verifier_rejects_algorithm_type_and_key_id_confusion(
     assert outcome == InvalidCredentials()
 
 
-@pytest.mark.anyio
 async def test_pyjwt_verifier_rejects_hmac_rsa_algorithm_confusion(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -3720,7 +3671,6 @@ async def test_pyjwt_verifier_rejects_hmac_rsa_algorithm_confusion(
         "missing-issued-at",
     ],
 )
-@pytest.mark.anyio
 async def test_pyjwt_verifier_rejects_invalid_rfc_9068_claims(
     overrides: dict[str, object], removed: frozenset[str], jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -3737,7 +3687,6 @@ async def test_pyjwt_verifier_rejects_invalid_rfc_9068_claims(
     assert outcome == InvalidCredentials()
 
 
-@pytest.mark.anyio
 async def test_pyjwt_verifier_enforces_explicit_non_access_token_required_claims(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -3757,7 +3706,6 @@ async def test_pyjwt_verifier_enforces_explicit_non_access_token_required_claims
     assert outcome == InvalidCredentials()
 
 
-@pytest.mark.anyio
 async def test_pyjwt_verifier_accepts_non_access_profile_without_optional_access_claims(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -3781,7 +3729,6 @@ async def test_pyjwt_verifier_accepts_non_access_profile_without_optional_access
 
 
 @pytest.mark.parametrize("claim", ["client_id", "jti"])
-@pytest.mark.anyio
 async def test_pyjwt_verifier_rejects_malformed_optional_access_claims_in_non_access_profiles(
     claim: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -3802,7 +3749,6 @@ async def test_pyjwt_verifier_rejects_malformed_optional_access_claims_in_non_ac
     [("malformed", _JWT_NOW), ("malformed", _JWT_NOW.replace(tzinfo=None))],
     ids=["malformed-compact", "naive-now"],
 )
-@pytest.mark.anyio
 async def test_pyjwt_verifier_rejects_invalid_verification_inputs(
     token: str, now: datetime, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -3811,7 +3757,6 @@ async def test_pyjwt_verifier_rejects_invalid_verification_inputs(
     assert await verifier.verify(token, now=now) == InvalidCredentials()
 
 
-@pytest.mark.anyio
 async def test_verified_claims_are_frozen_recursively_and_secret_safe(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -3889,7 +3834,6 @@ def test_pyjwt_verifier_rejects_untrusted_or_incompatible_jwk_metadata(algorithm
         )
 
 
-@pytest.mark.anyio
 async def test_pyjwt_verifier_accepts_valid_public_jwk(jwt_key_material: Mapping[str, tuple[bytes, bytes]]) -> None:
     signing_key, verification_key = jwt_key_material["RS256"]
     public_key = serialization.load_pem_public_key(verification_key)
@@ -3902,7 +3846,6 @@ async def test_pyjwt_verifier_accepts_valid_public_jwk(jwt_key_material: Mapping
     assert isinstance(outcome, Authenticated)
 
 
-@pytest.mark.anyio
 async def test_pyjwt_verifier_accepts_subject_optional_logout_profile(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -3989,7 +3932,6 @@ def test_pyjwt_verifier_rejects_non_positive_token_limit(jwt_key_material: Mappi
         (OSError("worker detail must not escape"), VerificationUnavailable),
     ],
 )
-@pytest.mark.anyio
 async def test_pyjwt_verifier_maps_and_sanitizes_verification_failures(
     error: Exception,
     outcome_type: type[InvalidCredentials] | type[VerificationUnavailable],
@@ -4011,7 +3953,6 @@ async def test_pyjwt_verifier_maps_and_sanitizes_verification_failures(
     assert "worker detail" not in repr(outcome)
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_derives_one_exact_url_and_returns_pinned_metadata() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
@@ -4037,7 +3978,6 @@ async def test_oidc_discovery_derives_one_exact_url_and_returns_pinned_metadata(
         metadata.issuer = "changed"  # type: ignore[misc]
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_url_override_replaces_the_derived_path() -> None:
     override = "https://issuer.example/.well-known/openid-configuration"
 
@@ -4056,7 +3996,6 @@ async def test_oidc_discovery_url_override_replaces_the_derived_path() -> None:
     assert transport.requests[0].url == httpx.URL(override)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     "override",
     [
@@ -4079,7 +4018,6 @@ async def test_oidc_discovery_url_override_must_share_the_issuer_origin(override
     assert transport.requests == []
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_url_override_still_pins_the_issuer_claim() -> None:
     override = "https://issuer.example/.well-known/openid-configuration"
 
@@ -4095,7 +4033,6 @@ async def test_oidc_discovery_url_override_still_pins_the_issuer_claim() -> None
         await client.aclose()
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_client_context_returns_itself_and_closes_transport() -> None:
     client, transport, _resolver = _oidc_client(lambda _request: _oidc_response())
 
@@ -4190,7 +4127,6 @@ def test_oidc_discovery_client_rejects_invalid_pinned_algorithms(algorithms: fro
     ["https://issuer.example/tenant/", "https://issuer.example/other", "https://unconfigured.example/tenant"],
     ids=["trailing-slash", "different-path", "different-host"],
 )
-@pytest.mark.anyio
 async def test_oidc_discovery_rejects_non_exact_issuer_without_dns_or_network(issuer: str) -> None:
     def fail_request(_request: httpx.Request) -> httpx.Response:
         msg = "Discovery transport must not run"
@@ -4206,7 +4142,6 @@ async def test_oidc_discovery_rejects_non_exact_issuer_without_dns_or_network(is
 
 
 @pytest.mark.parametrize("issuer", ["https://ISSUER.example/tenant", "https://issuer.example:443/tenant"])
-@pytest.mark.anyio
 async def test_oidc_discovery_canonicalizes_equivalent_allowed_issuer_forms(issuer: str) -> None:
     client, transport, _resolver = _oidc_client(lambda _request: _oidc_response())
 
@@ -4259,7 +4194,6 @@ async def test_oidc_discovery_canonicalizes_equivalent_allowed_issuer_forms(issu
         "malformed-answer",
     ],
 )
-@pytest.mark.anyio
 async def test_oidc_discovery_classifies_every_dns_answer(addresses: tuple[str, ...], *, accepted: bool) -> None:
     client, transport, _resolver = _oidc_client(
         lambda _request: _oidc_response(), answers={"issuer.example": addresses}
@@ -4275,7 +4209,6 @@ async def test_oidc_discovery_classifies_every_dns_answer(addresses: tuple[str, 
         assert transport.requests == []
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_maps_resolver_runtime_failures_without_network() -> None:
     async def fail_resolution(_hostname: str, _port: int) -> tuple[str, ...]:
         message = "resolver detail must not escape"
@@ -4296,7 +4229,6 @@ async def test_oidc_discovery_maps_resolver_runtime_failures_without_network() -
     assert "resolver detail" not in repr(exc_info.value)
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_rejects_an_empty_dns_result_without_network() -> None:
     client, transport, _resolver = _oidc_client(lambda _request: _oidc_response(), answers={"issuer.example": ()})
 
@@ -4306,7 +4238,6 @@ async def test_oidc_discovery_rejects_an_empty_dns_result_without_network() -> N
     assert transport.requests == []
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_classifies_literal_public_ip_without_resolving() -> None:
     issuer = "https://93.184.216.34"
     resolver_calls: list[tuple[str, int]] = []
@@ -4347,7 +4278,6 @@ def test_shared_ssrf_primitives_live_in_providers_internal() -> None:
     assert callable(providers_internal.resolve_addresses)
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_default_resolver_deduplicates_getaddrinfo_answers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4372,7 +4302,6 @@ async def test_oidc_discovery_default_resolver_deduplicates_getaddrinfo_answers(
     assert calls == [("issuer.example", 443, providers_internal.socket.SOCK_STREAM)]
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_allows_explicit_controlled_private_keycloak_hosts() -> None:
     issuer = "http://keycloak.internal:8080/realms/application"
     policy = DiscoveryPolicy(
@@ -4403,7 +4332,6 @@ async def test_oidc_discovery_allows_explicit_controlled_private_keycloak_hosts(
 
 
 @pytest.mark.parametrize("allowed", [False, True])
-@pytest.mark.anyio
 async def test_oidc_discovery_requires_explicit_cross_origin_jwks(*, allowed: bool) -> None:
     policy = DiscoveryPolicy(
         allowed_issuers=frozenset({_OIDC_ISSUER}),
@@ -4436,7 +4364,6 @@ async def test_oidc_discovery_requires_explicit_cross_origin_jwks(*, allowed: bo
     ],
     ids=["http", "port", "userinfo", "query", "fragment", "dot-segment", "private-dns"],
 )
-@pytest.mark.anyio
 async def test_oidc_discovery_revalidates_untrusted_jwks_targets(
     jwks_uri: str, answers: Mapping[str, tuple[str, ...]]
 ) -> None:
@@ -4450,7 +4377,6 @@ async def test_oidc_discovery_revalidates_untrusted_jwks_targets(
         await _discover_and_close(client)
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_refuses_redirects_without_following_location() -> None:
     client, transport, resolver = _oidc_client(
         lambda _request: httpx.Response(302, headers={"location": "https://private.example/metadata"}),
@@ -4464,7 +4390,6 @@ async def test_oidc_discovery_refuses_redirects_without_following_location() -> 
     assert resolver.calls == [("issuer.example", 443)]
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_ignores_proxy_environment_with_injected_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4478,7 +4403,6 @@ async def test_oidc_discovery_ignores_proxy_environment_with_injected_transport(
     assert len(transport.requests) == 1
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_requests_identity_response_encoding() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["accept-encoding"] == "identity"
@@ -4491,7 +4415,6 @@ async def test_oidc_discovery_requests_identity_response_encoding() -> None:
     assert metadata.issuer == _OIDC_ISSUER
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_rejects_compressed_response_before_decoding() -> None:
     encoded = json.dumps(_oidc_document(), separators=(",", ":")).encode()
     stream = _ChunkedOIDCStream(gzip.compress(encoded))
@@ -4519,7 +4442,6 @@ async def test_oidc_discovery_rejects_compressed_response_before_decoding() -> N
     ],
     ids=["relative", "http", "userinfo", "empty", "whitespace", "invalid-port", "non-string"],
 )
-@pytest.mark.anyio
 async def test_httpx_jwks_fetcher_rejects_non_absolute_https_uri_before_resolution(uri: str) -> None:
     async def resolver(_host: str, _port: int) -> tuple[str, ...]:
         message = "Invalid JWKS URI must not reach DNS"
@@ -4535,7 +4457,6 @@ async def test_httpx_jwks_fetcher_rejects_non_absolute_https_uri_before_resoluti
     await fetcher.aclose()
 
 
-@pytest.mark.anyio
 async def test_httpx_jwks_fetcher_rejects_encoded_response_before_decoding() -> None:
     async def resolver(_host: str, _port: int) -> tuple[str, ...]:
         return (_OIDC_PUBLIC_IP,)
@@ -4551,7 +4472,6 @@ async def test_httpx_jwks_fetcher_rejects_encoded_response_before_decoding() -> 
     await fetcher.aclose()
 
 
-@pytest.mark.anyio
 async def test_httpx_jwks_fetcher_sends_if_none_match_returns_unfollowed_redirect_and_closes_idempotently() -> None:
     """The transport preserves conditional and non-success responses for the cache layer."""
 
@@ -4574,7 +4494,6 @@ async def test_httpx_jwks_fetcher_sends_if_none_match_returns_unfollowed_redirec
     assert transport.was_closed is True
 
 
-@pytest.mark.anyio
 async def test_httpx_jwks_fetcher_returns_redirect_verbatim_without_following_location() -> None:
     """A redirect remains a response for the cache layer to classify as unavailable."""
 
@@ -4594,7 +4513,6 @@ async def test_httpx_jwks_fetcher_returns_redirect_verbatim_without_following_lo
     await fetcher.aclose()
 
 
-@pytest.mark.anyio
 async def test_httpx_jwks_fetcher_checks_byte_ceiling_before_extending(monkeypatch: pytest.MonkeyPatch) -> None:
     """A streaming oversized chunk is rejected before allocating it into the body buffer."""
 
@@ -4620,7 +4538,6 @@ async def test_httpx_jwks_fetcher_checks_byte_ceiling_before_extending(monkeypat
     await fetcher.aclose()
 
 
-@pytest.mark.anyio
 async def test_httpx_jwks_fetcher_enforces_ssrf_boundary_unless_private_hosts_are_explicitly_allowed() -> None:
     """Private resolved addresses require an explicit operator opt-in."""
 
@@ -4644,7 +4561,6 @@ async def test_httpx_jwks_fetcher_enforces_ssrf_boundary_unless_private_hosts_ar
     await allowed.aclose()
 
 
-@pytest.mark.anyio
 async def test_httpx_jwks_fetcher_maps_resolution_failures_and_rejects_invalid_dns_answers() -> None:
     """Resolver failures, empty results, and malformed answers cannot leave the boundary."""
 
@@ -4670,7 +4586,6 @@ async def test_httpx_jwks_fetcher_maps_resolution_failures_and_rejects_invalid_d
         await fetcher.aclose()
 
 
-@pytest.mark.anyio
 async def test_httpx_jwks_fetcher_accepts_a_public_literal_without_dns() -> None:
     """Literal public IP endpoints are classified directly instead of resolved again."""
 
@@ -4689,7 +4604,6 @@ async def test_httpx_jwks_fetcher_accepts_a_public_literal_without_dns() -> None
     await fetcher.aclose()
 
 
-@pytest.mark.anyio
 async def test_httpx_jwks_fetcher_uses_the_exact_configured_timeout() -> None:
     """The bounded client preserves the configured timeout."""
     fetcher = HttpxJWKSFetcher(timeout=5)
@@ -4710,7 +4624,6 @@ def test_httpx_jwks_fetcher_rejects_invalid_byte_ceiling(maximum_response_bytes:
         HttpxJWKSFetcher(maximum_response_bytes=maximum_response_bytes)
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_checks_streaming_capacity_before_extending(monkeypatch: pytest.MonkeyPatch) -> None:
     class _CapacityCheckedBytearray(bytearray):
         def extend(self, chunk: bytes) -> None:
@@ -4730,7 +4643,6 @@ async def test_oidc_discovery_checks_streaming_capacity_before_extending(monkeyp
         await _discover_and_close(client)
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_enforces_streaming_body_limit_without_content_length() -> None:
     policy = DiscoveryPolicy(allowed_issuers=frozenset({_OIDC_ISSUER}), maximum_document_bytes=64)
     response = httpx.Response(
@@ -4743,7 +4655,6 @@ async def test_oidc_discovery_enforces_streaming_body_limit_without_content_leng
         await _discover_and_close(client)
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_rejects_excessive_json_depth() -> None:
     nested: object = None
     for _ in range(65):
@@ -4770,7 +4681,6 @@ async def test_oidc_discovery_rejects_excessive_json_depth() -> None:
     ],
     ids=lambda value: value if isinstance(value, str) else "",
 )
-@pytest.mark.anyio
 async def test_oidc_discovery_rejects_untrusted_http_or_document_shapes(response: httpx.Response, case: str) -> None:
     del case
     client, _transport, _resolver = _oidc_client(lambda _request: response)
@@ -4810,7 +4720,6 @@ async def test_oidc_discovery_rejects_untrusted_http_or_document_shapes(response
         "empty-pinned-intersection",
     ],
 )
-@pytest.mark.anyio
 async def test_oidc_discovery_rejects_mismatched_or_unsupported_metadata(document: dict[str, object]) -> None:
     client, _transport, _resolver = _oidc_client(lambda _request: _oidc_response(document))
 
@@ -4818,7 +4727,6 @@ async def test_oidc_discovery_rejects_mismatched_or_unsupported_metadata(documen
         await _discover_and_close(client)
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_preserves_absent_optional_endpoints() -> None:
     client, _transport, _resolver = _oidc_client(
         lambda _request: _oidc_response(
@@ -4854,7 +4762,6 @@ async def test_oidc_discovery_preserves_absent_optional_endpoints() -> None:
     ],
     ids=["relative", "http", "userinfo", "query", "fragment", "dot-segment", "private-dns"],
 )
-@pytest.mark.anyio
 async def test_oidc_discovery_rejects_unsafe_optional_endpoint_urls(
     field: str, value: str, answers: Mapping[str, tuple[str, ...]]
 ) -> None:
@@ -4866,7 +4773,6 @@ async def test_oidc_discovery_rejects_unsafe_optional_endpoint_urls(
         await _discover_and_close(client)
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_requires_explicit_cross_origin_oauth_endpoint_trust() -> None:
     endpoints = {
         "authorization_endpoint": "https://login.example/authorize",
@@ -4896,7 +4802,6 @@ async def test_oidc_discovery_requires_explicit_cross_origin_oauth_endpoint_trus
     assert ("login.example", 443) in resolver.calls
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_sanitizes_transport_failures() -> None:
     def fail(request: httpx.Request) -> httpx.Response:
         message = "internal-host.example must not escape"
@@ -4910,7 +4815,6 @@ async def test_oidc_discovery_sanitizes_transport_failures() -> None:
     assert "internal-host.example" not in repr(exc_info.value)
 
 
-@pytest.mark.anyio
 async def test_oidc_discovery_close_is_idempotent_and_closes_injected_transport() -> None:
     client, transport, _resolver = _oidc_client(lambda _request: _oidc_response())
 
@@ -5058,7 +4962,6 @@ def test_jwks_provider_rejects_invalid_configured_entries(factory: Callable[[], 
         factory()
 
 
-@pytest.mark.anyio
 async def test_jwks_cold_load_uses_default_ttl_and_fresh_hit_does_no_fetch(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5084,7 +4987,6 @@ async def test_jwks_cold_load_uses_default_ttl_and_fresh_hit_does_no_fetch(
 
 
 @pytest.mark.parametrize("cache_state", ["cold", "expired"])
-@pytest.mark.anyio
 async def test_jwks_concurrent_callers_share_one_refresh(
     cache_state: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -5117,7 +5019,6 @@ async def test_jwks_concurrent_callers_share_one_refresh(
     assert all(outcome is outcomes[0] for outcome in outcomes)
 
 
-@pytest.mark.anyio
 async def test_jwks_cancelling_one_waiter_preserves_shared_refresh(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5161,7 +5062,6 @@ async def test_jwks_cancelling_one_waiter_preserves_shared_refresh(
     assert isinstance(survivor_outcomes[0], VerificationKey)
 
 
-@pytest.mark.anyio
 async def test_jwks_independent_issuer_refreshes_proceed_concurrently(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5194,7 +5094,6 @@ async def test_jwks_independent_issuer_refreshes_proceed_concurrently(
     assert {outcome.algorithm for outcome in outcomes if isinstance(outcome, VerificationKey)} == {"EdDSA", "ES256"}
 
 
-@pytest.mark.anyio
 async def test_jwks_fresh_unknown_key_forces_one_refresh_and_retries(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5216,7 +5115,6 @@ async def test_jwks_fresh_unknown_key_forces_one_refresh_and_retries(
     assert len(fetcher.requests) == 2
 
 
-@pytest.mark.anyio
 async def test_jwks_unknown_selection_negative_cache_is_per_generation_tuple(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5242,7 +5140,6 @@ async def test_jwks_unknown_selection_negative_cache_is_per_generation_tuple(
     assert len(fetcher.requests) == 2
 
 
-@pytest.mark.anyio
 async def test_jwks_expired_unknown_selection_is_cached_after_refresh(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5268,7 +5165,6 @@ async def test_jwks_expired_unknown_selection_is_cached_after_refresh(
     assert len(fetcher.requests) == 2
 
 
-@pytest.mark.anyio
 async def test_jwks_failed_forced_refresh_is_generation_limited_and_prunes_expired_negative(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5295,7 +5191,6 @@ async def test_jwks_failed_forced_refresh_is_generation_limited_and_prunes_expir
     assert len(fetcher.requests) == 2
 
 
-@pytest.mark.anyio
 async def test_jwks_generation_replacement_invalidates_unknown_key_negatives(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5327,7 +5222,6 @@ async def test_jwks_generation_replacement_invalidates_unknown_key_negatives(
     assert len(fetcher.requests) == 4
 
 
-@pytest.mark.anyio
 async def test_jwks_unknown_key_negative_cache_is_bounded_lru(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5364,7 +5258,6 @@ async def test_jwks_unknown_key_negative_cache_is_bounded_lru(
     assert len(fetcher.requests) == 2
 
 
-@pytest.mark.anyio
 async def test_jwks_shared_refresh_failure_is_consistent_for_all_waiters(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5388,7 +5281,6 @@ async def test_jwks_shared_refresh_failure_is_consistent_for_all_waiters(
     assert all(outcome is outcomes[0] for outcome in outcomes)
 
 
-@pytest.mark.anyio
 async def test_jwks_pending_refresh_cancellation_is_sanitized() -> None:
     provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=_RecordingJWKSFetcher())
     cancelled_task = asyncio.create_task(checkpoint())
@@ -5403,7 +5295,6 @@ async def test_jwks_pending_refresh_cancellation_is_sanitized() -> None:
     await provider.aclose()
 
 
-@pytest.mark.anyio
 async def test_jwks_close_cancels_and_awaits_live_refresh_tasks(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5436,7 +5327,6 @@ async def test_jwks_close_cancels_and_awaits_live_refresh_tasks(
     ],
     ids=["minimum-clamp", "maximum-clamp", "default-fallback"],
 )
-@pytest.mark.anyio
 async def test_jwks_cache_control_ttl_is_clamped_or_defaults(
     cache_control: str,
     fresh_offset: timedelta,
@@ -5459,7 +5349,6 @@ async def test_jwks_cache_control_ttl_is_clamped_or_defaults(
 
 
 @pytest.mark.parametrize("directive", ["no-cache", "no-store"])
-@pytest.mark.anyio
 async def test_jwks_no_cache_and_no_store_revalidate_immediately(
     directive: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -5479,7 +5368,6 @@ async def test_jwks_no_cache_and_no_store_revalidate_immediately(
     assert fetcher.requests[1].etag == '"generation-1"'
 
 
-@pytest.mark.anyio
 async def test_jwks_conditional_304_retains_snapshot_and_recomputes_freshness(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5500,7 +5388,6 @@ async def test_jwks_conditional_304_retains_snapshot_and_recomputes_freshness(
     assert fetcher.requests[1].etag == '"generation-1"'
 
 
-@pytest.mark.anyio
 async def test_jwks_304_without_a_live_snapshot_is_unavailable() -> None:
     fetcher = _RecordingJWKSFetcher(JWKSFetchResponse(status_code=304, body=b"", headers={}))
     provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
@@ -5510,7 +5397,6 @@ async def test_jwks_304_without_a_live_snapshot_is_unavailable() -> None:
     assert isinstance(outcome, VerificationUnavailable)
 
 
-@pytest.mark.anyio
 async def test_jwks_fetcher_returning_wrong_response_type_is_unavailable() -> None:
     class _WrongResponseFetcher:
         async def fetch(self, _request: JWKSFetchRequest) -> object:
@@ -5526,7 +5412,6 @@ async def test_jwks_fetcher_returning_wrong_response_type_is_unavailable() -> No
     assert isinstance(outcome, VerificationUnavailable)
 
 
-@pytest.mark.anyio
 async def test_jwks_atomic_replacement_exposes_new_and_removes_old_keys(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5560,7 +5445,6 @@ async def test_jwks_atomic_replacement_exposes_new_and_removes_old_keys(
     ],
     ids=["fetch", "http-5xx", "http-4xx", "parse", "partial-key-parse"],
 )
-@pytest.mark.anyio
 async def test_jwks_failed_refresh_does_not_mutate_live_snapshot(
     failure: JWKSFetchResponse | Exception, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -5583,7 +5467,6 @@ async def test_jwks_failed_refresh_does_not_mutate_live_snapshot(
     assert "detail" not in repr(failed)
 
 
-@pytest.mark.anyio
 async def test_jwks_stale_if_error_is_local_explicit_and_bounded(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5604,7 +5487,6 @@ async def test_jwks_stale_if_error_is_local_explicit_and_bounded(
     assert isinstance(expired, VerificationUnavailable)
 
 
-@pytest.mark.anyio
 async def test_jwks_stale_if_error_never_accepts_an_unknown_key(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5623,7 +5505,6 @@ async def test_jwks_stale_if_error_never_accepts_an_unknown_key(
     assert isinstance(outcome, VerificationUnavailable)
 
 
-@pytest.mark.anyio
 async def test_jwks_remote_stale_directive_cannot_enable_local_stale_use(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5663,7 +5544,6 @@ async def test_jwks_remote_stale_directive_cannot_enable_local_stale_use(
         "wrong-ec-curve",
     ],
 )
-@pytest.mark.anyio
 async def test_jwks_rejects_unsafe_or_ambiguous_documents(  # noqa: C901, PLR0912, PLR0915
     case: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -5725,7 +5605,6 @@ async def test_jwks_rejects_unsafe_or_ambiguous_documents(  # noqa: C901, PLR091
     assert isinstance(outcome, VerificationUnavailable)
 
 
-@pytest.mark.anyio
 async def test_jwks_rejects_unsupported_prepared_key_type(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5744,7 +5623,6 @@ async def test_jwks_rejects_unsupported_prepared_key_type(
     assert isinstance(outcome, VerificationUnavailable)
 
 
-@pytest.mark.anyio
 async def test_jwks_entries_isolate_same_kid_by_issuer_uri_and_algorithm(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5783,7 +5661,6 @@ async def test_jwks_entries_isolate_same_kid_by_issuer_uri_and_algorithm(
     ],
     ids=["issuer", "uri", "algorithm"],
 )
-@pytest.mark.anyio
 async def test_jwks_unconfigured_entry_coordinates_fail_without_fetch(
     issuer: str, jwks_uri: str, algorithm: str
 ) -> None:
@@ -5796,7 +5673,6 @@ async def test_jwks_unconfigured_entry_coordinates_fail_without_fetch(
     assert fetcher.requests == []
 
 
-@pytest.mark.anyio
 async def test_jwks_rejects_naive_time_without_fetch() -> None:
     fetcher = _RecordingJWKSFetcher()
     provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
@@ -5808,7 +5684,6 @@ async def test_jwks_rejects_naive_time_without_fetch() -> None:
 
 
 @pytest.mark.parametrize(("warm_on_startup", "failure"), [(False, False), (True, False), (True, True)])
-@pytest.mark.anyio
 async def test_jwks_warmup_is_explicit_complete_and_failure_aware(
     *, warm_on_startup: bool, failure: bool, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
@@ -5843,7 +5718,6 @@ async def test_jwks_warmup_is_explicit_complete_and_failure_aware(
         )
 
 
-@pytest.mark.anyio
 async def test_jwks_close_is_idempotent_and_prevents_selection_fetch(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -5863,7 +5737,6 @@ async def test_jwks_close_is_idempotent_and_prevents_selection_fetch(
     assert fetcher.requests == []
 
 
-@pytest.mark.anyio
 async def test_argon2_hasher_uses_locked_id_parameters_and_detects_rehash(
     password_hasher: "accounts_module.Argon2PasswordHasher",
 ) -> None:
@@ -5901,7 +5774,6 @@ async def test_argon2_hasher_uses_locked_id_parameters_and_detects_rehash(
     assert legacy_result.replacement_hash not in repr(legacy_result)
 
 
-@pytest.mark.anyio
 async def test_argon2_hasher_supports_strengthening_without_sync_startup_hash(monkeypatch: pytest.MonkeyPatch) -> None:
     original = Argon2Engine.hash
 
@@ -5921,7 +5793,6 @@ async def test_argon2_hasher_supports_strengthening_without_sync_startup_hash(mo
 
 
 @pytest.mark.parametrize("operation", ["create", "hash"])
-@pytest.mark.anyio
 async def test_argon2_hasher_maps_worker_hash_failures(monkeypatch: pytest.MonkeyPatch, operation: str) -> None:
     def unavailable(_engine: Argon2Engine, _candidate: str | bytes, **_kwargs: object) -> str:
         raise RuntimeError
@@ -5958,7 +5829,6 @@ def test_argon2_hasher_rejects_weak_unsafe_or_mismatched_configuration(kwargs: d
 
 
 @pytest.mark.parametrize("memory_cost", [40_000, 999_999_999])
-@pytest.mark.anyio
 async def test_argon2_hasher_rejects_hostile_parameters_before_real_verification(
     monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher", memory_cost: int
 ) -> None:
@@ -5979,7 +5849,6 @@ async def test_argon2_hasher_rejects_hostile_parameters_before_real_verification
     assert hostile not in repr(result)
 
 
-@pytest.mark.anyio
 async def test_argon2_hasher_accepts_exact_utf8_byte_boundary(
     password_hasher: "accounts_module.Argon2PasswordHasher",
 ) -> None:
@@ -5991,7 +5860,6 @@ async def test_argon2_hasher_accepts_exact_utf8_byte_boundary(
     assert result.verified
 
 
-@pytest.mark.anyio
 async def test_argon2_hasher_equalizes_absent_wrong_and_malformed_verification_work(
     monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher"
 ) -> None:
@@ -6021,7 +5889,6 @@ async def test_argon2_hasher_equalizes_absent_wrong_and_malformed_verification_w
     assert all("incorrect passphrase" not in repr(result) for result in (absent, wrong, malformed))
 
 
-@pytest.mark.anyio
 async def test_argon2_hasher_maps_verification_library_failures_to_sanitized_outcomes(
     monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher"
 ) -> None:
@@ -6048,7 +5915,6 @@ async def test_argon2_hasher_maps_verification_library_failures_to_sanitized_out
         await password_hasher.verify(None, "constant-work candidate")
 
 
-@pytest.mark.anyio
 async def test_argon2_hasher_maps_unexpected_dummy_failure_to_unavailable(
     monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher"
 ) -> None:
@@ -6062,7 +5928,6 @@ async def test_argon2_hasher_maps_unexpected_dummy_failure_to_unavailable(
 
 
 @pytest.mark.parametrize("encoded_hash", [object(), "a" * 1_025])
-@pytest.mark.anyio
 async def test_argon2_hasher_treats_invalid_hash_runtime_shapes_as_malformed(
     password_hasher: "accounts_module.Argon2PasswordHasher", encoded_hash: object
 ) -> None:
@@ -6071,7 +5936,6 @@ async def test_argon2_hasher_treats_invalid_hash_runtime_shapes_as_malformed(
     assert result.status is accounts_module.PasswordVerificationStatus.MALFORMED
 
 
-@pytest.mark.anyio
 async def test_argon2_hasher_rejects_oversized_or_invalid_text_before_workers(
     monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher"
 ) -> None:
@@ -6109,7 +5973,6 @@ def test_argon2_hasher_maps_engine_configuration_failure(monkeypatch: pytest.Mon
         accounts_module.Argon2PasswordHasher()
 
 
-@pytest.mark.anyio
 async def test_argon2_hasher_bounds_concurrency_and_maps_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     workers = WorkerLimits(crypto_tokens=2, timeout=1)
     hasher = accounts_module.Argon2PasswordHasher(worker_limits=workers)
@@ -6281,7 +6144,6 @@ class _SecurityEvents:
 
 
 @pytest.mark.parametrize("failure", ["invalid", "unavailable", "store"])
-@pytest.mark.anyio
 async def test_password_reauthentication_maps_every_failure_to_domain_outcome(failure: str) -> None:
     store = _PasswordStore(fail_read=failure == "store")
     hasher = _PasswordHasher(unavailable=failure == "unavailable")
@@ -6304,7 +6166,6 @@ async def test_password_reauthentication_maps_every_failure_to_domain_outcome(fa
         (accounts_module.PasswordVerificationStatus.INVALID, None),
     ],
 )
-@pytest.mark.anyio
 async def test_password_reauthentication_collapses_credential_failures_without_rehash(
     status: accounts_module.PasswordVerificationStatus, encoded_hash: str | None
 ) -> None:
@@ -6326,7 +6187,6 @@ async def test_password_reauthentication_collapses_credential_failures_without_r
         (True, True, accounts_module.PasswordReauthenticationProof),
     ],
 )
-@pytest.mark.anyio
 async def test_password_reauthentication_rejects_inactive_or_unverified_accounts_after_hash_verification(
     active: bool,  # noqa: FBT001 - parametrized account-state matrix
     verified: bool,  # noqa: FBT001 - parametrized account-state matrix
@@ -6346,7 +6206,6 @@ async def test_password_reauthentication_rejects_inactive_or_unverified_accounts
 
 
 @pytest.mark.parametrize("sink_mode", ["default", "available", "failure"])
-@pytest.mark.anyio
 async def test_password_reauthentication_emits_sanitized_malformed_hash_event(
     sink_mode: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -6390,7 +6249,6 @@ async def test_password_reauthentication_emits_sanitized_malformed_hash_event(
         (True, True, VerificationUnavailable),
     ],
 )
-@pytest.mark.anyio
 async def test_password_reauthentication_locks_atomic_rehash_outcomes(
     replace_result: object, *, fail_replace: bool, outcome_type: type[object]
 ) -> None:
@@ -6431,7 +6289,6 @@ def test_password_reauthentication_rejects_invalid_configuration(kwargs: dict[st
 
 
 @pytest.mark.parametrize("source", ["argument", "clock"])
-@pytest.mark.anyio
 async def test_password_reauthentication_rejects_naive_time_as_unavailable(source: str) -> None:
     naive = _JWT_NOW.replace(tzinfo=None)
     service = accounts_module.PasswordReauthenticationService(
@@ -6448,7 +6305,6 @@ async def test_password_reauthentication_rejects_naive_time_as_unavailable(sourc
 
 
 @pytest.mark.parametrize("account_id", [" ", object()])
-@pytest.mark.anyio
 async def test_password_reauthentication_rejects_invalid_account_ids_without_port_calls(account_id: object) -> None:
     hasher = _PasswordHasher()
     service = accounts_module.PasswordReauthenticationService(accounts=_PasswordStore(), hasher=hasher)
@@ -6459,7 +6315,6 @@ async def test_password_reauthentication_rejects_invalid_account_ids_without_por
     assert hasher.calls == []
 
 
-@pytest.mark.anyio
 async def test_password_reauthentication_uses_an_aware_default_clock() -> None:
     service = accounts_module.PasswordReauthenticationService(
         accounts=_PasswordStore(),
@@ -6477,7 +6332,6 @@ async def test_password_reauthentication_uses_an_aware_default_clock() -> None:
     assert outcome.expires_at == outcome.authenticated_at + timedelta(minutes=5)
 
 
-@pytest.mark.anyio
 async def test_password_reauthentication_logs_blank_event_ids_without_changing_decision(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -6496,7 +6350,6 @@ async def test_password_reauthentication_logs_blank_event_ids_without_changing_d
     assert "Security event could not be built for local.password.verify" in caplog.text
 
 
-@pytest.mark.anyio
 async def test_password_reauthentication_returns_fresh_evidence_and_rehashes_atomically() -> None:
     replacement = "$argon2id$replacement-secret"
     store = _PasswordStore()
@@ -6662,7 +6515,6 @@ def _replacement_session(*, security_epoch: int = 1) -> accounts_module.CreateSe
         (_password_proof(account_id="account-2"), _JWT_NOW, False),
     ],
 )
-@pytest.mark.anyio
 async def test_password_change_requires_account_epoch_bound_recent_proof(
     proof: accounts_module.PasswordReauthenticationProof, now: datetime, *, accepted: bool
 ) -> None:
@@ -6723,7 +6575,6 @@ def test_password_change_rejects_invalid_configuration(kwargs: dict[str, object]
         ("wrong_epoch", VerificationUnavailable),
     ],
 )
-@pytest.mark.anyio
 async def test_password_change_fails_closed_before_or_after_the_atomic_boundary(
     case: str, outcome_type: type[object]
 ) -> None:
@@ -6788,7 +6639,6 @@ async def test_password_change_fails_closed_before_or_after_the_atomic_boundary(
     assert isinstance(outcome, outcome_type)
 
 
-@pytest.mark.anyio
 async def test_password_change_rebinds_only_current_session_at_new_epoch_and_revokes_all_refresh() -> None:
     store = _PasswordStore()
     cleanup = _CredentialCleanup()
@@ -6825,7 +6675,6 @@ async def test_password_change_rebinds_only_current_session_at_new_epoch_and_rev
 
 
 @pytest.mark.parametrize("operation", ["compromise", "force_reset", "bearer"])
-@pytest.mark.anyio
 async def test_password_change_compromise_admin_and_bearer_paths_revoke_every_local_transport(operation: str) -> None:
     store = _PasswordStore()
     cleanup = _CredentialCleanup()
@@ -6853,7 +6702,6 @@ async def test_password_change_compromise_admin_and_bearer_paths_revoke_every_lo
     assert cleanup.other_revocations == []
 
 
-@pytest.mark.anyio
 async def test_concurrent_password_changes_allow_exactly_one_epoch_compare_and_bump() -> None:
     store = _PasswordStore()
     cleanup = _CredentialCleanup()
@@ -6885,7 +6733,6 @@ async def test_concurrent_password_changes_allow_exactly_one_epoch_compare_and_b
         (9_223_372_036_854_775_807, accounts_module.PasswordChangeStatus.EPOCH_EXHAUSTED, []),
     ],
 )
-@pytest.mark.anyio
 async def test_password_change_never_wraps_security_epoch(
     epoch: int, expected_status: accounts_module.PasswordChangeStatus, hash_calls: list[str]
 ) -> None:
@@ -6903,7 +6750,6 @@ async def test_password_change_never_wraps_security_epoch(
 
 
 @pytest.mark.parametrize("failure", ["sessions", "refresh", "others", "rebind"])
-@pytest.mark.anyio
 async def test_committed_password_change_survives_best_effort_cleanup_failure(
     failure: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -6939,7 +6785,6 @@ async def test_committed_password_change_survives_best_effort_cleanup_failure(
         (3, 3, True, VerificationUnavailable),
     ],
 )
-@pytest.mark.anyio
 async def test_security_epoch_validator_maps_exact_current_invalid_and_unavailable_states(
     current_epoch: object, presented_epoch: int, *, fail: bool, outcome_type: type[object]
 ) -> None:
@@ -6957,7 +6802,6 @@ async def test_security_epoch_validator_maps_exact_current_invalid_and_unavailab
     assert isinstance(outcome, outcome_type)
 
 
-@pytest.mark.anyio
 async def test_security_epoch_validator_rejects_invalid_configuration_and_presented_state() -> None:
     with pytest.raises(ImproperlyConfiguredException, match="Security epoch validator"):
         accounts_module.SecurityEpochValidator(cast("Any", object()))
@@ -7110,7 +6954,6 @@ def _unavailable_password_check(_password: str) -> bool:
         (accounts_module.RegistrationStatus.DUPLICATE, False),
     ],
 )
-@pytest.mark.anyio
 async def test_registration_service_collapses_created_and_duplicate_atomic_results(
     registration_status: accounts_module.RegistrationStatus, *, require_verification: bool
 ) -> None:
@@ -7156,7 +6999,6 @@ async def test_registration_service_collapses_created_and_duplicate_atomic_resul
         ("accepted", accounts_module.LifecycleAccepted, accounts_module.RegistrationStatus.CREATED),
     ],
 )
-@pytest.mark.anyio
 async def test_invite_registration_passes_only_one_purpose_bound_digest_to_atomic_store(
     case: str, expected_type: type[object], store_status: accounts_module.RegistrationStatus
 ) -> None:
@@ -7190,7 +7032,6 @@ async def test_invite_registration_passes_only_one_purpose_bound_digest_to_atomi
 
 
 @pytest.mark.parametrize("failure", ["password", "policy", "store", "identifier", "empty_identifier", "event"])
-@pytest.mark.anyio
 async def test_registration_service_returns_secret_free_domain_failures(failure: str) -> None:
     store = _LifecycleStore(fail=failure == "store")
     hasher = _PasswordHasher(unavailable=failure == "password")
@@ -7225,7 +7066,6 @@ async def test_registration_service_returns_secret_free_domain_failures(failure:
     assert "correct horse battery staple" not in repr(outcome)
 
 
-@pytest.mark.anyio
 async def test_registration_service_returns_password_policy_without_hash_or_store_call() -> None:
     store = _LifecycleStore()
     hasher = _PasswordHasher()
@@ -7255,7 +7095,6 @@ async def test_registration_service_returns_password_policy_without_hash_or_stor
         (_lifecycle_account(), True, 1),
     ],
 )
-@pytest.mark.anyio
 async def test_verification_resend_is_generic_across_account_and_store_states(
     account: "accounts_module.LocalAccountRecord[object] | None",
     *,
@@ -7296,7 +7135,6 @@ async def test_verification_resend_is_generic_across_account_and_store_states(
         accounts_module.ConsumeStatus.USED,
     ],
 )
-@pytest.mark.anyio
 async def test_verification_consume_delegates_replay_and_expiry_atomically(
     status: accounts_module.ConsumeStatus,
 ) -> None:
@@ -7315,7 +7153,6 @@ async def test_verification_consume_delegates_replay_and_expiry_atomically(
     assert event.operation == "local.verification.consume"
 
 
-@pytest.mark.anyio
 async def test_verification_consume_rejects_purpose_swap_without_store_access() -> None:
     codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
     recovery = _lifecycle_token(codec, accounts_module.TokenPurpose.RECOVERY, timedelta(minutes=30))
@@ -7328,7 +7165,6 @@ async def test_verification_consume_rejects_purpose_swap_without_store_access() 
     assert store.consumptions == []
 
 
-@pytest.mark.anyio
 async def test_verification_consume_maps_atomic_store_failure_to_unavailable() -> None:
     codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
     issued = _lifecycle_token(codec, accounts_module.TokenPurpose.VERIFICATION, timedelta(hours=24))
@@ -7350,7 +7186,6 @@ async def test_verification_consume_maps_atomic_store_failure_to_unavailable() -
         (_lifecycle_account(), True, 1),
     ],
 )
-@pytest.mark.anyio
 async def test_recovery_request_is_generic_and_emits_only_atomic_outbox_commands(
     account: "accounts_module.LocalAccountRecord[object] | None",
     *,
@@ -7386,7 +7221,6 @@ async def test_recovery_request_is_generic_and_emits_only_atomic_outbox_commands
         assert "Recovery token request failed" in caplog.text
 
 
-@pytest.mark.anyio
 async def test_recovery_request_with_control_character_destination_stays_generic_and_does_not_emit() -> None:
     store = _LifecycleStore(account=_lifecycle_account())
     service = accounts_module.RecoveryTokenService(
@@ -7413,7 +7247,6 @@ async def test_recovery_request_with_control_character_destination_stays_generic
         accounts_module.PasswordResetStatus.CONFLICT,
     ],
 )
-@pytest.mark.anyio
 async def test_recovery_reset_delegates_replay_expiry_and_epoch_mutation_atomically(
     status: accounts_module.PasswordResetStatus,
 ) -> None:
@@ -7448,7 +7281,6 @@ async def test_recovery_reset_delegates_replay_expiry_and_epoch_mutation_atomica
 
 
 @pytest.mark.parametrize("transport", ["sessions", "refresh", "refresh_failure"])
-@pytest.mark.anyio
 async def test_recovery_reset_cleans_each_configured_transport_independently(
     transport: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -7477,7 +7309,6 @@ async def test_recovery_reset_cleans_each_configured_transport_independently(
 
 
 @pytest.mark.parametrize("case", ["purpose_swap", "policy", "policy_failure", "store_failure"])
-@pytest.mark.anyio
 async def test_recovery_reset_rejects_invalid_inputs_without_splitting_atomic_consumption(case: str) -> None:
     codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
     purpose = (
@@ -7837,7 +7668,6 @@ def test_native_session_payload_preserves_independent_assurance_expiry() -> None
     assert restored.assurance_expires_at == assurance_expires_at
 
 
-@pytest.mark.anyio
 async def test_native_session_remains_authenticated_after_step_up_assurance_expires() -> None:
     """A short step-up expiry does not shorten the underlying native session."""
     store = _NativeSessionStore()
@@ -7876,7 +7706,6 @@ async def test_native_session_remains_authenticated_after_step_up_assurance_expi
     assert decision.code == "missing_assurance"
 
 
-@pytest.mark.anyio
 async def test_native_session_establish_authenticate_touch_and_rebind_are_fixation_safe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7969,7 +7798,6 @@ async def test_native_session_establish_authenticate_touch_and_rebind_are_fixati
     assert isinstance(await auth.authenticate(replacement_extraction.value, replacement_connection), Authenticated)
 
 
-@pytest.mark.anyio
 async def test_native_session_binds_evidence_authentication_time_to_durable_record() -> None:
     store = _NativeSessionStore()
     auth = accounts_module.NativeSessionAuth(
@@ -8039,7 +7867,6 @@ def test_native_session_extraction_is_strict_and_cleans_only_presented_invalid_h
 
 
 @pytest.mark.parametrize("failure", ["get", "account", "epoch"])
-@pytest.mark.anyio
 async def test_native_session_transient_verification_failures_preserve_retryable_state(failure: str) -> None:
     store = _NativeSessionStore()
     auth = accounts_module.NativeSessionAuth(
@@ -8071,7 +7898,6 @@ async def test_native_session_transient_verification_failures_preserve_retryable
 @pytest.mark.parametrize(
     "invalid_state", ["missing", "disabled", "unverified", "epoch", "binding", "authenticated_at", "expired"]
 )
-@pytest.mark.anyio
 async def test_native_session_current_state_mismatch_is_invalid_and_cleared(invalid_state: str) -> None:
     store = _NativeSessionStore()
     current = [_JWT_NOW]
@@ -8129,7 +7955,6 @@ async def test_native_session_current_state_mismatch_is_invalid_and_cleared(inva
     assert _queued_binding_token(connection) == ""
 
 
-@pytest.mark.anyio
 async def test_native_session_logout_and_account_qualified_revoke_are_explicit_and_idempotent() -> None:
     store = _NativeSessionStore()
     auth = accounts_module.NativeSessionAuth(
@@ -8170,7 +7995,6 @@ async def test_native_session_logout_and_account_qualified_revoke_are_explicit_a
     ]
 
 
-@pytest.mark.anyio
 async def test_native_session_password_rebind_plan_activates_only_the_committed_record() -> None:
     store = _NativeSessionStore()
     auth = accounts_module.NativeSessionAuth(
@@ -8259,7 +8083,6 @@ async def test_native_session_password_rebind_plan_activates_only_the_committed_
     assert not await auth.activate_password_rebind(connection, mismatch_plan, 2)
 
 
-@pytest.mark.anyio
 async def test_native_session_lists_safe_summaries_and_websocket_lifecycle_is_read_only() -> None:
     store = _NativeSessionStore()
     auth = accounts_module.NativeSessionAuth(
@@ -8327,7 +8150,6 @@ def test_native_session_auth_rejects_invalid_runtime_dependencies(field: str, va
         accounts_module.NativeSessionAuth(**values)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_native_session_rejects_wrong_credential_and_ignores_touch_failure() -> None:
     store = _NativeSessionStore()
     current = [_JWT_NOW]
@@ -8361,7 +8183,6 @@ async def test_native_session_rejects_wrong_credential_and_ignores_touch_failure
     "case",
     ["invalid_account", "create_failure", "record_mismatch", "lookup_entropy", "secret_entropy", "event_id", "clock"],
 )
-@pytest.mark.anyio
 async def test_native_session_establishment_fails_closed_without_revealing_a_cookie(case: str) -> None:  # noqa: C901
     def valid_event_id() -> str:
         return "event-1"
@@ -8422,7 +8243,6 @@ async def test_native_session_establishment_fails_closed_without_revealing_a_coo
 
 
 @pytest.mark.parametrize("mutation", ["separator", "binding", "secret", "version", "boolean_version", "timestamp"])
-@pytest.mark.anyio
 async def test_native_session_rejects_canonical_length_malformed_binding_and_payload(mutation: str) -> None:
     store = _NativeSessionStore()
     auth = accounts_module.NativeSessionAuth(
@@ -8460,7 +8280,6 @@ async def test_native_session_rejects_canonical_length_malformed_binding_and_pay
     assert "_litestar_security" not in session
 
 
-@pytest.mark.anyio
 async def test_native_session_logout_and_revoke_report_store_failure_after_local_cleanup() -> None:
     store = _NativeSessionStore()
     auth = accounts_module.NativeSessionAuth(
@@ -8483,7 +8302,6 @@ async def test_native_session_logout_and_revoke_report_store_failure_after_local
     assert "_litestar_security" not in session
 
 
-@pytest.mark.anyio
 async def test_native_session_current_revoke_clears_browser_state_and_list_filters_store_leaks() -> None:
     store = _NativeSessionStore()
     auth = accounts_module.NativeSessionAuth(
@@ -8596,7 +8414,6 @@ def _local_access_account(
         (_local_access_account(), False, False, True, VerificationUnavailable),
     ],
 )
-@pytest.mark.anyio
 async def test_password_login_is_constant_work_and_returns_structured_outcomes(
     account: accounts_module.LocalAccountRecord[object] | None,
     fail_lookup: bool,  # noqa: FBT001
@@ -8635,7 +8452,6 @@ def test_access_token_claims_reject_non_oauth_scope_tokens(scope: str) -> None:
         )
 
 
-@pytest.mark.anyio
 async def test_local_access_issue_cross_verifies_exact_minimal_claims_without_generic_scope_grants(
     local_key_ring: LocalKeyRing,
 ) -> None:
@@ -8685,7 +8501,6 @@ async def test_local_access_issue_cross_verifies_exact_minimal_claims_without_ge
         assert forbidden not in serialized_claims
 
 
-@pytest.mark.anyio
 async def test_local_access_token_preserves_passkey_assurance(local_key_ring: LocalKeyRing) -> None:
     validation = JWTValidationConfig(
         issuer=local_key_ring.issuer,
@@ -8761,7 +8576,6 @@ async def test_local_access_token_preserves_passkey_assurance(local_key_ring: Lo
     )
 
 
-@pytest.mark.anyio
 async def test_legacy_local_access_assurance_falls_back_to_issued_at(local_key_ring: LocalKeyRing) -> None:
     """Legacy access tokens without auth_time retain their frozen issuance time."""
     validation = JWTValidationConfig(
@@ -8795,7 +8609,6 @@ async def test_legacy_local_access_assurance_falls_back_to_issued_at(local_key_r
     assert outcome.evidence.authenticated_at == issued_at
 
 
-@pytest.mark.anyio
 async def test_token_login_preserves_password_assurance_at_refresh_issuance() -> None:
     """Password token login carries its original assurance into the refresh family."""
     account = _local_access_account()
@@ -8842,7 +8655,6 @@ async def test_token_login_preserves_password_assurance_at_refresh_issuance() ->
     )
 
 
-@pytest.mark.anyio
 async def test_token_login_fails_closed_when_refresh_issuance_clock_is_unavailable() -> None:
     """A failed refresh issuance clock never mints a token with invented assurance time."""
     account = _local_access_account()
@@ -8885,7 +8697,6 @@ async def test_token_login_fails_closed_when_refresh_issuance_clock_is_unavailab
         (_local_access_account(), False, False, 2, InvalidCredentials),
     ],
 )
-@pytest.mark.anyio
 async def test_local_bearer_identity_resolution_checks_account_and_exact_epoch(
     account: accounts_module.LocalAccountRecord[object] | None,
     fail_lookup: bool,  # noqa: FBT001
@@ -8938,7 +8749,6 @@ def test_password_login_rejects_invalid_configuration(kwargs: dict[str, object],
     ("identifier", "unavailable", "expected_type"),
     [(" ", False, InvalidCredentials), ("person@example.com", True, VerificationUnavailable)],
 )
-@pytest.mark.anyio
 async def test_password_login_dummy_work_handles_empty_identifiers_and_worker_failure(
     identifier: str,
     unavailable: bool,  # noqa: FBT001
@@ -9189,7 +8999,6 @@ def _mfa_service(
         ),
     ],
 )
-@pytest.mark.anyio
 async def test_totp_enrollment_uses_rfc_vectors_and_persists_only_protected_secret(
     algorithm: str, secret: str, code: str
 ) -> None:
@@ -9217,7 +9026,6 @@ async def test_totp_enrollment_uses_rfc_vectors_and_persists_only_protected_secr
     assert b"test-key" in protector.associated_data[0]
 
 
-@pytest.mark.anyio
 async def test_totp_counter_advance_allows_one_concurrent_use_and_rejects_replay() -> None:
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     store = _MFAStore()
@@ -9267,7 +9075,6 @@ def test_totp_policy_rejects_unsupported_or_unbounded_profiles(policy_kwargs: di
         accounts_module.TOTPPolicy(**policy_kwargs)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_totp_drift_account_and_expiry_failures_are_generic() -> None:
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     store = _MFAStore()
@@ -9294,7 +9101,6 @@ async def test_totp_drift_account_and_expiry_failures_are_generic() -> None:
 
 
 @pytest.mark.parametrize("failure", ["protect", "store", "unprotect"])
-@pytest.mark.anyio
 async def test_totp_protector_and_store_failures_are_sanitized(failure: str) -> None:
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     store = _MFAStore()
@@ -9317,7 +9123,6 @@ async def test_totp_protector_and_store_failures_are_sanitized(failure: str) -> 
     assert "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" not in repr(outcome)
 
 
-@pytest.mark.anyio
 async def test_recovery_codes_are_reveal_once_digest_only_and_atomically_consumed() -> None:
     store = _MFAStore()
     service = _mfa_service(store, _MFAProtector())
@@ -9357,7 +9162,6 @@ def test_recovery_code_digest_is_bound_to_its_account() -> None:
     assert owner_digest != other_digest
 
 
-@pytest.mark.anyio
 async def test_recovery_regeneration_invalidates_old_codes_and_pepper_versions_are_explicit() -> None:
     entropy_values = iter((b"\x01" * 16, b"\x02" * 16, b"\x03" * 16))
     store = _MFAStore()
@@ -9388,7 +9192,6 @@ async def test_recovery_regeneration_invalidates_old_codes_and_pepper_versions_a
         (accounts_module.RevokeLoginMethodStatus.FINAL_METHOD, accounts_module.RevokeLoginMethodStatus.FINAL_METHOD),
     ],
 )
-@pytest.mark.anyio
 async def test_totp_removal_delegates_atomic_final_method_safety_and_redacts_events(
     status: accounts_module.RevokeLoginMethodStatus, expected: accounts_module.RevokeLoginMethodStatus
 ) -> None:
@@ -9416,7 +9219,6 @@ async def test_totp_removal_delegates_atomic_final_method_safety_and_redacts_eve
         ("store_consume", VerificationUnavailable),
     ],
 )
-@pytest.mark.anyio
 async def test_recovery_failures_are_generic_and_never_leak_codes(case: str, expected_type: type[object]) -> None:
     store = _MFAStore()
     service = _mfa_service(store, _MFAProtector())
@@ -9449,7 +9251,6 @@ async def test_recovery_failures_are_generic_and_never_leak_codes(case: str, exp
     assert "01010101" not in repr(outcome)
 
 
-@pytest.mark.anyio
 async def test_recovery_audit_failure_cannot_reverse_settled_generation_or_consumption() -> None:
     store = _MFAStore()
     service = _mfa_service(store, _MFAProtector())
@@ -9679,7 +9480,6 @@ def _passkey_service(  # noqa: PLR0913 - explicit service seam builder for cerem
     )
 
 
-@pytest.mark.anyio
 async def test_passkey_registration_is_bound_one_time_and_stores_only_verified_project_types() -> None:
     challenge_store = _ChallengeStore()
     store = _PasskeyStore()
@@ -9716,7 +9516,6 @@ async def test_passkey_registration_is_bound_one_time_and_stores_only_verified_p
         "store",
     ],
 )
-@pytest.mark.anyio
 async def test_passkey_registration_rejects_unbound_invalid_or_unavailable_ceremonies(case: str) -> None:
     challenge_store = _ChallengeStore()
     store = _PasskeyStore()
@@ -9765,7 +9564,6 @@ def test_py_webauthn_adapter_builds_exact_options_and_sanitizes_malformed_json()
             operation("{}")
 
 
-@pytest.mark.anyio
 async def test_passkey_authentication_verifies_owner_and_emits_normalized_assurance() -> None:
     challenge_store = _ChallengeStore()
     store = _PasskeyStore()
@@ -9822,7 +9620,6 @@ def _stored_passkey(
         (2, 1, accounts_module.CloneRiskPolicy.AUDIT_ONLY, AuthenticationEvidence, True),
     ],
 )
-@pytest.mark.anyio
 async def test_passkey_counter_policy_persists_clone_risk_before_assurance(
     stored_count: int,
     new_count: int,
@@ -9856,7 +9653,6 @@ async def test_passkey_counter_policy_persists_clone_risk_before_assurance(
         (False, False, False, True, InvalidCredentials),
     ],
 )
-@pytest.mark.anyio
 async def test_passkey_backup_eligibility_is_immutable_and_state_may_transition(
     stored_be: bool,  # noqa: FBT001
     stored_bs: bool,  # noqa: FBT001
@@ -9876,7 +9672,6 @@ async def test_passkey_backup_eligibility_is_immutable_and_state_may_transition(
     assert isinstance(outcome, expected_type)
 
 
-@pytest.mark.anyio
 async def test_passkey_listing_rename_and_removal_are_safe_and_final_method_guarded() -> None:
     store = _PasskeyStore()
     store.credentials[b"credential-1"] = _stored_passkey()
@@ -9926,7 +9721,6 @@ class _StepUpStore:
         return record
 
 
-@pytest.mark.anyio
 async def test_step_up_grant_is_exactly_bound_expiring_and_single_use() -> None:
     store = _StepUpStore()
     now = datetime(2026, 7, 27, tzinfo=timezone.utc)
@@ -9963,7 +9757,6 @@ async def test_step_up_grant_is_exactly_bound_expiring_and_single_use() -> None:
     assert isinstance(replay, InvalidCredentials)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(("changed"), ["principal", "epoch", "transport", "expiry"])
 async def test_step_up_grant_rejects_changed_binding(changed: str) -> None:
     store = _StepUpStore()
@@ -10012,7 +9805,6 @@ def test_public_testing_helpers_are_isolated_structural_conformance_ports() -> N
         clock.advance(timedelta())
 
 
-@pytest.mark.anyio
 async def test_public_step_up_conformance_store_has_one_atomic_winner() -> None:
     now = datetime(2026, 7, 27, tzinfo=timezone.utc)
     store = testing_module.InMemoryStepUpStore()
@@ -10048,7 +9840,6 @@ async def test_public_step_up_conformance_store_has_one_atomic_winner() -> None:
     assert sum(isinstance(outcome, InvalidCredentials) for outcome in outcomes) == 1
 
 
-@pytest.mark.anyio
 async def test_public_conformance_helpers_execute_factor_atomicity_matrix() -> None:
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     clock = testing_module.FakeClock(now)
@@ -10425,7 +10216,6 @@ def test_passkey_values_and_dependency_configuration_reject_invalid_shapes() -> 
     assert localhost.allow_insecure_localhost is True
 
 
-@pytest.mark.anyio
 async def test_passkey_worker_timeout_cancels_the_request_boundary() -> None:
     class SlowVerifier(_WebAuthnVerifier):
         def authentication_options(self, **kwargs: object) -> str:
@@ -10436,7 +10226,6 @@ async def test_passkey_worker_timeout_cancels_the_request_boundary() -> None:
     assert isinstance(await service.begin_authentication("account-1", binding=b"binding"), VerificationUnavailable)
 
 
-@pytest.mark.anyio
 async def test_passkey_service_defensive_store_and_ceremony_outcomes_are_sanitized() -> None:
     store = _PasskeyStore()
     service = _passkey_service(store=store)
@@ -10466,7 +10255,6 @@ async def test_passkey_service_defensive_store_and_ceremony_outcomes_are_sanitiz
     )
 
 
-@pytest.mark.anyio
 async def test_local_auth_passkey_login_selects_only_configured_transport() -> None:
     account = accounts_module.LocalAccountRecord(
         account_id="account-1",
@@ -10601,7 +10389,6 @@ def test_step_up_purpose_allowlist_covers_every_consumed_purpose_with_strong_fac
     assert all(methods == frozenset({"password", "passkey"}) for methods in purpose_methods.values())
 
 
-@pytest.mark.anyio
 async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
     request = cast("Any", SimpleNamespace(headers={"authorization": "Bearer transport"}))
     with pytest.raises(ValueError, match="At least one"):
@@ -10725,7 +10512,6 @@ async def test_mfa_controller_helpers_cover_safe_failure_matrix() -> None:
     )
 
 
-@pytest.mark.anyio
 async def test_mfa_and_step_up_defensive_failures_are_sanitized() -> None:
     now = datetime(2026, 7, 27, tzinfo=timezone.utc)
 
@@ -10784,7 +10570,6 @@ async def test_mfa_and_step_up_defensive_failures_are_sanitized() -> None:
     )
 
 
-@pytest.mark.anyio
 async def test_testing_stores_cover_expiry_update_and_clone_risk_outcomes() -> None:
     now = datetime(2026, 7, 27, tzinfo=timezone.utc)
     with pytest.raises(ValueError, match="timezone-aware"):
@@ -10992,7 +10777,6 @@ def test_local_access_token_issuer_rejects_invalid_configuration(kwargs: dict[st
         ),
     ],
 )
-@pytest.mark.anyio
 async def test_local_access_token_issuer_maps_invalid_and_unavailable_composition(  # noqa: PLR0913 - one composition matrix per parametrized case
     *,
     account: accounts_module.LocalAccountRecord[object],
@@ -11017,7 +10801,6 @@ def test_local_bearer_resolver_rejects_missing_capabilities() -> None:
 
 
 @pytest.mark.parametrize("epoch", [None, True, -1, 1.0, "1"])
-@pytest.mark.anyio
 async def test_local_bearer_resolver_rejects_malformed_epoch_without_lookup(epoch: object) -> None:
     store = _LocalAccessStore(_local_access_account())
     resolver = accounts_module.LocalBearerIdentityResolver(accounts=store)
@@ -11363,7 +11146,6 @@ def _refresh_service(
     )
 
 
-@pytest.mark.anyio
 async def test_mfa_operational_and_format_failure_branches_are_sanitized() -> None:
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     store = _MFAStore()
@@ -11410,7 +11192,6 @@ async def test_mfa_operational_and_format_failure_branches_are_sanitized() -> No
     assert isinstance(await invalid.generate_recovery_codes("account-1"), VerificationUnavailable)
 
 
-@pytest.mark.anyio
 async def test_mfa_atomic_rejection_and_step_up_storage_failure_are_sanitized() -> None:
     class RejectingAdvanceStore(_MFAStore):
         async def advance_totp_counter(self, method_id: str, *, accepted_counter: int, now: datetime) -> bool:
@@ -11525,7 +11306,6 @@ async def test_mfa_atomic_rejection_and_step_up_storage_failure_are_sanitized() 
     )
 
 
-@pytest.mark.anyio
 async def test_passkey_defensive_registration_authentication_and_audit_outcomes() -> None:  # noqa: PLR0915
     class InvalidAttestationVerifier(_WebAuthnVerifier):
         def verify_registration(self, **kwargs: object) -> accounts_module.RegistrationVerification:
@@ -11674,7 +11454,6 @@ def test_refresh_codec_is_canonical_hmac_only_and_rejects_malformed_tokens(token
     assert issued.digest.hex() not in repr(issued)
 
 
-@pytest.mark.anyio
 async def test_refresh_known_lookup_with_wrong_digest_is_invalid_without_family_revocation() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
@@ -11745,7 +11524,6 @@ def test_refresh_receipts_bind_all_context_and_support_key_rotation(field: str, 
     assert response.refresh_token not in repr(response)
 
 
-@pytest.mark.anyio
 async def test_refresh_first_rotation_and_same_key_duplicate_return_exact_sealed_result() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, scopes=frozenset({"reports:read"}), now=_JWT_NOW)
@@ -11770,7 +11548,6 @@ async def test_refresh_first_rotation_and_same_key_duplicate_return_exact_sealed
         assert plaintext not in stored
 
 
-@pytest.mark.anyio
 async def test_refresh_rotation_preserves_original_passkey_assurance_and_time() -> None:
     service, store, _accounts, account = _refresh_service()
     authenticated_at = _JWT_NOW - timedelta(minutes=2)
@@ -11801,7 +11578,6 @@ async def test_refresh_rotation_preserves_original_passkey_assurance_and_time() 
 
 
 @pytest.mark.parametrize("outage", ["signer", "token_entropy", "receipt_entropy"])
-@pytest.mark.anyio
 async def test_refresh_same_key_retry_recovers_without_fresh_crypto(outage: str) -> None:
     service, _store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
@@ -11824,7 +11600,6 @@ async def test_refresh_same_key_retry_recovers_without_fresh_crypto(outage: str)
     assert duplicate == first
 
 
-@pytest.mark.anyio
 async def test_refresh_receipt_window_preserves_subsecond_precision() -> None:
     service, _store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
@@ -11841,7 +11616,6 @@ async def test_refresh_receipt_window_preserves_subsecond_precision() -> None:
     assert duplicate == first
 
 
-@pytest.mark.anyio
 async def test_refresh_malformed_key_revokes_consumed_token_but_not_active_token() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
@@ -11860,7 +11634,6 @@ async def test_refresh_malformed_key_revokes_consumed_token_but_not_active_token
     assert "weak" not in repr(store.preparation_events[-1])
 
 
-@pytest.mark.anyio
 async def test_refresh_preflight_replay_receipt_failure_revokes_family() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
@@ -11885,7 +11658,6 @@ async def test_refresh_preflight_replay_receipt_failure_revokes_family() -> None
         (_refresh_idempotency_key(1), timedelta(seconds=30)),
     ],
 )
-@pytest.mark.anyio
 async def test_refresh_replay_without_exact_live_key_revokes_family(second_key: str | None, advance: timedelta) -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
@@ -11911,7 +11683,6 @@ async def test_refresh_replay_without_exact_live_key_revokes_family(second_key: 
 
 
 @pytest.mark.parametrize("receipt_kind", ["malformed", "expired", "swapped_context"])
-@pytest.mark.anyio
 async def test_refresh_invalid_store_receipt_fails_closed_and_revokes_family(receipt_kind: str) -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
@@ -11949,7 +11720,6 @@ async def test_refresh_invalid_store_receipt_fails_closed_and_revokes_family(rec
 
 
 @pytest.mark.parametrize("condition", ["idle", "absolute", "epoch", "disabled", "account_revoke", "family_revoke"])
-@pytest.mark.anyio
 async def test_refresh_rotation_rejects_expiry_epoch_and_revocation_boundaries(condition: str) -> None:
     idle = timedelta(days=1)
     absolute = timedelta(days=2)
@@ -11987,7 +11757,6 @@ async def test_refresh_rotation_rejects_expiry_epoch_and_revocation_boundaries(c
     assert len(store.tokens) == 1
 
 
-@pytest.mark.anyio
 async def test_refresh_epoch_bump_after_preflight_is_rejected_by_atomic_rotate() -> None:
     accounts_holder: list[_LocalAccessStore] = []
 
@@ -12014,7 +11783,6 @@ async def test_refresh_epoch_bump_after_preflight_is_rejected_by_atomic_rotate()
     assert not store.revoked_families
 
 
-@pytest.mark.anyio
 async def test_refresh_atomic_rotate_revalidates_preserved_scopes() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, scopes=frozenset({"read"}), now=_JWT_NOW)
@@ -12048,7 +11816,6 @@ async def test_refresh_atomic_rotate_revalidates_preserved_scopes() -> None:
     assert len(store.tokens) == 1
 
 
-@pytest.mark.anyio
 async def test_refresh_presented_token_revoke_is_exact_and_idempotent() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
@@ -12062,7 +11829,6 @@ async def test_refresh_presented_token_revoke_is_exact_and_idempotent() -> None:
 
 
 @pytest.mark.parametrize("mode", ["shared_key", "no_key"])
-@pytest.mark.anyio
 async def test_refresh_one_hundred_way_races_enforce_one_logical_result(mode: str) -> None:
     service, store, _accounts, account = _refresh_service(expected_preparations=100)
     initial = await service.issue(account, now=_JWT_NOW)
@@ -12120,7 +11886,6 @@ def test_refresh_service_rejects_invalid_composition_and_lifetimes() -> None:
             replace(service, **{field_name: value})
 
 
-@pytest.mark.anyio
 async def test_refresh_service_default_clock_and_id_factories_issue_valid_family() -> None:
     service, store, accounts, account = _refresh_service()
     defaulted = accounts_module.RefreshTokenService(
@@ -12183,7 +11948,6 @@ class _RefreshAccessOutcome:
         "create_false",
     ],
 )
-@pytest.mark.anyio
 async def test_refresh_issue_sanitizes_invalid_and_unavailable_composition(  # noqa: C901, PLR0912, PLR0915
     mode: str,
 ) -> None:
@@ -12296,7 +12060,6 @@ async def test_refresh_issue_sanitizes_invalid_and_unavailable_composition(  # n
         "receipt_revoke_false",
     ],
 )
-@pytest.mark.anyio
 async def test_refresh_rotate_sanitizes_invalid_and_unavailable_composition(  # noqa: C901,PLR0912,PLR0915
     mode: str,
 ) -> None:
@@ -12444,7 +12207,6 @@ async def test_refresh_rotate_sanitizes_invalid_and_unavailable_composition(  # 
     assert isinstance(outcome, VerificationUnavailable if mode in unavailable_modes else InvalidCredentials)
 
 
-@pytest.mark.anyio
 async def test_refresh_revoke_maps_store_and_clock_failures_to_unavailable() -> None:
     service, store, _accounts, account = _refresh_service()
     initial = await service.issue(account, now=_JWT_NOW)
@@ -12502,7 +12264,6 @@ async def test_refresh_revoke_maps_store_and_clock_failures_to_unavailable() -> 
     )
 
 
-@pytest.mark.anyio
 async def test_generated_local_handlers_map_services_to_typed_http_contracts() -> None:  # noqa: PLR0915
     class AsyncOutcome:
         def __init__(self, *outcomes: object) -> None:
@@ -12793,7 +12554,6 @@ async def test_generated_local_handlers_map_services_to_typed_http_contracts() -
         )
 
 
-@pytest.mark.anyio
 async def test_local_auth_service_graph_composes_existing_services_without_handler_logic() -> None:
     class AsyncOutcome:
         def __init__(self, *outcomes: object) -> None:
@@ -13047,7 +12807,6 @@ def test_rate_limit_decision_requires_a_retry_hint_only_on_denial(kwargs: dict[s
         accounts_module.RateLimitDecision(**kwargs)
 
 
-@pytest.mark.anyio
 async def test_unlimited_rate_limiter_allows_every_attempt() -> None:
     decision = await accounts_module.UnlimitedRateLimiter().acquire(
         accounts_module.RateLimitAttempt(operation="local.login")
@@ -13154,7 +12913,6 @@ def test_store_rate_limiter_binds_only_a_native_store() -> None:
     assert limiter.store is None
 
 
-@pytest.mark.anyio
 async def test_store_rate_limiter_allows_unconfigured_operations_and_fails_closed_without_a_store() -> None:
     limiter = _memory_limiter()
     assert await limiter.acquire(accounts_module.RateLimitAttempt(operation="local.unbudgeted")) == (
@@ -13165,7 +12923,6 @@ async def test_store_rate_limiter_allows_unconfigured_operations_and_fails_close
         await unbound.acquire(accounts_module.RateLimitAttempt(operation="local.login", client_key="1.1.1.1"))
 
 
-@pytest.mark.anyio
 async def test_store_rate_limiter_denies_after_the_window_budget_and_recovers_next_window() -> None:
     moment = [datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)]
     limiter = _memory_limiter(clock=lambda: moment[0])
@@ -13179,7 +12936,6 @@ async def test_store_rate_limiter_denies_after_the_window_budget_and_recovers_ne
     assert (await limiter.acquire(request)).allowed
 
 
-@pytest.mark.anyio
 async def test_store_rate_limiter_serializes_concurrent_single_bucket_acquires() -> None:
     limiter = accounts_module.StoreRateLimiter(
         policies={"concurrent": accounts_module.RateLimitPolicy(limit=5, window=timedelta(minutes=1))},
@@ -13198,7 +12954,6 @@ async def test_store_rate_limiter_serializes_concurrent_single_bucket_acquires()
     assert sum(decision.allowed for decision in decisions) == 5
 
 
-@pytest.mark.anyio
 async def test_store_rate_limiter_serializes_concurrent_shared_store_acquires() -> None:
     store = _InterleavingStore()
     policies = {"concurrent": accounts_module.RateLimitPolicy(limit=5, window=timedelta(minutes=1))}
@@ -13217,7 +12972,6 @@ async def test_store_rate_limiter_serializes_concurrent_shared_store_acquires() 
     assert sum(decision.allowed for decision in decisions) == 5
 
 
-@pytest.mark.anyio
 async def test_process_rate_limit_lock_releases_after_cancellation() -> None:
     lock = ThreadLock()
     entered = Event()
@@ -13237,7 +12991,6 @@ async def test_process_rate_limit_lock_releases_after_cancellation() -> None:
     lock.release()
 
 
-@pytest.mark.anyio
 async def test_process_rate_limit_lock_cancels_promptly_while_waiting() -> None:
     lock = ThreadLock()
     assert lock.acquire(blocking=False)
@@ -13303,7 +13056,6 @@ def test_process_rate_limit_lock_supports_separate_event_loop_threads() -> None:
     assert second_entered.is_set()
 
 
-@pytest.mark.anyio
 async def test_store_rate_limiter_serializes_each_multi_bucket_acquire() -> None:
     class ObservingLimiter(accounts_module.StoreRateLimiter):
         async def _consume(  # noqa: PLR0913 - observe each fully named rate-limit bucket argument
@@ -13337,7 +13089,6 @@ async def test_store_rate_limiter_serializes_each_multi_bucket_acquire() -> None
     )
 
 
-@pytest.mark.anyio
 async def test_store_rate_limiter_budgets_password_verify_by_default() -> None:
     limiter = _memory_limiter()
     request = accounts_module.RateLimitAttempt(operation="local.password.verify", client_key="1.1.1.1")
@@ -13346,7 +13097,6 @@ async def test_store_rate_limiter_budgets_password_verify_by_default() -> None:
     assert [decision.allowed for decision in decisions] == [True] * 10 + [False]
 
 
-@pytest.mark.anyio
 async def test_store_rate_limiter_fails_closed_on_an_unreadable_counter() -> None:
     store = MemoryStore()
     limiter = accounts_module.StoreRateLimiter(store=store)
@@ -13359,7 +13109,6 @@ async def test_store_rate_limiter_fails_closed_on_an_unreadable_counter() -> Non
         await limiter.acquire(request)
 
 
-@pytest.mark.anyio
 async def test_store_rate_limiter_denies_when_either_bucket_is_exhausted() -> None:
     limiter = _memory_limiter()
     for _ in range(10):
@@ -13400,7 +13149,6 @@ def test_rate_limit_guard_digests_never_carry_the_identifier() -> None:
     assert digest != _guard(accounts_module.UnlimitedRateLimiter(), pepper=b"q" * 32).subject_digest("user@example.com")
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("limiter", [_RaisingLimiter(), _ScriptedLimiter(cast("Any", object()))])
 async def test_rate_limit_guard_fails_closed_when_the_limiter_is_unusable(limiter: object) -> None:
     outcome = await _guard(limiter).check("local.login", client_key="1.1.1.1")
@@ -13408,7 +13156,6 @@ async def test_rate_limit_guard_fails_closed_when_the_limiter_is_unusable(limite
     assert isinstance(outcome, VerificationUnavailable)
 
 
-@pytest.mark.anyio
 async def test_rate_limit_guard_reports_denials_and_emits_one_account_free_event() -> None:
     sink = _CollectingSink()
     guard = _guard(
@@ -13425,7 +13172,6 @@ async def test_rate_limit_guard_reports_denials_and_emits_one_account_free_event
     ]
 
 
-@pytest.mark.anyio
 async def test_rate_limit_guard_allows_and_passes_a_digested_subject() -> None:
     limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=True))
     guard = _guard(limiter)
@@ -13435,7 +13181,6 @@ async def test_rate_limit_guard_allows_and_passes_a_digested_subject() -> None:
     assert limiter.requests[0].client_key == "1.1.1.1"
 
 
-@pytest.mark.anyio
 async def test_rate_limit_guard_logs_unbuildable_denial_events_without_changing_the_denial(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -13450,7 +13195,6 @@ async def test_rate_limit_guard_logs_unbuildable_denial_events_without_changing_
     assert "Rate limit event could not be built" in caplog.text
 
 
-@pytest.mark.anyio
 async def test_rate_limit_guard_survives_a_failing_denial_sink(caplog: pytest.LogCaptureFixture) -> None:
     guard = _guard(
         _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=False, retry_after=1)), events=_FailingSink()
@@ -13493,7 +13237,6 @@ def test_password_login_service_validates_limiting_and_audit_ports(kwargs: dict[
         )
 
 
-@pytest.mark.anyio
 async def test_password_login_is_limited_before_any_password_work() -> None:
     hasher = _PasswordHasher()
     service = accounts_module.PasswordLoginService(
@@ -13506,7 +13249,6 @@ async def test_password_login_is_limited_before_any_password_work() -> None:
     assert hasher.calls == []
 
 
-@pytest.mark.anyio
 async def test_password_login_still_consumes_a_budget_for_an_unnormalizable_identifier() -> None:
     limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=True))
     service = accounts_module.PasswordLoginService(
@@ -13523,7 +13265,6 @@ async def test_password_login_still_consumes_a_budget_for_an_unnormalizable_iden
     assert limiter.requests[0].client_key == "1.1.1.1"
 
 
-@pytest.mark.anyio
 async def test_password_login_logs_unbuildable_decision_events_without_changing_the_decision(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -13537,7 +13278,6 @@ async def test_password_login_logs_unbuildable_decision_events_without_changing_
     assert "Security event could not be built for local.login" in caplog.text
 
 
-@pytest.mark.anyio
 async def test_password_login_emits_one_decision_event_per_outcome() -> None:
     sink = _CollectingSink()
     service = accounts_module.PasswordLoginService(
@@ -13558,7 +13298,6 @@ async def test_password_login_emits_one_decision_event_per_outcome() -> None:
     assert [event.outcome for event in sink.events] == ["verified", "attempted"]
 
 
-@pytest.mark.anyio
 async def test_registration_is_limited_before_hashing() -> None:
     hasher = _PasswordHasher()
     service = accounts_module.RegistrationService(
@@ -13575,7 +13314,6 @@ async def test_registration_is_limited_before_hashing() -> None:
     assert hasher.hash_calls == []
 
 
-@pytest.mark.anyio
 async def test_verification_resend_is_limited_and_reports_a_denial() -> None:
     store = _LifecycleStore()
     service = accounts_module.VerificationTokenService(
@@ -13588,7 +13326,6 @@ async def test_verification_resend_is_limited_and_reports_a_denial() -> None:
     assert await service.resend("user@example.com", now=_JWT_NOW) == accounts_module.RateLimited(retry_after=7)
 
 
-@pytest.mark.anyio
 async def test_verification_resend_consumes_a_budget_for_an_unnormalizable_identifier() -> None:
     limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=True))
     store = _LifecycleStore()
@@ -13604,7 +13341,6 @@ async def test_verification_resend_consumes_a_budget_for_an_unnormalizable_ident
     assert limiter.requests[0].subject_digest is None
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("family", ["verification", "recovery"])
 async def test_uniform_durable_write_cost_for_present_and_absent_identifiers(family: str) -> None:
     counts: dict[str, int] = {}
@@ -13625,7 +13361,6 @@ async def test_uniform_durable_write_cost_for_present_and_absent_identifiers(fam
     assert counts["present"] == counts["absent"] == 1
 
 
-@pytest.mark.anyio
 async def test_verification_consume_buckets_only_the_client_never_the_token() -> None:
     limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=False, retry_after=7))
     store = _LifecycleStore()
@@ -13645,7 +13380,6 @@ async def test_verification_consume_buckets_only_the_client_never_the_token() ->
     assert limiter.requests[0].subject_digest is None
 
 
-@pytest.mark.anyio
 async def test_generated_verification_confirm_reports_denials_with_the_client_bucket() -> None:
     captured: dict[str, object] = {}
 
@@ -13676,7 +13410,6 @@ async def test_generated_verification_confirm_reports_denials_with_the_client_bu
     assert captured["client_key"] == "1.1.1.1"
 
 
-@pytest.mark.anyio
 async def test_recovery_request_and_reset_are_limited() -> None:
     store = _LifecycleStore()
     codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
@@ -13689,7 +13422,6 @@ async def test_recovery_request_and_reset_are_limited() -> None:
     assert reset == accounts_module.RateLimited(retry_after=7)
 
 
-@pytest.mark.anyio
 async def test_recovery_request_consumes_a_budget_for_an_unnormalizable_identifier() -> None:
     limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=True))
     store = _LifecycleStore()
@@ -13706,7 +13438,6 @@ async def test_recovery_request_consumes_a_budget_for_an_unnormalizable_identifi
     assert limiter.requests[0].subject_digest is None
 
 
-@pytest.mark.anyio
 async def test_recovery_reset_buckets_only_the_client_never_the_token() -> None:
     limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=True))
     store = _LifecycleStore()
@@ -13724,7 +13455,6 @@ async def test_recovery_reset_buckets_only_the_client_never_the_token() -> None:
     assert limiter.requests[0].client_key == "1.1.1.1"
 
 
-@pytest.mark.anyio
 async def test_password_login_emits_an_attempt_event_for_a_known_account_with_a_wrong_password() -> None:
     sink = _CollectingSink()
     service = accounts_module.PasswordLoginService(
@@ -13742,7 +13472,6 @@ async def test_password_login_emits_an_attempt_event_for_a_known_account_with_a_
     assert [(event.outcome, event.account_id) for event in sink.events] == [("attempted", "account-1")]
 
 
-@pytest.mark.anyio
 async def test_refresh_rotation_is_limited_by_client_only() -> None:
     limiter = _ScriptedLimiter(accounts_module.RateLimitDecision(allowed=False, retry_after=7))
     service, _store, _accounts, _account = _refresh_service()
@@ -13769,7 +13498,6 @@ def test_route_errors_map_denials_to_429_with_a_retry_hint() -> None:
     assert not unhinted_info.value.headers or "Retry-After" not in unhinted_info.value.headers
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("handler_name", ["recovery", "verification"])
 async def test_generated_lifecycle_handlers_report_denials_instead_of_the_shared_accepted_response(
     handler_name: str,
@@ -13800,7 +13528,6 @@ async def test_generated_lifecycle_handlers_report_denials_instead_of_the_shared
     assert error.headers["Retry-After"] == "7"
 
 
-@pytest.mark.anyio
 async def test_aesgcm_oauth_transaction_protector_round_trips_bound_transaction_secrets() -> None:
     protector = AESGCMOAuthTransactionProtector(active_key=OAuthTransactionProtectorKey("v1", b"k" * 32))
     associated_data = b"transaction=1|purpose=pkce"
@@ -13840,7 +13567,6 @@ async def test_aesgcm_oauth_transaction_protector_round_trips_bound_transaction_
     )
 
 
-@pytest.mark.anyio
 async def test_aesgcm_secret_protectors_reject_invalid_configuration_entropy_and_envelopes() -> None:
     """Versioned AES-GCM protectors reject malformed material before decrypting it."""
     mfa_key = accounts_module.SecretProtectorKey("v1", b"m" * 32)

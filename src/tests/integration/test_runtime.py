@@ -311,7 +311,6 @@ class _WebSocketRouteHandler(_RouteHandler):
             raise self.authorization_error
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("scope_type", ["http", "websocket"])
 async def test_anonymous_http_and_websocket_always_receive_typed_scope(scope_type: str) -> None:
     observed: list[Scope] = []
@@ -327,7 +326,6 @@ async def test_anonymous_http_and_websocket_always_receive_typed_scope(scope_typ
     assert isinstance(observed[0]["auth"], SecurityContext)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("scope_type", ["http", "websocket"])
 async def test_authenticated_http_and_websocket_replace_anonymous_scope(scope_type: str) -> None:
     observed: list[Scope] = []
@@ -350,7 +348,6 @@ async def test_authenticated_http_and_websocket_replace_anonymous_scope(scope_ty
     assert authenticator.calls == 1
 
 
-@pytest.mark.anyio
 async def test_explicit_bypass_initializes_scope_without_extracting() -> None:
     observed: list[Scope] = []
     config, slot, _ = _runtime(InvalidCredentials())
@@ -367,7 +364,6 @@ async def test_explicit_bypass_initializes_scope_without_extracting() -> None:
     assert slot.calls == 0
 
 
-@pytest.mark.anyio
 async def test_generated_options_initializes_scope_without_extracting() -> None:
     observed: list[Scope] = []
     config, slot, _ = _runtime(InvalidCredentials())
@@ -392,7 +388,6 @@ async def test_generated_options_initializes_scope_without_extracting() -> None:
     assert slot.calls == 0
 
 
-@pytest.mark.anyio
 async def test_lookalike_options_handler_is_authenticated_not_bypassed() -> None:
     config, slot, _ = _runtime(InvalidCredentials())
 
@@ -415,7 +410,6 @@ async def test_lookalike_options_handler_is_authenticated_not_bypassed() -> None
     assert slot.calls == 1
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("outcome", "status_code", "exception_name"),
     [
@@ -462,7 +456,6 @@ async def test_native_exception_dispatch_and_hooks_observe_anonymous_scope(
     assert isinstance(hook_observations[0][1], SecurityContext)
 
 
-@pytest.mark.anyio
 async def test_owned_native_session_loads_before_security_and_persists_through_401() -> None:
     backend = _MemorySessionBackend()
     owned_session = OwnedSessionBackend(
@@ -500,7 +493,6 @@ async def test_owned_native_session_loads_before_security_and_persists_through_4
     assert persisted.json() == {"failure_seen": True}
 
 
-@pytest.mark.anyio
 async def test_wrapper_runtime_order_and_native_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
     builds = 0
@@ -1149,7 +1141,6 @@ def _verified_route_accounts(password: str) -> _GeneratedRouteAccounts:
     )
 
 
-@pytest.mark.anyio
 async def test_local_access_token_runtime_enforces_scope_account_and_epoch(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -1489,7 +1480,6 @@ def test_generated_token_routes_register_verify_login_refresh_and_revoke(
     assert any(state.revoked for state in accounts.refresh_tokens.values())
 
 
-@pytest.mark.anyio
 async def test_generated_session_login_requires_and_completes_mfa() -> None:
     password = "initial password 123"  # noqa: S105 - test-only credential
     accounts = _verified_route_accounts(password)
@@ -1553,7 +1543,6 @@ async def test_generated_session_login_requires_and_completes_mfa() -> None:
     assert sessions.status_code == 200
 
 
-@pytest.mark.anyio
 async def test_generated_token_login_requires_and_completes_mfa(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -1597,7 +1586,6 @@ async def test_generated_token_login_requires_and_completes_mfa(
     assert {"access_token", "refresh_token"} <= completed.json().keys()
 
 
-@pytest.mark.anyio
 async def test_require_at_login_false_preserves_unchallenged_token_login(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -1628,7 +1616,6 @@ async def test_require_at_login_false_preserves_unchallenged_token_login(
     assert completion.status_code == 404
 
 
-@pytest.mark.anyio
 async def test_require_at_login_false_preserves_unchallenged_session_login() -> None:
     password = "initial password 123"  # noqa: S105 - test-only credential
     accounts = _verified_route_accounts(password)
@@ -1870,7 +1857,6 @@ def test_websocket_native_guard_denial_closes_before_handler_and_di() -> None:
     assert events == []
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("scope_changes", "websocket_config", "expected_code", "expected_reason"),
     [
@@ -1914,7 +1900,6 @@ async def test_websocket_transport_failures_are_mapped_before_application(
     assert app_called is False
 
 
-@pytest.mark.anyio
 async def test_websocket_revocation_hook_receives_secret_free_session_binding() -> None:
     observed: list[object] = []
     success = Authenticated(
@@ -1948,7 +1933,6 @@ async def test_websocket_revocation_hook_receives_secret_free_session_binding() 
     assert messages == [{"type": "websocket.close", "code": 4401, "reason": "credential_revoked"}]
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("snapshot", "expected_message", "guards_present"),
     [
@@ -2009,7 +1993,6 @@ async def test_websocket_authorization_refresh_replaces_snapshot_and_rechecks_gu
         assert route_handler.authorization_calls == int(guards_present)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("error", [NotAuthorizedException(), PermissionDeniedException()])
 async def test_websocket_handler_authorization_exceptions_map_to_4403(error: Exception) -> None:
     async def app(_scope: Scope, _receive: Receive, _send: Send) -> None:
@@ -2043,7 +2026,6 @@ def _runtime_connect_token_record() -> WebSocketConnectTokenRecord:
     )
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_token_merge_requires_the_same_authenticated_subject() -> None:
     runtime, _, _ = _runtime()
 
@@ -2069,7 +2051,6 @@ async def test_websocket_connect_token_merge_requires_the_same_authenticated_sub
         )
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("resolution", "expected_error"),
     [
@@ -2109,7 +2090,6 @@ async def test_anonymous_websocket_connect_token_uses_authorization_resolver(
     assert merged.authorization.scopes == frozenset({"reports:read"})
 
 
-@pytest.mark.anyio
 async def test_public_websocket_and_http_install_the_same_anonymous_context_with_async_client() -> None:
     observed: list[tuple[Principal[object], SecurityContext]] = []
 
@@ -2282,7 +2262,6 @@ def test_websocket_message_loop_performs_security_work_once() -> None:
     assert (slot.calls, authenticator.calls, resolver.calls) == (1, 1, 1)
 
 
-@pytest.mark.anyio
 async def test_matching_one_time_connect_token_authenticates_cross_origin_websocket_once() -> None:
     store = InMemoryWebSocketConnectTokenStore()
     slot = _Slot(NoCredentials())
@@ -2355,7 +2334,6 @@ async def test_matching_one_time_connect_token_authenticates_cross_origin_websoc
     assert replay.value.code == 4401
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_tokens_dependency_mints_by_route_name_end_to_end() -> None:
     store = InMemoryWebSocketConnectTokenStore()
     slot = _Slot(PresentedCredential("subject-1"))

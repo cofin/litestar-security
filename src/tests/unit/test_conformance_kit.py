@@ -1556,7 +1556,6 @@ class _BrokenRefreshStore:
         return await self.delegate.revoke_for_account(account_id, event=event)
 
 
-@pytest.mark.anyio
 async def test_single_winner_counts_only_successful_contenders() -> None:
     release = Event()
     started = 0
@@ -1576,33 +1575,28 @@ async def test_single_winner_counts_only_successful_contenders() -> None:
         assert await _single_winner((contender(outcome=True), contender(outcome=False), contender(outcome=True))) == 2
 
 
-@pytest.mark.anyio
 async def test_api_key_conformance_accepts_the_reference_store_in_isolation() -> None:
     await assert_api_key_store_conformance(lambda: InMemorySecurityBackend(clock=lambda: _NOW).api_keys)
 
 
-@pytest.mark.anyio
 async def test_secret_protector_conformance_accepts_the_reference_protector() -> None:
     await assert_secret_protector_conformance(
         lambda: AESGCMSecretProtector(active_key=SecretProtectorKey("v1", b"s" * 32))
     )
 
 
-@pytest.mark.anyio
 async def test_oauth_transaction_protector_conformance_accepts_the_reference_protector() -> None:
     await assert_oauth_transaction_protector_conformance(
         lambda: AESGCMOAuthTransactionProtector(active_key=OAuthTransactionProtectorKey("v1", b"o" * 32))
     )
 
 
-@pytest.mark.anyio
 async def test_oauth_transaction_protector_conformance_rejects_deterministic_protection() -> None:
     deterministic_protector = testing_module._DeterministicProtector  # noqa: SLF001  # pyright: ignore[reportPrivateUsage] - required private deterministic fixture
     with pytest.raises(AssertionError, match="non-determinism"):
         await assert_oauth_transaction_protector_conformance(deterministic_protector)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("factory", "invariant"),
     [
@@ -1618,13 +1612,11 @@ async def test_oauth_transaction_protector_conformance_names_the_remaining_invar
         await assert_oauth_transaction_protector_conformance(factory)
 
 
-@pytest.mark.anyio
 async def test_secret_protector_conformance_rejects_ignored_associated_data() -> None:
     with pytest.raises(AssertionError, match="associated data"):
         await assert_secret_protector_conformance(_AADIgnoringSecretProtector)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("factory", "invariant"),
     [
@@ -1640,12 +1632,10 @@ async def test_secret_protector_conformance_names_the_remaining_invariants(
         await assert_secret_protector_conformance(factory)
 
 
-@pytest.mark.anyio
 async def test_local_account_store_conformance_accepts_the_reference_store_in_isolation() -> None:
     await assert_local_account_store_conformance(lambda: InMemorySecurityBackend(clock=lambda: _NOW).accounts)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("toggle", "invariant"),
     [
@@ -1676,7 +1666,6 @@ async def test_local_account_store_conformance_names_each_broken_invariant(toggl
         await assert_local_account_store_conformance(factory)
 
 
-@pytest.mark.anyio
 async def test_local_account_store_conformance_names_partial_registration_exceptions() -> None:
     def factory() -> _BrokenAccountStore:
         return _BrokenAccountStore(
@@ -1687,7 +1676,6 @@ async def test_local_account_store_conformance_names_partial_registration_except
         await assert_local_account_store_conformance(factory)
 
 
-@pytest.mark.anyio
 async def test_local_account_store_conformance_detects_a_yielding_password_lost_update() -> None:
     def factory() -> _YieldingPasswordCASStore:
         return _YieldingPasswordCASStore(InMemorySecurityBackend(clock=lambda: _NOW).accounts)
@@ -1698,7 +1686,6 @@ async def test_local_account_store_conformance_detects_a_yielding_password_lost_
         await assert_local_account_store_conformance(factory)
 
 
-@pytest.mark.anyio
 async def test_local_account_store_conformance_detects_a_yielding_registration_lost_update() -> None:
     def factory() -> _YieldingRegistrationStore:
         return _YieldingRegistrationStore(InMemorySecurityBackend(clock=lambda: _NOW).accounts)
@@ -1707,7 +1694,6 @@ async def test_local_account_store_conformance_detects_a_yielding_registration_l
         await assert_local_account_store_conformance(factory)
 
 
-@pytest.mark.anyio
 async def test_local_account_store_conformance_detects_a_yielding_epoch_lost_update() -> None:
     def factory() -> _YieldingEpochBumpStore:
         return _YieldingEpochBumpStore(InMemorySecurityBackend(clock=lambda: _NOW).accounts)
@@ -1718,7 +1704,6 @@ async def test_local_account_store_conformance_detects_a_yielding_epoch_lost_upd
         await assert_local_account_store_conformance(factory)
 
 
-@pytest.mark.anyio
 async def test_local_account_store_conformance_names_shared_factory_state() -> None:
     shared = InMemorySecurityBackend(clock=lambda: _NOW).accounts
 
@@ -1726,7 +1711,6 @@ async def test_local_account_store_conformance_names_shared_factory_state() -> N
         await assert_local_account_store_conformance(lambda: shared)
 
 
-@pytest.mark.anyio
 async def test_local_account_store_conformance_detects_distinct_wrappers_over_shared_storage() -> None:
     shared = InMemorySecurityBackend(clock=lambda: _NOW).accounts
 
@@ -1734,7 +1718,6 @@ async def test_local_account_store_conformance_detects_distinct_wrappers_over_sh
         await assert_local_account_store_conformance(lambda: _BrokenAccountStore(shared))
 
 
-@pytest.mark.anyio
 async def test_api_key_conformance_names_a_non_atomic_rotation_invariant() -> None:
     @dataclass
     class BrokenStore:
@@ -1760,14 +1743,12 @@ async def test_api_key_conformance_names_a_non_atomic_rotation_invariant() -> No
         await assert_api_key_store_conformance(lambda: BrokenStore({}))
 
 
-@pytest.mark.anyio
 async def test_session_registry_conformance_accepts_the_reference_store_in_isolation() -> None:
     await assert_session_registry_conformance(
         lambda: InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW).accounts, now=_CONFORMANCE_NOW
     )
 
 
-@pytest.mark.anyio
 async def test_session_registry_conformance_rejects_a_shared_factory_instance() -> None:
     shared = InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW).accounts
 
@@ -1775,14 +1756,12 @@ async def test_session_registry_conformance_rejects_a_shared_factory_instance() 
         await assert_session_registry_conformance(lambda: shared, now=_CONFORMANCE_NOW)
 
 
-@pytest.mark.anyio
 async def test_session_registry_conformance_rejects_distinct_wrappers_over_shared_storage() -> None:
     shared = InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW).accounts
     with pytest.raises(AssertionError, match=r"SessionRegistry factory isolation invariant"):
         await assert_session_registry_conformance(lambda: _BrokenSessionStore(shared), now=_CONFORMANCE_NOW)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("toggle", "invariant"),
     [
@@ -1805,7 +1784,6 @@ async def test_session_registry_conformance_names_each_broken_invariant(toggle: 
         await assert_session_registry_conformance(factory, now=_CONFORMANCE_NOW)
 
 
-@pytest.mark.anyio
 async def test_session_registry_conformance_detects_a_yielding_rebind_lost_update() -> None:
     with pytest.raises(AssertionError, match=r"SessionRegistry\.rebind atomicity invariant"):
         await assert_session_registry_conformance(
@@ -1814,12 +1792,10 @@ async def test_session_registry_conformance_detects_a_yielding_rebind_lost_updat
         )
 
 
-@pytest.mark.anyio
 async def test_refresh_family_store_conformance_accepts_the_reference_store_in_isolation() -> None:
     await assert_refresh_family_store_conformance(lambda: InMemorySecurityBackend(clock=lambda: _NOW).accounts)
 
 
-@pytest.mark.anyio
 async def test_refresh_family_store_conformance_rejects_a_shared_factory_instance() -> None:
     shared = _BrokenRefreshStore(InMemorySecurityBackend(clock=lambda: _NOW).accounts)
 
@@ -1827,7 +1803,6 @@ async def test_refresh_family_store_conformance_rejects_a_shared_factory_instanc
         await assert_refresh_family_store_conformance(lambda: shared)
 
 
-@pytest.mark.anyio
 async def test_refresh_family_store_conformance_rejects_distinct_wrappers_over_shared_storage() -> None:
     shared = InMemorySecurityBackend(clock=lambda: _NOW).accounts
 
@@ -1835,7 +1810,6 @@ async def test_refresh_family_store_conformance_rejects_distinct_wrappers_over_s
         await assert_refresh_family_store_conformance(lambda: _BrokenRefreshStore(shared))
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("toggle", "invariant"),
     [
@@ -1860,7 +1834,6 @@ async def test_refresh_family_store_conformance_names_each_broken_invariant(togg
         await assert_refresh_family_store_conformance(factory)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("attribute", "value", "invariant"),
     [
@@ -1894,13 +1867,11 @@ async def test_refresh_family_store_conformance_names_setup_and_exact_state_inva
         await assert_refresh_family_store_conformance(factory)
 
 
-@pytest.mark.anyio
 async def test_mfa_store_conformance_rejects_a_non_monotonic_store() -> None:
     with pytest.raises(AssertionError, match="monotonicity invariant"):
         await assert_mfa_store_conformance(_BrokenMFAStore)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("factory", "invariant"),
     [
@@ -1916,19 +1887,16 @@ async def test_mfa_store_conformance_names_atomic_invariants(
         await assert_mfa_store_conformance(factory)
 
 
-@pytest.mark.anyio
 async def test_mfa_store_conformance_names_activation_setup_invariant() -> None:
     with pytest.raises(AssertionError, match=r"MFAStore setup invariant"):
         await assert_mfa_store_conformance(_RejectingMFAActivationStore)
 
 
-@pytest.mark.anyio
 async def test_mfa_login_challenge_conformance_rejects_an_unburned_binding() -> None:
     with pytest.raises(AssertionError, match="account-binding burn invariant"):
         await assert_mfa_login_challenge_store_conformance(_BrokenMFALoginChallengeStore)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("factory", "invariant"),
     [
@@ -1947,13 +1915,11 @@ async def test_mfa_login_challenge_conformance_names_rejected_value_invariants(
         await assert_mfa_login_challenge_store_conformance(factory)
 
 
-@pytest.mark.anyio
 async def test_webauthn_challenge_conformance_rejects_an_unburned_binding() -> None:
     with pytest.raises(AssertionError, match="binding burn invariant"):
         await assert_webauthn_challenge_store_conformance(_BrokenWebAuthnChallengeStore)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("factory", "invariant"),
     [
@@ -1971,13 +1937,11 @@ async def test_webauthn_challenge_conformance_names_rejected_value_invariants(
         await assert_webauthn_challenge_store_conformance(factory)
 
 
-@pytest.mark.anyio
 async def test_oauth_transaction_conformance_rejects_a_provider_blind_store() -> None:
     with pytest.raises(AssertionError, match="provider invariant"):
         await assert_oauth_transaction_store_conformance(_BrokenOAuthTransactionStore)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("failure", "invariant"),
     [
@@ -1993,13 +1957,11 @@ async def test_oauth_transaction_conformance_names_each_remaining_invariant(fail
         await assert_oauth_transaction_store_conformance(lambda: _ConfigurableOAuthTransactionStore(failure))
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_token_conformance_rejects_digest_burn() -> None:
     with pytest.raises(AssertionError, match="digest preservation invariant"):
         await assert_websocket_connect_token_store_conformance(_BrokenWebSocketConnectTokenStore)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("failure", "invariant"),
     [
@@ -2013,13 +1975,11 @@ async def test_websocket_connect_token_conformance_names_lookup_invariants(failu
         await assert_websocket_connect_token_store_conformance(lambda: _ConfigurableConnectTokenStore(failure))
 
 
-@pytest.mark.anyio
 async def test_passkey_conformance_rejects_unpersisted_assertion_state() -> None:
     with pytest.raises(AssertionError, match="state invariant"):
         await assert_passkey_store_conformance(_BrokenPasskeyStore)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("store", "invariant"),
     [
@@ -2034,7 +1994,6 @@ async def test_passkey_conformance_names_setup_and_atomicity_invariants(
         await assert_passkey_store_conformance(store)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("store", "invariant"),
     [
@@ -2049,13 +2008,11 @@ async def test_passkey_conformance_names_clone_risk_invariants(
         await assert_passkey_store_conformance(store)
 
 
-@pytest.mark.anyio
 async def test_oauth_account_conformance_rejects_final_identity_removal() -> None:
     with pytest.raises(AssertionError, match="final-method invariant"):
         await assert_oauth_account_store_conformance(_BrokenOAuthAccountStore)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("store", "invariant"),
     [
@@ -2087,12 +2044,10 @@ def _oidc_logout_store(
     )
 
 
-@pytest.mark.anyio
 async def test_oidc_session_logout_store_conformance_accepts_seeded_reference_store() -> None:
     await assert_oidc_session_logout_store_conformance(_oidc_logout_store)
 
 
-@pytest.mark.anyio
 async def test_oidc_session_logout_store_conformance_rejects_replay_and_wrong_binding() -> None:
     with pytest.raises(AssertionError, match=r"OIDCSessionLogoutStore\.consume_backchannel replay invariant"):
         await assert_oidc_session_logout_store_conformance(lambda: _oidc_logout_store(_BrokenOIDCReplayStore))
@@ -2100,7 +2055,6 @@ async def test_oidc_session_logout_store_conformance_rejects_replay_and_wrong_bi
         await assert_oidc_session_logout_store_conformance(lambda: _oidc_logout_store(_BrokenOIDCBindingStore))
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("store_type", "invariant"),
     [
@@ -2117,7 +2071,6 @@ async def test_oidc_session_logout_store_conformance_names_each_remaining_invari
         await assert_oidc_session_logout_store_conformance(lambda: _oidc_logout_store(store_type))
 
 
-@pytest.mark.anyio
 async def test_oidc_session_logout_store_allows_exactly_one_backchannel_contender() -> None:
     store = _oidc_logout_store()
     identity = OIDCLogoutIdentity(
@@ -2141,7 +2094,6 @@ async def test_oidc_session_logout_store_allows_exactly_one_backchannel_contende
     assert outcomes.count(None) == 1
 
 
-@pytest.mark.anyio
 async def test_oidc_reference_frontchannel_handles_missing_and_already_revoked_mappings() -> None:
     missing = testing_module.InMemoryOIDCSessionLogoutStore(
         session_mappings=(), frontchannel_bindings={("provider", "https://issuer.example", "session"): "binding"}
@@ -2175,25 +2127,21 @@ async def test_oidc_reference_frontchannel_handles_missing_and_already_revoked_m
     )
 
 
-@pytest.mark.anyio
 async def test_step_up_store_conformance_accepts_the_reference_store() -> None:
     await assert_step_up_store_conformance(testing_module.InMemoryStepUpStore)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("binding", ["principal", "epoch", "purpose", "transport", "expiry"])
 async def test_step_up_store_conformance_names_each_bound_value(binding: str) -> None:
     with pytest.raises(AssertionError, match=rf"StepUpStore\.consume {binding} invariant"):
         await assert_step_up_store_conformance(lambda: _BrokenStepUpStore(ignored_binding=binding))
 
 
-@pytest.mark.anyio
 async def test_step_up_store_conformance_detects_yielding_double_consume() -> None:
     with pytest.raises(AssertionError, match=r"StepUpStore\.consume atomicity invariant"):
         await assert_step_up_store_conformance(_YieldingStepUpStore)
 
 
-@pytest.mark.anyio
 async def test_step_up_store_conformance_detects_a_replayed_grant() -> None:
     with pytest.raises(AssertionError, match=r"StepUpStore\.consume replay invariant"):
         await assert_step_up_store_conformance(_ReplayStepUpStore)
@@ -2205,12 +2153,10 @@ def _token_vault() -> MemoryTokenVault:
     )
 
 
-@pytest.mark.anyio
 async def test_token_vault_conformance_accepts_the_reference_vault() -> None:
     await assert_token_vault_conformance(_token_vault)
 
 
-@pytest.mark.anyio
 async def test_token_vault_conformance_rejects_stale_cas_success() -> None:
     with pytest.raises(AssertionError, match=r"TokenVault\.replace stale-CAS invariant"):
         await assert_token_vault_conformance(
@@ -2222,7 +2168,6 @@ async def test_token_vault_conformance_rejects_stale_cas_success() -> None:
         )
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("factory", "invariant"),
     [
@@ -2283,7 +2228,6 @@ async def test_token_vault_conformance_names_each_remaining_invariant(
         await assert_token_vault_conformance(factory)
 
 
-@pytest.mark.anyio
 async def test_token_vault_conformance_rejects_factory_state_leakage() -> None:
     shared = _token_vault()
     await shared.put(
@@ -2302,7 +2246,6 @@ async def test_token_vault_conformance_rejects_factory_state_leakage() -> None:
         await assert_token_vault_conformance(lambda: shared)
 
 
-@pytest.mark.anyio
 async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # noqa: C901 - one complete dispatch matrix
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2474,7 +2417,6 @@ def test_testing_surface_is_explicit_and_stable() -> None:
     )
 
 
-@pytest.mark.anyio
 async def test_rate_limiter_conformance_accepts_the_reference_limiter() -> None:
     await assert_rate_limiter_conformance(
         lambda limit: StoreRateLimiter(
@@ -2484,14 +2426,12 @@ async def test_rate_limiter_conformance_accepts_the_reference_limiter() -> None:
     )
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("limiter", [_NonAtomicLimiter, _UnderAdmittingLimiter])
 async def test_rate_limiter_conformance_names_exact_admission_invariant(limiter: Callable[[int], RateLimiter]) -> None:
     with pytest.raises(AssertionError, match=r"RateLimiter\.acquire atomicity invariant: .*admit exactly k"):
         await assert_rate_limiter_conformance(limiter)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(("limit", "concurrency"), [(0, 20), (5, 0), (5, 4), (True, 20), (5, True)])
 async def test_rate_limiter_conformance_rejects_invalid_scenario_bounds(limit: object, concurrency: object) -> None:
     with pytest.raises(ValueError, match="conformance"):
@@ -2505,7 +2445,6 @@ async def test_rate_limiter_conformance_rejects_invalid_scenario_bounds(limit: o
         )
 
 
-@pytest.mark.anyio
 async def test_remaining_reference_store_conformance() -> None:
     await assert_mfa_store_conformance(testing_module.InMemoryMFAStore)
     await assert_mfa_login_challenge_store_conformance(testing_module.InMemoryMFALoginChallengeStore)
@@ -2520,13 +2459,11 @@ async def test_remaining_reference_store_conformance() -> None:
     await assert_token_vault_conformance(_token_vault)
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_token_conformance_detects_yielding_double_consume() -> None:
     with pytest.raises(AssertionError, match="atomicity invariant"):
         await assert_websocket_connect_token_store_conformance(_YieldingConnectTokenStore)
 
 
-@pytest.mark.anyio
 async def test_conformance_detects_shared_factory_state() -> None:
     shared = _ControlledStore({})
 
@@ -2534,7 +2471,6 @@ async def test_conformance_detects_shared_factory_state() -> None:
         await assert_api_key_store_conformance(lambda: shared)
 
 
-@pytest.mark.anyio
 async def test_conformance_detects_non_isolated_factory_storage() -> None:
     shared_records: dict[str, APIKeyRecord] = {}
 
@@ -2542,7 +2478,6 @@ async def test_conformance_detects_non_isolated_factory_storage() -> None:
         await assert_api_key_store_conformance(lambda: _ControlledStore(shared_records))
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("persist_successor", "revoke_current", "invariant"),
     [(False, True, "partial-write invariant"), (True, False, "current-state invariant")],
@@ -2558,6 +2493,5 @@ async def test_conformance_detects_partial_rotation_states(
         )
 
 
-@pytest.mark.anyio
 async def test_empty_aggregate_conformance_requires_no_unrelated_store() -> None:
     await assert_security_backend_conformance(StoreConformanceFactories())

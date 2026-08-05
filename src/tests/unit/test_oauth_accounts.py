@@ -252,7 +252,6 @@ def test_account_service_rejects_invalid_ports(kwargs: dict[str, object]) -> Non
         OAuthAccountService(**kwargs)  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_exact_lookup_cross_account_link_and_atomic_final_unlink() -> None:
     store = MemoryOAuthAccountStore(login_method_counts={"account-1": 1, "account-2": 1})
     linked = await store.link_identity("account-1", identity(), grant(), now=NOW)
@@ -280,7 +279,6 @@ async def test_exact_lookup_cross_account_link_and_atomic_final_unlink() -> None
     assert (await only_provider.resolve_login(identity())).linked == final
 
 
-@pytest.mark.anyio
 async def test_simultaneous_oauth_unlink_has_one_atomic_winner() -> None:
     store = MemoryOAuthAccountStore(login_method_counts={"account-1": 2})
     linked = await store.link_identity("account-1", identity(), grant(), now=NOW)
@@ -293,7 +291,6 @@ async def test_simultaneous_oauth_unlink_has_one_atomic_winner() -> None:
     assert {result.status for result in results} == {UnlinkStatus.UNLINKED, UnlinkStatus.NOT_FOUND}
 
 
-@pytest.mark.anyio
 async def test_account_store_rejects_invalid_inputs_and_missing_grant_target() -> None:
     store = MemoryOAuthAccountStore()
     naive = NOW.replace(tzinfo=None)
@@ -312,7 +309,6 @@ async def test_account_store_rejects_invalid_inputs_and_missing_grant_target() -
         await store.resolve_provider_account("", "example")
 
 
-@pytest.mark.anyio
 async def test_account_store_rejects_ambiguous_provider_account_resolution() -> None:
     store = MemoryOAuthAccountStore(login_method_counts={"account-1": 2})
     await store.link_identity("account-1", identity(subject="one"), grant(), now=NOW)
@@ -322,7 +318,6 @@ async def test_account_store_rejects_ambiguous_provider_account_resolution() -> 
         await store.resolve_provider_account("account-1", "example")
 
 
-@pytest.mark.anyio
 async def test_unknown_login_requires_explicit_provision_and_no_vault_discards_tokens() -> None:
     store = MemoryOAuthAccountStore(login_method_counts={"account-1": 1})
     denied = OAuthAccountService(store=store)
@@ -344,7 +339,6 @@ async def test_unknown_login_requires_explicit_provision_and_no_vault_discards_t
     assert service.vault is None
 
 
-@pytest.mark.anyio
 async def test_existing_login_link_unlink_and_scope_upgrade_use_vault() -> None:
     store = MemoryOAuthAccountStore(login_method_counts={"account-1": 1})
     vault = MemoryTokenVault(provider="example", client_id="client", protector=ReversingProtector())
@@ -377,7 +371,6 @@ async def test_existing_login_link_unlink_and_scope_upgrade_use_vault() -> None:
     assert await vault.get_for_refresh(linked.provider_account_id, now=NOW) is None
 
 
-@pytest.mark.anyio
 async def test_link_with_vault_and_scope_upgrade_failures() -> None:
     store = MemoryOAuthAccountStore(login_method_counts={"account-1": 1})
     vault = MemoryTokenVault(provider="example", client_id="client", protector=ReversingProtector())
@@ -400,7 +393,6 @@ async def test_link_with_vault_and_scope_upgrade_failures() -> None:
     ).status is UnlinkStatus.UNLINKED
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     "invalid_proof",
     [
@@ -417,7 +409,6 @@ async def test_link_rejects_stale_or_wrong_step_up(invalid_proof: OAuthLinkProof
         await service.link(invalid_proof, identity(), grant(), tokens(), now=NOW)
 
 
-@pytest.mark.anyio
 async def test_encrypted_vault_round_trip_version_and_cas() -> None:
     protector = ReversingProtector()
     vault = MemoryTokenVault(provider="example", client_id="client", protector=protector)
@@ -442,7 +433,6 @@ async def test_encrypted_vault_round_trip_version_and_cas() -> None:
     assert await vault.get_for_refresh("provider-account", now=NOW) is None
 
 
-@pytest.mark.anyio
 async def test_vault_rejects_invalid_inputs_and_classifies_protector_failures() -> None:
     vault = MemoryTokenVault(provider="example", client_id="client", protector=ReversingProtector())
     naive = NOW.replace(tzinfo=None)
@@ -466,7 +456,6 @@ async def test_vault_rejects_invalid_inputs_and_classifies_protector_failures() 
     assert captured.value.code == "oauth_vault_unavailable"
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     "decoded",
     [b"[]", b'{"access_token":"a","token_type":"Bearer","scopes":"profile","expires_at":"2026-07-28T18:00:00+00:00"}'],
@@ -536,7 +525,6 @@ class RefreshProvider:
             raise RuntimeError
 
 
-@pytest.mark.anyio
 async def test_refresh_is_single_flight_and_invalid_grant_deletes_vault() -> None:
     vault = MemoryTokenVault(provider="example", client_id="client", protector=ReversingProtector())
     await vault.put("provider-account", tokens(), now=NOW)
@@ -559,7 +547,6 @@ async def test_refresh_is_single_flight_and_invalid_grant_deletes_vault() -> Non
     assert await vault.get_for_refresh("provider-account", now=NOW) is None
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("vault", "code"),
     [
@@ -576,7 +563,6 @@ async def test_refresh_classifies_external_vault_races(vault: RefreshRaceVault, 
     assert captured.value.code == code
 
 
-@pytest.mark.anyio
 async def test_refresh_without_retention_or_refresh_token_and_revoke_cleanup() -> None:
     provider = RefreshProvider()
     without_vault = OAuthAccountService(store=MemoryOAuthAccountStore())
@@ -601,7 +587,6 @@ async def test_refresh_without_retention_or_refresh_token_and_revoke_cleanup() -
     await service.revoke("provider-account", provider, now=NOW)
 
 
-@pytest.mark.anyio
 async def test_revoke_attempts_every_token_and_schedules_secret_retry_before_local_delete() -> None:
     vault = MemoryTokenVault(provider="example", client_id="client", protector=ReversingProtector())
     retries = RevocationRetries()
@@ -621,7 +606,6 @@ async def test_revoke_attempts_every_token_and_schedules_secret_retry_before_loc
     assert await vault.get_for_refresh("provider-account", now=NOW) is None
 
 
-@pytest.mark.anyio
 async def test_in_memory_revocation_retry_store_encrypts_secret_material_and_replaces_metadata() -> None:
     protector = BoundRecordingProtector()
     retries = InMemoryOAuthRevocationRetryStore(protector)
@@ -648,7 +632,6 @@ async def test_in_memory_revocation_retry_store_encrypts_secret_material_and_rep
         retries.failures["other-account"] = first  # type: ignore[index]  # proves inspection is immutable
 
 
-@pytest.mark.anyio
 async def test_revocation_retry_store_rejects_invalid_input_and_retains_metadata_on_encryption_failure() -> None:
     with pytest.raises(ImproperlyConfiguredException, match="retry store configuration"):
         InMemoryOAuthRevocationRetryStore(object())  # type: ignore[arg-type]
@@ -670,7 +653,6 @@ async def test_revocation_retry_store_rejects_invalid_input_and_retains_metadata
     assert dict(retries.failures) == {"provider-account": original}
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("retries", [None, BrokenRevocationRetries()])
 async def test_revoke_retains_vault_when_retry_persistence_is_unavailable(retries: object | None) -> None:
     vault = MemoryTokenVault(provider="example", client_id="client", protector=ReversingProtector())
@@ -688,7 +670,6 @@ async def test_revoke_retains_vault_when_retry_persistence_is_unavailable(retrie
     assert await vault.get_for_refresh("provider-account", now=NOW) is not None
 
 
-@pytest.mark.anyio
 async def test_public_oauth_conformance_fakes_record_calls_and_http() -> None:
     fake = FakeOAuthProvider(name="example", tokens=tokens(), identity=identity())
     tx = transaction()

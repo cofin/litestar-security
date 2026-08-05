@@ -150,6 +150,10 @@ dev = [
 ###########
 [tool.pytest.ini_options]
 addopts = ["-ra", "--strict-config", "--strict-markers", "-m", "not performance"]
+# Every coroutine test in this suite runs on anyio, against the single backend
+# the session-scoped anyio_backend fixture pins. Auto mode makes that the
+# default so a new async test cannot be silently skipped for want of a marker.
+anyio_mode = "auto"
 markers = ["performance: deterministic local regression gates excluded from the normal suite"]
 norecursedirs = [".hypothesis", "src/tests/fixtures"]
 pythonpath = ["."]

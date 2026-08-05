@@ -207,7 +207,6 @@ def test_security_headers_reject_application_ownership_collisions() -> None:
         )
 
 
-@pytest.mark.anyio
 async def test_nonce_csp_hook_is_idempotent_and_replaces_response_conflicts() -> None:
     plugin = SecurityPlugin[object](
         SecurityConfig[object](
@@ -1578,7 +1577,6 @@ def test_plugin_mfa_route_registration_validates_ownership_and_is_idempotent() -
     assert len(app_config.route_handlers) == 1
 
 
-@pytest.mark.anyio
 async def test_plugin_binds_login_mfa_before_local_route_caching_and_gates_password_login() -> None:
     """The MFA-login service is installed before generated local routes can cache."""
     mfa_store, protector, _passkey_store, _challenge_store = _feature_test_ports()

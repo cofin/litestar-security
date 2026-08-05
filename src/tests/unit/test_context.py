@@ -598,7 +598,6 @@ def test_authorization_snapshot_rejects_blank_values(kwargs: dict[str, object]) 
         AuthorizationSnapshot(**kwargs)
 
 
-@pytest.mark.anyio
 async def test_static_authorization_snapshot_refresher_returns_its_immutable_snapshot() -> None:
     previous = AuthorizationSnapshot(attributes={"previous": "value"})
     snapshot = AuthorizationSnapshot(scopes={"reports:read"}, attributes={"source": "static"})
@@ -1313,7 +1312,6 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
     )
 
 
-@pytest.mark.anyio
 async def test_aesgcm_secret_protector_is_nondeterministic_and_aad_bound() -> None:
     key = accounts_module.SecretProtectorKey("v1", b"k" * 32)
     nonces = iter((b"1" * 12, b"2" * 12))

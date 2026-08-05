@@ -116,7 +116,6 @@ def test_provider_rejects_a_cache_that_does_not_implement_the_protocol(jwks_docu
         CachedJWKSProvider((_entry(),), _CountingFetcher(jwks_document), cache=object())  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_a_provider_defaults_to_its_own_cache(jwks_document: bytes) -> None:
     fetcher = _CountingFetcher(jwks_document)
     first = CachedJWKSProvider((_entry(),), fetcher)
@@ -128,7 +127,6 @@ async def test_a_provider_defaults_to_its_own_cache(jwks_document: bytes) -> Non
     assert fetcher.calls == 2
 
 
-@pytest.mark.anyio
 async def test_a_second_component_sharing_the_cache_does_not_fetch_again(jwks_document: bytes) -> None:
     fetcher = _CountingFetcher(jwks_document)
     cache = InMemoryJWKSCache()
@@ -142,7 +140,6 @@ async def test_a_second_component_sharing_the_cache_does_not_fetch_again(jwks_do
     assert fetcher.calls == 1
 
 
-@pytest.mark.anyio
 async def test_an_application_cache_receives_the_published_snapshot(jwks_document: bytes) -> None:
     class _RecordingCache:
         def __init__(self) -> None:
@@ -171,7 +168,6 @@ async def test_an_application_cache_receives_the_published_snapshot(jwks_documen
     assert ("shared-key", "RS256") in stored.keys
 
 
-@pytest.mark.anyio
 async def test_an_evicted_entry_is_refetched_like_a_cold_miss(jwks_document: bytes) -> None:
     fetcher = _CountingFetcher(jwks_document)
     cache = InMemoryJWKSCache()

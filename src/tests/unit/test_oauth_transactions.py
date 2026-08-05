@@ -95,7 +95,6 @@ def _transaction() -> OAuthTransaction:
     )
 
 
-@pytest.mark.anyio
 async def test_start_generates_independent_256_bit_material_and_s256_pkce() -> None:
     calls: list[int] = []
 
@@ -127,7 +126,6 @@ async def test_start_generates_independent_256_bit_material_and_s256_pkce() -> N
     assert "AwMDAw" not in repr(start.transaction)
 
 
-@pytest.mark.anyio
 async def test_start_reuses_valid_browser_binding_for_concurrent_tabs() -> None:
     service = _service()
     binding = SecretStr("b" * 43)
@@ -214,7 +212,6 @@ def test_transaction_allows_optional_bindings_to_be_absent() -> None:
     assert transaction.nonce is None
 
 
-@pytest.mark.anyio
 async def test_concurrent_consume_is_atomic_and_replay_safe() -> None:
     service = _service()
     start = await service.start(
@@ -254,7 +251,6 @@ async def test_concurrent_consume_is_atomic_and_replay_safe() -> None:
         )
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("change", "value"),
     [("state", SecretStr("A" * 43)), ("browser_binding", SecretStr("B" * 43)), ("provider", "github")],
@@ -298,7 +294,6 @@ async def test_lookup_mismatch_is_one_generic_failure_and_does_not_consume(chang
     assert transaction.provider == "google"
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("stored_session", "callback_session", "operation"),
     [
@@ -343,7 +338,6 @@ async def test_session_and_operation_mismatch_are_consumed_generic_failures(
         )
 
 
-@pytest.mark.anyio
 async def test_expired_transaction_and_absent_nonce_are_generic() -> None:
     service = _service()
     start = await service.start(
@@ -368,7 +362,6 @@ async def test_expired_transaction_and_absent_nonce_are_generic() -> None:
         )
 
 
-@pytest.mark.anyio
 async def test_multi_tab_transactions_do_not_overwrite_each_other() -> None:
     service = _service()
     first = await service.start(
@@ -410,7 +403,6 @@ async def test_multi_tab_transactions_do_not_overwrite_each_other() -> None:
     assert (first_transaction.return_to, second_transaction.return_to) == ("/", "/settings/security")
 
 
-@pytest.mark.anyio
 async def test_reference_store_rejects_duplicate_lookup() -> None:
     store = MemoryOAuthTransactionStore(protector=_Protector())
     transaction = _transaction()
@@ -575,7 +567,6 @@ def test_service_rejects_invalid_configuration(overrides: dict[str, Any], match:
         OAuthTransactionService(**arguments)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -601,7 +592,6 @@ async def test_start_rejects_invalid_transaction_input(overrides: dict[str, Any]
         await _service().start(**arguments)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("result", [b"short", cast("Any", "x" * 32)])
 async def test_start_sanitizes_invalid_entropy(result: Any) -> None:
     def entropy(length: int) -> bytes:
@@ -620,7 +610,6 @@ async def test_start_sanitizes_invalid_entropy(result: Any) -> None:
         )
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -647,7 +636,6 @@ async def test_consume_rejects_malformed_callback_input(overrides: dict[str, Any
         await _service().consume(**arguments)
 
 
-@pytest.mark.anyio
 async def test_consume_sanitizes_unprotect_failure() -> None:
     protector = _Protector()
     service = _service(protector=protector)
@@ -688,7 +676,6 @@ def test_cookie_rejects_invalid_values_and_lifetimes(binding: Any, max_age: Any)
         oauth_binding_cookie(binding, max_age=max_age)
 
 
-@pytest.mark.anyio
 async def test_protector_failure_is_secret_free_unavailable_error() -> None:
     protector = _Protector(fail=True)
     service = _service(protector=protector)
@@ -707,7 +694,6 @@ async def test_protector_failure_is_secret_free_unavailable_error() -> None:
     assert "protect detail" not in repr(exc_info.value)
 
 
-@pytest.mark.anyio
 async def test_start_rejects_invalid_reused_browser_binding() -> None:
     with pytest.raises(OAuthTransactionUnavailable, match="unavailable"):
         await _service().start(
