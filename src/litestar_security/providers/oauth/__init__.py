@@ -34,7 +34,11 @@ from litestar_security.providers.oauth._provider import (
     ProviderIdentity,
     ProviderTokenSet,
 )
-from litestar_security.providers.oauth._resource_server import ProtectedResourceConfig
+from litestar_security.providers.oauth._resource_server import (
+    ProtectedResourceConfig,
+    ProtectedResourceMetadata,
+    build_protected_resource_handler,
+)
 from litestar_security.providers.oauth._routes import (
     OIDC_FRONTCHANNEL_LOGOUT,
     OAuthAuthorization,
@@ -137,6 +141,7 @@ __all__ = (
     "OIDCSessionLogoutStore",
     "ProtectedOAuthSecret",
     "ProtectedResourceConfig",
+    "ProtectedResourceMetadata",
     "ProviderGrant",
     "ProviderIdentity",
     "ProviderTokenReference",
@@ -148,6 +153,7 @@ __all__ = (
     "UnlinkOutcome",
     "UnlinkStatus",
     "build_oauth_routes",
+    "build_protected_resource_handler",
     "oauth_binding_cookie",
     "pkce_s256",
 )

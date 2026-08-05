@@ -129,6 +129,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._configure_oauth_routes(app_config)
         self._configure_oauth_lifespan(app_config)
         self._configure_local_jwks(app_config)
+        self._configure_protected_resource(app_config)
         self._configure_jwks_lifespan(app_config)
         self._validate_dependency_map(app_config.dependencies, "application")
         self._validate_native_security(app_config)
@@ -635,6 +636,15 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         from litestar_security.providers.jwt import build_local_jwks_handler  # noqa: PLC0415 - breaks an import cycle
 
         app_config.route_handlers.append(build_local_jwks_handler(self.config.local_jwks))
+
+    def _configure_protected_resource(self, app_config: AppConfig) -> None:
+        if self.config.protected_resource is None:
+            return
+        from litestar_security.providers.oauth import (  # noqa: PLC0415 - the OAuth tree loads only when configured
+            build_protected_resource_handler,
+        )
+
+        app_config.route_handlers.append(build_protected_resource_handler(self.config.protected_resource))
 
     def _configure_jwks_lifespan(self, app_config: AppConfig) -> None:
         if not self.config.jwks_providers:
