@@ -26,6 +26,7 @@ guards, OpenAPI schema, and WebSocket lifecycle.
    composition
    rate-limiting
    jwt-and-jwks
+   resource-server
    websockets
    hardening
    customization

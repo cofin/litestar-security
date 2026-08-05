@@ -15,6 +15,22 @@ Added
   claiming a protection it does not have. A route that declares its own ``auth``
   and also matches a pattern is rejected at startup, and a pattern matching no
   registered route warns once. See :doc:`composition`.
+* ``SecurityConfig(protected_resource=ProtectedResourceConfig(...))`` publishes
+  the :rfc:`9728` protected-resource metadata document at
+  ``/.well-known/oauth-protected-resource``, so a client or an authorization
+  server can discover which issuers this resource trusts, which scopes it
+  understands, and how a bearer token may be presented to it. The route is
+  unauthenticated, answers conditional requests with ``304``, and the document
+  is computed once at configuration time. See :doc:`resource-server`.
+* ``CachedJWKSProvider(cache=...)`` takes a ``JWKSCache``. Handing the same
+  cache to two providers gives them one key set and one fetch schedule instead
+  of two. ``InMemoryJWKSCache`` is the default and stays the behavior when the
+  argument is omitted; an application may implement the protocol itself over
+  the immutable ``JWKSSnapshot``. See :doc:`jwt-and-jwks`.
+* ``OIDCDiscoveryClient.discover(issuer, discovery_url=...)`` reaches a provider
+  that does not publish its metadata at
+  ``{issuer}/.well-known/openid-configuration``. The override must share the
+  issuer's exact origin.
 
 0.2.0
 -----
