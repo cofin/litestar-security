@@ -14,11 +14,19 @@ document changes with ``PYTHONHASHSEED`` while the sorted order does not.
     uv run python -m tests.integration.test_openapi_document
 
 then read the resulting git diff and confirm every changed line is a change the
-work in hand intended. The four tests below are ordered so an accidental drift
-names itself: the path set, the operation-id set, and the tag groups are each
-compared on their own before the whole document is compared byte for byte. A
-failure in one of the first three says exactly what moved; a failure in only the
-last one says something changed that none of those three describes.
+work in hand intended. The five tests below are ordered so an accidental drift
+names itself: the path set, the operation-id set, the tag groups, and the
+component-schema member names are each compared on their own before the whole
+document is compared byte for byte. A failure in one of the first four says
+exactly what moved; a failure in only the last one says something changed that
+none of those four describes.
+
+The member-name comparison is what makes a **casing** change legible. Member
+names are the wire contract the generated client's field names come from, so a
+rename that reaches them is the largest change this document can carry and the
+easiest to make by accident. Compared on its own it reports the schemas and the
+members that moved; folded into the byte comparison it would report only that
+several thousand lines differ.
 """
 
 import json
@@ -218,6 +226,12 @@ def _tag_groups(document: Mapping[str, Any]) -> dict[str, str | None]:
     return {tag["name"]: tag.get("description") for tag in document.get("tags", ())}
 
 
+def schema_members(document: Mapping[str, Any]) -> dict[str, tuple[str, ...]]:
+    """Return the declared member names of every component schema, by schema name."""
+    schemas = cast("Mapping[str, Mapping[str, Any]]", document.get("components", {}).get("schemas", {}))
+    return {name: tuple(sorted(schema.get("properties", {}))) for name, schema in schemas.items()}
+
+
 @pytest.fixture(scope="module")
 def golden() -> dict[str, Any]:
     """Return the committed document."""
@@ -245,10 +259,15 @@ def test_documented_tag_groups_match_the_golden_file(emitted: Mapping[str, Any],
     assert _tag_groups(emitted) == _tag_groups(golden)
 
 
+def test_documented_schema_members_match_the_golden_file(emitted: Mapping[str, Any], golden: Mapping[str, Any]) -> None:
+    """Member names are the wire contract, so a casing change must be a deliberate one."""
+    assert schema_members(emitted) == schema_members(golden)
+
+
 def test_openapi_document_is_byte_identical_to_the_golden_file(
     emitted: Mapping[str, Any], golden: Mapping[str, Any]
 ) -> None:
-    """Catch every drift the three narrower comparisons above do not describe."""
+    """Catch every drift the four narrower comparisons above do not describe."""
     assert canonical(emitted) == canonical(golden)
 
 
