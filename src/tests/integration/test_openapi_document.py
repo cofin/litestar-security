@@ -335,3 +335,37 @@ def test_mfa_and_passkey_documentation_must_agree(jwt_key_material: Mapping[str,
             docs=RouteDocs(tags={"step_up": "Re-authentication"}),
             passkey_docs=RouteDocs(tags={"step_up": "Confirmation"}),
         )
+
+
+def test_one_transform_renames_every_generated_operation_id(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    """An application wanting camelCase supplies one callable, not thirty-five overrides."""
+    docs = RouteDocs(operation_id=lambda value: value[0].lower() + value[1:])
+    document = emitted_document(jwt_key_material["EdDSA"][0], docs=docs)
+
+    assert document["paths"]["/auth/login"]["post"]["operationId"] == "localSessionLogin"
+    assert document["paths"]["/auth/passkeys"]["get"]["operationId"] == "passkeyList"
+    assert all(operation_id[0].islower() for operation_id in _operation_ids(document))
+
+
+def test_one_transform_renames_every_generated_route_name(jwt_key_material: Mapping[str, tuple[bytes, bytes]]) -> None:
+    """Route names are what ``route_reverse`` resolves, so a transform must reach them too."""
+    app = build_documented_app(jwt_key_material["EdDSA"][0], docs=RouteDocs(route_name="app.".__add__))
+
+    assert app.route_reverse("app.local.session.login") == "/auth/login"
+    assert app.route_reverse("app.oidc.logout.frontchannel", provider="example") == (
+        "/auth/oidc/example/frontchannel-logout"
+    )
+
+
+def test_colliding_operation_ids_after_a_transform_raise(jwt_key_material: Mapping[str, tuple[bytes, bytes]]) -> None:
+    """A transform that flattens two operations together would produce a broken client."""
+    with pytest.raises(ImproperlyConfiguredException, match="operation_id"):
+        build_documented_app(jwt_key_material["EdDSA"][0], docs=RouteDocs(operation_id=lambda _value: "Operation"))
+
+
+def test_colliding_route_names_after_a_transform_raise(jwt_key_material: Mapping[str, tuple[bytes, bytes]]) -> None:
+    """Litestar indexes handlers by name, so a collision silently misdirects ``route_reverse``."""
+    with pytest.raises(ImproperlyConfiguredException, match="route name"):
+        build_documented_app(jwt_key_material["EdDSA"][0], docs=RouteDocs(route_name=lambda _value: "route"))

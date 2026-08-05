@@ -17,6 +17,7 @@ from litestar.openapi.spec import Tag
 if TYPE_CHECKING:
     from litestar import Router
     from litestar.handlers import BaseRouteHandler
+    from litestar.handlers.http_handlers import HTTPRouteHandler
 
 __all__ = ("LOCAL_TAG_KEYS", "ROUTE_TAGS", "RouteDocs", "apply_route_docs", "merge_route_tags", "resolve_tags")
 
@@ -212,23 +213,54 @@ def apply_route_docs(router: "Router", docs: "RouteDocs") -> "Router":
 
     Returns:
         The same router.
+
+    Raises:
+        ImproperlyConfiguredException: If a transform makes two handlers share an
+            operation ID or a route name.
     """
     renames = {ROUTE_TAGS[key].name: name for key, name in docs.tags.items() if ROUTE_TAGS[key].name != name}
-    if not renames:
+    if not renames and docs.operation_id is None and docs.route_name is None:
         return router
+    # A handler declaring several paths appears on several routes; identity keeps
+    # each one rewritten exactly once, so a transform cannot collide with itself.
+    handlers: dict[int, HTTPRouteHandler] = {
+        id(handler): handler
+        for route in router.routes
+        for handler in cast("tuple[HTTPRouteHandler, ...]", getattr(route, "route_handlers", ()))
+    }
     retagged: set[int] = set()
-    for route in router.routes:
-        for handler in cast("tuple[BaseRouteHandler, ...]", getattr(route, "route_handlers", ())):
-            for layer in _documentation_layers(handler, router):
-                if id(layer) in retagged:
-                    continue
-                retagged.add(id(layer))
-                layer.tags = _renamed(layer.tags, renames)
+    operation_ids: set[str] = set()
+    route_names: set[str] = set()
+    for handler in handlers.values():
+        for layer in _documentation_layers(handler, router):
+            if id(layer) in retagged:
+                continue
+            retagged.add(id(layer))
+            layer.tags = _renamed(layer.tags, renames)
+        # Litestar also accepts a callable operation-id factory; every generated
+        # handler declares a literal, which is what a transform is given.
+        handler.operation_id = _transformed(
+            cast("str | None", handler.operation_id), docs.operation_id, operation_ids, subject="operation_id"
+        )
+        handler.name = _transformed(handler.name, docs.route_name, route_names, subject="route name")
     return router
 
 
 def _renamed(tags: "Sequence[str] | None", renames: "Mapping[str, str]") -> "tuple[str, ...] | None":
     return None if tags is None else tuple(renames.get(tag, tag) for tag in tags)
+
+
+def _transformed(
+    value: "str | None", transform: "Callable[[str], str] | None", seen: "set[str]", *, subject: str
+) -> "str | None":
+    if value is None:
+        return None
+    resolved = value if transform is None else transform(value)
+    if resolved in seen:
+        message = f"Generated routes resolve to a duplicate {subject}: {resolved}"
+        raise ImproperlyConfiguredException(detail=message)
+    seen.add(resolved)
+    return resolved
 
 
 def _documentation_layers(handler: "BaseRouteHandler", router: "Router") -> "Iterator[Any]":
