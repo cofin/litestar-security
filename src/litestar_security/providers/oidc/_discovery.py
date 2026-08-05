@@ -160,11 +160,15 @@ class OIDCDiscoveryClient:
             trust_env=False,
         )
 
-    async def discover(self, issuer: str) -> OIDCMetadata:
+    async def discover(self, issuer: str, *, discovery_url: str | None = None) -> OIDCMetadata:
         """Fetch and validate metadata for one configured issuer.
 
         Args:
             issuer: The issuer to discover, matched against configured trust anchors.
+            discovery_url: Where the metadata document lives, for a provider that
+                does not publish it at ``{issuer}/.well-known/openid-configuration``.
+                It must share the issuer's exact origin, so an override changes the
+                path this client requests and never the host it reaches.
 
         Returns:
             The validated metadata.
@@ -187,10 +191,10 @@ class OIDCDiscoveryClient:
         if normalized_issuer.value not in self.policy.allowed_issuers:
             raise_config("OIDC discovery issuer is not in the configured allowlist")
 
+        requested_url = self._discovery_url(normalized_issuer, discovery_url)
         resolved: dict[tuple[str, int], tuple[str, ...]] = {}
         await self._validate_addresses(normalized_issuer, resolved)
-        discovery_url = f"{normalized_issuer.value}/.well-known/openid-configuration"
-        document = await self._fetch_document(discovery_url)
+        document = await self._fetch_document(requested_url)
         return await self._parse_metadata(document, normalized_issuer, resolved)
 
     async def aclose(self) -> None:
@@ -206,6 +210,22 @@ class OIDCDiscoveryClient:
     async def __aexit__(self, *_exc: object) -> None:
         """Close the owned client on context exit."""
         await self.aclose()
+
+    def _discovery_url(self, issuer: NormalizedURL, override: str | None) -> str:
+        if override is None:
+            return f"{issuer.value}/.well-known/openid-configuration"
+        try:
+            normalized = normalize_url(
+                override,
+                require_https=self.policy.require_https,
+                allowed_ports=self.policy.allowed_ports,
+                allow_origin_only=False,
+            )
+        except (TypeError, ValueError):
+            raise_config("Invalid OIDC discovery URL override")
+        if normalized.origin != issuer.origin:
+            raise_config("OIDC discovery URL override must share the issuer origin")
+        return normalized.value
 
     async def _fetch_document(self, url: str) -> JSONObject:
         try:

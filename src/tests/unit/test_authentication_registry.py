@@ -4038,6 +4038,64 @@ async def test_oidc_discovery_derives_one_exact_url_and_returns_pinned_metadata(
 
 
 @pytest.mark.anyio
+async def test_oidc_discovery_url_override_replaces_the_derived_path() -> None:
+    override = "https://issuer.example/.well-known/openid-configuration"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == override
+        return _oidc_response()
+
+    client, transport, _resolver = _oidc_client(handler)
+
+    try:
+        metadata = await client.discover(_OIDC_ISSUER, discovery_url=override)
+    finally:
+        await client.aclose()
+
+    assert metadata.issuer == _OIDC_ISSUER
+    assert transport.requests[0].url == httpx.URL(override)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "override",
+    [
+        "https://elsewhere.example/.well-known/openid-configuration",
+        "https://issuer.example:8443/.well-known/openid-configuration",
+        "http://issuer.example/.well-known/openid-configuration",
+        "/.well-known/openid-configuration",
+        "",
+    ],
+)
+async def test_oidc_discovery_url_override_must_share_the_issuer_origin(override: str) -> None:
+    client, transport, _resolver = _oidc_client(lambda _request: _oidc_response())
+
+    try:
+        with pytest.raises(ImproperlyConfiguredException):
+            await client.discover(_OIDC_ISSUER, discovery_url=override)
+    finally:
+        await client.aclose()
+
+    assert transport.requests == []
+
+
+@pytest.mark.anyio
+async def test_oidc_discovery_url_override_still_pins_the_issuer_claim() -> None:
+    override = "https://issuer.example/.well-known/openid-configuration"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _oidc_response(_oidc_document(issuer="https://issuer.example/other"))
+
+    client, _transport, _resolver = _oidc_client(handler)
+
+    try:
+        with pytest.raises(OIDCDiscoveryError):
+            await client.discover(_OIDC_ISSUER, discovery_url=override)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.anyio
 async def test_oidc_discovery_client_context_returns_itself_and_closes_transport() -> None:
     client, transport, _resolver = _oidc_client(lambda _request: _oidc_response())
 
