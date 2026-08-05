@@ -7,6 +7,16 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 
+# ``tests.fixtures.factories`` is the load-bearing entry: ``register_fixture``
+# applies ``pytest.fixture`` at decoration time, so pytest only needs the module
+# loaded as a plugin for the factory fixtures to resolve. ``polyfactory.pytest_plugin``
+# exposes no ``pytest_*`` hooks and is not sufficient on its own, but polyfactory
+# declares no ``pytest11`` entry point either, so a release that does add hooks
+# would otherwise be skipped silently. This is legal in this file only because
+# ``testpaths`` makes it an initial conftest: re-verify it if the import mode
+# changes or this file moves.
+pytest_plugins = ["polyfactory.pytest_plugin", "tests.fixtures.factories"]
+
 
 def _pem_pair(private_key: object) -> tuple[bytes, bytes]:
     """Serialize one asymmetric test key as immutable PKCS8/SPKI bytes."""
