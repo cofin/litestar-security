@@ -123,6 +123,7 @@ docs = [
 ]
 tests = [
   "coverage[toml]",
+  "polyfactory",
   "pytest",
   "pytest-cov",
   "pytest-xdist",

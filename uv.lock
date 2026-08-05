@@ -1038,6 +1038,7 @@ dev = [
     { name = "coverage", extra = ["toml"] },
     { name = "hypothesis" },
     { name = "mypy" },
+    { name = "polyfactory" },
     { name = "prek" },
     { name = "pyright" },
     { name = "pytest" },
@@ -1077,6 +1078,7 @@ property = [
 tests = [
     { name = "coverage", extra = ["toml"] },
     { name = "hypothesis" },
+    { name = "polyfactory" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-xdist" },
@@ -1105,6 +1107,7 @@ dev = [
     { name = "coverage", extras = ["toml"] },
     { name = "hypothesis" },
     { name = "mypy" },
+    { name = "polyfactory" },
     { name = "prek" },
     { name = "pyright" },
     { name = "pytest" },
@@ -1136,6 +1139,7 @@ property = [{ name = "hypothesis" }]
 tests = [
     { name = "coverage", extras = ["toml"] },
     { name = "hypothesis" },
+    { name = "polyfactory" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-xdist" },
