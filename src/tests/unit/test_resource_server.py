@@ -31,6 +31,18 @@ def test_sequences_freeze_to_tuples() -> None:
     assert config.bearer_methods_supported == ("header", "body")
 
 
+@pytest.mark.parametrize("field", ["authorization_servers", "scopes_supported", "bearer_methods_supported"])
+@pytest.mark.parametrize("value", ["header", 1, None, object()])
+def test_sequence_members_must_be_ordered_collections(field: str, value: object) -> None:
+    """A bare string is a sequence of characters, so it must be rejected like any non-sequence.
+
+    Accepting one would advertise a metadata member per character rather than
+    failing, and the document is published unvalidated from precomputed bytes.
+    """
+    with pytest.raises(ImproperlyConfiguredException):
+        ProtectedResourceConfig(resource="https://api.example.com", **{field: value})  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     "resource",
     [
