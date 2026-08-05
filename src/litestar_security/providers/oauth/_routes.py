@@ -41,6 +41,7 @@ from litestar.types import Empty
 from litestar.utils.scope.state import ScopeState
 
 from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
+from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import Principal
 from litestar_security.providers.oauth._accounts import (
@@ -959,6 +960,7 @@ def build_oauth_routes(config: OAuthConfig) -> Router:
             route_handlers=[_OAuthController, *([_OIDCLogoutController] if config.oidc_service is not None else [])],
             cache_control=CacheControlHeader(no_store=True),
             response_headers={"Pragma": "no-cache"},
+            opt={GENERATED_ROUTE_OPT_KEY: True},
             exception_handlers=_oauth_exception_handlers(),
             dependencies={
                 "oauth_service": Provide(provide_oauth_service, sync_to_thread=False, use_cache=False),

@@ -24,6 +24,7 @@ from litestar.status_codes import (
 )
 
 from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
+from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa import MFAService, RecoveryCodeGrant, StepUpCredential, StepUpService
 from litestar_security.accounts._operations import (
@@ -159,6 +160,7 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
             route_handlers=handlers,
             cache_control=CacheControlHeader(no_store=True),
             response_headers={"Pragma": "no-cache"},
+            opt={GENERATED_ROUTE_OPT_KEY: True},
             dependencies={"mfa_service": Provide(lambda: mfa_service, sync_to_thread=False, use_cache=False)},
         ),
         RouteDocs() if docs is None else docs,

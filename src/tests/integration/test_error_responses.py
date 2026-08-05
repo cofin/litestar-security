@@ -22,8 +22,8 @@ from collections.abc import Mapping
 from typing import Any, NamedTuple, cast
 
 import pytest
-from litestar import Litestar, Request, Response
-from litestar.exceptions import HTTPException, TooManyRequestsException
+from litestar import Litestar, Request, Response, get
+from litestar.exceptions import HTTPException, LitestarWarning, TooManyRequestsException
 from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
     HTTP_401_UNAUTHORIZED,
@@ -240,6 +240,49 @@ async def test_an_oauth_failure_still_reveals_nothing_about_its_cause(failure: _
     assert failure.detail in body
     assert type(failure.exception).__name__ not in body
     assert "Traceback" not in body
+
+
+class _EnvelopeResponse(Response[Any]):
+    """Stand in for the response class a presentation plugin installs."""
+
+
+@get("/application/owned", response_class=_EnvelopeResponse, sync_to_thread=False)
+def _application_owned_route() -> str:
+    return "owned"
+
+
+def _response_class_warnings(recorded: pytest.WarningsRecorder) -> list[str]:
+    return [str(warning.message) for warning in recorded if "response class" in str(warning.message)]
+
+
+def test_a_customized_response_class_warns_once_however_many_routes_it_reaches(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    """Every generated route resolves the same application-level class, so one warning says it all."""
+    with pytest.warns(LitestarWarning) as recorded:
+        build_documented_app(jwt_key_material["EdDSA"][0], response_class=_EnvelopeResponse)
+
+    warnings = _response_class_warnings(recorded)
+    assert len(warnings) == 1
+    assert "_EnvelopeResponse" in warnings[0]
+
+
+def test_the_default_configuration_says_nothing_about_response_classes(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]], recwarn: pytest.WarningsRecorder
+) -> None:
+    """A warning nobody can act on is noise, and the framework default describes the document exactly."""
+    build_documented_app(jwt_key_material["EdDSA"][0])
+
+    assert _response_class_warnings(recwarn) == []
+
+
+def test_a_route_the_application_owns_is_its_own_business(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]], recwarn: pytest.WarningsRecorder
+) -> None:
+    """This library documents the routes it generates and makes no claim about the rest."""
+    build_documented_app(jwt_key_material["EdDSA"][0], route_handlers=[_application_owned_route])
+
+    assert _response_class_warnings(recwarn) == []
 
 
 def test_a_returned_body_keeps_its_own_typed_schema(documented_schema: Mapping[str, Any]) -> None:

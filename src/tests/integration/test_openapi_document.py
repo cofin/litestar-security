@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from litestar import Litestar
+from litestar import Litestar, Response
 from litestar.config.csrf import CSRFConfig
 from litestar.datastructures import Cookie
 from litestar.exceptions import ImproperlyConfiguredException
@@ -132,7 +132,12 @@ class _LogoutTokenConsumer:
 
 
 def build_documented_app(
-    private_key: bytes, *, docs: RouteDocs | None = None, passkey_docs: RouteDocs | None = None
+    private_key: bytes,
+    *,
+    docs: RouteDocs | None = None,
+    passkey_docs: RouteDocs | None = None,
+    response_class: type[Response[Any]] | None = None,
+    route_handlers: list[Any] | None = None,
 ) -> Litestar:
     """Build the application every generated route family is documented from.
 
@@ -141,6 +146,10 @@ def build_documented_app(
         docs: Documentation metadata applied to every configured feature.
         passkey_docs: Documentation metadata for the passkey feature alone, so a
             test can make the MFA and passkey configurations disagree.
+        response_class: An application-level response class, so a test can
+            observe what a customized one does to the generated routes.
+        route_handlers: Handlers the application owns alongside the generated
+            ones.
 
     Returns:
         One application with local auth, MFA, passkeys, OAuth, and OIDC logout.
@@ -194,12 +203,14 @@ def build_documented_app(
         ),
         docs=docs,
     )
+    optional: dict[str, Any] = {} if response_class is None else {"response_class": response_class}
     return Litestar(
-        route_handlers=[],
+        route_handlers=list(route_handlers or []),
         csrf_config=CSRFConfig(secret="golden-file-csrf-secret"),  # noqa: S106 - fixed test secret
         middleware=[CookieBackendConfig(secret=bytes(range(16)), secure=True, httponly=True).middleware],
         openapi_config=OpenAPIConfig(title="Litestar Security", version="0.0.0"),
         plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa, passkeys=passkeys, oauth=oauth))],
+        **optional,
     )
 
 

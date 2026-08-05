@@ -11,10 +11,11 @@ from re import Pattern
 from re import compile as recompile
 from types import MappingProxyType
 from typing import Generic, NoReturn, TypeVar, cast
-from warnings import catch_warnings, simplefilter
+from warnings import catch_warnings, simplefilter, warn
 
+from litestar import Response
 from litestar._openapi.plugin import OpenAPIPlugin
-from litestar.exceptions import ImproperlyConfiguredException, LitestarDeprecationWarning
+from litestar.exceptions import ImproperlyConfiguredException, LitestarDeprecationWarning, LitestarWarning
 from litestar.handlers.base import BaseRouteHandler
 from litestar.handlers.http_handlers import HTTPRouteHandler
 from litestar.middleware._utils import (
@@ -27,7 +28,7 @@ from litestar.openapi.spec import Components, Reference, SecurityRequirement, Se
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 from litestar.types import Empty
 
-from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
+from litestar_security._internal import GENERATED_ROUTE_OPT_KEY, RUNTIME_PLAN_OPT_KEY
 from litestar_security.authentication import (
     AUTH_POLICY_OPT_KEY,
     CSRF_REQUIRED_OPT_KEY,
@@ -72,6 +73,7 @@ _RESERVED_OPT_KEYS = frozenset({
     CSRF_REQUIRED_OPT_KEY,
     _CSRF_COVERAGE_OPT_KEY,
     _OPENAPI_SECURITY_OPT_KEY,
+    GENERATED_ROUTE_OPT_KEY,
     RUNTIME_PLAN_OPT_KEY,
 })
 _EXCLUDE_FROM_AUTH_OPT_KEY = "exclude_from_auth"
@@ -301,6 +303,7 @@ class RouteCompiler(Generic[UserT]):
     _exclude_pattern: Pattern[str] | None = field(init=False, repr=False)
     _reported_exclusions: tuple[tuple[str, Pattern[str]], ...] = field(init=False, repr=False)
     _matched_exclusions: set[str] = field(init=False, repr=False, default_factory=set[str])
+    _reported_response_classes: set[type] = field(init=False, repr=False, default_factory=set[type])
 
     def __post_init__(self) -> None:
         """Create one per-registry policy compiler."""
@@ -361,7 +364,42 @@ class RouteCompiler(Generic[UserT]):
         """
         return tuple(source for source, _ in self._reported_exclusions if source not in self._matched_exclusions)
 
+    def _report_customized_response_class(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> None:
+        """Report once that a generated route no longer renders through Litestar's own response.
+
+        The documented response specifications describe what the generated
+        handlers return. A response class that reshapes the body - a
+        presentation plugin's, or an application's own - makes them describe
+        something the route no longer sends. Every generated handler resolves
+        the same application-level class, so the report is one per distinct
+        class rather than one per route.
+
+        This warns rather than raises: a customized response class is
+        legitimate, and refusing to run beside one would make this plugin
+        incompatible with presentation plugins for no security reason.
+
+        Args:
+            route: The route being compiled, named as the representative one.
+            route_handler: The handler whose resolved response class is read.
+        """
+        if not route_handler.opt.get(GENERATED_ROUTE_OPT_KEY) or self._is_generated_options(route_handler):
+            return
+        resolved = cast(
+            "type[object]",
+            route_handler.resolve_response_class(),  # pyright: ignore[reportUnknownMemberType] - Litestar returns an unparameterized Response type
+        )
+        if resolved is Response or resolved in self._reported_response_classes:
+            return
+        self._reported_response_classes.add(resolved)
+        message = (
+            f"Generated Litestar Security routes resolve the response class {resolved.__qualname__!r} "
+            f"rather than Litestar's own, first at {route.path}. The documented response schemas describe "
+            "what the handlers return, so a response class that reshapes the body makes them inaccurate."
+        )
+        warn(message, category=LitestarWarning, stacklevel=1)
+
     def _compile_http_handler(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> None:
+        self._report_customized_response_class(route, route_handler)
         policy: AuthenticationPolicy
         csrf_override: bool | None
         native_exclude = self._handler_excludes_auth(route, route_handler)

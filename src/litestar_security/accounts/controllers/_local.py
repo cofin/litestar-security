@@ -27,6 +27,7 @@ from litestar.status_codes import (
 )
 
 from litestar_security._docs import ROUTE_TAGS, apply_route_docs, raised_denial
+from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa_login import MFARequired
 from litestar_security.accounts._rate_limits import RateLimited
@@ -174,6 +175,7 @@ def build_local_auth_routes(config: "LocalAuthConfig[Any]") -> Router:
             dependencies={
                 "local_auth_service": Provide(provide_local_auth_service, sync_to_thread=False, use_cache=False)
             },
+            opt={GENERATED_ROUTE_OPT_KEY: True},
             response_headers={"Pragma": "no-cache"},
         ),
         config.docs,
