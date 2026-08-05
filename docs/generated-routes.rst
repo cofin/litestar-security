@@ -253,6 +253,75 @@ success case:
      - An application-supplied dependency was unavailable. Security decisions
        fail closed, so this never means the request was allowed.
 
+What an error body looks like
+----------------------------
+
+Two different things produce a non-success status, and they produce different
+bodies. The distinction is raised versus returned, not error versus success.
+
+A **raised** status — ``400``, ``401``, ``429``, ``503``, and the OAuth
+``409`` — never reaches the handler's return value. It travels through the
+application's exception handling, so the body is
+:class:`~litestar_security.RouteError`: the status repeated inside the payload,
+a human-readable ``detail``, and ``extra`` when the failure carries structured
+context. A request-validation failure always carries one, listing the members
+it rejected.
+
+.. code-block:: json
+
+   {"status_code": 401, "detail": "Authentication required."}
+
+A **returned** status is a value the handler produced, so its schema is the
+handler's own type and no exception handling touches it. That covers every
+``2xx``, the typed ``403`` second-factor challenge above, and the ``409``
+conflict raised when a change would remove an account's last login method.
+
+Registering your own error format on the application reaches the generated
+routes, including the OAuth ones:
+
+.. code-block:: python
+
+   Litestar(exception_handlers={HTTPException: my_error_format}, ...)
+
+Problem details
+~~~~~~~~~~~~~~~
+
+An application can install Litestar's problem-details plugin and ask it to
+convert every HTTP exception:
+
+.. code-block:: python
+
+   from litestar.plugins.problem_details import ProblemDetailsConfig, ProblemDetailsPlugin
+
+   Litestar(
+       plugins=[
+           SecurityPlugin(config),
+           ProblemDetailsPlugin(ProblemDetailsConfig(enable_for_all_http_exceptions=True)),
+       ],
+   )
+
+Every raised status then arrives as ``application/problem+json`` carrying
+:class:`~litestar_security.ProblemDetail`, and the published document says so.
+Note what Litestar's conversion actually emits, which is not the :rfc:`9457`
+five-member shape: the raised explanation moves to ``title``, ``detail`` falls
+back to the HTTP reason phrase, structured context carries through as
+``extra``, and ``type`` and ``instance`` are never produced.
+
+.. code-block:: json
+
+   {"status": 401, "title": "Authentication required.", "detail": "Unauthorized"}
+
+``ProblemDetailsPlugin()`` on its own converts nothing. Its default
+configuration registers a handler for ``ProblemDetailsException`` alone, which
+the generated routes never raise, so the responses and the document both stay
+exactly as they were. Returned statuses are unaffected in either mode.
+
+If the application installs a response class of its own — its own, or one a
+presentation plugin contributes — the generated routes warn once at startup,
+naming the class. The documented schemas describe what the handlers return, and
+a response class that reshapes the body makes them inaccurate. It is a warning
+rather than an error: a customized response class is legitimate.
+
 Enumeration resistance shows up in the schema as well. Recovery, verification,
 and registration answer ``202`` with the same body for every identifier, so a
 client cannot tell an existing account from an absent one by reading the

@@ -50,6 +50,34 @@ Changed
   OAuth providers, and OIDC logout previously appeared as bare names because
   only the local-auth groups reached the OpenAPI config. Nothing else about the
   document changes.
+* An application's own exception handlers now apply to the generated OAuth
+  routes. Those routes previously answered their provider and account failures
+  themselves, which took precedence over every application-level handler, so an
+  application publishing its own error format received it everywhere except
+  there. Statuses, messages, and ``Retry-After`` are unchanged, and a failure
+  still reveals nothing about its cause. An application relying on the previous
+  bodies while also configuring its own error format will now see its own
+  format on those paths.
+* The generated routes document their error bodies as the new ``RouteError``
+  rather than ``RouteStatus``. A ``400``, ``401``, ``429``, or ``503`` is
+  raised rather than returned, so the body has always been Litestar's
+  ``{status_code, detail}`` plus ``extra`` — a member the published document
+  never declared, leaving clients generated from it with no typed access to it
+  and, under strict decoding, rejecting every error response. ``RouteStatus``
+  keeps its real role as the body a handler *returns*: the ``200``
+  confirmations and the ``409`` conflict. The typed ``403`` second-factor
+  challenge is unaffected. A generated client will need regenerating.
+* An application converting every HTTP exception to problem details — Litestar's
+  ``ProblemDetailsPlugin`` with ``enable_for_all_http_exceptions=True`` — now
+  has its error bodies described as ``ProblemDetail`` at
+  ``application/problem+json``. The plugin in its default configuration
+  converts nothing the generated routes raise, and the document is unchanged
+  for it. See :doc:`generated-routes`.
+* Generated routes warn once at startup when the application installs a
+  response class other than Litestar's, naming it. The documented response
+  schemas describe what the handlers return, so a response class that reshapes
+  the body makes them inaccurate. Routes the application writes itself are
+  never checked, and this warns rather than raises.
 
 0.2.0
 -----
