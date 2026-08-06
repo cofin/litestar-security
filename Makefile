@@ -241,10 +241,21 @@ type-check: mypy pyright                            ## Run all static type check
 # Linting and Formatting
 # -----------------------------------------------------------------------------
 
+# Every file in the working tree that is not ignored, whether git tracks it yet
+# or not. prek's own --all-files means "files git already knows about", so a
+# module that has never been added would otherwise pass every hook unseen.
+# Recursive assignment, so a recipe that creates a file still checks it.
+WORKING_TREE_FILES = $$(git ls-files --cached --others --exclude-standard 2>/dev/null)
+
 .PHONY: prek
 prek:                                               ## Run prek hooks
 	@echo "${INFO} Running prek checks... 🔍"
-	@uvx prek run --show-diff-on-failure --color=always --all-files
+	@files="${WORKING_TREE_FILES}"; \
+	if [ -n "$$files" ]; then \
+		uvx prek run --show-diff-on-failure --color=always --files $$files; \
+	else \
+		uvx prek run --show-diff-on-failure --color=always --all-files; \
+	fi
 	@echo "${OK} prek checks passed ✨"
 
 .PHONY: zizmor
@@ -266,8 +277,15 @@ slotscheck:                                         ## Validate slotted classes
 .PHONY: fix
 fix:                                                ## Fix linting issues
 	@echo "${INFO} Fixing linting issues... 🔍"
-	@uv run ruff check --fix --unsafe-fixes .
-	@uv run ruff format .
+	@files="${WORKING_TREE_FILES}"; \
+	python_files=$$(printf '%s\n' $$files | grep -E '\.pyi?$$' || true); \
+	if [ -n "$$python_files" ]; then \
+		uv run ruff check --fix --unsafe-fixes $$python_files; \
+		uv run ruff format $$python_files; \
+	else \
+		uv run ruff check --fix --unsafe-fixes .; \
+		uv run ruff format .; \
+	fi
 	@echo "${OK} Linting issues fixed ✨"
 
 .PHONY: lint
