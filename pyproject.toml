@@ -237,12 +237,49 @@ split-on-trailing-comma = false
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.ruff.lint.flake8-tidy-imports]
+# TID251 matches an import by its absolute dotted path, so `from .testing import
+# FakeClock` slips past every entry in banned-api below. Banning relative imports
+# outright is what makes the denylist total. The package contains zero relative
+# imports today, so this costs nothing to adopt.
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# Runtime source must not depend on the shipped test kit. The package exposes it
+# only through the module __getattr__ in __init__.py, and
+# tools/check_import_boundaries.py proves at lint time that a bare
+# `import litestar_security` does not load it.
+"litestar_security.testing".msg = "Runtime source must not import the test kit. See .agents/patterns.md, Test layout."
+
+# No storage, cache or cloud adapter may become a runtime dependency: this library
+# ships protocols, and an adapter belongs in the consumer. tools/check_downstream_consumer.py
+# enforces the same list against the built wheel's Requires-Dist.
+"advanced_alchemy".msg = "Adapters belong in the consumer, not in runtime source."
+"aioboto3".msg = "Adapters belong in the consumer, not in runtime source."
+"aiomysql".msg = "Adapters belong in the consumer, not in runtime source."
+"aiosqlite".msg = "Adapters belong in the consumer, not in runtime source."
+"asyncpg".msg = "Adapters belong in the consumer, not in runtime source."
+"boto3".msg = "Adapters belong in the consumer, not in runtime source."
+"google.cloud".msg = "Adapters belong in the consumer, not in runtime source."
+"litestar_mcp".msg = "Adapters belong in the consumer, not in runtime source."
+"motor".msg = "Adapters belong in the consumer, not in runtime source."
+"pymongo".msg = "Adapters belong in the consumer, not in runtime source."
+"redis".msg = "Adapters belong in the consumer, not in runtime source."
+"sqlalchemy".msg = "Adapters belong in the consumer, not in runtime source."
+"sqlspec".msg = "Adapters belong in the consumer, not in runtime source."
+
 [tool.ruff.lint.per-file-ignores]
 "docs/conf.py" = ["A001", "INP001"]
 # Every value in this module is an audit event name. S105 fires on each PASSWORD_*
 # constant because the name looks credential-bearing, but the module holds no secrets.
 "src/litestar_security/accounts/_operations.py" = ["S105"]
-"src/tests/**/*.py" = ["ANN", "D", "PLR2004", "S101"]
+# The test tree and the examples import litestar_security.testing on purpose, and
+# banned-api offers no per-key waiver: silencing that one entry means silencing
+# TID251 wholesale here, adapter roots included. That is the right trade, because
+# the adapter rule is about what the distribution depends on and
+# tools/check_downstream_consumer.py enforces it against the built wheel instead.
+"examples/**/*.py" = ["TID251"]
+"src/tests/**/*.py" = ["ANN", "D", "PLR2004", "S101", "TID251"]
 "tools/**/*.py" = ["T201"]
 
 ########
