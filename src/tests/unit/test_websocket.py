@@ -1,7 +1,7 @@
 """Unit tests for WebSocket handshake transport policy."""
 
 from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -160,20 +160,6 @@ def test_websocket_refresh_interval_accepts_an_explicit_refresher() -> None:
     config = WebSocketSecurityConfig(refresh_interval=timedelta(seconds=1), snapshot_refresher=refresher)
 
     assert config.snapshot_refresher is refresher
-
-
-def test_websocket_configuration_values_are_frozen_and_slotted() -> None:
-    config = WebSocketSecurityConfig()
-    handshake = WebSocketHandshake(
-        origin=None, uses_cookie_credentials=False, uses_authorization_header=False, connect_token=None
-    )
-
-    with pytest.raises(FrozenInstanceError):
-        config.connect_token_query_parameter = "other"  # type: ignore[misc]  # noqa: S105 - a parameter name
-    with pytest.raises(FrozenInstanceError):
-        handshake.origin = "https://trusted.example"  # type: ignore[misc]
-    with pytest.raises((AttributeError, TypeError)):
-        handshake.extra = True  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("uses_cookie_credentials", [True, False])

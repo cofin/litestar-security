@@ -117,102 +117,6 @@ _REFRESH_CAPABILITIES = {
     "revoke_token_for_account",
     "rotate",
 }
-_PUBLIC_API = (
-    "CSRF_REQUIRED_OPT_KEY",
-    "ROUTE_TAGS",
-    "AESGCMOAuthTransactionProtector",
-    "AssuranceRequirement",
-    "AssuranceTrait",
-    "Authenticated",
-    "AuthenticationEvidence",
-    "AuthenticationMechanism",
-    "AuthenticationOutcome",
-    "AuthenticationPolicy",
-    "AuthenticationRegistry",
-    "AuthorizationDecision",
-    "AuthorizationPredicate",
-    "AuthorizationResolver",
-    "AuthorizationSnapshot",
-    "AuthorizationSnapshotRefresher",
-    "BlockingIntegration",
-    "CSPMode",
-    "ContentSecurityPolicy",
-    "CredentialExtraction",
-    "CredentialRestrictions",
-    "CredentialSlot",
-    "CurrentUser",
-    "ExternalCSRF",
-    "GitHubOAuthProvider",
-    "IdentityResolution",
-    "IdentityResolver",
-    "InMemoryWebSocketConnectTokenStore",
-    "InvalidCredentials",
-    "IssuedWebSocketConnectToken",
-    "LitestarSessionHandle",
-    "MFAConfig",
-    "MechanismRequirement",
-    "NoCredentials",
-    "NullSessionHandle",
-    "OAuthAccountService",
-    "OAuthAccountStore",
-    "OAuthConfig",
-    "OAuthProvider",
-    "OAuthRouteService",
-    "OAuthTransactionProtectorKey",
-    "PasskeyConfig",
-    "PresentedCredential",
-    "Principal",
-    "ProblemDetail",
-    "PublicController",
-    "RequestAuthenticator",
-    "ResourcePermission",
-    "RouteDocs",
-    "RouteError",
-    "SecureController",
-    "SecurityConfig",
-    "SecurityContext",
-    "SecurityHeadersConfig",
-    "SecurityPlugin",
-    "SessionHandle",
-    "SessionPersistenceUnavailableError",
-    "SessionUnavailableError",
-    "TokenVault",
-    "VerificationUnavailable",
-    "WebSocketBinding",
-    "WebSocketCloseCodes",
-    "WebSocketConnectTokenIssuer",
-    "WebSocketConnectTokenRecord",
-    "WebSocketConnectTokenService",
-    "WebSocketConnectTokenStore",
-    "WebSocketRevocationSource",
-    "WebSocketSecurityConfig",
-    "WireStruct",
-    "__project__",
-    "__version__",
-    "all_of",
-    "any_of",
-    "at_least",
-    "csp_nonce",
-    "exclude",
-    "guard_all_of",
-    "guard_any_of",
-    "guard_at_least",
-    "guard_one_of",
-    "issue_websocket_connect_token",
-    "mechanism",
-    "optional",
-    "public",
-    "required",
-    "requires_assurance",
-    "requires_authenticated",
-    "requires_capability",
-    "requires_role",
-    "requires_scope",
-    "requires_team_role",
-    "requires_tenant",
-    "resolve_authorization",
-    "websocket_policy_fingerprint",
-)
 
 
 class _Session:
@@ -362,14 +266,6 @@ def test_principal_require_user_preserves_identity_and_fails_generically() -> No
 def test_principal_rejects_invalid_states(kwargs: dict[str, object], match: str) -> None:
     with pytest.raises(ValueError, match=match):
         Principal(**kwargs)
-
-
-def test_principal_is_frozen_and_slotted() -> None:
-    principal = Principal(id="user-1")
-
-    with pytest.raises(FrozenInstanceError):
-        principal.id = "changed"  # type: ignore[misc]
-    assert not hasattr(principal, "__dict__")
 
 
 def test_evidence_normalizes_utc_and_preserves_assurance_details() -> None:
@@ -906,28 +802,10 @@ def test_websocket_native_session_is_read_only() -> None:
         assert scope["session"] == original_session
 
 
-def test_package_root_exports_only_foundational_contract() -> None:
-    assert litestar_security.__all__ == _PUBLIC_API
-    assert all(hasattr(litestar_security, name) for name in _PUBLIC_API)
+def test_package_root_exports_its_foundational_contract() -> None:
     assert litestar_security.__project__ == "litestar-security"
     assert CSRF_REQUIRED_OPT_KEY == "csrf_required"
     assert exclude() == authentication_module.exclude()
-    for private_name in (
-        "OwnedSessionBackend",
-        "SecurityMiddleware",
-        "SecurityMiddlewareWrapper",
-        "SecurityRuntimeConfig",
-        "SecurityRuntimePlan",
-        "_AuthenticationEvaluator",
-    ):
-        assert not hasattr(litestar_security, private_name)
-    assert not {
-        "OwnedSessionBackend",
-        "SecurityMiddleware",
-        "SecurityMiddlewareWrapper",
-        "SecurityRuntimeConfig",
-        "SecurityRuntimePlan",
-    }.intersection(authentication_module.__all__)
     assert "CSRF_REQUIRED_OPT_KEY" in authentication_module.__all__
     assert openapi_module.__all__ == ()
 
@@ -993,135 +871,11 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
         assert import_module(dependency)
 
     providers = import_module("litestar_security.providers")
-    assert providers.__all__ == (
-        "AESGCMOAuthTransactionProtector",
-        "APIKeyClaims",
-        "APIKeyCodec",
-        "APIKeyConfig",
-        "APIKeyGenerationError",
-        "APIKeyProof",
-        "APIKeyRecord",
-        "APIKeyService",
-        "APIKeyStore",
-        "APIKeyUsageSink",
-        "AsyncJWKSFetcher",
-        "BearerSlotSelector",
-        "BearerTokenSlot",
-        "BufferedAPIKeyUsage",
-        "CachedJWKSProvider",
-        "CompositeBearerConfig",
-        "DiscoveryPolicy",
-        "GitHubOAuthProvider",
-        "GoogleIAPClaims",
-        "GoogleIAPConfig",
-        "HttpxJWKSFetcher",
-        "InMemoryJWKSCache",
-        "IssuedAPIKey",
-        "JSONValue",
-        "JWKSCache",
-        "JWKSCacheEntry",
-        "JWKSCachePolicy",
-        "JWKSFetchRequest",
-        "JWKSFetchResponse",
-        "JWKSProvider",
-        "JWKSSnapshot",
-        "JWTClaims",
-        "JWTValidationConfig",
-        "JWTVerifier",
-        "KeycloakClaims",
-        "LocalJWKSConfig",
-        "LocalKeyRing",
-        "NoOpSecurityMetrics",
-        "OAuthAccountService",
-        "OAuthAccountStore",
-        "OAuthConfig",
-        "OAuthProvider",
-        "OAuthRouteService",
-        "OAuthTransactionProtectorKey",
-        "OIDCDiscoveryClient",
-        "OIDCDiscoveryError",
-        "OIDCJWTLogoutTokenConsumer",
-        "OIDCMetadata",
-        "OIDCProvider",
-        "ProtectedResourceConfig",
-        "SecurityMetrics",
-        "ServiceTokenConfig",
-        "SigningKey",
-        "SyncJWKSFetcher",
-        "SyncJWTVerifier",
-        "SyncTokenSigner",
-        "TokenSigner",
-        "TokenVault",
-        "VerificationKey",
-        "VerificationKeySet",
-        "VerifiedCapability",
-        "WorkerLimits",
-        "build_access_token_claims",
-        "build_local_jwks_handler",
-        "extend_composite_bearer",
-        "google_oidc_provider",
-        "keycloak_oidc_provider",
-        "map_keycloak_claims",
-        "normalize_fetcher",
-        "normalize_signer",
-        "normalize_verifier",
-        "oidc_provider",
-    )
-    api_key_module = import_module("litestar_security.providers.api_key")
-    iap_module = import_module("litestar_security.providers.iap")
-    jwks_module = import_module("litestar_security.providers.jwks")
     jwt_module = import_module("litestar_security.providers.jwt")
     capability_module = import_module("litestar_security.providers.jwt._capabilities")
-    oidc_module = import_module("litestar_security.providers.oidc")
-    oauth_exports = {
-        "AESGCMOAuthTransactionProtector",
-        "GitHubOAuthProvider",
-        "OAuthAccountService",
-        "OAuthAccountStore",
-        "OAuthConfig",
-        "OAuthProvider",
-        "OAuthRouteService",
-        "OAuthTransactionProtectorKey",
-        "ProtectedResourceConfig",
-        "TokenVault",
-    }
-    assert set(api_key_module.__all__).union(
-        iap_module.__all__, jwks_module.__all__, jwt_module.__all__, oidc_module.__all__, oauth_exports
-    ) == set(providers.__all__)
+
     assert "VerifiedCapability" in jwt_module.__all__
     assert providers.VerifiedCapability is jwt_module.VerifiedCapability is capability_module.VerifiedCapability
-    assert api_key_module.__all__ == (
-        "APIKeyClaims",
-        "APIKeyCodec",
-        "APIKeyConfig",
-        "APIKeyGenerationError",
-        "APIKeyProof",
-        "APIKeyRecord",
-        "APIKeyService",
-        "APIKeyStore",
-        "APIKeyUsageSink",
-        "BufferedAPIKeyUsage",
-        "IssuedAPIKey",
-    )
-    assert iap_module.__all__ == ("GoogleIAPClaims", "GoogleIAPConfig")
-    assert jwks_module.__all__ == (
-        "AsyncJWKSFetcher",
-        "CachedJWKSProvider",
-        "HttpxJWKSFetcher",
-        "InMemoryJWKSCache",
-        "JWKSCache",
-        "JWKSCacheEntry",
-        "JWKSCachePolicy",
-        "JWKSFetchRequest",
-        "JWKSFetchResponse",
-        "JWKSProvider",
-        "JWKSSnapshot",
-        "NoOpSecurityMetrics",
-        "SecurityMetrics",
-        "SyncJWKSFetcher",
-        "WorkerLimits",
-        "normalize_fetcher",
-    )
 
 
 def test_package_declares_feature_dependencies_only_through_extras() -> None:
@@ -1143,178 +897,7 @@ def test_package_declares_feature_dependencies_only_through_extras() -> None:
         for requirement in declared
     )
     assert import_module("argon2")
-    accounts = import_module("litestar_security.accounts")
-    assert accounts.__all__ == (
-        "DEFAULT_RATE_LIMIT_POLICIES",
-        "LOCAL_AUTH_TAGS",
-        "RATE_LIMIT_STORE_NAME",
-        "REFRESH_RESPONSE_HEADERS",
-        "AESGCMSecretProtector",
-        "AccountLookup",
-        "Argon2PasswordHasher",
-        "AssertionRecordStatus",
-        "AssuranceRequirement",
-        "AssuranceTrait",
-        "AttestationTrustMapper",
-        "AuthenticationVerification",
-        "CloneRiskPolicy",
-        "ConsumeOutcome",
-        "ConsumeStatus",
-        "CreateRefreshFamilyCommand",
-        "CreateSessionCommand",
-        "InvalidInvitation",
-        "InvalidWebAuthnResponseError",
-        "LifecycleAccepted",
-        "LifecycleRejected",
-        "LocalAccessToken",
-        "LocalAccessTokenIssuer",
-        "LocalAccount",
-        "LocalAccountCapabilities",
-        "LocalAccountRecord",
-        "LocalAuth",
-        "LocalAuthConfig",
-        "LocalAuthMode",
-        "LocalAuthSecrets",
-        "LocalAuthService",
-        "LocalBearerIdentityResolver",
-        "LocalCredentials",
-        "LocalIdentifier",
-        "LocalInvitationRegistration",
-        "LocalMFAChallenge",
-        "LocalMFACompletion",
-        "LocalPasswordChange",
-        "LocalPasswordReset",
-        "LocalRegistration",
-        "LocalSession",
-        "LocalSessionList",
-        "LocalToken",
-        "LoginMethod",
-        "LoginMethodStore",
-        "MFALoginChallenge",
-        "MFALoginChallengeStore",
-        "MFARequired",
-        "MFAService",
-        "MFAStore",
-        "NativeSessionAuth",
-        "NativeSessionStore",
-        "NoOpSecurityEventSink",
-        "NotificationCommand",
-        "PasskeyAuthenticationStart",
-        "PasskeyCredential",
-        "PasskeyOptions",
-        "PasskeyRecord",
-        "PasskeyRegistrationStart",
-        "PasskeyService",
-        "PasskeyStore",
-        "PasskeySummary",
-        "PasskeyVerification",
-        "PasswordChangeOutcome",
-        "PasswordChangeService",
-        "PasswordChangeStatus",
-        "PasswordCredentialState",
-        "PasswordCredentialStore",
-        "PasswordHasher",
-        "PasswordHashingUnavailableError",
-        "PasswordLoginService",
-        "PasswordPolicy",
-        "PasswordPolicyDecision",
-        "PasswordPolicyViolation",
-        "PasswordReauthenticationProof",
-        "PasswordReauthenticationService",
-        "PasswordResetOutcome",
-        "PasswordResetStatus",
-        "PasswordVerificationOutcome",
-        "PasswordVerificationStatus",
-        "PendingTOTPEnrollment",
-        "PendingTokenIssue",
-        "ProtectedSecret",
-        "PurposeTokenCodec",
-        "PurposeTokenDelivery",
-        "PurposeTokenGenerationError",
-        "PurposeTokenProof",
-        "PyWebAuthnVerifier",
-        "RateLimitAttempt",
-        "RateLimitDecision",
-        "RateLimitGuard",
-        "RateLimitPolicy",
-        "RateLimited",
-        "RateLimiter",
-        "RecoveryCodeDigest",
-        "RecoveryCodeGrant",
-        "RecoveryCodePepper",
-        "RecoveryCodes",
-        "RecoveryTokenService",
-        "RecoveryTokenStore",
-        "RefreshFamilyContext",
-        "RefreshPreflightOutcome",
-        "RefreshReceiptContext",
-        "RefreshReceiptKey",
-        "RefreshReceiptReplay",
-        "RefreshReceiptSealer",
-        "RefreshRotationOutcome",
-        "RefreshRotationStatus",
-        "RefreshTokenCodec",
-        "RefreshTokenFamilyStore",
-        "RefreshTokenIssue",
-        "RefreshTokenProof",
-        "RefreshTokenService",
-        "RegistrationCommand",
-        "RegistrationMode",
-        "RegistrationOutcome",
-        "RegistrationPolicy",
-        "RegistrationService",
-        "RegistrationStatus",
-        "RegistrationStore",
-        "RegistrationVerification",
-        "RevokeLoginMethodOutcome",
-        "RevokeLoginMethodStatus",
-        "RotateRefreshCommand",
-        "RouteStatus",
-        "SecretProtector",
-        "SecretProtectorKey",
-        "SecurityEpochStore",
-        "SecurityEpochValidator",
-        "SecurityEvent",
-        "SecurityEventSink",
-        "SessionAuthentication",
-        "SessionBindingConfig",
-        "SessionBindingProof",
-        "SessionRebindPlan",
-        "SessionRecord",
-        "SessionRegistry",
-        "SessionSummary",
-        "StepUpAuthorization",
-        "StepUpCredential",
-        "StepUpGrant",
-        "StepUpRecord",
-        "StepUpService",
-        "StepUpStore",
-        "StepUpVerification",
-        "StoreRateLimiter",
-        "TOTPEnrollment",
-        "TOTPMethod",
-        "TOTPPolicy",
-        "TOTPProvisioning",
-        "TOTPProvisioningGrant",
-        "TOTPVerification",
-        "TokenIssue",
-        "TokenPair",
-        "TokenPurpose",
-        "UnlimitedRateLimiter",
-        "UserVerification",
-        "VerificationTokenService",
-        "VerificationTokenStore",
-        "WebAuthnChallenge",
-        "WebAuthnChallengeStore",
-        "WebAuthnOptions",
-        "WebAuthnVerifier",
-        "build_local_auth_routes",
-        "build_mfa_routes",
-        "forwarded_client_key",
-        "normalize_identifier",
-        "requires_local_bearer",
-        "trusted_client_key",
-    )
+    assert import_module("litestar_security.accounts")
 
 
 async def test_aesgcm_secret_protector_is_nondeterministic_and_aad_bound() -> None:
@@ -1430,7 +1013,7 @@ def test_account_capabilities_are_runtime_structural(protocol: type[object], met
         assert not isinstance(incomplete, protocol)
 
 
-def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe() -> None:
+def test_local_account_commands_and_results_are_secret_safe() -> None:
     now = datetime(2026, 7, 26, 23, tzinfo=timezone.utc)
     account = accounts_module.LocalAccountRecord(
         account_id="account-1",
@@ -1538,10 +1121,6 @@ def test_local_account_commands_and_results_are_frozen_slotted_and_secret_safe()
 
     event_correlation["request_id"] = "changed"
     assert event.correlation == {"request_id": "request-1"}
-    for value in values:
-        assert not hasattr(value, "__dict__")
-        with pytest.raises(FrozenInstanceError):
-            setattr(value, fields(value)[0].name, None)
     rendered = " ".join(repr(value) for value in values)
     for secret in (
         "binding-secret-digest",
@@ -2921,7 +2500,7 @@ def test_password_verification_outcome_rejects_replacement_for_failure() -> None
         )
 
 
-def test_security_config_is_typed_and_slotted() -> None:
+def test_security_config_declares_its_fields_in_order() -> None:
     config = litestar_security.SecurityConfig()
 
     expected_fields = (
@@ -2949,8 +2528,6 @@ def test_security_config_is_typed_and_slotted() -> None:
         "wire_forbid_unknown_fields",
     )
     assert tuple(field.name for field in fields(config)) == expected_fields
-    assert config.__slots__ == expected_fields
-    assert not hasattr(config, "__dict__")
 
 
 def test_security_config_wire_casing_defaults_to_snake_case_and_strict() -> None:

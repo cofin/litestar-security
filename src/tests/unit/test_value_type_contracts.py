@@ -151,6 +151,11 @@ def test_mutable_service_list_is_exact() -> None:
 def test_frozen_instances_reject_assignment(instance: object, field: str) -> None:
     with pytest.raises((FrozenInstanceError, AttributeError)):
         setattr(instance, field, object())
+    # Declared slots only keep an instance dictionary away when every base is
+    # slotted too, so this is the runtime half of the class-level slots check.
+    assert not hasattr(instance, "__dict__")
+    with pytest.raises((AttributeError, TypeError)):
+        instance.attribute_that_was_never_declared = True  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("module_name", MODULES)

@@ -1,17 +1,14 @@
 """Cross-feature extension-boundary tests."""
 
 import inspect
-from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from threading import Event as ThreadEvent
 from threading import Lock
 from typing import Protocol
 
-import pytest
 from anyio import CancelScope, CapacityLimiter, Event, create_task_group, from_thread
 from anyio.lowlevel import checkpoint
 
-import litestar_security.config as config_module
 import litestar_security.testing as testing_module
 import litestar_security.workers as workers_module
 from litestar_security.accounts import (
@@ -99,15 +96,6 @@ async def test_mfa_login_challenge_reference_store_is_atomic_and_burns_mismatche
 
     assert sum(outcome is winning_challenge for outcome in outcomes) == 1
     assert outcomes.count(None) == 1
-
-
-def test_blocking_integration_marker_is_public_configuration() -> None:
-    marker = config_module.BlockingIntegration(object())
-
-    assert hasattr(config_module, "BlockingIntegration")
-    assert marker.__slots__ == ("implementation",)
-    with pytest.raises(FrozenInstanceError):
-        marker.implementation = object()  # type: ignore[misc]
 
 
 async def test_blocking_call_runner_enforces_its_capacity_limit() -> None:
