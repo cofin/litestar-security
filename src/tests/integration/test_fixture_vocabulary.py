@@ -9,12 +9,16 @@ import ast
 import pathlib
 
 import pytest
+from litestar import Litestar
+from litestar.testing import TestClient
 
 from litestar_security.testing import FakeOAuthHTTPTransport, FakeOAuthProvider, InMemoryWebSocketRevocationSource
 
 TYPED_FIXTURES = {
     "oauth_provider": FakeOAuthProvider,
     "oauth_transport": FakeOAuthHTTPTransport,
+    "public_profile_app": Litestar,
+    "required_profile_app": Litestar,
     "revocation_source": InMemoryWebSocketRevocationSource,
 }
 
@@ -34,6 +38,24 @@ def test_function_scope_gives_each_test_its_own_provider(oauth_provider: FakeOAu
     # A provider carrying calls from an earlier test would mean the fixture is
     # shared, which is what its function scope exists to prevent.
     assert oauth_provider.calls == []
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "expected"),
+    [("public_profile_app", {"anonymous": True}), ("required_profile_app", {"principal_id": "profile-user"})],
+)
+def test_session_profile_apps_are_reusable_across_sequential_clients(
+    fixture_name: str, expected: dict[str, object], request: pytest.FixtureRequest
+) -> None:
+    app = request.getfixturevalue(fixture_name)
+
+    with TestClient(app) as first_client:
+        first = first_client.get("/")
+    with TestClient(app) as second_client:
+        second = second_client.get("/")
+
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json() == expected
 
 
 def test_this_file_does_not_reintroduce_the_anyio_marker() -> None:

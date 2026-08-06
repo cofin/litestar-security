@@ -24,15 +24,17 @@ attribute. ``ProbeController`` is the one non-dataclass: a Litestar
 
 from __future__ import annotations
 
+import asyncio
 import json
 from base64 import urlsafe_b64encode
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from threading import get_ident
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from litestar import Controller, get
-from litestar.exceptions import PermissionDeniedException
 from litestar.stores.memory import MemoryStore
 
 from litestar_security import testing as kit
@@ -45,14 +47,14 @@ from litestar_security.accounts import (
     StoreRateLimiter,
     TokenPair,
 )
-from litestar_security.providers.oauth import ProviderIdentity, ProviderTokenSet, SecretStr
+from litestar_security.context import Principal
+from litestar_security.providers.jwt import JWTValidationConfig
+from litestar_security.providers.oauth import ProtectedOAuthSecret, ProviderIdentity, ProviderTokenSet, SecretStr
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
-    from threading import Event
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
-    import httpx
-
+    from litestar_security.providers.api_key import APIKeyClaims, APIKeyRecord
     from litestar_security.providers.jwks import JWKSFetchRequest, JWKSFetchResponse
 
 # A function-parameter default, so the dataclass-default rule in patterns.md does
@@ -83,6 +85,241 @@ BACKEND_STORE_ATTRIBUTES: tuple[str, ...] = (
 
 _TOKEN_PEPPER = b"t" * 32
 _DEFAULT_EXPIRES_IN = 300
+
+
+class MemoryAPIKeyStore:
+    """Mutable atomic API-key store supporting runtime fault scripting."""
+
+    def __init__(self) -> None:
+        self.records: dict[str, APIKeyRecord] = {}
+        self._lock = asyncio.Lock()
+        self.get_calls: list[str] = []
+        self.fail_get = False
+
+    async def get(self, key_id: str) -> APIKeyRecord | None:
+        """Return and record one lookup."""
+        self.get_calls.append(key_id)
+        if self.fail_get:
+            msg = "store detail"
+            raise RuntimeError(msg)
+        return self.records.get(key_id)
+
+    async def create(self, record: APIKeyRecord) -> None:
+        """Create one unique record atomically."""
+        async with self._lock:
+            if record.key_id in self.records:
+                msg = "duplicate API-key id"
+                raise ValueError(msg)
+            self.records[record.key_id] = record
+
+    async def rotate(
+        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+    ) -> None:
+        """Rotate one current record atomically."""
+        async with self._lock:
+            current = self.records[current_key_id]
+            if current.revoked_at is not None or replacement.key_id in self.records:
+                msg = "API key rotation conflict"
+                raise ValueError(msg)
+            bounded = (
+                min(overlap_until, current.expires_at)
+                if overlap_until is not None and current.expires_at is not None
+                else overlap_until
+            )
+            self.records[current_key_id] = replace(current, revoked_at=now, overlap_until=bounded)
+            self.records[replacement.key_id] = replacement
+
+    async def revoke(self, *, key_id: str, now: datetime) -> None:
+        """Revoke one record atomically."""
+        async with self._lock:
+            self.records[key_id] = replace(self.records[key_id], revoked_at=now, overlap_until=None)
+
+
+def build_api_key_store() -> MemoryAPIKeyStore:
+    """Build an isolated mutable API-key store."""
+    return MemoryAPIKeyStore()
+
+
+@dataclass(slots=True)
+class RecordingOAuthProtector:
+    """Deterministic OAuth transaction protector with an optional failure switch."""
+
+    fail: bool = False
+    active_key_version: str = "test-key"
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedOAuthSecret:
+        """Protect deterministically or raise the configured operational failure."""
+        del associated_data
+        if self.fail:
+            msg = "secret protect detail"
+            raise RuntimeError(msg)
+        return ProtectedOAuthSecret(
+            ciphertext=bytes(value ^ 0xA5 for value in secret), key_version=self.active_key_version
+        )
+
+    async def unprotect(self, protected: ProtectedOAuthSecret, *, associated_data: bytes) -> bytes:
+        """Recover deterministically or raise the configured operational failure."""
+        del associated_data
+        if self.fail:
+            msg = "secret unprotect detail"
+            raise RuntimeError(msg)
+        return bytes(value ^ 0xA5 for value in protected.ciphertext)
+
+
+class RecordingAPIKeyResolver:
+    """Resolve API-key claims and record each normalized claim."""
+
+    def __init__(self) -> None:
+        self.claims: list[APIKeyClaims] = []
+
+    async def resolve(self, claims: APIKeyClaims) -> Principal[str]:
+        """Resolve one API-key subject."""
+        self.claims.append(claims)
+        return Principal(id=claims.subject_id, user=claims.subject_id)
+
+
+class RecordingAPIKeyUsageSink:
+    """Record usage observations with an optional operational failure."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, datetime]] = []
+        self.fail = False
+
+    async def record(self, *, key_id: str, used_at: datetime) -> None:
+        """Record one observation or raise the configured failure."""
+        self.calls.append((key_id, used_at))
+        if self.fail:
+            msg = "usage detail"
+            raise RuntimeError(msg)
+
+
+class RecordingAPIMetrics:
+    """Record metric increments while accepting observations."""
+
+    def __init__(self) -> None:
+        self.increments: list[str] = []
+
+    def increment(self, name: str, **_kwargs: object) -> None:
+        """Record one counter name."""
+        self.increments.append(name)
+
+    def observe(self, _name: str, _value: float, **_kwargs: object) -> None:
+        """Accept one observation."""
+
+
+class SyncMemoryAPIKeyStore:
+    """Synchronous API-key store recording worker thread identities."""
+
+    def __init__(self) -> None:
+        self.records: dict[str, APIKeyRecord] = {}
+        self.thread_ids: list[int] = []
+
+    def get(self, key_id: str) -> APIKeyRecord | None:
+        """Return a record and capture the executing thread."""
+        self.thread_ids.append(get_ident())
+        return self.records.get(key_id)
+
+    def create(self, record: APIKeyRecord) -> None:
+        """Create a record and capture the executing thread."""
+        self.thread_ids.append(get_ident())
+        self.records[record.key_id] = record
+
+    def rotate(
+        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+    ) -> None:
+        """Rotate a record and capture the executing thread."""
+        self.thread_ids.append(get_ident())
+        current = self.records[current_key_id]
+        self.records[current_key_id] = replace(current, revoked_at=now, overlap_until=overlap_until)
+        self.records[replacement.key_id] = replacement
+
+    def revoke(self, *, key_id: str, now: datetime) -> None:
+        """Revoke a record and capture the executing thread."""
+        self.thread_ids.append(get_ident())
+        self.records[key_id] = replace(self.records[key_id], revoked_at=now, overlap_until=None)
+
+
+class RecordingDNSResolver:
+    """Return fixed DNS answers and record every lookup."""
+
+    def __init__(self, answers: Mapping[str, tuple[str, ...]]) -> None:
+        self.answers = answers
+        self.calls: list[tuple[str, int]] = []
+
+    async def __call__(self, hostname: str, port: int) -> tuple[str, ...]:
+        """Resolve one configured host."""
+        self.calls.append((hostname, port))
+        if hostname not in self.answers:
+            msg = f"Unexpected DNS lookup for {hostname}:{port}"
+            raise AssertionError(msg)
+        return self.answers[hostname]
+
+
+class RecordingMockTransport(httpx.MockTransport):
+    """HTTPX mock transport recording requests and close state."""
+
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        super().__init__(handler)
+        self.requests: list[httpx.Request] = []
+        self.was_closed = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        """Record and dispatch one request."""
+        self.requests.append(request)
+        return await super().handle_async_request(request)
+
+    async def aclose(self) -> None:
+        """Record and perform closure."""
+        self.was_closed = True
+        await super().aclose()
+
+
+class ChunkedByteStream(httpx.AsyncByteStream):
+    """Deterministic async response stream exposing configured chunks."""
+
+    def __init__(self, *chunks: bytes) -> None:
+        self.chunks = chunks
+        self.was_iterated = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Yield configured chunks in order."""
+        self.was_iterated = True
+        for chunk in self.chunks:
+            yield chunk
+
+
+class ProviderPrincipalResolver:
+    """Resolve a text claim into a principal with the same identifier."""
+
+    async def resolve(self, claims: str) -> Principal[object]:
+        """Build the principal."""
+        return Principal(id=claims)
+
+
+class AsyncRecordingJWTVerifier:
+    """JWT verifier returning one configured outcome and recording calls."""
+
+    def __init__(self, outcome: object, config: JWTValidationConfig) -> None:
+        self.outcome = outcome
+        self.config = config
+        self.calls: list[tuple[str, datetime]] = []
+
+    async def verify(self, token: str, *, now: datetime) -> object:
+        """Record and return the configured outcome."""
+        self.calls.append((token, now))
+        return self.outcome
+
+
+def build_recording_jwt_verifier(
+    outcome: object,
+    *,
+    issuer: str = "https://issuer.example",
+    audiences: frozenset[str] = frozenset({"litestar-security"}),
+) -> AsyncRecordingJWTVerifier:
+    """Build a recording verifier with a safe fixed validation policy."""
+    return AsyncRecordingJWTVerifier(
+        outcome, JWTValidationConfig(issuer=issuer, audiences=audiences, algorithms=frozenset({"HS256"}))
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,147 +551,6 @@ class RecordingJWKSFetcher:
 
 
 @dataclass(slots=True)
-class SyncRecordingJWKSFetcher:
-    """Synchronous twin of ``RecordingJWKSFetcher``, for the worker-normalization paths."""
-
-    responses: list[object] = field(default_factory=list)
-    requests: list[JWKSFetchRequest] = field(default_factory=list)
-    closes: int = 0
-
-    def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
-        """Return the next scripted response.
-
-        Args:
-            request: The recorded fetch request.
-
-        Returns:
-            The next queued response.
-
-        Raises:
-            AssertionError: If the script is exhausted.
-        """
-        return _next_response(self.responses, self.requests, request)
-
-    def close(self) -> None:
-        """Record one close."""
-        self.closes += 1
-
-
-@dataclass(slots=True)
-class BlockingJWKSFetcher:
-    """Synchronous fetcher that blocks until released, for saturation and timeout paths.
-
-    ``started`` is set on entry and ``release`` gates the return, so a test can
-    observe a fetch in flight without sleeping.
-    """
-
-    response: JWKSFetchResponse
-    started: Event
-    release: Event
-    timeout: float = 1.0
-    requests: list[JWKSFetchRequest] = field(default_factory=list)
-
-    def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
-        """Block until released, then return the configured response.
-
-        Args:
-            request: The recorded fetch request.
-
-        Returns:
-            The configured response.
-        """
-        self.requests.append(request)
-        self.started.set()
-        self.release.wait(timeout=self.timeout)
-        return self.response
-
-
-@dataclass(slots=True)
-class RecordingJWTVerifier:
-    """JWT verifier recording every token it is asked about and returning a scripted outcome."""
-
-    outcome: object
-    config: object = None
-    calls: list[tuple[str, datetime]] = field(default_factory=list)
-
-    def verify(self, token: str, *, now: datetime) -> object:
-        """Record the call and return the configured outcome.
-
-        Args:
-            token: The presented token.
-            now: The verification instant.
-
-        Returns:
-            The configured outcome.
-        """
-        self.calls.append((token, now))
-        return self.outcome
-
-
-@dataclass(slots=True)
-class FailingJWTVerifier:
-    """JWT verifier that raises, for the fail-closed ``VerificationUnavailable`` paths."""
-
-    error: Exception = field(default_factory=lambda: RuntimeError("verifier unavailable"))
-    config: object = None
-    calls: list[tuple[str, datetime]] = field(default_factory=list)
-
-    def verify(self, token: str, *, now: datetime) -> object:
-        """Record the call and raise.
-
-        Args:
-            token: The presented token.
-            now: The verification instant.
-
-        Returns:
-            Never returns.
-
-        Raises:
-            Exception: Always, with the configured error.
-        """
-        self.calls.append((token, now))
-        raise self.error
-
-
-@dataclass(slots=True)
-class RecordingSigner:
-    """JWT signer recording claims and returning a fixed token."""
-
-    token: str = "signed-token"  # noqa: S105 - a placeholder token value, not a credential
-    calls: list[tuple[Mapping[str, object], datetime]] = field(default_factory=list)
-
-    def sign(self, claims: Mapping[str, object], *, now: datetime) -> str:
-        """Record the call and return the configured token.
-
-        Args:
-            claims: The claims to sign.
-            now: The signing instant.
-
-        Returns:
-            The configured token.
-        """
-        self.calls.append((claims, now))
-        return self.token
-
-
-@dataclass(slots=True)
-class RecordingRateLimitGuard:
-    """Rate-limit guard that admits every operation and records the admission."""
-
-    calls: list[tuple[str, str | None, str | None]] = field(default_factory=list)
-
-    async def check(self, operation: str, *, client_key: str | None = None, identifier: str | None = None) -> None:
-        """Record one admitted operation.
-
-        Args:
-            operation: The rate-limited operation name.
-            client_key: The caller's client key, when one is bound.
-            identifier: The account identifier, when one is known.
-        """
-        self.calls.append((operation, client_key, identifier))
-
-
-@dataclass(slots=True)
 class DenyingRateLimitGuard:
     """Rate-limit guard that denies every operation with a retry hint."""
 
@@ -476,159 +572,6 @@ class DenyingRateLimitGuard:
         """
         self.calls.append((operation, client_key, identifier))
         return RateLimited(retry_after=self.retry_after)
-
-
-@dataclass(slots=True)
-class RecordingRouteGuard:
-    """Native Litestar guard that permits every connection and records it."""
-
-    calls: list[tuple[object, object]] = field(default_factory=list)
-
-    def __call__(self, connection: object, handler: object) -> None:
-        """Record one permitted connection.
-
-        Args:
-            connection: The ASGI connection under check.
-            handler: The route handler under check.
-        """
-        self.calls.append((connection, handler))
-
-
-@dataclass(slots=True)
-class DenyingRouteGuard:
-    """Native Litestar guard that denies every connection."""
-
-    detail: str = "denied by test guard"
-    calls: list[tuple[object, object]] = field(default_factory=list)
-
-    def __call__(self, connection: object, handler: object) -> None:
-        """Record one denied connection and refuse it.
-
-        Args:
-            connection: The ASGI connection under check.
-            handler: The route handler under check.
-
-        Raises:
-            PermissionDeniedException: Always.
-        """
-        self.calls.append((connection, handler))
-        raise PermissionDeniedException(detail=self.detail)
-
-
-@dataclass(slots=True)
-class RecordingMetricsSink:
-    """``SecurityMetrics`` sink keeping counters and observations apart.
-
-    ``name in sink`` answers "was this metric touched at all", which is what
-    most assertions want.
-    """
-
-    increments: list[tuple[str, dict[str, str]]] = field(default_factory=list)
-    observations: list[tuple[str, float, dict[str, str]]] = field(default_factory=list)
-
-    def increment(self, name: str, *, attributes: Mapping[str, str] = _NO_ATTRIBUTES) -> None:
-        """Record one counter increment.
-
-        Args:
-            name: The counter name.
-            attributes: Dimensions recorded with the increment.
-        """
-        self.increments.append((name, dict(attributes)))
-
-    def observe(self, name: str, value: float, *, attributes: Mapping[str, str] = _NO_ATTRIBUTES) -> None:
-        """Record one observation.
-
-        Args:
-            name: The measurement name.
-            value: The observed value.
-            attributes: Dimensions recorded with the observation.
-        """
-        self.observations.append((name, value, dict(attributes)))
-
-    def __contains__(self, name: object) -> bool:
-        """Report whether a metric of this name was recorded at all.
-
-        Args:
-            name: The metric name to look for.
-
-        Returns:
-            ``True`` when the name was incremented or observed.
-        """
-        return any(recorded == name for recorded, _ in self.increments) or any(
-            recorded == name for recorded, _, _ in self.observations
-        )
-
-
-@dataclass(slots=True)
-class RecordingEventSink:
-    """``SecurityEventSink`` collecting every emitted event."""
-
-    events: list[object] = field(default_factory=list)
-
-    async def emit(self, event: object) -> None:
-        """Collect one event.
-
-        Args:
-            event: The emitted security event.
-        """
-        self.events.append(event)
-
-
-@dataclass(slots=True)
-class FailingEventSink:
-    """``SecurityEventSink`` that raises, proving an observational failure is dropped."""
-
-    error: Exception = field(default_factory=lambda: RuntimeError("sink unavailable"))
-    events: list[object] = field(default_factory=list)
-
-    async def emit(self, event: object) -> None:
-        """Collect one event, then raise.
-
-        Args:
-            event: The emitted security event.
-
-        Raises:
-            Exception: Always, with the configured error.
-        """
-        self.events.append(event)
-        raise self.error
-
-
-@dataclass(slots=True)
-class FailingStore:
-    """Store whose named methods raise, for the fail-closed port paths.
-
-    Any attribute is callable. Methods named in ``failing`` raise ``error``;
-    every other call is recorded and returns ``None``, which is what the
-    read-then-write halves of an atomic port contract expect. This replaces the
-    per-test ``BrokenStore`` definitions across the account and WebSocket suites.
-    """
-
-    failing: tuple[str, ...] = ()
-    error: Exception = field(default_factory=lambda: RuntimeError("store unavailable"))
-    calls: list[tuple[str, dict[str, object]]] = field(default_factory=list)
-
-    def __getattr__(self, name: str) -> Callable[..., Any]:
-        """Return an async stub for any port method.
-
-        Args:
-            name: The port method being reached for.
-
-        Returns:
-            An async callable recording the call, raising for named methods.
-
-        Raises:
-            AttributeError: For dunder lookups, so protocol checks stay honest.
-        """
-        if name.startswith("__"):
-            raise AttributeError(name)
-
-        async def call(*args: object, **kwargs: object) -> None:
-            self.calls.append((name, {**{str(index): value for index, value in enumerate(args)}, **kwargs}))
-            if name in self.failing:
-                raise self.error
-
-        return call
 
 
 class ProbeController(Controller):

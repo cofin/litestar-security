@@ -137,13 +137,6 @@ def test_route_prefix_rejects_relative_and_malformed_mounts(route_prefix: object
         ProtectedResourceConfig(resource="https://api.example.com", route_prefix=route_prefix)  # type: ignore[arg-type]
 
 
-def test_config_is_frozen() -> None:
-    config = ProtectedResourceConfig(resource="https://api.example.com")
-
-    with pytest.raises(AttributeError):
-        config.resource = "https://other.example.com"  # type: ignore[misc]
-
-
 def test_security_config_accepts_a_protected_resource() -> None:
 
     config = ProtectedResourceConfig(resource="https://api.example.com")

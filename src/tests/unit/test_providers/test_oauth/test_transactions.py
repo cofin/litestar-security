@@ -1,16 +1,18 @@
-"""OAuth transaction and browser-binding contracts."""
+"""OAuth transaction behavior.."""
 
 from __future__ import annotations
 
 import asyncio
 from base64 import urlsafe_b64decode
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from cryptography.exceptions import InvalidTag
 from litestar.exceptions import ImproperlyConfiguredException
 
+from litestar_security import AESGCMOAuthTransactionProtector, OAuthTransactionProtectorKey
 from litestar_security.providers.oauth import (
     InvalidOAuthCallback,
     MemoryOAuthTransactionStore,
@@ -24,36 +26,17 @@ from litestar_security.providers.oauth import (
     oauth_binding_cookie,
     pkce_s256,
 )
+from litestar_security.providers.oauth import _transactions as oauth_transactions_module
+from tests.fixtures.collaborators import RecordingOAuthProtector as _Protector
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-
 _NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
+
 _PEPPER = b"p" * 32
+
 _CALLBACK = "https://app.example/auth/google/callback"
-
-
-@dataclass(slots=True)
-class _Protector:
-    fail: bool = False
-    active_key_version: str = "test-key"
-
-    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedOAuthSecret:
-        del associated_data
-        if self.fail:
-            message = "secret protect detail"
-            raise RuntimeError(message)
-        return ProtectedOAuthSecret(
-            ciphertext=bytes(value ^ 0xA5 for value in secret), key_version=self.active_key_version
-        )
-
-    async def unprotect(self, protected: ProtectedOAuthSecret, *, associated_data: bytes) -> bytes:
-        del associated_data
-        if self.fail:
-            message = "secret unprotect detail"
-            raise RuntimeError(message)
-        return bytes(value ^ 0xA5 for value in protected.ciphertext)
 
 
 def _service(
@@ -706,3 +689,71 @@ async def test_start_rejects_invalid_reused_browser_binding() -> None:
             now=_NOW,
             include_nonce=False,
         )
+
+
+_JWT_NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
+
+
+async def test_aesgcm_oauth_transaction_protector_round_trips_bound_transaction_secrets() -> None:
+    protector = AESGCMOAuthTransactionProtector(active_key=OAuthTransactionProtectorKey("v1", b"k" * 32))
+    associated_data = b"transaction=1|purpose=pkce"
+    first = await protector.protect(b"pkce-verifier", associated_data=associated_data)
+    second = await protector.protect(b"pkce-verifier", associated_data=associated_data)
+
+    assert first.key_version == protector.active_key_version == "v1"
+    assert first.ciphertext != second.ciphertext
+    assert await protector.unprotect(first, associated_data=associated_data) == b"pkce-verifier"
+    with pytest.raises(InvalidTag):
+        await protector.unprotect(first, associated_data=b"transaction=2|purpose=pkce")
+
+    transaction = OAuthTransaction(
+        state_digest=b"s" * 32,
+        binding_digest=b"b" * 32,
+        operation=OAuthOperation.LOGIN,
+        provider="google",
+        expected_issuer="https://accounts.google.com",
+        redirect_uri="https://app.example/auth/google/callback",
+        return_to="/",
+        requested_scopes=frozenset({"openid"}),
+        pkce_verifier=SecretStr("v" * 43),
+        nonce=SecretStr("n" * 43),
+        expires_at=_JWT_NOW + timedelta(minutes=10),
+    )
+    store = MemoryOAuthTransactionStore(protector=protector)
+    await store.create(transaction)
+
+    assert (
+        await store.consume(
+            state_digest=transaction.state_digest,
+            binding_digest=transaction.binding_digest,
+            provider=transaction.provider,
+            now=_JWT_NOW,
+        )
+        == transaction
+    )
+
+
+async def test_aesgcm_oauth_protector_rejects_invalid_configuration_entropy_and_envelopes() -> None:
+    """OAuth AES-GCM protection rejects malformed material before decrypting it."""
+    oauth_key = OAuthTransactionProtectorKey("v1", b"o" * 32)
+    with pytest.raises(ImproperlyConfiguredException, match="unique keys"):
+        AESGCMOAuthTransactionProtector(active_key=oauth_key, retained_keys=(oauth_key,))
+
+    protector = AESGCMOAuthTransactionProtector(active_key=oauth_key, entropy=lambda _size: bytearray(12))
+    with pytest.raises(ValueError, match="entropy"):
+        await protector.protect(b"secret", associated_data=b"bound")
+
+    protector = AESGCMOAuthTransactionProtector(active_key=oauth_key)
+    for protected in (
+        oauth_transactions_module.ProtectedOAuthSecret(ciphertext=b"x" * 12, key_version="unknown"),
+        oauth_transactions_module.ProtectedOAuthSecret(ciphertext=b"x" * 12, key_version="v1"),
+    ):
+        with pytest.raises(ValueError, match="envelope"):
+            await protector.unprotect(protected, associated_data=b"bound")
+
+
+@pytest.mark.parametrize(("key_version", "key"), [("", b"o" * 32), ("v1", b"o" * 31), ("v1", bytearray(b"o" * 32))])
+def test_oauth_transaction_protector_key_rejects_invalid_key_material(key_version: str, key: object) -> None:
+    """OAuth transaction encryption only accepts exact versioned AES-256 keys."""
+    with pytest.raises(ImproperlyConfiguredException, match="32-byte key"):
+        OAuthTransactionProtectorKey(key_version, key)  # type: ignore[arg-type]

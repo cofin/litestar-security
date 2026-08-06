@@ -170,6 +170,14 @@ def test_public_exports_resolve_and_hide_private_names(module_name: str) -> None
         assert not (name.startswith("_") and not name.startswith("__")), f"{module_name} exports private {name}"
 
 
+@pytest.mark.parametrize("module_name", MODULES)
+def test_public_exports_are_sorted(module_name: str) -> None:
+    module = importlib.import_module(module_name)
+
+    expected = tuple(sorted(module.__all__, key=lambda name: (not name.isupper(), name[0].islower(), name)))
+    assert module.__all__ == expected, f"{module_name}.__all__ must be sorted"
+
+
 def test_private_runtime_names_are_not_exported() -> None:
     for name in PRIVATE_RUNTIME_NAMES:
         assert not hasattr(litestar_security, name), f"litestar_security leaks {name}"

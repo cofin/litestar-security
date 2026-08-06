@@ -78,6 +78,14 @@ jobs:
       python-version: ${{ matrix.python-version }}
       timeout: 60
 
+  test_shuffle:
+    name: test (python 3.14, shuffled)
+    uses: ./.github/workflows/test.yml
+    with:
+      python-version: "3.14"
+      shuffle: true
+      timeout: 60
+
   codecov:
     needs: test_python
     runs-on: ubuntu-latest

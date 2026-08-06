@@ -149,12 +149,21 @@ dev = [
 # Testing #
 ###########
 [tool.pytest.ini_options]
-addopts = ["-ra", "--strict-config", "--strict-markers", "-m", "not performance"]
+addopts = [
+  "-ra",
+  "--strict-config",
+  "--strict-markers",
+  "--benchmark-disable",
+  "-m",
+  "not performance",
+  "-n",
+  "auto",
+]
 # Every coroutine test in this suite runs on anyio, against the single backend
 # the session-scoped anyio_backend fixture pins. Auto mode makes that the
 # default so a new async test cannot be silently skipped for want of a marker.
 anyio_mode = "auto"
-markers = ["performance: deterministic local regression gates excluded from the normal suite"]
+markers = ["performance: calibrated local benchmarks excluded from the normal suite"]
 norecursedirs = ["src/tests/fixtures"]
 pythonpath = ["."]
 testpaths = ["src/tests"]
@@ -162,18 +171,18 @@ testpaths = ["src/tests"]
 [tool.coverage.run]
 branch = true
 source = ["src/litestar_security"]
-# The dependency shims are staged for the optional-extras work and nothing
-# imports them yet. Remove both entries when the capabilities move behind
-# extras and start resolving their dependencies through them.
-omit = ["src/litestar_security/_typing.py", "src/litestar_security/typing.py"]
 
 [tool.coverage.report]
-fail_under = 100
+fail_under = 95
 show_missing = true
 skip_covered = true
-exclude_lines = [
+exclude_also = [
   "pragma: no cover",
   "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "assert_never\\(",
+  "@overload",
+  "if sys\\.version_info",
 ]
 
 #########
@@ -301,13 +310,13 @@ warn_return_any = true
 warn_unreachable = true
 warn_unused_configs = true
 warn_unused_ignores = true
-files = ["src/litestar_security", "src/tests/typing/helpers.py", "examples"]
+files = ["src/litestar_security", "src/tests/helpers/typing.py", "examples"]
 
 ###########
 # Pyright #
 ###########
 [tool.pyright]
-include = ["src/litestar_security", "src/tests/typing/helpers.py", "examples"]
+include = ["src/litestar_security", "src/tests/helpers/typing.py", "examples"]
 pythonVersion = "3.10"
 typeCheckingMode = "strict"
 

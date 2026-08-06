@@ -10,7 +10,6 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from inspect import isawaitable
 from time import perf_counter
 from types import MappingProxyType
 from typing import Protocol, TypeAlias, cast, runtime_checkable
@@ -252,11 +251,7 @@ class CachedJWKSProvider:
                 state.refresh = None
         if self._fetcher_owned and not self._fetcher_closed:
             self._fetcher_closed = True
-            close = getattr(self._fetcher, "aclose", None)
-            if callable(close):
-                close_result = close()
-                if isawaitable(close_result):
-                    await close_result
+            await self._fetcher.aclose()
 
     async def _select_unknown(
         self, state: "_EntryState", snapshot: "JWKSSnapshot", selection: _SelectionKey, now: datetime

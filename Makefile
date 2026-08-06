@@ -170,6 +170,8 @@ docs-linkcheck:                                     ## Validate documentation li
 # Testing and Quality Checks
 # =============================================================================
 
+CORE_COVERAGE = src/litestar_security/authentication.py,src/litestar_security/guards.py,src/litestar_security/context.py,src/litestar_security/providers/jwt/*,src/litestar_security/providers/oauth/_transactions.py,src/litestar_security/accounts/_refresh.py,src/litestar_security/websocket/_connect_tokens.py
+
 .PHONY: test
 test:                                               ## Run the test suite
 	@echo "${INFO} Running test cases... 🧪"
@@ -186,13 +188,13 @@ examples:                                           ## Run the runnable example 
 	@echo "${OK} Example applications passed 🧪"
 
 .PHONY: benchmark
-benchmark:                                          ## Run deterministic local performance regression gates
-	@echo "${INFO} Running performance regression gates... 📊"
-	@uv run pytest -m performance
-	@echo "${OK} Performance regression gates passed 📊"
+benchmark:                                          ## Run local performance benchmarks
+	@echo "${INFO} Running performance benchmarks... 📊"
+	@uv run pytest -n 0 --benchmark-enable -m performance
+	@echo "${OK} Performance benchmarks completed 📊"
 
 .PHONY: performance
-performance: benchmark                              ## Alias for deterministic performance regression gates
+performance: benchmark                              ## Alias for local performance benchmarks
 
 .PHONY: downstream-check
 downstream-check:                                   ## Verify the installed wheel from an isolated downstream package
@@ -209,8 +211,19 @@ release-smoke:                                      ## Verify release archives a
 .PHONY: coverage
 coverage:                                           ## Run the test suite with branch coverage
 	@echo "${INFO} Running tests with coverage... 🧪"
-	@uv run pytest -m "not performance" --cov=litestar_security --cov-branch --cov-report=term-missing
+	@uv run pytest -m "not performance" --cov=litestar_security --cov-branch --cov-report=
+	@uv run coverage report --fail-under=95
+	@uv run coverage report --include="${CORE_COVERAGE}" --fail-under=100
 	@echo "${OK} Coverage checks passed 📊"
+
+.PHONY: coverage-ci
+coverage-ci:                                        ## Run coverage gates and write the CI XML artifact
+	@echo "${INFO} Running CI coverage checks... 🧪"
+	@uv run pytest -m "not performance" --cov=litestar_security --cov-branch --cov-report=
+	@uv run coverage report --fail-under=95
+	@uv run coverage report --include="${CORE_COVERAGE}" --fail-under=100
+	@uv run coverage xml -o coverage.xml --fail-under=0
+	@echo "${OK} CI coverage checks passed 📊"
 
 # -----------------------------------------------------------------------------
 # Type Checking

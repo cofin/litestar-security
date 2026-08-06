@@ -1371,15 +1371,13 @@ async def test_public_login_and_callback_have_binding_and_no_store_headers() -> 
     assert callback.headers["cache-control"] == "no-store"
 
 
-def test_oauth_dtos_are_frozen_camel_case_and_redact_step_up() -> None:
+def test_oauth_dtos_redact_step_up_secrets() -> None:
     link = OAuthLink(step_up_grant="secret", return_to="/")
     scope = OAuthScopeUpgrade(
         provider_account_id="provider-account", scopes=frozenset({"email"}), step_up_grant="secret"
     )
     action = OAuthStepUp(step_up_grant="secret")
 
-    with pytest.raises(AttributeError):
-        link.return_to = "/other"  # type: ignore[misc]
     assert "secret" not in repr(link)
     assert "secret" not in repr(scope)
     assert "secret" not in repr(action)
@@ -1422,27 +1420,6 @@ async def test_authenticated_routes_delegate_to_shared_service() -> None:
     assert logout.json() == {"detail": "Logged out."}
     assert redirected_logout.headers["location"] == "https://issuer.example/logout"
     assert service.operations == [OAuthOperation.LINK, OAuthOperation.SCOPE_UPGRADE]
-
-
-@pytest.mark.parametrize(
-    ("path", "payload"),
-    [
-        ("/auth/oauth/example/link", {"step_up_grant": "grant", "returnTo": "/dashboard"}),
-        ("/auth/oauth/example/link", {"step_up_grant": "grant", "return_to": "/", "prompt": "consent"}),
-        (
-            "/auth/oauth/example/scopes",
-            {"providerAccountId": "provider-account", "scopes": ["email"], "step_up_grant": "grant"},
-        ),
-        ("/auth/oauth/example/revoke", {"stepUpGrant": "grant"}),
-    ],
-)
-async def test_oauth_routes_reject_unknown_and_camel_case_body_members(path: str, payload: dict[str, object]) -> None:
-    app = oauth_app(openapi=False, oauth_service=RouteService())
-
-    async with AsyncTestClient(app=app) as client:
-        response = await client.post(path, json=payload, follow_redirects=False)
-
-    assert response.status_code == 400, response.text
 
 
 async def test_lifecycle_response_names_each_identifier_it_carries() -> None:

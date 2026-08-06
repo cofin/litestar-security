@@ -1,5 +1,7 @@
 """Shared test configuration."""
 
+import os
+import random
 from collections.abc import Mapping
 from types import MappingProxyType
 
@@ -24,6 +26,13 @@ pytest_plugins = ["polyfactory.pytest_plugin", "tests.fixtures.factories"]
 # whole tree uses. It matches the kit's own default instant, so a clock-driven
 # backend and a default-constructed one agree on now.
 FIXED_NOW = collaborators.FIXED_NOW
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Shuffle collection reproducibly when the release-order probe opts in."""
+    seed = os.getenv("LITESTAR_SECURITY_TEST_SHUFFLE_SEED")
+    if seed is not None:
+        random.Random(seed).shuffle(items)  # noqa: S311 - deterministic test ordering, not security
 
 
 @pytest.fixture

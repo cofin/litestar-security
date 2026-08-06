@@ -1,4 +1,4 @@
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
@@ -28,23 +28,12 @@ from litestar_security.providers.oidc import (
     keycloak_oidc_provider,
     oidc_provider,
 )
+from tests.fixtures.collaborators import AsyncRecordingJWTVerifier as StubVerifier
 
 NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
 ISSUER = "https://issuer.example.com"
 CLIENT_ID = "client-id"
 ID_TOKEN = SecretStr("header.payload.signature")
-
-
-@dataclass
-class StubVerifier:
-    config: JWTValidationConfig
-    outcome: object
-    seen_token: str | None = None
-
-    async def verify(self, token: str, *, now: datetime) -> object:
-        del now
-        self.seen_token = token
-        return self.outcome
 
 
 def claims(**overrides: JSONValue) -> JWTClaims:

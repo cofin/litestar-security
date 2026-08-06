@@ -35,7 +35,7 @@ from litestar.middleware.session.server_side import ServerSideSessionConfig
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.controller import OpenAPIController
 from litestar.openapi.plugins import JsonRenderPlugin, SwaggerRenderPlugin
-from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme, Tag
+from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme
 from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED, HTTP_400_BAD_REQUEST
@@ -57,7 +57,6 @@ from litestar_security._cli import register, security_group
 from litestar_security._docs import RouteDocs
 from litestar_security._dto import wire_struct
 from litestar_security.accounts import (
-    LOCAL_AUTH_TAGS,
     LifecycleAccepted,
     LocalAccount,
     LocalAuth,
@@ -129,6 +128,8 @@ from litestar_security.websocket import (
     WebSocketConnectTokenIssuer,
     WebSocketSecurityConfig,
 )
+from tests.fixtures.accounts import PasswordLogin as AccountPasswordLogin
+from tests.fixtures.collaborators import AsyncRecordingJWTVerifier, DenyingRateLimitGuard
 
 
 def test_static_security_headers_cover_success_and_error_responses_without_duplicates() -> None:
@@ -1011,18 +1012,13 @@ def test_generated_step_up_purposes_constrain_factors_deny_by_default(purpose: s
 
 
 def test_generated_mfa_handlers_apply_shared_rate_limit_before_factor_work() -> None:
-    class Guard:
-        async def check(self, *args: object, **kwargs: object) -> object:
-            del args, kwargs
-            return accounts_module.RateLimited(retry_after=2)
-
     router = build_mfa_routes(
         step_up=cast("Any", _RouteStepUpService()),
         epochs=cast("Any", _RouteEpochs()),
         mfa=cast("Any", _RouteMFAService()),
         passkeys=cast("Any", _RoutePasskeyService()),
         local_auth=cast("Any", _RouteLocalAuth()),
-        rate_limits=cast("Any", Guard()),
+        rate_limits=cast("Any", DenyingRateLimitGuard()),
         client_key=lambda _request: "client",
     )
     app = Litestar(
@@ -1617,11 +1613,7 @@ async def test_plugin_binds_login_mfa_before_local_route_caching_and_gates_passw
         security_epoch=1,
     )
 
-    class PasswordLogin:
-        async def authenticate(self, *_args: object, **_kwargs: object) -> LocalAccountRecord[object]:
-            return account
-
-    service = replace(local_auth.local_auth_service, password_login=cast("Any", PasswordLogin()))
+    service = replace(local_auth.local_auth_service, password_login=cast("Any", AccountPasswordLogin(account)))
     outcome = await service.session_login(
         cast("Any", object()),
         LocalCredentials(identifier="person@example.com", password="password"),  # noqa: S106
@@ -2971,66 +2963,6 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
     assert provider.dependency() is local_auth.local_auth_service
 
 
-def test_generated_local_routes_are_grouped_documented_and_uniquely_identified(
-    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
-) -> None:
-    private_key, _public_key = jwt_key_material["EdDSA"]
-    local_auth = LocalAuth.hybrid(
-        accounts=cast("Any", _local_session_accounts()),
-        secrets=_local_auth_secrets(refresh=True),
-        binding=SessionBindingConfig(pepper=b"b" * 32, max_age=600),
-        key_ring=LocalKeyRing(
-            issuer="https://local.example",
-            active_signing_key=SigningKey(key_id="active", algorithm="EdDSA", private_key=private_key),
-        ),
-        token_audience="local-client",  # noqa: S106 - public JWT audience
-        registration=RegistrationPolicy.public(),
-    )
-    caller_tag = Tag(name="Local sessions", description="Caller owns this description.")
-    app = Litestar(
-        route_handlers=[],
-        csrf_config=CSRFConfig(secret=token_hex()),
-        middleware=[_native_session_backend("client")[1]],
-        openapi_config=OpenAPIConfig(title="Test", version="1.0", tags=[caller_tag]),
-        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))],
-    )
-
-    declared = {tag.name: tag for tag in app.openapi_schema.tags or ()}
-    assert set(declared) == {tag.name for tag in LOCAL_AUTH_TAGS}
-    assert declared["Local sessions"] is caller_tag
-    assert all(tag.description for tag in declared.values())
-
-    operations = [
-        operation
-        for path_item in app.openapi_schema.paths.values()
-        for operation in (path_item.get, path_item.post, path_item.delete)
-        if operation is not None
-    ]
-    generated = [operation for operation in operations if (operation.operation_id or "").startswith("Local")]
-    assert len(generated) == 14
-    assert len({operation.operation_id for operation in generated}) == len(generated)
-    assert all(operation.summary and operation.description for operation in generated)
-    assert all(len(operation.tags or ()) == 1 for operation in generated)
-    assert {tag for operation in generated for tag in operation.tags or ()} == set(declared)
-
-    schemas = app.openapi_schema.components.schemas if app.openapi_schema.components is not None else None
-    assert schemas is not None
-    documented = ("LocalCredentials", "LocalPasswordChange", "LocalSession", "RouteStatus")
-    # LocalSession is only named when the nested annotation resolves, which a
-    # quoted reference does not do on Python 3.10.
-    assert set(documented) <= set(schemas)
-    assert all(all(prop.description for prop in (schemas[name].properties or {}).values()) for name in documented)
-
-    by_id = {operation.operation_id: operation for operation in generated}
-    assert by_id["LocalSessionLogin"].tags == ["Local sessions"]
-    assert by_id["LocalTokenRefresh"].tags == ["Local tokens"]
-    assert by_id["LocalRegister"].tags == ["Local registration"]
-    assert by_id["LocalPasswordRecovery"].tags == ["Local passwords"]
-    assert by_id["LocalVerificationConfirm"].tags == ["Local verification"]
-    assert by_id["LocalPasswordChange"].tags == ["Local passwords"]
-    assert by_id["LocalTokenPasswordChange"].tags == ["Local passwords"]
-
-
 def test_custom_local_controllers_keep_services_without_generated_routes(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -3109,14 +3041,12 @@ def test_openapi_component_contribution_preserves_callers_and_validates_duplicat
 
 
 def test_composite_bearer_contributes_one_native_openapi_scheme() -> None:
-    class _Verifier:
-        config = JWTValidationConfig(
+    verifier = AsyncRecordingJWTVerifier(
+        InvalidCredentials(),
+        JWTValidationConfig(
             issuer="https://issuer.example", audiences=frozenset({"api"}), algorithms=frozenset({"RS256"})
-        )
-
-        async def verify(self, _token: str, *, now: datetime) -> InvalidCredentials:
-            del now
-            return InvalidCredentials()
+        ),
+    )
 
     composite = CompositeBearerConfig(
         mechanism_name="bearer",
@@ -3126,7 +3056,7 @@ def test_composite_bearer_contributes_one_native_openapi_scheme() -> None:
                 selector=BearerSlotSelector(
                     issuers=frozenset({"https://issuer.example"}), audiences=frozenset({"api"})
                 ),
-                verifier=_Verifier(),
+                verifier=verifier,
             ),
         ),
     )

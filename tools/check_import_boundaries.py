@@ -26,9 +26,7 @@ PACKAGE_ROOT = Path(__file__).parents[1] / "src" / "litestar_security"
 
 # R4 exemptions, by path relative to PACKAGE_ROOT. Each entry states why the
 # branch is still there. An empty dict is the goal.
-AWAITABILITY_EXEMPTIONS: dict[str, str] = {
-    "providers/jwks/_provider.py": "Closes an owned fetcher whose aclose() may be sync or async."
-}
+AWAITABILITY_EXEMPTIONS: dict[str, str] = {}
 
 R5_SCRIPT = (
     "import sys; import litestar_security; "

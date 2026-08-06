@@ -118,6 +118,7 @@ __all__ = (
     "InMemorySecurityBackend",
     "InMemoryStepUpStore",
     "InMemoryWebAuthnChallengeStore",
+    "InMemoryWebSocketConnectTokenStore",
     "InMemoryWebSocketRevocationSource",
     "MemoryOAuthAccountStore",
     "MemoryOAuthTransactionStore",
@@ -1077,6 +1078,7 @@ class InMemorySecurityBackend:
         "oauth_accounts",
         "oauth_tokens",
         "oauth_transactions",
+        "oidc_session_logout",
         "passkeys",
         "password_hash",
         "step_up",
@@ -1142,6 +1144,9 @@ class InMemorySecurityBackend:
         self.oauth_accounts = MemoryOAuthAccountStore()
         self.oauth_transactions = MemoryOAuthTransactionStore(protector=selected_protector)
         self.oauth_tokens = MemoryTokenVault(provider="test", client_id="test-client", protector=selected_protector)
+        self.oidc_session_logout = InMemoryOIDCSessionLogoutStore(
+            session_mappings=(), frontchannel_bindings={}, clock=self.clock
+        )
         self.accounts = InMemoryLocalAccountStore(
             self._observe, clock=self.clock, identifiers=self.next_identifier, entropy=self.entropy
         )
@@ -3460,7 +3465,10 @@ class _DeterministicProtector:
 class InMemoryOIDCSessionLogoutStore:
     """Lock-protected OIDC mapped-session logout reference for deterministic tests."""
 
+    _clock: Callable[[], datetime]
+
     __slots__ = (
+        "_clock",
         "_consumed_frontchannel_mappings",
         "_consumed_token_ids",
         "_frontchannel_bindings",
@@ -3474,14 +3482,17 @@ class InMemoryOIDCSessionLogoutStore:
         *,
         session_mappings: tuple[tuple[str, str, str | None, str | None], ...],
         frontchannel_bindings: Mapping[tuple[str, str, str], str],
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         """Initialize fixed secret-free mappings and browser bindings.
 
         Args:
             session_mappings: ``(provider, issuer, subject, session_id)`` rows, one per local session.
             frontchannel_bindings: Browser binding by exact provider, issuer, and provider-session tuple.
+            clock: Time source used to reject expired logout identities.
         """
         self._lock = Lock()
+        self._clock = (lambda: _DEFAULT_NOW) if clock is None else clock
         self._session_mappings = session_mappings
         self._frontchannel_bindings = dict(frontchannel_bindings)
         self._consumed_token_ids: set[str] = set()
@@ -3490,7 +3501,8 @@ class InMemoryOIDCSessionLogoutStore:
 
     async def consume_backchannel(self, identity: OIDCLogoutIdentity, *, now: datetime) -> int | None:
         """Consume one token id and revoke every active exact identity mapping."""
-        del now
+        if identity.expires_at <= max(now, self._clock()):
+            return None
         async with self._lock:
             if identity.token_id in self._consumed_token_ids:
                 return None
