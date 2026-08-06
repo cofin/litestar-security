@@ -274,6 +274,12 @@ slotscheck:                                         ## Validate slotted classes
 	@uv run slotscheck src/litestar_security/
 	@echo "${OK} Slots check passed ✨"
 
+.PHONY: import-boundaries
+import-boundaries:                                  ## Verify runtime import boundaries
+	@echo "${INFO} Checking import boundaries... 🔍"
+	@uv run python tools/check_import_boundaries.py
+	@echo "${OK} Import boundaries passed 🔍"
+
 .PHONY: fix
 fix:                                                ## Fix linting issues
 	@echo "${INFO} Fixing linting issues... 🔍"
@@ -289,7 +295,7 @@ fix:                                                ## Fix linting issues
 	@echo "${OK} Linting issues fixed ✨"
 
 .PHONY: lint
-lint: prek type-check slotscheck zizmor              ## Run all linting checks
+lint: prek type-check slotscheck import-boundaries zizmor ## Run all linting checks
 
 # =============================================================================
 # Aggregate Verification
