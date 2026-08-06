@@ -7,7 +7,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 FIXTURE = ROOT / "src" / "tests" / "fixtures" / "downstream_consumer"
-FORBIDDEN_DEPENDENCIES = ("advanced-alchemy", "litestar-mcp", "sqlalchemy", "sqlspec")
+# The same 13 roots as [tool.ruff.lint.flake8-tidy-imports.banned-api] in
+# pyproject.toml, in distribution rather than module spelling. Ruff keeps them out
+# of the source; this keeps them out of the wheel's Requires-Dist.
+FORBIDDEN_DEPENDENCIES = (
+    "advanced-alchemy",
+    "aioboto3",
+    "aiomysql",
+    "aiosqlite",
+    "asyncpg",
+    "boto3",
+    "google-cloud",
+    "litestar-mcp",
+    "motor",
+    "pymongo",
+    "redis",
+    "sqlalchemy",
+    "sqlspec",
+)
 
 
 def run(*command: str, cwd: Path = ROOT, env: dict[str, str] | None = None) -> None:
