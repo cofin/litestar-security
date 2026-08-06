@@ -1,11 +1,8 @@
-"""Adversarial input corpora, preserved from the Hypothesis property suite.
+"""Adversarial input corpora for the security parsers and serializers.
 
-``src/tests/property/test_security_properties.py`` generates its inputs from
-strategies. When chapter 9 deletes that file the strategies go with it, so the
-inputs they were reaching for are enumerated here first: one corpus per property,
-each entry commented with the failure class it stands for. A chapter turning a
-property into a table test parametrizes over the matching corpus and keeps the
-same totality assertion.
+One corpus per boundary, each entry commented with the failure class it stands
+for. ``src/tests/unit/test_input_corpora.py`` parametrizes over them and keeps
+the totality assertion each corpus exists to defend.
 
 Every corpus is a ``tuple``, so it is immutable and safe to share at any scope.
 
@@ -24,6 +21,13 @@ Corpus                           Argument that makes its boundary meaningful
 ``ADVERSARIAL_TEXT`` (API key)   ``APIKeyCodec(pepper=b"p" * 32)``
 ``HANDSHAKE_BYTES``              ``WebSocketSecurityConfig()``,
                                  ``uses_cookie_credentials=False``
+``CSP_DIRECTIVES``               Parametrized as a product with
+                                 ``CSP_SOURCE_LISTS``, so the directive
+                                 name and the source arity vary
+                                 independently.
+``CSP_SOURCE_LISTS``             Its empty entry reaches the bare-directive
+                                 branch and its duplicate pair reaches the
+                                 deduplication branch.
 ===============================  =============================================
 
 Confusable and bidirectional characters are written as escapes. Ruff runs
@@ -147,6 +151,28 @@ CSP_SOURCES: tuple[str, ...] = (
     "data:",  # bare scheme
     "example.com:8443",  # explicit port
     "a-b_c.d",  # every remaining allowed punctuation
+)
+
+# Directive names, from the same r"[a-z][a-z0-9-]{0,31}" the CSP boundary draws
+# its first argument from. CSP_SOURCES varies only the source expression, so
+# without these the directive-name axis is untested.
+CSP_DIRECTIVES: tuple[str, ...] = (
+    "a",  # shortest legal directive name
+    "a" + "b" * 31,  # longest legal directive name, 32 characters
+    "a1",  # digit after the leading letter
+    "a---------------",  # all-hyphen tail
+    "script-src",  # a real directive, for readability of the failure
+)
+
+# Source lists, from lists of up to 8 unique sources. The minimum size is zero,
+# so an empty list is a live input reaching a distinct branch: a directive
+# serialized with no sources at all.
+CSP_SOURCE_LISTS: tuple[tuple[str, ...], ...] = (
+    (),  # empty: the directive serializes bare, verified -> "script-src"
+    ("a",),  # single source
+    ("'self'", "https://cdn.example.com", "*.example.com"),  # several
+    ("a", "a"),  # duplicates: deduplicated, verified -> "script-src a"
+    tuple(f"s{index}.example.com" for index in range(8)),  # the widest list
 )
 
 # PKCE code verifiers, from the RFC 7636 unreserved alphabet.
