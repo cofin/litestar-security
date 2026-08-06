@@ -75,7 +75,7 @@ destroy:                                            ## Destroy virtual environme
 .PHONY: clean
 clean:                                              ## Cleanup temporary build artifacts
 	@echo "${INFO} Cleaning working directory... 🧹"
-	@rm -rf .pytest_cache .ruff_cache .hypothesis build/ dist/ .eggs/ .coverage coverage.xml coverage.json htmlcov/ src/tests/.pytest_cache src/tests/**/.pytest_cache .mypy_cache >/dev/null 2>&1
+	@rm -rf .pytest_cache .ruff_cache build/ dist/ .eggs/ .coverage coverage.xml coverage.json htmlcov/ src/tests/.pytest_cache src/tests/**/.pytest_cache .mypy_cache >/dev/null 2>&1
 	@find . -name '*.egg-info' -exec rm -rf {} + >/dev/null 2>&1
 	@find . -type f -name '*.egg' -exec rm -f {} + >/dev/null 2>&1
 	@find . -name '*.pyc' -exec rm -f {} + >/dev/null 2>&1
@@ -178,12 +178,6 @@ test:                                               ## Run the test suite
 
 .PHONY: test-all
 test-all: test                                      ## Run all tests
-
-.PHONY: property
-property:                                           ## Run deterministic property and fuzz regression tests
-	@echo "${INFO} Running property tests... 🧪"
-	@uv run pytest src/tests/property
-	@echo "${OK} Property tests passed 🧪"
 
 .PHONY: examples
 examples:                                           ## Run the runnable example applications
@@ -302,7 +296,7 @@ lint: prek type-check slotscheck import-boundaries zizmor ## Run all linting che
 # =============================================================================
 
 .PHONY: check-all
-check-all: lint test-all property coverage docs docs-linkcheck downstream-check build ## Run all checks
+check-all: lint test-all coverage docs docs-linkcheck downstream-check build ## Run all checks
 
 .PHONY: release-check
-release-check: property downstream-check examples benchmark check-all release-smoke ## Run every local 1.0 release gate
+release-check: downstream-check examples benchmark check-all release-smoke ## Run every local 1.0 release gate

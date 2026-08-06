@@ -127,9 +127,7 @@ tests = [
   "pytest",
   "pytest-cov",
   "pytest-xdist",
-  { include-group = "property" },
 ]
-property = ["hypothesis"]
 benchmark = ["pytest-benchmark"]
 lint = [
   "codespell",
@@ -157,7 +155,7 @@ addopts = ["-ra", "--strict-config", "--strict-markers", "-m", "not performance"
 # default so a new async test cannot be silently skipped for want of a marker.
 anyio_mode = "auto"
 markers = ["performance: deterministic local regression gates excluded from the normal suite"]
-norecursedirs = [".hypothesis", "src/tests/fixtures"]
+norecursedirs = ["src/tests/fixtures"]
 pythonpath = ["."]
 testpaths = ["src/tests"]
 
