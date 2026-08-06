@@ -200,6 +200,7 @@ litestar-security = "2099-01-01T00:00:00Z"
 litestar-vite = "2099-01-01T00:00:00Z"
 polyfactory = "2099-01-01T00:00:00Z"
 pytest-databases = "2099-01-01T00:00:00Z"
+ruff = "2099-01-01T00:00:00Z"
 sqlglot = "2099-01-01T00:00:00Z"
 sqlglotc = "2099-01-01T00:00:00Z"
 sqlspec = "2099-01-01T00:00:00Z"
@@ -215,6 +216,9 @@ extend-exclude = ["docs/_build"]
 
 [tool.ruff.format]
 docstring-code-format = true
+# Prose keeps its own line breaks. Examples in Markdown are wrapped for a reader
+# in a narrow column, not to the line length source is held to.
+exclude = ["*.md"]
 preview = true
 skip-magic-trailing-comma = true
 

@@ -277,15 +277,8 @@ import-boundaries:                                  ## Verify runtime import bou
 .PHONY: fix
 fix:                                                ## Fix linting issues
 	@echo "${INFO} Fixing linting issues... 🔍"
-	@files="${WORKING_TREE_FILES}"; \
-	python_files=$$(printf '%s\n' $$files | grep -E '\.pyi?$$' || true); \
-	if [ -n "$$python_files" ]; then \
-		uv run ruff check --fix --unsafe-fixes $$python_files; \
-		uv run ruff format $$python_files; \
-	else \
-		uv run ruff check --fix --unsafe-fixes .; \
-		uv run ruff format .; \
-	fi
+	@uv run ruff check --fix --unsafe-fixes .
+	@uv run ruff format .
 	@echo "${OK} Linting issues fixed ✨"
 
 .PHONY: lint

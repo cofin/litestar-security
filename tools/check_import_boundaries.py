@@ -25,13 +25,9 @@ from pathlib import Path
 PACKAGE_ROOT = Path(__file__).parents[1] / "src" / "litestar_security"
 
 # R4 exemptions, by path relative to PACKAGE_ROOT. Each entry states why the
-# branch is still there and which issue removes it. An empty dict is the goal.
+# branch is still there. An empty dict is the goal.
 AWAITABILITY_EXEMPTIONS: dict[str, str] = {
-    "providers/jwks/_provider.py": (
-        "Closes an owned fetcher whose aclose() may be sync or async "
-        "(litestar-security-hl6.12.1). The text-scanning predecessor never "
-        "detected this because the module uses `from inspect import isawaitable`."
-    )
+    "providers/jwks/_provider.py": "Closes an owned fetcher whose aclose() may be sync or async."
 }
 
 R5_SCRIPT = (
