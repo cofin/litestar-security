@@ -21,7 +21,10 @@ Added
   server can discover which issuers this resource trusts, which scopes it
   understands, and how a bearer token may be presented to it. The route is
   unauthenticated, answers conditional requests with ``304``, and the document
-  is computed once at configuration time. See :doc:`resource-server`.
+  is computed once at configuration time. Applicable RFC 6750 Bearer failures
+  advertise the same URL through RFC 9728's ``resource_metadata`` challenge
+  parameter; set ``advertise_resource_metadata=False`` to disable that
+  discovery hint without hiding the document. See :doc:`resource-server`.
 * ``CachedJWKSProvider(cache=...)`` takes a ``JWKSCache``. Handing the same
   cache to two providers gives them one key set and one fetch schedule instead
   of two. ``InMemoryJWKSCache`` is the default and stays the behavior when the

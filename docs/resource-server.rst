@@ -52,6 +52,26 @@ document, its strong ``ETag``, and its ``Cache-Control`` are computed once when
 the configuration is built, so serving it costs one comparison and one write.
 A conditional request carrying the matching ``If-None-Match`` gets ``304``.
 
+Discovering the document from a bearer challenge
+------------------------------------------------
+
+When a route whose authentication policy includes an HTTP Bearer mechanism
+rejects a request with ``401``, the response also points at the same document:
+
+.. code-block:: text
+
+   WWW-Authenticate: Bearer resource_metadata="https://api.example.com/.well-known/oauth-protected-resource"
+
+This is the :rfc:`9728` discovery flow layered onto the :rfc:`6750` bearer
+challenge. The plugin derives the URL from the same resource identifier,
+resource path, and ``route_prefix`` used to mount the document. It does not add
+the parameter to API-key, session, public, or otherwise non-bearer routes, and
+it preserves any Bearer challenge parameters already present.
+
+Publication and challenge discovery are independent. To publish the document
+without advertising it in rejected requests, set
+``advertise_resource_metadata=False`` on ``ProtectedResourceConfig``.
+
 Member names are the specification's, not this application's
 ------------------------------------------------------------
 
@@ -79,8 +99,10 @@ advertised at the root:
      - ``/.well-known/oauth-protected-resource/mcp``
 
 ``route_prefix`` mounts the whole thing somewhere else, for an application
-served under a path its clients do not see. Leave it alone unless you need it —
-a client that follows the specification looks at the root.
+served under a path. The same prefix appears in the advertised
+``resource_metadata`` URL. Leave it alone unless the public URL genuinely
+contains that prefix — a client that follows the specification looks at the
+root otherwise.
 
 What is validated at startup
 ----------------------------

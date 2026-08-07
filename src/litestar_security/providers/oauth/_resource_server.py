@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, NoReturn, TypedDict, cast
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from litestar import Request, Response
 from litestar.datastructures import ResponseHeader
@@ -87,6 +87,9 @@ class ProtectedResourceConfig:
             value mounts it at the application root, which is where RFC 9728
             requires it to be reachable; a non-empty value must be an absolute
             non-root path.
+        advertise_resource_metadata: Whether bearer authentication failures
+            advertise this document through the RFC 9728
+            ``resource_metadata`` challenge parameter.
         cache_max_age: Seconds a client may cache the document, at most a day.
     """
 
@@ -96,11 +99,13 @@ class ProtectedResourceConfig:
     bearer_methods_supported: Sequence[str] = ("header",)
     resource_documentation: str | None = None
     route_prefix: str = ""
+    advertise_resource_metadata: bool = True
     cache_max_age: int = 300
     document: Mapping[str, JSONValue] = field(init=False)
     canonical_bytes: bytes = field(init=False, repr=False)
     etag: str = field(init=False)
     path: str = field(init=False)
+    metadata_url: str = field(init=False)
     cache_control: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -133,6 +138,8 @@ class ProtectedResourceConfig:
         object.__setattr__(self, "resource_documentation", documentation)
         route_prefix = _mount_prefix(self.route_prefix)
         object.__setattr__(self, "route_prefix", route_prefix)
+        if self.advertise_resource_metadata.__class__ is not bool:
+            _reject("Protected resource challenge advertisement must be boolean")
         if (
             isinstance(self.cache_max_age, bool)
             or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
@@ -156,7 +163,11 @@ class ProtectedResourceConfig:
         object.__setattr__(self, "document", MappingProxyType(document))
         object.__setattr__(self, "canonical_bytes", canonical_bytes)
         object.__setattr__(self, "etag", f'"{hashlib.sha256(canonical_bytes).hexdigest()}"')
-        object.__setattr__(self, "path", f"{route_prefix}{WELL_KNOWN_SEGMENT}{_resource_path(resource)}")
+        path = f"{route_prefix}{WELL_KNOWN_SEGMENT}{_resource_path(resource)}"
+        resource_parts = urlsplit(resource)
+        object.__setattr__(self, "path", path)
+        metadata_url = urlunsplit((resource_parts.scheme, resource_parts.netloc, path, "", ""))
+        object.__setattr__(self, "metadata_url", metadata_url)
         object.__setattr__(self, "cache_control", f"public, max-age={self.cache_max_age}")
 
 
