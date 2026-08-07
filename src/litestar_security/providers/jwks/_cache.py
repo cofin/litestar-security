@@ -6,16 +6,26 @@ them is swappable, which is how two components in one application share a single
 key set and a single fetch schedule.
 """
 
+from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Protocol, TypeAlias, runtime_checkable
+
+from anyio import Lock
 
 from litestar_security.providers._internal import raise_config
 from litestar_security.providers.jwks._internal import strict_value
 from litestar_security.providers.jwt import VerificationKey
 
-__all__ = ("InMemoryJWKSCache", "JWKSCache", "JWKSCacheEntry", "JWKSCachePolicy", "JWKSSnapshot")
+__all__ = (
+    "InMemoryJWKSCache",
+    "JWKSCache",
+    "JWKSCacheCoordinator",
+    "JWKSCacheEntry",
+    "JWKSCachePolicy",
+    "JWKSSnapshot",
+)
 
 
 SelectionKey: TypeAlias = tuple[str, str]
@@ -159,6 +169,30 @@ class JWKSSnapshot:
     source_uri: str
 
 
+@dataclass(slots=True)
+class JWKSCacheCoordinator:
+    """Share refresh and negative-key state for one exact cache entry.
+
+    Cache implementations return the same coordinator for repeated requests for
+    one exact ``(issuer, jwks_uri)`` pair. Applications normally only construct
+    this value while implementing :class:`JWKSCache`; providers manage its
+    contents.
+
+    Args:
+        lock: Lock serializing refresh and negative-key changes.
+        refresh: Opaque in-flight refresh state owned by a provider.
+        forced_generation: The generation whose unknown-key refresh was used.
+        negative: Bounded generation-scoped unknown-key expirations.
+        users: Number of providers attached to this coordination state.
+    """
+
+    lock: Lock = field(default_factory=Lock)
+    refresh: object | None = None
+    forced_generation: int | None = None
+    negative: OrderedDict[tuple[int, str, str], datetime] = field(default_factory=OrderedDict)
+    users: int = 0
+
+
 @runtime_checkable
 class JWKSCache(Protocol):
     """Store remote key snapshots so components can share one fetch schedule.
@@ -211,6 +245,21 @@ class JWKSCache(Protocol):
         """
         ...  # pragma: no cover
 
+    def coordinator(self, issuer: str, jwks_uri: str) -> JWKSCacheCoordinator:
+        """Return stable coordination state for one configured source.
+
+        Calls for the same exact pair must return the same object so providers
+        sharing this cache also share refresh and unknown-key coordination.
+
+        Args:
+            issuer: The configured issuer the coordination belongs to.
+            jwks_uri: The configured key-set URI.
+
+        Returns:
+            Stable coordination state for the exact source pair.
+        """
+        ...  # pragma: no cover
+
 
 class InMemoryJWKSCache:
     """Hold key snapshots for the lifetime of one process.
@@ -219,11 +268,12 @@ class InMemoryJWKSCache:
     providers to give them a shared key set and a shared fetch schedule.
     """
 
-    __slots__ = ("_entries",)
+    __slots__ = ("_coordinators", "_entries")
 
     def __init__(self) -> None:
         """Start with no stored snapshots."""
         self._entries: dict[SelectionKey, JWKSSnapshot] = {}
+        self._coordinators: dict[SelectionKey, JWKSCacheCoordinator] = {}
 
     def get(self, issuer: str, jwks_uri: str) -> "JWKSSnapshot | None":
         """Return the stored snapshot for one configured source.
@@ -255,3 +305,15 @@ class InMemoryJWKSCache:
             jwks_uri: The key set the snapshot was parsed from.
         """
         self._entries.pop((issuer, jwks_uri), None)
+
+    def coordinator(self, issuer: str, jwks_uri: str) -> JWKSCacheCoordinator:
+        """Return stable coordination state for one configured source.
+
+        Args:
+            issuer: The configured issuer the coordination belongs to.
+            jwks_uri: The configured key-set URI.
+
+        Returns:
+            Stable coordination state for the exact source pair.
+        """
+        return self._coordinators.setdefault((issuer, jwks_uri), JWKSCacheCoordinator())

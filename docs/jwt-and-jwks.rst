@@ -354,17 +354,22 @@ them a single key set and a single fetch schedule:
    reports = CachedJWKSProvider(entries=entries, fetcher=fetcher, cache=shared_keys)
    admin = CachedJWKSProvider(entries=entries, fetcher=fetcher, cache=shared_keys)
 
-An application may implement ``JWKSCache`` itself. Three invariants make an
+An application may implement ``JWKSCache`` itself. Four invariants make an
 implementation safe to use: a stored ``JWKSSnapshot`` is immutable and is
-returned as given, ``set`` is last-write-wins, and returning ``None`` is always
-allowed. That last one is what lets an implementation bound or evict itself
-freely — the provider treats a miss exactly like an expired entry and refetches.
-The methods are synchronous because a fresh key selection runs on the
-token-verification path and must not await.
+returned as given, ``set`` is last-write-wins, returning ``None`` is always
+allowed, and ``coordinator`` returns the same ``JWKSCacheCoordinator`` for every
+request for an exact issuer and URI pair. That last invariant shares cold,
+expired, and unknown-key single-flight state as well as bounded generation-scoped
+negative entries. Returning ``None`` still lets an implementation bound or evict
+snapshots freely — the provider treats a miss exactly like an expired entry and
+refetches. Snapshot methods are synchronous because a fresh key selection runs
+on the token-verification path and must not await.
 
-Single-flight refresh remains per provider. Two providers sharing a cache can
-still issue one fetch each on a cold start; sharing the provider itself is what
-collapses that too, and is the arrangement to prefer.
+Coordination is owned by the shared cache rather than one provider. Closing one
+provider detaches it and waits for refresh work using its owned fetcher, but does
+not cancel work while another provider remains attached. Closing the last
+provider cancels and gathers an unfinished refresh. Provider and fetcher close
+operations remain explicit and idempotent.
 
 Fresh snapshots are immutable and selected without network I/O or lock
 acquisition. Expiry and unknown key IDs use per-entry single-flight refreshes;

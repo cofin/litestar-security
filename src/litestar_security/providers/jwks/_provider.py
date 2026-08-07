@@ -6,15 +6,13 @@ bounded so a hostile issuer cannot grow it without limit.
 """
 
 import asyncio
-from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from time import perf_counter
 from types import MappingProxyType
-from typing import Protocol, TypeAlias, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast, runtime_checkable
 
-from anyio import Lock
 from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
@@ -22,6 +20,7 @@ from litestar_security.providers._internal import raise_config, safe_increment, 
 from litestar_security.providers.jwks._cache import (
     InMemoryJWKSCache,
     JWKSCache,
+    JWKSCacheCoordinator,
     JWKSCacheEntry,
     JWKSCachePolicy,
     JWKSSnapshot,
@@ -35,9 +34,12 @@ from litestar_security.providers.jwks._fetching import (
     SyncJWKSFetcher,
     normalize_fetcher,
 )
-from litestar_security.providers.jwks._internal import aware_utc, etag, negative_cache, valid_selection_value
+from litestar_security.providers.jwks._internal import aware_utc, etag, valid_selection_value
 from litestar_security.providers.jwt import VerificationKey
 from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
+
+if TYPE_CHECKING:
+    from collections import OrderedDict
 
 __all__ = ("CachedJWKSProvider", "JWKSProvider")
 
@@ -49,9 +51,6 @@ _SelectionKey: TypeAlias = tuple[str, str]
 
 
 _EntryKey: TypeAlias = tuple[str, str]
-
-
-_NegativeKey: TypeAlias = tuple[int, str, str]
 
 
 _INVALID = InvalidCredentials()
@@ -145,6 +144,9 @@ class CachedJWKSProvider:
         )
         self.policy = policy or JWKSCachePolicy()
         self._cache = snapshots
+        for state in states.values():
+            state.coordination = snapshots.coordinator(state.config.issuer, state.config.jwks_uri)
+            state.coordination.users += 1
         self._fetcher = normalized_fetcher
         self._fetcher_owned = fetcher_owned
         self._fetcher_closed = False
@@ -232,23 +234,29 @@ class CachedJWKSProvider:
 
     async def aclose(self) -> None:
         """Close this provider idempotently without closing its caller-owned fetcher."""
+        if self._closed:
+            return
         self._closed = True
         refreshes: list[tuple[_EntryState, _Refresh]] = []
         tasks: list[asyncio.Task[JWKSSnapshot | VerificationUnavailable]] = []
         for state in self._entries.values():
-            async with state.lock:
-                if state.refresh is not None:
-                    refresh = state.refresh
+            coordination = state.coordination
+            async with coordination.lock:
+                coordination.users -= 1
+                if coordination.refresh is not None:
+                    refresh = cast("_Refresh", coordination.refresh)
                     task = refresh.task
                     assert task is not None  # noqa: S101 - internal coordination invariant
-                    task.cancel()
+                    if coordination.users == 0:
+                        task.cancel()
                     tasks.append(task)
                     refreshes.append((state, refresh))
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         for state, _refresh in refreshes:
-            async with state.lock:
-                state.refresh = None
+            async with state.coordination.lock:
+                if state.coordination.refresh is _refresh and _refresh.task is not None and _refresh.task.done():
+                    state.coordination.refresh = None
         if self._fetcher_owned and not self._fetcher_closed:
             self._fetcher_closed = True
             await self._fetcher.aclose()
@@ -284,39 +292,44 @@ class CachedJWKSProvider:
             if refresh is not candidate:
                 started = perf_counter()
                 try:
-                    return await asyncio.shield(task)
+                    result = await asyncio.shield(task)
                 finally:
                     self._observe("security.jwks.single_flight_wait", perf_counter() - started)
-            return await asyncio.shield(task)
+            else:
+                result = await asyncio.shield(task)
         except asyncio.CancelledError:
             if task.cancelled() or self._closed:
                 return _UNAVAILABLE
             raise
+        return _UNAVAILABLE if self._closed else result
 
     async def _coordinate_refresh(
         self, state: "_EntryState", candidate: "_Refresh", now: datetime, forced_generation: int | None
     ) -> "tuple[_Refresh | None, JWKSSnapshot | VerificationUnavailable]":
         refresh: _Refresh | None = None
         immediate: JWKSSnapshot | VerificationUnavailable = _UNAVAILABLE
-        async with state.lock:
+        coordination = state.coordination
+        async with coordination.lock:
             current = self._snapshot(state)
             current_is_fresh = current is not None and now < current.fresh_until
             forced_generation_changed = forced_generation is not None and (
                 current is None or current.generation != forced_generation
             )
-            forced_generation_used = forced_generation is not None and state.forced_generation == forced_generation
+            forced_generation_used = (
+                forced_generation is not None and coordination.forced_generation == forced_generation
+            )
             if self._closed:
                 pass
             elif (forced_generation is None and current_is_fresh) or forced_generation_changed:
                 immediate = current or _UNAVAILABLE
-            elif state.refresh is not None:
-                refresh = state.refresh
+            elif coordination.refresh is not None:
+                refresh = cast("_Refresh", coordination.refresh)
             elif forced_generation_used:
                 immediate = current or _UNAVAILABLE
             else:
                 if forced_generation is not None:
-                    state.forced_generation = forced_generation
-                state.refresh = candidate
+                    coordination.forced_generation = forced_generation
+                coordination.refresh = candidate
                 candidate.task = asyncio.create_task(
                     self._run_refresh(state, candidate, now), name="litestar-security-jwks-refresh"
                 )
@@ -336,22 +349,24 @@ class CachedJWKSProvider:
             else "security.jwks.refresh_success"
         )
         await self._publish_refresh(state, refresh, result)
-        return _UNAVAILABLE if self._closed else result
+        return result
 
     async def _publish_refresh(
         self, state: "_EntryState", refresh: "_Refresh", result: "JWKSSnapshot | VerificationUnavailable"
     ) -> None:
-        async with state.lock:
+        coordination = state.coordination
+        async with coordination.lock:
             current = self._snapshot(state)
-            if isinstance(result, JWKSSnapshot) and not self._closed:
+            if isinstance(result, JWKSSnapshot):
                 self._cache.set(state.config.issuer, state.config.jwks_uri, result)
                 if refresh.forced_generation is not None:
-                    state.forced_generation = result.generation
+                    coordination.forced_generation = result.generation
                 if current is None or result.generation != current.generation:
-                    state.negative.clear()
+                    coordination.negative.clear()
                     if current is not None:
                         self._increment("security.jwks.rotation")
-            state.refresh = None
+            if coordination.refresh is refresh:
+                coordination.refresh = None
 
     async def _fetch_snapshot(self, state: "_EntryState", now: datetime) -> "JWKSSnapshot | VerificationUnavailable":
         current = self._snapshot(state)
@@ -417,30 +432,34 @@ class CachedJWKSProvider:
         self, state: "_EntryState", generation: int, selection: _SelectionKey, now: datetime
     ) -> bool:
         key = (generation, *selection)
-        async with state.lock:
+        coordination = state.coordination
+        async with coordination.lock:
             self._prune_negative(state, generation, now)
-            expires_at = state.negative.get(key)
+            expires_at = coordination.negative.get(key)
             if expires_at is None:
                 return False
-            state.negative.move_to_end(key)
+            coordination.negative.move_to_end(key)
             return True
 
     async def _remember_negative(
         self, state: "_EntryState", generation: int, selection: _SelectionKey, now: datetime
     ) -> None:
         key = (generation, *selection)
-        async with state.lock:
+        coordination = state.coordination
+        async with coordination.lock:
             self._prune_negative(state, generation, now)
-            state.negative[key] = now + self.policy.unknown_kid_cooldown
-            state.negative.move_to_end(key)
-            while len(state.negative) > self.policy.maximum_unknown_keys:
-                state.negative.popitem(last=False)
+            coordination.negative[key] = now + self.policy.unknown_kid_cooldown
+            coordination.negative.move_to_end(key)
+            while len(coordination.negative) > self.policy.maximum_unknown_keys:
+                coordination.negative.popitem(last=False)
 
     @staticmethod
     def _prune_negative(state: "_EntryState", generation: int, now: datetime) -> None:
-        stale = tuple(key for key, expires_at in state.negative.items() if key[0] != generation or expires_at <= now)
+        stale = tuple(
+            key for key, expires_at in state.coordination.negative.items() if key[0] != generation or expires_at <= now
+        )
         for key in stale:
-            del state.negative[key]
+            del state.coordination.negative[key]
 
 
 @dataclass(slots=True)
@@ -452,7 +471,32 @@ class _Refresh:
 @dataclass(slots=True)
 class _EntryState:
     config: JWKSCacheEntry
-    lock: Lock = field(default_factory=Lock)
-    refresh: _Refresh | None = None
-    forced_generation: int | None = None
-    negative: OrderedDict[_NegativeKey, datetime] = field(default_factory=negative_cache)
+    coordination: JWKSCacheCoordinator = field(init=False)
+
+    @property
+    def lock(self) -> object:
+        return self.coordination.lock
+
+    @lock.setter
+    def lock(self, value: object) -> None:
+        self.coordination.lock = cast("Any", value)
+
+    @property
+    def refresh(self) -> "_Refresh | None":
+        return cast("_Refresh | None", self.coordination.refresh)
+
+    @refresh.setter
+    def refresh(self, value: "_Refresh | None") -> None:
+        self.coordination.refresh = value
+
+    @property
+    def forced_generation(self) -> int | None:
+        return self.coordination.forced_generation
+
+    @forced_generation.setter
+    def forced_generation(self, value: int | None) -> None:
+        self.coordination.forced_generation = value
+
+    @property
+    def negative(self) -> "OrderedDict[tuple[int, str, str], datetime]":
+        return self.coordination.negative
