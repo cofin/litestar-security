@@ -658,6 +658,7 @@ class SecurityRuntimeConfig(Generic[UserT]):
     """Per-application runtime state consumed by security middleware."""
 
     registry: AuthenticationRegistry[UserT]
+    resource_metadata_url: str | None = None
     owned_session_backend: OwnedSessionBackend | None = None
     websocket: WebSocketSecurityConfig = field(default_factory=WebSocketSecurityConfig)
     plan_lookup: Callable[[Scope], SecurityRuntimePlan] | None = field(default=None, repr=False)
@@ -711,7 +712,11 @@ class SecurityMiddleware(Generic[UserT]):
             connection = ASGIConnection[Any, Principal[UserT], SecurityContext, Any](
                 scope=scope, receive=receive, send=send
             )
-            principal, context = await self.evaluator.evaluate(connection, session, plan=plan)
+            try:
+                principal, context = await self.evaluator.evaluate(connection, session, plan=plan)
+            except NotAuthorizedException as exc:
+                _advertise_resource_metadata(exc, config=self.config, plan=plan)
+                raise
             scope["user"] = principal
             scope["auth"] = context
         await self.app(scope, receive, send)
@@ -955,6 +960,45 @@ class SecurityMiddlewareWrapper(Generic[UserT]):
             await send(message)
 
         await self._wrapped(scope, receive, send_with_security_headers)
+
+
+def _advertise_resource_metadata(
+    exc: NotAuthorizedException, *, config: SecurityRuntimeConfig[Any], plan: SecurityRuntimePlan
+) -> None:
+    """Add RFC 9728 discovery to one applicable RFC 6750 challenge."""
+    metadata_url = config.resource_metadata_url
+    if metadata_url is None or not _plan_uses_bearer(config.registry, plan):
+        return
+    headers = dict(exc.headers or {})
+    header_name = next((name for name in headers if name.lower() == "www-authenticate"), "WWW-Authenticate")
+    challenge = headers.get(header_name)
+    parameter = f'resource_metadata="{_quote_challenge_value(metadata_url)}"'
+    if challenge is None:
+        headers[header_name] = f"Bearer {parameter}"
+    elif challenge.split(maxsplit=1)[0].lower() == "bearer" and "resource_metadata=" not in challenge.lower():
+        headers[header_name] = f"{challenge}, {parameter}"
+    else:
+        return
+    exc.headers = headers
+
+
+def _plan_uses_bearer(registry: AuthenticationRegistry[Any], plan: SecurityRuntimePlan) -> bool:
+    participants = plan.participant_names
+    names = registry.default_mechanism_names if participants is None else participants
+    for name in names:
+        scheme = registry.get_mechanism(name).security_scheme
+        if (
+            scheme is not None
+            and scheme.type == "http"
+            and scheme.scheme is not None
+            and scheme.scheme.lower() == "bearer"
+        ):
+            return True
+    return False
+
+
+def _quote_challenge_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _normalize_name(value: str, label: str) -> str:

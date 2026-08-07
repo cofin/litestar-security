@@ -177,8 +177,95 @@ def test_document_is_public_even_when_the_application_requires_authentication() 
     )
 
     with create_test_client([private], plugins=[SecurityPlugin(config)]) as client:
-        assert client.get("/private").status_code == HTTP_401_UNAUTHORIZED
+        denied = client.get("/private")
         assert client.get(METADATA_PATH).status_code == HTTP_200_OK
+
+    assert denied.status_code == HTTP_401_UNAUTHORIZED
+    assert denied.headers["www-authenticate"] == (
+        'Bearer resource_metadata="https://api.example.com/.well-known/oauth-protected-resource"'
+    )
+
+
+def test_bearer_challenge_uses_the_canonical_prefixed_resource_metadata_url() -> None:
+    @get("/private")
+    async def private() -> str:  # pragma: no cover - the request never reaches the handler
+        return "private"
+
+    config = SecurityConfig[object](
+        slots=(_HeaderSlot(),),  # type: ignore[arg-type]
+        mechanisms=(
+            AuthenticationMechanism(
+                authenticator=_HeaderAuthenticator(),  # type: ignore[arg-type]
+                resolver=_HeaderResolver(),
+                scheme_name="bearer",
+                security_scheme=SecurityScheme(type="http", scheme="bearer"),
+            ),
+        ),
+        require_default=True,
+        protected_resource=ProtectedResourceConfig(resource="https://api.example.com/mcp", route_prefix="/api"),
+    )
+
+    with create_test_client([private], plugins=[SecurityPlugin(config)]) as client:
+        response = client.get("/private")
+
+    assert response.headers["www-authenticate"] == (
+        'Bearer resource_metadata="https://api.example.com/api/.well-known/oauth-protected-resource/mcp"'
+    )
+
+
+def test_bearer_challenge_advertisement_can_be_disabled_without_hiding_metadata() -> None:
+    @get("/private")
+    async def private() -> str:  # pragma: no cover - the request never reaches the handler
+        return "private"
+
+    config = SecurityConfig[object](
+        slots=(_HeaderSlot(),),  # type: ignore[arg-type]
+        mechanisms=(
+            AuthenticationMechanism(
+                authenticator=_HeaderAuthenticator(),  # type: ignore[arg-type]
+                resolver=_HeaderResolver(),
+                scheme_name="bearer",
+                security_scheme=SecurityScheme(type="http", scheme="bearer"),
+            ),
+        ),
+        require_default=True,
+        protected_resource=ProtectedResourceConfig(
+            resource="https://api.example.com", advertise_resource_metadata=False
+        ),
+    )
+
+    with create_test_client([private], plugins=[SecurityPlugin(config)]) as client:
+        denied = client.get("/private")
+        metadata = client.get(METADATA_PATH)
+
+    assert "www-authenticate" not in denied.headers
+    assert metadata.status_code == HTTP_200_OK
+
+
+def test_resource_metadata_is_not_advertised_for_non_bearer_mechanisms() -> None:
+    @get("/private")
+    async def private() -> str:  # pragma: no cover - the request never reaches the handler
+        return "private"
+
+    config = SecurityConfig[object](
+        slots=(_HeaderSlot(),),  # type: ignore[arg-type]
+        mechanisms=(
+            AuthenticationMechanism(
+                authenticator=_HeaderAuthenticator(),  # type: ignore[arg-type]
+                resolver=_HeaderResolver(),
+                scheme_name="api-key",
+                security_scheme=SecurityScheme(type="apiKey", name="X-API-Key", security_scheme_in="header"),
+            ),
+        ),
+        require_default=True,
+        protected_resource=ProtectedResourceConfig(resource="https://api.example.com"),
+    )
+
+    with create_test_client([private], plugins=[SecurityPlugin(config)]) as client:
+        response = client.get("/private")
+
+    assert response.status_code == HTTP_401_UNAUTHORIZED
+    assert "www-authenticate" not in response.headers
 
 
 def test_conditional_requests_answer_not_modified() -> None:

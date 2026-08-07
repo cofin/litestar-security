@@ -16,6 +16,8 @@ def test_defaults_advertise_only_the_bearer_header_method() -> None:
     assert config.bearer_methods_supported == ("header",)
     assert config.resource_documentation is None
     assert config.route_prefix == ""
+    assert config.advertise_resource_metadata is True
+    assert config.metadata_url == "https://api.example.com/.well-known/oauth-protected-resource"
 
 
 def test_sequences_freeze_to_tuples() -> None:
@@ -126,9 +128,19 @@ def test_route_prefix_defaults_to_the_application_root() -> None:
 
 
 def test_route_prefix_accepts_a_mount_point() -> None:
-    config = ProtectedResourceConfig(resource="https://api.example.com", route_prefix="/api/")
+    config = ProtectedResourceConfig(resource="https://api.example.com/mcp", route_prefix="/api/")
 
     assert config.route_prefix == "/api"
+    assert config.metadata_url == "https://api.example.com/api/.well-known/oauth-protected-resource/mcp"
+
+
+@pytest.mark.parametrize("advertise_resource_metadata", [0, 1, None, "yes"])
+def test_challenge_advertisement_must_be_boolean(advertise_resource_metadata: object) -> None:
+    with pytest.raises(ImproperlyConfiguredException):
+        ProtectedResourceConfig(
+            resource="https://api.example.com",
+            advertise_resource_metadata=advertise_resource_metadata,  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize("route_prefix", ["api", "/", "//api", "/a b", "/api\n", 1])

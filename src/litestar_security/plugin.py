@@ -289,7 +289,15 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 authorization_resolver=self.config.authorization_resolver,
                 require_default=self.config.require_default,
             )
-            self._runtime_config = SecurityRuntimeConfig(registry=registry, websocket=self.config.websocket)
+            protected_resource = self.config.protected_resource
+            resource_metadata_url = (
+                protected_resource.metadata_url
+                if protected_resource is not None and protected_resource.advertise_resource_metadata
+                else None
+            )
+            self._runtime_config = SecurityRuntimeConfig(
+                registry=registry, resource_metadata_url=resource_metadata_url, websocket=self.config.websocket
+            )
             self._middleware = DefineMiddleware(SecurityMiddlewareWrapper, config=self._runtime_config)
         return self._runtime_config, cast("DefineMiddleware", self._middleware)
 
