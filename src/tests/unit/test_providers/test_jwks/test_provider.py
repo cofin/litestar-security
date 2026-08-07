@@ -724,14 +724,10 @@ async def test_closing_one_provider_preserves_cache_shared_refresh(
     cache = InMemoryJWKSCache()
     first = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher, cache=cache)
     second = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher, cache=cache)
-    first_selection = asyncio.create_task(
-        first.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
-    )
+    first_selection = asyncio.create_task(first.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW))
 
     await fetcher.started.wait()
-    second_selection = asyncio.create_task(
-        second.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
-    )
+    second_selection = asyncio.create_task(second.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW))
     await checkpoint()
     close = asyncio.create_task(first.aclose())
     await checkpoint()

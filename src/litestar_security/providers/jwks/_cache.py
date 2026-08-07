@@ -189,7 +189,9 @@ class JWKSCacheCoordinator:
     lock: Lock = field(default_factory=Lock)
     refresh: object | None = None
     forced_generation: int | None = None
-    negative: OrderedDict[tuple[int, str, str], datetime] = field(default_factory=OrderedDict)
+    negative: OrderedDict[tuple[int, str, str], datetime] = field(
+        default_factory=OrderedDict[tuple[int, str, str], datetime]
+    )
     users: int = 0
 
 

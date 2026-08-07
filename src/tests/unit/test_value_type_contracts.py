@@ -45,10 +45,10 @@ MODULES: tuple[str, ...] = (
     "litestar_security.workers",
 )
 
-# Public dataclasses that hold mutable state by design: services, stores, a
-# runner, a buffer, the root config and a test-kit barrier. Everything else
-# public must be frozen. Listed by qualified name so a rename is a visible
-# failure rather than a silent reclassification.
+# Public dataclasses that hold mutable state by design: services, stores,
+# coordinators, a runner, a buffer, the root config and a test-kit barrier.
+# Everything else public must be frozen. Listed by qualified name so a rename
+# is a visible failure rather than a silent reclassification.
 MUTABLE_SERVICES: frozenset[str] = frozenset({
     "litestar_security.InMemoryWebSocketConnectTokenStore",
     "litestar_security.SecurityConfig",
@@ -60,6 +60,7 @@ MUTABLE_SERVICES: frozenset[str] = frozenset({
     "litestar_security.providers.APIKeyService",
     "litestar_security.providers.BufferedAPIKeyUsage",
     "litestar_security.providers.HttpxJWKSFetcher",
+    "litestar_security.providers.JWKSCacheCoordinator",
     "litestar_security.testing.BackendBarrier",
     "litestar_security.workers.BlockingCallRunner",
 })
