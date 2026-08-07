@@ -44,7 +44,7 @@ from litestar.middleware.session.client_side import CookieBackendConfig
 from litestar.openapi.config import OpenAPIConfig
 from litestar.openapi.spec import Tag
 
-from litestar_security import ROUTE_TAGS, RouteDocs, SecurityConfig, SecurityPlugin
+from litestar_security import ROUTE_TAGS, RaisedErrorSchema, RouteDocs, SecurityConfig, SecurityPlugin
 from litestar_security._openapi import merge_openapi_tags
 from litestar_security.accounts import (
     AESGCMSecretProtector,
@@ -141,6 +141,7 @@ def build_documented_app(  # noqa: PLR0913 - one variation point per configurabl
     route_handlers: list[Any] | None = None,
     plugins: list[Any] | None = None,
     wire: WirePolicy | None = None,
+    raised_error_schema: RaisedErrorSchema | None = None,
 ) -> Litestar:
     """Build the application every generated route family is documented from.
 
@@ -155,6 +156,7 @@ def build_documented_app(  # noqa: PLR0913 - one variation point per configurabl
             ones.
         plugins: Further plugins installed beside the security plugin.
         wire: How the generated bodies are spelled on the wire.
+        raised_error_schema: The application-owned schema for raised errors.
 
     Returns:
         One application with local auth, MFA, passkeys, OAuth, and OIDC logout.
@@ -223,6 +225,7 @@ def build_documented_app(  # noqa: PLR0913 - one variation point per configurabl
                     oauth=oauth,
                     wire_rename=wire.rename if wire is not None else None,
                     wire_forbid_unknown_fields=wire.forbid_unknown_fields if wire is not None else True,
+                    raised_error_schema=raised_error_schema,
                 )
             ),
             *(plugins or []),

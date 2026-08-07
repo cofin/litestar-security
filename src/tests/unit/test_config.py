@@ -38,8 +38,32 @@ def test_security_config_declares_its_fields_in_order() -> None:
         "jwks_warmup_failure",
         "wire_rename",
         "wire_forbid_unknown_fields",
+        "raised_error_schema",
     )
     assert tuple(field.name for field in fields(config)) == expected_fields
+
+
+def test_raised_error_schema_is_frozen_slotted_and_hashable() -> None:
+    schema = litestar_security.RaisedErrorSchema(dict, "application/problem+json")
+
+    assert {schema: "configured"}[litestar_security.RaisedErrorSchema(dict, "application/problem+json")] == "configured"
+    assert not hasattr(schema, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        cast("Any", schema).media_type = "application/json"
+
+
+@pytest.mark.parametrize("value", [object(), {"schema": dict}, {"media_type": "application/json"}])
+def test_security_config_rejects_an_incomplete_raised_error_schema(value: object) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Raised-error schema"):
+        litestar_security.SecurityConfig(raised_error_schema=cast("Any", value))
+
+
+@pytest.mark.parametrize(
+    ("schema", "media_type"), [(object(), "application/json"), (dict, ""), (dict, "   "), (dict, object())]
+)
+def test_raised_error_schema_rejects_invalid_fields(schema: object, media_type: object) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Raised-error"):
+        litestar_security.RaisedErrorSchema(cast("Any", schema), cast("Any", media_type))
 
 
 def test_security_config_wire_casing_defaults_to_snake_case_and_strict() -> None:

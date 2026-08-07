@@ -344,6 +344,28 @@ routes, including the OAuth ones:
 
    Litestar(exception_handlers={HTTPException: my_error_format}, ...)
 
+When that format changes the body schema or media type, declare both on the
+security configuration so generated clients receive the same contract:
+
+.. code-block:: python
+
+   from litestar_security import RaisedErrorSchema, SecurityConfig, SecurityPlugin
+
+   SecurityPlugin(
+       SecurityConfig(
+           raised_error_schema=RaisedErrorSchema(
+               schema=ApplicationError,
+               media_type="application/vnd.example.error+json",
+           ),
+       ),
+   )
+
+The declaration only restates statuses generated handlers raise. Typed values
+they return, including second-factor challenges and conflicts, retain their own
+schemas. It also suppresses the customized-response-class warning because the
+application has supplied the missing OpenAPI contract; runtime exception
+handling remains entirely application-owned.
+
 Problem details
 ~~~~~~~~~~~~~~~
 
@@ -381,7 +403,9 @@ If the application installs a response class of its own — its own, or one a
 presentation plugin contributes — the generated routes warn once at startup,
 naming the class. The documented schemas describe what the handlers return, and
 a response class that reshapes the body makes them inaccurate. It is a warning
-rather than an error: a customized response class is legitimate.
+rather than an error: a customized response class is legitimate. A complete
+``RaisedErrorSchema`` declaration suppresses the warning and restates every
+raised denial using its schema and media type.
 
 Enumeration resistance shows up in the schema as well. Recovery, verification,
 and registration answer ``202`` with the same body for every identifier, so a

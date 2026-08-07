@@ -48,6 +48,11 @@ Added
 Changed
 ~~~~~~~
 
+* Applications with custom exception rendering can declare a
+  ``RaisedErrorSchema`` on ``SecurityConfig``. Generated routes then document
+  every raised denial with that body type and media type while preserving
+  returned response schemas. A complete declaration also suppresses the
+  customized-response-class warning.
 * All ten generated tag groups now carry a description in the emitted OpenAPI
   document. Multi-factor authentication, passkeys, step-up authentication,
   OAuth providers, and OIDC logout previously appeared as bare names because

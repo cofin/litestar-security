@@ -21,6 +21,7 @@ raised.
 from collections.abc import Mapping
 from typing import Any, NamedTuple, cast
 
+import msgspec
 import pytest
 from litestar import Litestar, Request, Response, get
 from litestar.exceptions import HTTPException, LitestarWarning, TooManyRequestsException
@@ -34,6 +35,7 @@ from litestar.status_codes import (
 )
 from litestar.testing import AsyncTestClient, TestClient
 
+from litestar_security import RaisedErrorSchema
 from litestar_security.providers.oauth import (
     AccountLinkError,
     InvalidOAuthCallback,
@@ -289,6 +291,12 @@ class _EnvelopeResponse(Response[Any]):
     """Stand in for the response class a presentation plugin installs."""
 
 
+class _ApplicationError(msgspec.Struct):
+    """Describe the body the example application's exception handler emits."""
+
+    error: dict[str, object]
+
+
 @get("/application/owned", response_class=_EnvelopeResponse, sync_to_thread=False)
 def _application_owned_route() -> str:
     return "owned"
@@ -308,6 +316,51 @@ def test_a_customized_response_class_warns_once_however_many_routes_it_reaches(
     warnings = _response_class_warnings(recorded)
     assert len(warnings) == 1
     assert "_EnvelopeResponse" in warnings[0]
+
+
+def test_a_complete_application_error_declaration_suppresses_the_response_class_warning(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]], recwarn: pytest.WarningsRecorder
+) -> None:
+    """A complete declaration gives the application an accurate alternative to the warning."""
+    build_documented_app(
+        jwt_key_material["EdDSA"][0],
+        response_class=_EnvelopeResponse,
+        raised_error_schema=RaisedErrorSchema(_ApplicationError, "application/vnd.example.error+json"),
+    )
+
+    assert _response_class_warnings(recwarn) == []
+
+
+@pytest.mark.parametrize("denial", _RAISED_DENIALS)
+def test_an_application_declaration_restates_every_raised_denial(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]], denial: _Denial
+) -> None:
+    """Every raised status shares the application-declared schema and media type."""
+    app = build_documented_app(
+        jwt_key_material["EdDSA"][0],
+        raised_error_schema=RaisedErrorSchema(_ApplicationError, "application/vnd.example.error+json"),
+    )
+    assert app.openapi_schema is not None
+    document = cast("dict[str, Any]", app.openapi_schema.to_schema())
+
+    declared = _declared_body(document, denial.template, denial.method.lower(), str(denial.status))
+    assert declared == ("application/vnd.example.error+json", document["components"]["schemas"]["_ApplicationError"])
+
+
+def test_an_application_declaration_takes_precedence_over_problem_details_detection(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    """An explicit application contract is more precise than plugin inference."""
+    app = build_documented_app(
+        jwt_key_material["EdDSA"][0],
+        raised_error_schema=RaisedErrorSchema(_ApplicationError, "application/vnd.example.error+json"),
+        plugins=[ProblemDetailsPlugin(ProblemDetailsConfig(enable_for_all_http_exceptions=True))],
+    )
+    assert app.openapi_schema is not None
+    document = cast("dict[str, Any]", app.openapi_schema.to_schema())
+
+    declared = _declared_body(document, "/auth/sessions", "get", "401")
+    assert declared == ("application/vnd.example.error+json", document["components"]["schemas"]["_ApplicationError"])
 
 
 def test_the_default_configuration_says_nothing_about_response_classes(

@@ -32,7 +32,14 @@ from litestar_security.authentication import (
     public,
     required,
 )
-from litestar_security.config import BlockingIntegration, ExternalCSRF, MFAConfig, PasskeyConfig, SecurityConfig
+from litestar_security.config import (
+    BlockingIntegration,
+    ExternalCSRF,
+    MFAConfig,
+    PasskeyConfig,
+    RaisedErrorSchema,
+    SecurityConfig,
+)
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -144,6 +151,7 @@ __all__ = (
     "Principal",
     "ProblemDetail",
     "PublicController",
+    "RaisedErrorSchema",
     "RequestAuthenticator",
     "ResourcePermission",
     "RouteDocs",
