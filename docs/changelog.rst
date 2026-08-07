@@ -1,91 +1,143 @@
 Changelog
 =========
 
-Unreleased
-----------
+0.3.0
+-----
+
+Changed (breaking)
+~~~~~~~~~~~~~~~~~~
+
+* Public domain and protocol types now use semantic names. No compatibility
+  aliases are provided: ``TOTPEnrollment`` becomes
+  ``TOTPProvisioningGrant``, ``RecoveryCodes`` becomes
+  ``RecoveryCodeGrant``, ``StepUpGrant`` becomes ``StepUpCredential``,
+  ``AssertionRecordResult`` becomes ``AssertionRecordStatus``,
+  ``PasskeySummary`` becomes ``PasskeyRecord``, ``PasswordPolicyResult``
+  becomes ``PasswordPolicyDecision``, ``PasswordVerificationResult`` becomes
+  ``PasswordVerificationOutcome``, ``RateLimitRequest`` becomes
+  ``RateLimitAttempt``, ``LocalAccount`` becomes ``LocalAccountRecord``,
+  ``InvalidLifecycleRequest`` becomes ``LifecycleRejected``,
+  ``PasswordChangeResult`` becomes ``PasswordChangeOutcome``,
+  ``RevokeLoginMethodResult`` becomes ``RevokeLoginMethodOutcome``,
+  ``RegistrationResult`` becomes ``RegistrationOutcome``, ``ConsumeResult``
+  becomes ``ConsumeOutcome``, ``PasswordResetResult`` becomes
+  ``PasswordResetOutcome``, ``RotateRefreshResult`` becomes
+  ``RefreshRotationOutcome``, ``PrepareRefreshResult`` becomes
+  ``RefreshPreflightOutcome``, ``RefreshTokenResponse`` becomes ``TokenPair``,
+  and ``UnlinkResult`` becomes ``UnlinkOutcome``.
+* Generated-route schemas follow the same rule:
+  ``LocalMFARequiredResponse`` to ``LocalMFAChallenge``,
+  ``LocalMFACompletionRequest`` to ``LocalMFACompletion``,
+  ``LocalRegistrationRequest`` to ``LocalRegistration``,
+  ``LocalInvitationRegistrationRequest`` to ``LocalInvitationRegistration``,
+  ``LocalIdentifierRequest`` to ``LocalIdentifier``, ``LocalTokenRequest`` to
+  ``LocalToken``, ``LocalPasswordResetRequest`` to ``LocalPasswordReset``,
+  ``LocalPasswordChangeRequest`` to ``LocalPasswordChange``,
+  ``LocalAccountResponse`` to ``LocalAccount``, ``RouteStatusResponse`` to
+  ``RouteStatus``, ``LocalSessionResponse`` to ``LocalSession``, and
+  ``LocalSessionListResponse`` to ``LocalSessionList``.
+* The remaining account schemas are renamed: ``TOTPEnrollmentRequest`` to
+  ``TOTPEnrollment``, ``TOTPEnrollmentResponse`` to ``TOTPProvisioning``,
+  ``TOTPVerificationRequest`` to ``TOTPVerification``,
+  ``StepUpAuthorizedRequest`` to ``StepUpAuthorization``,
+  ``RecoveryCodesResponse`` to ``RecoveryCodes``, ``StepUpRequest`` to
+  ``StepUpVerification``, ``StepUpResponse`` to ``StepUpGrant``,
+  ``PasskeyRegistrationOptionsRequest`` to ``PasskeyRegistrationStart``,
+  ``PasskeyAuthenticationOptionsRequest`` to ``PasskeyAuthenticationStart``,
+  ``PasskeyVerifyRequest`` to ``PasskeyVerification``,
+  ``PasskeyOptionsResponse`` to ``PasskeyOptions``, and
+  ``PasskeySummaryResponse`` to ``PasskeySummary``.
+* OAuth schemas are renamed: ``OAuthRouteResponse`` to ``OAuthRouteStatus``,
+  ``OAuthLinkRequest`` to ``OAuthLink``, ``OAuthScopeRequest`` to
+  ``OAuthScopeUpgrade``, ``OAuthStepUpRequest`` to ``OAuthStepUp``,
+  ``OIDCBackchannelLogoutRequest`` to ``OIDCBackchannelLogout``, and
+  ``OAuthLogoutResult`` to ``OAuthLogout``.
+* Custom ``JWKSCache`` implementations must return a stable
+  ``JWKSCacheCoordinator`` from ``coordinator(issuer, jwks_uri)``. It owns
+  refresh, forced-refresh, negative-cache, and lifecycle state shared by every
+  provider using that cache.
 
 Added
 ~~~~~
 
-* ``SecurityConfig(exclude=[...])`` takes path patterns that remove routes from
-  security entirely, mirroring ``JWTAuth.exclude``. It is what lets an
-  application serve static assets, or any other route tree a plugin registered,
-  without authentication. Patterns apply when routes are compiled, so an
-  excluded operation also documents anonymous access in OpenAPI instead of
-  claiming a protection it does not have. A route that declares its own ``auth``
-  and also matches a pattern is rejected at startup, and a pattern matching no
-  registered route warns once. See :doc:`composition`.
-* ``SecurityConfig(protected_resource=ProtectedResourceConfig(...))`` publishes
-  the :rfc:`9728` protected-resource metadata document at
-  ``/.well-known/oauth-protected-resource``, so a client or an authorization
-  server can discover which issuers this resource trusts, which scopes it
-  understands, and how a bearer token may be presented to it. The route is
-  unauthenticated, answers conditional requests with ``304``, and the document
-  is computed once at configuration time. Applicable RFC 6750 Bearer failures
-  advertise the same URL through RFC 9728's ``resource_metadata`` challenge
-  parameter; set ``advertise_resource_metadata=False`` to disable that
-  discovery hint without hiding the document. See :doc:`resource-server`.
-* ``CachedJWKSProvider(cache=...)`` takes a ``JWKSCache``. Handing the same
-  cache to two providers gives them one key set and one fetch schedule instead
-  of two. ``InMemoryJWKSCache`` is the default and stays the behavior when the
-  argument is omitted; an application may implement the protocol itself over
-  the immutable ``JWKSSnapshot``. See :doc:`jwt-and-jwks`.
-* ``OIDCDiscoveryClient.discover(issuer, discovery_url=...)`` reaches a provider
-  that does not publish its metadata at
-  ``{issuer}/.well-known/openid-configuration``. The override must share the
-  issuer's exact origin.
-* ``RouteDocs`` puts the OpenAPI documentation of the generated routes in the
-  application's hands. Pass one to any feature configuration to rename a tag
-  group, replace its description, or rewrite every operation identifier and
-  route name through a single callable — useful when a generated TypeScript
-  client should follow the project's own naming. Groups are addressed by a
-  stable key such as ``local.sessions`` or ``oauth.providers``, so a rename does
-  not invalidate the key, and a key naming no group is rejected at startup
-  rather than silently ignored. None of it is security policy: a route's
-  protection is unaffected by how it is documented. See
-  :doc:`generated-routes`.
+* ``SecurityConfig(exclude=[...])`` accepts path patterns that remove matching
+  routes from security. Excluded operations are anonymous in runtime policy and
+  OpenAPI. Conflicting route-level ``auth`` is rejected, and unmatched patterns
+  warn once. See the composition guide.
+* ``ProtectedResourceConfig`` publishes an RFC 9728 protected-resource metadata
+  document. Its path derives from the resource URL and optional ``route_prefix``;
+  the root-resource default is ``/.well-known/oauth-protected-resource``. The
+  endpoint is anonymous, supports conditional ``304`` responses, and configures
+  cache age, authorization servers, scopes, bearer methods, and documentation
+  URL. ``ProtectedResourceMetadata`` and ``build_protected_resource_handler``
+  expose the document contract and handler builder. See the resource-server
+  guide.
+* Applicable RFC 6750 Bearer challenges advertise the canonical metadata URL in
+  ``resource_metadata``. Set ``advertise_resource_metadata=False`` to disable
+  the hint without removing the endpoint.
+* ``CachedJWKSProvider(cache=...)`` accepts a ``JWKSCache``.
+  ``InMemoryJWKSCache`` remains the default. Sharing a cache shares immutable
+  ``JWKSSnapshot`` values and refresh coordination across providers.
+* ``OIDCDiscoveryClient.discover(issuer, discovery_url=...)`` supports metadata
+  outside the conventional well-known URL. The override must use the issuer's
+  exact origin.
+* ``RouteDocs`` lets applications rename and describe generated-route tag groups
+  and transform operation IDs and route names. Stable group keys remain fixed,
+  and unknown groups are rejected. See the generated-routes guide.
+* ``SecurityConfig.wire_rename`` applies one generated-body naming policy to
+  request decoding, response encoding, and OpenAPI. It accepts ``lower``,
+  ``upper``, ``camel``, ``pascal``, ``kebab``, or a callable; the default stays
+  snake case. ``wire_forbid_unknown_fields`` controls unknown request members
+  and defaults to strict rejection.
+* ``WirePolicy``, ``wire_struct()``, ``RouteError``, and ``ProblemDetail`` expose
+  generated-route wire and error-schema contracts.
+* ``RaisedErrorSchema`` declares the schema and media type produced by custom
+  exception rendering. It changes only OpenAPI; exception handling remains
+  application-owned.
 
 Changed
 ~~~~~~~
 
-* Applications with custom exception rendering can declare a
-  ``RaisedErrorSchema`` on ``SecurityConfig``. Generated routes then document
-  every raised denial with that body type and media type while preserving
-  returned response schemas. A complete declaration also suppresses the
-  customized-response-class warning.
-* All ten generated tag groups now carry a description in the emitted OpenAPI
-  document. Multi-factor authentication, passkeys, step-up authentication,
-  OAuth providers, and OIDC logout previously appeared as bare names because
-  only the local-auth groups reached the OpenAPI config. Nothing else about the
-  document changes.
-* An application's own exception handlers now apply to the generated OAuth
-  routes. Those routes previously answered their provider and account failures
-  themselves, which took precedence over every application-level handler, so an
-  application publishing its own error format received it everywhere except
-  there. Statuses, messages, and ``Retry-After`` are unchanged, and a failure
-  still reveals nothing about its cause. An application relying on the previous
-  bodies while also configuring its own error format will now see its own
-  format on those paths.
-* The generated routes document their error bodies as the new ``RouteError``
-  rather than ``RouteStatus``. A ``400``, ``401``, ``429``, or ``503`` is
-  raised rather than returned, so the body has always been Litestar's
-  ``{status_code, detail}`` plus ``extra`` — a member the published document
-  never declared, leaving clients generated from it with no typed access to it
-  and, under strict decoding, rejecting every error response. ``RouteStatus``
-  keeps its real role as the body a handler *returns*: the ``200``
-  confirmations and the ``409`` conflict. The typed ``403`` second-factor
-  challenge is unaffected. A generated client will need regenerating.
-* An application converting every HTTP exception to problem details — Litestar's
-  ``ProblemDetailsPlugin`` with ``enable_for_all_http_exceptions=True`` — now
-  has its error bodies described as ``ProblemDetail`` at
-  ``application/problem+json``. The plugin in its default configuration
-  converts nothing the generated routes raise, and the document is unchanged
-  for it. See :doc:`generated-routes`.
-* Generated routes warn once at startup when the application installs a
-  response class other than Litestar's, naming it. The documented response
-  schemas describe what the handlers return, so a response class that reshapes
-  the body makes them inaccurate. Routes the application writes itself are
-  never checked, and this warns rather than raises.
+* All ten generated tag groups now include descriptions and pass through the
+  application's ``RouteDocs`` configuration.
+* Generated OAuth routes now let application exception handlers render provider
+  and account failures. Status codes, sanitized messages, and ``Retry-After``
+  behavior are unchanged.
+* Raised ``400``, ``401``, ``429``, and ``503`` responses are documented as
+  ``RouteError`` rather than ``RouteStatus``. ``RouteStatus`` remains the body
+  returned by success and conflict responses, and typed second-factor
+  challenges retain their own schemas. Generated clients should be regenerated.
+* With ``ProblemDetailsPlugin(enable_for_all_http_exceptions=True)``, generated
+  routes document raised errors as ``ProblemDetail`` with
+  ``application/problem+json``. Default plugin configuration leaves the
+  document unchanged.
+* Generated routes warn once when a custom response class could invalidate
+  documented response bodies. A complete ``RaisedErrorSchema`` supplies the
+  missing OpenAPI contract and suppresses the warning.
+
+Fixed
+~~~~~
+
+* Providers sharing a ``JWKSCache`` coalesce cold, expired, and unknown-key
+  refreshes into one upstream fetch. Closing one provider does not cancel
+  shared work still used by another.
+* Path exclusions compile consistently across runtime authentication and
+  OpenAPI, including routes registered by other Litestar plugins.
+* Generated error schemas match the bodies and media types applications render
+  without overwriting returned response schemas.
+
+Development
+~~~~~~~~~~~
+
+* Reorganized tests by behavior and introduced shared fixtures, adversarial
+  corpora, provider performance checks, and shuffled CI execution.
+* Replaced the global 100% branch-coverage requirement with a 95% global gate
+  plus a hard 100% gate for security-critical authentication, authorization,
+  token, OAuth transaction, refresh, and WebSocket paths.
+* Moved architecture and forbidden-import checks into lint-time tooling,
+  removed Hypothesis and low-signal structural tests, and made lint include
+  untracked source files.
+* Updated CI actions and removed duplicate optional-extra synchronization.
 
 0.2.0
 -----
