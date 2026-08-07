@@ -16,6 +16,7 @@ from litestar_security.authentication import InvalidCredentials, VerificationUna
 from litestar_security.providers.jwks import (
     AsyncJWKSFetcher,
     CachedJWKSProvider,
+    InMemoryJWKSCache,
     JWKSCacheEntry,
     JWKSCachePolicy,
     JWKSFetchRequest,
@@ -482,6 +483,37 @@ async def test_jwks_fresh_unknown_key_forces_one_refresh_and_retries(
     assert len(fetcher.requests) == 2
 
 
+async def test_cache_shared_providers_collapse_forced_unknown_key_refresh(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    known = _verification_jwk(jwt_key_material, key_id="known")
+    rotated = _verification_jwk(jwt_key_material, key_id="rotated")
+    fetcher = _BlockingJWKSFetcher(
+        _jwks_response(known, cache_control="max-age=60", etag='"generation-1"'),
+        _jwks_response(known, rotated, cache_control="max-age=60", etag='"generation-2"'),
+        immediate_calls=1,
+        maximum_calls=2,
+    )
+    cache = InMemoryJWKSCache()
+    providers = tuple(CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher, cache=cache) for _ in range(2))
+    assert isinstance(
+        await providers[0].select_key(_JWT_ISSUER, _JWKS_URI, "known", "EdDSA", now=_JWT_NOW), VerificationKey
+    )
+    selections = tuple(
+        asyncio.create_task(
+            provider.select_key(_JWT_ISSUER, _JWKS_URI, "rotated", "EdDSA", now=_JWT_NOW + timedelta(seconds=1))
+        )
+        for provider in providers
+    )
+
+    await fetcher.started.wait()
+    await checkpoint()
+    fetcher.release.set()
+
+    assert all(isinstance(selection, VerificationKey) for selection in await asyncio.gather(*selections))
+    assert len(fetcher.requests) == 2
+
+
 async def test_jwks_unknown_selection_negative_cache_is_per_generation_tuple(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -683,6 +715,29 @@ async def test_jwks_close_cancels_and_awaits_live_refresh_tasks(
     assert isinstance(
         await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW), VerificationUnavailable
     )
+
+
+async def test_closing_one_provider_preserves_cache_shared_refresh(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    fetcher = _BlockingJWKSFetcher(_jwks_response(_verification_jwk(jwt_key_material)))
+    cache = InMemoryJWKSCache()
+    first = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher, cache=cache)
+    second = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher, cache=cache)
+    first_selection = asyncio.create_task(first.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW))
+
+    await fetcher.started.wait()
+    second_selection = asyncio.create_task(second.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW))
+    await checkpoint()
+    close = asyncio.create_task(first.aclose())
+    await checkpoint()
+
+    assert fetcher.cancelled == 0
+    assert fetcher.active == 1
+    fetcher.release.set()
+    assert isinstance(await second_selection, VerificationKey)
+    assert isinstance(await first_selection, VerificationUnavailable)
+    await close
 
 
 @pytest.mark.parametrize(

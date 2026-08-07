@@ -3,6 +3,7 @@
 from litestar_security.providers.jwks._cache import (
     InMemoryJWKSCache,
     JWKSCache,
+    JWKSCacheCoordinator,
     JWKSCacheEntry,
     JWKSCachePolicy,
     JWKSSnapshot,
@@ -24,6 +25,7 @@ __all__ = (
     "HttpxJWKSFetcher",
     "InMemoryJWKSCache",
     "JWKSCache",
+    "JWKSCacheCoordinator",
     "JWKSCacheEntry",
     "JWKSCachePolicy",
     "JWKSFetchRequest",

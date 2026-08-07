@@ -1,5 +1,6 @@
 """Unit contracts for the swappable JWKS cache."""
 
+import asyncio
 import json
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,7 @@ from litestar_security.providers.jwks import (
     CachedJWKSProvider,
     InMemoryJWKSCache,
     JWKSCache,
+    JWKSCacheCoordinator,
     JWKSCacheEntry,
     JWKSCachePolicy,
     JWKSFetchRequest,
@@ -135,8 +137,64 @@ async def test_a_second_component_sharing_the_cache_does_not_fetch_again(jwks_do
 
     assert isinstance(await first.select_key(ISSUER, JWKS_URI, "shared-key", "RS256", now=NOW), VerificationKey)
     assert fetcher.calls == 1
-
     assert isinstance(await second.select_key(ISSUER, JWKS_URI, "shared-key", "RS256", now=NOW), VerificationKey)
+    assert fetcher.calls == 1
+
+
+async def test_two_providers_sharing_a_cache_collapse_a_cold_refresh(jwks_document: bytes) -> None:
+    class BlockingFetcher(_CountingFetcher):
+        def __init__(self, document: bytes) -> None:
+            super().__init__(document)
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+            self.started.set()
+            await self.release.wait()
+            return await super().fetch(request)
+
+    fetcher = BlockingFetcher(jwks_document)
+    cache = InMemoryJWKSCache()
+    providers = tuple(CachedJWKSProvider((_entry(),), fetcher, cache=cache) for _ in range(2))
+    selections = [
+        asyncio.create_task(provider.select_key(ISSUER, JWKS_URI, "shared-key", "RS256", now=NOW))
+        for provider in providers
+    ]
+
+    await fetcher.started.wait()
+    await asyncio.sleep(0)
+    fetcher.release.set()
+
+    assert all(isinstance(selection, VerificationKey) for selection in await asyncio.gather(*selections))
+    assert fetcher.calls == 1
+
+
+async def test_custom_cache_can_share_refresh_coordination(jwks_document: bytes) -> None:
+    class CustomCache:
+        def __init__(self) -> None:
+            self.entries: dict[tuple[str, str], JWKSSnapshot] = {}
+            self.coordinators: dict[tuple[str, str], JWKSCacheCoordinator] = {}
+
+        def get(self, issuer: str, jwks_uri: str) -> "JWKSSnapshot | None":
+            return self.entries.get((issuer, jwks_uri))
+
+        def set(self, issuer: str, jwks_uri: str, snapshot: JWKSSnapshot) -> None:
+            self.entries[issuer, jwks_uri] = snapshot
+
+        def invalidate(self, issuer: str, jwks_uri: str) -> None:
+            self.entries.pop((issuer, jwks_uri), None)
+
+        def coordinator(self, issuer: str, jwks_uri: str) -> JWKSCacheCoordinator:
+            return self.coordinators.setdefault((issuer, jwks_uri), JWKSCacheCoordinator())
+
+    fetcher = _CountingFetcher(jwks_document)
+    cache = CustomCache()
+    providers = tuple(CachedJWKSProvider((_entry(),), fetcher, cache=cache) for _ in range(2))
+
+    await asyncio.gather(
+        *(provider.select_key(ISSUER, JWKS_URI, "shared-key", "RS256", now=NOW) for provider in providers)
+    )
+
     assert fetcher.calls == 1
 
 
@@ -144,6 +202,7 @@ async def test_an_application_cache_receives_the_published_snapshot(jwks_documen
     class _RecordingCache:
         def __init__(self) -> None:
             self.entries: dict[tuple[str, str], JWKSSnapshot] = {}
+            self.coordinators: dict[tuple[str, str], JWKSCacheCoordinator] = {}
             self.reads = 0
 
         def get(self, issuer: str, jwks_uri: str) -> "JWKSSnapshot | None":
@@ -155,6 +214,9 @@ async def test_an_application_cache_receives_the_published_snapshot(jwks_documen
 
         def invalidate(self, issuer: str, jwks_uri: str) -> None:
             self.entries.pop((issuer, jwks_uri), None)
+
+        def coordinator(self, issuer: str, jwks_uri: str) -> JWKSCacheCoordinator:
+            return self.coordinators.setdefault((issuer, jwks_uri), JWKSCacheCoordinator())
 
     cache = _RecordingCache()
     provider = CachedJWKSProvider((_entry(),), _CountingFetcher(jwks_document), cache=cache)
