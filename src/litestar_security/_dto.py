@@ -21,10 +21,9 @@ Two things the stock DTO layer does not do, and this module supplies:
   cannot narrow to a union. :class:`WireUnionBackend` holds one ordinary
   backend per struct arm and composes them.
 
-Reaching into ``litestar.dto._backend`` and ``litestar.dto._codegen_backend``
-is confined to this module. Both hold classes that are documented extension
-points in every respect except their module name, and keeping the imports in
-one file is what makes them one deletion when they are exported.
+Litestar does not publicly export the backend hooks these behaviors need. The
+:mod:`litestar_security._dto_compat` adapter owns that temporary dependency;
+this module uses only the local compatibility boundary.
 """
 
 from dataclasses import replace
@@ -32,12 +31,16 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, Union, cast, get_args
 
 from litestar import MediaType, Response
 from litestar.dto import DTOConfig, MsgspecDTO
-from litestar.dto._backend import DTOBackend, build_annotation_for_backend
-from litestar.dto._codegen_backend import DTOCodegenBackend
 from litestar.exceptions import ImproperlyConfiguredException
 from litestar.typing import FieldDefinition
 from litestar.utils.signature import ParsedSignature
 
+from litestar_security._dto_compat import (
+    DTOBackend,
+    DTOCodegenBackend,
+    TransferDTOFieldDefinition,
+    build_annotation_for_backend,
+)
 from litestar_security.schema import WirePolicy, WireStruct
 
 if TYPE_CHECKING:
@@ -48,7 +51,6 @@ if TYPE_CHECKING:
     from litestar import Router
     from litestar.connection import ASGIConnection
     from litestar.dto import AbstractDTO
-    from litestar.dto._types import TransferDTOFieldDefinition
 
 __all__ = (
     "MAX_NESTED_DEPTH",

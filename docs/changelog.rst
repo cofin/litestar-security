@@ -45,6 +45,9 @@ Added
 Changed
 ~~~~~~~
 
+* The generated-route DTO integration now isolates Litestar's unexported
+  backend hooks behind a compatibility adapter. The package requires
+  ``litestar>=2.24.0`` and does not impose an upper bound.
 * All ten generated tag groups now carry a description in the emitted OpenAPI
   document. Multi-factor authentication, passkeys, step-up authentication,
   OAuth providers, and OIDC logout previously appeared as bare names because
