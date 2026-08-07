@@ -110,6 +110,11 @@ name = "litestar-security"
 version = "{new_version}"
 """
 
+[[tool.bumpversion.files]]
+filename = "tools/check_release.py"
+search = "{current_version}"
+replace = "{new_version}"
+
 #####################
 # Dependency Groups #
 #####################
