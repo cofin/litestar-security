@@ -13,15 +13,15 @@ from litestar_security.accounts._purpose_tokens import (
     TokenIssue,
 )
 from litestar_security.accounts._records import (
-    ConsumeResult,
-    LocalAccount,
+    ConsumeOutcome,
+    LocalAccountRecord,
     LoginMethod,
-    PasswordChangeResult,
+    PasswordChangeOutcome,
     PasswordCredentialState,
-    PasswordResetResult,
+    PasswordResetOutcome,
     RegistrationMode,
-    RegistrationResult,
-    RevokeLoginMethodResult,
+    RegistrationOutcome,
+    RevokeLoginMethodOutcome,
     SecurityEvent,
 )
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
@@ -92,7 +92,7 @@ class RegistrationPolicy:
 class AccountLookup(Protocol[UserT]):
     """Resolve the minimal application account projection."""
 
-    async def find_for_login(self, normalized_identifier: str) -> "LocalAccount[UserT] | None":
+    async def find_for_login(self, normalized_identifier: str) -> "LocalAccountRecord[UserT] | None":
         """Find an account through an already-normalized identifier.
 
         The caller normalizes before calling, so match the stored value exactly
@@ -106,7 +106,7 @@ class AccountLookup(Protocol[UserT]):
         """
         ...  # pragma: no cover
 
-    async def get_by_id(self, account_id: str) -> "LocalAccount[UserT] | None":
+    async def get_by_id(self, account_id: str) -> "LocalAccountRecord[UserT] | None":
         """Resolve an account by its stable security identifier.
 
         Args:
@@ -161,7 +161,7 @@ class PasswordCredentialStore(Protocol):
 
     async def replace_password_and_bump_epoch(
         self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
-    ) -> PasswordChangeResult:
+    ) -> PasswordChangeOutcome:
         """Atomically replace a password and increment the security epoch.
 
         Advancing the epoch is what invalidates credentials issued before the
@@ -197,7 +197,7 @@ class LoginMethodStore(Protocol):
 
     async def revoke_login_method(
         self, account_id: str, method_id: str, *, require_remaining: bool = True, event: SecurityEvent
-    ) -> RevokeLoginMethodResult:
+    ) -> RevokeLoginMethodOutcome:
         """Revoke a method without removing the final viable method by default.
 
         Args:
@@ -227,7 +227,7 @@ class RegistrationStore(Protocol[UserT]):
         verification: PurposeTokenDelivery | None,
         now: "datetime",
         event: SecurityEvent,
-    ) -> RegistrationResult[UserT]:
+    ) -> RegistrationOutcome[UserT]:
         """Commit registration, invitation, verification, notification, and event.
 
         Every part commits together. Creating the account but failing to consume
@@ -281,7 +281,7 @@ class VerificationTokenStore(Protocol):
 
     async def consume_and_verify(
         self, token_id: str, digest: bytes, *, now: "datetime", event: SecurityEvent
-    ) -> ConsumeResult:
+    ) -> ConsumeOutcome:
         """Consume a verification token and verify its account atomically.
 
         Marking the token used and marking the account verified must commit
@@ -331,7 +331,7 @@ class RecoveryTokenStore(Protocol):
 
     async def consume_and_reset(
         self, token_id: str, digest: bytes, new_password_hash: str, *, now: "datetime", event: SecurityEvent
-    ) -> PasswordResetResult:
+    ) -> PasswordResetOutcome:
         """Consume only at its issued epoch, then reset password and advance epoch atomically.
 
         The epoch check is what stops a stale recovery token from undoing a

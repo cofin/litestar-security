@@ -1,4 +1,4 @@
-"""Local account records, status enumerations, and lifecycle results."""
+"""Local account records, status enumerations, and lifecycle outcomes."""
 
 from collections.abc import Mapping  # noqa: TC003 - Litestar resolves public annotations at runtime
 from dataclasses import dataclass, field
@@ -17,27 +17,27 @@ from litestar_security.accounts._internal import aware_utc_time, strict_text, va
 from litestar_security.schema import WireStruct
 
 __all__ = (
-    "ConsumeResult",
+    "ConsumeOutcome",
     "ConsumeStatus",
     "InvalidInvitation",
-    "InvalidLifecycleRequest",
     "LifecycleAccepted",
-    "LocalAccount",
+    "LifecycleRejected",
+    "LocalAccountRecord",
     "LocalAuthMode",
     "LoginMethod",
     "NoOpSecurityEventSink",
-    "PasswordChangeResult",
+    "PasswordChangeOutcome",
     "PasswordChangeStatus",
     "PasswordCredentialState",
     "PasswordPolicyViolation",
     "PasswordReauthenticationProof",
-    "PasswordResetResult",
+    "PasswordResetOutcome",
     "PasswordResetStatus",
     "PasswordVerificationStatus",
     "RegistrationMode",
-    "RegistrationResult",
+    "RegistrationOutcome",
     "RegistrationStatus",
-    "RevokeLoginMethodResult",
+    "RevokeLoginMethodOutcome",
     "RevokeLoginMethodStatus",
     "SecurityEvent",
     "SecurityEventSink",
@@ -141,7 +141,7 @@ class PasswordResetStatus(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class LocalAccount(Generic[UserT]):
+class LocalAccountRecord(Generic[UserT]):
     """Application-owned account projection needed by local authentication."""
 
     account_id: str
@@ -291,14 +291,14 @@ class InvalidInvitation:
 
 
 @dataclass(frozen=True, slots=True)
-class InvalidLifecycleRequest:
+class LifecycleRejected:
     """Generic malformed lifecycle request response."""
 
     detail: str = "The request is invalid."
 
 
 @dataclass(frozen=True, slots=True)
-class PasswordChangeResult:
+class PasswordChangeOutcome:
     """Atomic password replacement and security-epoch outcome."""
 
     status: PasswordChangeStatus
@@ -312,33 +312,33 @@ class PasswordChangeResult:
             or changed != (self.security_epoch is not None)
             or (changed and not valid_security_epoch(self.security_epoch))
         ):
-            msg = "Changed password results require exactly one security epoch"
+            msg = "Changed password outcomes require exactly one security epoch"
             raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
-class RevokeLoginMethodResult:
+class RevokeLoginMethodOutcome:
     """Atomic login-method revocation outcome."""
 
     status: RevokeLoginMethodStatus
 
 
 @dataclass(frozen=True, slots=True)
-class RegistrationResult(Generic[UserT]):
+class RegistrationOutcome(Generic[UserT]):
     """Atomic registration outcome."""
 
     status: RegistrationStatus
-    account: LocalAccount[UserT] | None = None
+    account: LocalAccountRecord[UserT] | None = None
 
     def __post_init__(self) -> None:
         """Require an account projection only for a created registration."""
         if (self.status is RegistrationStatus.CREATED) != (self.account is not None):
-            msg = "Created registration results require exactly one account"
+            msg = "Created registration outcomes require exactly one account"
             raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
-class ConsumeResult:
+class ConsumeOutcome:
     """Atomic verification-token consumption outcome."""
 
     status: ConsumeStatus
@@ -352,12 +352,12 @@ class ConsumeResult:
         if consumed != has_payload or (
             not consumed and (self.account_id is not None or self.security_epoch is not None)
         ):
-            msg = "Consumed verification results require exactly one account and security epoch"
+            msg = "Consumed verification outcomes require exactly one account and security epoch"
             raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
-class PasswordResetResult:
+class PasswordResetOutcome:
     """Atomic recovery-token consumption and password-reset outcome."""
 
     status: PasswordResetStatus
@@ -374,7 +374,7 @@ class PasswordResetResult:
             or (not reset and (self.account_id is not None or self.security_epoch is not None))
             or (reset and (not strict_text(self.account_id) or not valid_security_epoch(self.security_epoch)))
         ):
-            msg = "Reset password results require exactly one account and security epoch"
+            msg = "Reset password outcomes require exactly one account and security epoch"
             raise ValueError(msg)
 
 

@@ -49,7 +49,7 @@ from litestar_security.accounts._operations import (
 from litestar_security.accounts._records import (
     LoginMethod,
     NoOpSecurityEventSink,
-    RevokeLoginMethodResult,
+    RevokeLoginMethodOutcome,
     SecurityEvent,
     SecurityEventSink,
 )
@@ -58,15 +58,15 @@ from litestar_security.authentication import InvalidCredentials, VerificationUna
 from litestar_security.context import AuthenticationEvidence
 
 __all__ = (
-    "AssertionRecordResult",
+    "AssertionRecordStatus",
     "AttestationTrustMapper",
     "AuthenticationVerification",
     "CloneRiskPolicy",
     "InvalidWebAuthnResponseError",
     "PasskeyCredential",
+    "PasskeyRecord",
     "PasskeyService",
     "PasskeyStore",
-    "PasskeySummary",
     "PyWebAuthnVerifier",
     "RegistrationVerification",
     "UserVerification",
@@ -97,7 +97,7 @@ class UserVerification(str, Enum):
     DISCOURAGED = "discouraged"
 
 
-class AssertionRecordResult(str, Enum):
+class AssertionRecordStatus(str, Enum):
     """Atomic assertion-recording outcome."""
 
     RECORDED = "recorded"
@@ -268,7 +268,7 @@ class PasskeyCredential:
 
 
 @dataclass(frozen=True, slots=True)
-class PasskeySummary:
+class PasskeyRecord:
     """Safe credential metadata for account-management responses."""
 
     credential_id: str
@@ -349,7 +349,7 @@ class PasskeyStore(Protocol):
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordResult:
+    ) -> AssertionRecordStatus:
         """Atomically persist a verified assertion against an optimistic version.
 
         Args:
@@ -863,13 +863,13 @@ class PasskeyService:
                 clone_risk=clone_risk,
                 now=now,
             )
-            if result is AssertionRecordResult.CONFLICT:
+            if result is AssertionRecordStatus.CONFLICT:
                 return InvalidCredentials()
         except InvalidWebAuthnResponseError:
             return InvalidCredentials()
         except Exception:  # noqa: BLE001 - sanitize application stores and dependency failures
             return VerificationUnavailable()
-        if result is AssertionRecordResult.CLONE_RISK:
+        if result is AssertionRecordStatus.CLONE_RISK:
             await self._emit_event(
                 operation=PASSKEY_ASSERT, outcome=OUTCOME_CLONE_RISK, account_id=account_id, occurred_at=now
             )
@@ -893,7 +893,7 @@ class PasskeyService:
             amr=("passkey",),
         )
 
-    async def list_credentials(self, account_id: str) -> tuple[PasskeySummary, ...] | VerificationUnavailable:
+    async def list_credentials(self, account_id: str) -> tuple[PasskeyRecord, ...] | VerificationUnavailable:
         """List safe credential metadata for one owner."""
         try:
             credentials = await self.store.list_credentials(account_id)
@@ -905,7 +905,7 @@ class PasskeyService:
 
     async def rename_credential(
         self, account_id: str, credential_id: bytes, display_name: str
-    ) -> PasskeySummary | VerificationUnavailable | None:
+    ) -> PasskeyRecord | VerificationUnavailable | None:
         """Rename one credential through its owner-checked store operation."""
         if not strict_context_text(display_name):
             return None
@@ -917,7 +917,7 @@ class PasskeyService:
 
     async def remove_credential(
         self, account_id: str, credential_id: bytes
-    ) -> RevokeLoginMethodResult | VerificationUnavailable:
+    ) -> RevokeLoginMethodOutcome | VerificationUnavailable:
         """Remove one credential through the shared final-method-safe operation."""
         login_methods = self.login_methods
         if login_methods is None:
@@ -990,9 +990,9 @@ def _binding_digest(binding: bytes) -> bytes:
     return sha256(value).digest()
 
 
-def _credential_summary(credential: PasskeyCredential) -> PasskeySummary:
+def _credential_summary(credential: PasskeyCredential) -> PasskeyRecord:
     identifier = urlsafe_b64encode(credential.credential_id).rstrip(b"=").decode("ascii")
-    return PasskeySummary(
+    return PasskeyRecord(
         credential_id=identifier,
         display_name=credential.display_name,
         backup_eligible=credential.backup_eligible,

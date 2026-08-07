@@ -93,4 +93,9 @@ The ``principal`` and ``security_context`` dependencies remain typed on public
 and protected routes. ``current_user`` is the explicit narrowing dependency
 that rejects anonymous and userless service principals.
 
+Routes another plugin registered — static assets, a queue dashboard, a debug
+toolbar — carry no ``auth`` of their own and so compile to implicit
+``required()``. Exclude them by path with ``SecurityConfig(exclude=[...])``; see
+:doc:`composition`.
+
 See :doc:`providers` to choose and configure an authentication source.

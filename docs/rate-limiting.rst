@@ -193,11 +193,11 @@ Supplying your own limiter
 
 .. code-block:: python
 
-   from litestar_security.accounts import RateLimitDecision, RateLimitRequest
+   from litestar_security.accounts import RateLimitAttempt, RateLimitDecision
 
 
    class MyLimiter:
-       async def acquire(self, request: RateLimitRequest) -> RateLimitDecision:
+       async def acquire(self, request: RateLimitAttempt) -> RateLimitDecision:
            allowed, retry_after = await my_backend.consume(
                request.operation, request.client_key, request.subject_digest
            )

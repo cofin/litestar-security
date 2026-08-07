@@ -16,7 +16,7 @@ from litestar_security.accounts._internal import (
     utc_now,
     valid_security_epoch,
 )
-from litestar_security.accounts._records import LocalAccount
+from litestar_security.accounts._records import LocalAccountRecord
 from litestar_security.accounts._stores import AccountLookup, SecurityEpochStore, SecurityEpochValidator
 from litestar_security.authentication import (
     Authenticated,
@@ -107,7 +107,7 @@ class LocalAccessTokenIssuer(Generic[UserT]):
 
     async def issue(
         self,
-        account: LocalAccount[UserT],
+        account: LocalAccountRecord[UserT],
         *,
         scopes: "AbstractSet[str]" = frozenset(),
         evidence: AuthenticationEvidence | None = None,
@@ -131,7 +131,7 @@ class LocalAccessTokenIssuer(Generic[UserT]):
         """
         account_value: object = account
         if (
-            not isinstance(account_value, LocalAccount)  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
+            not isinstance(account_value, LocalAccountRecord)  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
             or not account_value.active
             or not account_value.verified
         ):

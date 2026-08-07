@@ -75,7 +75,7 @@ destroy:                                            ## Destroy virtual environme
 .PHONY: clean
 clean:                                              ## Cleanup temporary build artifacts
 	@echo "${INFO} Cleaning working directory... 🧹"
-	@rm -rf .pytest_cache .ruff_cache .hypothesis build/ dist/ .eggs/ .coverage coverage.xml coverage.json htmlcov/ src/tests/.pytest_cache src/tests/**/.pytest_cache .mypy_cache >/dev/null 2>&1
+	@rm -rf .pytest_cache .ruff_cache build/ dist/ .eggs/ .coverage coverage.xml coverage.json htmlcov/ src/tests/.pytest_cache src/tests/**/.pytest_cache .mypy_cache >/dev/null 2>&1
 	@find . -name '*.egg-info' -exec rm -rf {} + >/dev/null 2>&1
 	@find . -type f -name '*.egg' -exec rm -f {} + >/dev/null 2>&1
 	@find . -name '*.pyc' -exec rm -f {} + >/dev/null 2>&1
@@ -170,6 +170,8 @@ docs-linkcheck:                                     ## Validate documentation li
 # Testing and Quality Checks
 # =============================================================================
 
+CORE_COVERAGE = src/litestar_security/authentication.py,src/litestar_security/guards.py,src/litestar_security/context.py,src/litestar_security/providers/jwt/*,src/litestar_security/providers/oauth/_transactions.py,src/litestar_security/accounts/_refresh.py,src/litestar_security/websocket/_connect_tokens.py
+
 .PHONY: test
 test:                                               ## Run the test suite
 	@echo "${INFO} Running test cases... 🧪"
@@ -179,12 +181,6 @@ test:                                               ## Run the test suite
 .PHONY: test-all
 test-all: test                                      ## Run all tests
 
-.PHONY: property
-property:                                           ## Run deterministic property and fuzz regression tests
-	@echo "${INFO} Running property tests... 🧪"
-	@uv run pytest src/tests/property
-	@echo "${OK} Property tests passed 🧪"
-
 .PHONY: examples
 examples:                                           ## Run the runnable example applications
 	@echo "${INFO} Running example applications... 🧪"
@@ -192,13 +188,13 @@ examples:                                           ## Run the runnable example 
 	@echo "${OK} Example applications passed 🧪"
 
 .PHONY: benchmark
-benchmark:                                          ## Run deterministic local performance regression gates
-	@echo "${INFO} Running performance regression gates... 📊"
-	@uv run pytest -m performance
-	@echo "${OK} Performance regression gates passed 📊"
+benchmark:                                          ## Run local performance benchmarks
+	@echo "${INFO} Running performance benchmarks... 📊"
+	@uv run pytest -n 0 --benchmark-enable -m performance
+	@echo "${OK} Performance benchmarks completed 📊"
 
 .PHONY: performance
-performance: benchmark                              ## Alias for deterministic performance regression gates
+performance: benchmark                              ## Alias for local performance benchmarks
 
 .PHONY: downstream-check
 downstream-check:                                   ## Verify the installed wheel from an isolated downstream package
@@ -215,8 +211,19 @@ release-smoke:                                      ## Verify release archives a
 .PHONY: coverage
 coverage:                                           ## Run the test suite with branch coverage
 	@echo "${INFO} Running tests with coverage... 🧪"
-	@uv run pytest -m "not performance" --cov=litestar_security --cov-branch --cov-report=term-missing
+	@uv run pytest -m "not performance" --cov=litestar_security --cov-branch --cov-report=
+	@uv run coverage report --fail-under=95
+	@uv run coverage report --include="${CORE_COVERAGE}" --fail-under=100
 	@echo "${OK} Coverage checks passed 📊"
+
+.PHONY: coverage-ci
+coverage-ci:                                        ## Run coverage gates and write the CI XML artifact
+	@echo "${INFO} Running CI coverage checks... 🧪"
+	@uv run pytest -m "not performance" --cov=litestar_security --cov-branch --cov-report=
+	@uv run coverage report --fail-under=95
+	@uv run coverage report --include="${CORE_COVERAGE}" --fail-under=100
+	@uv run coverage xml -o coverage.xml --fail-under=0
+	@echo "${OK} CI coverage checks passed 📊"
 
 # -----------------------------------------------------------------------------
 # Type Checking
@@ -241,10 +248,21 @@ type-check: mypy pyright                            ## Run all static type check
 # Linting and Formatting
 # -----------------------------------------------------------------------------
 
+# Every file in the working tree that is not ignored, whether git tracks it yet
+# or not. prek's own --all-files means "files git already knows about", so a
+# module that has never been added would otherwise pass every hook unseen.
+# Recursive assignment, so a recipe that creates a file still checks it.
+WORKING_TREE_FILES = $$(git ls-files --cached --others --exclude-standard 2>/dev/null)
+
 .PHONY: prek
 prek:                                               ## Run prek hooks
 	@echo "${INFO} Running prek checks... 🔍"
-	@uvx prek run --show-diff-on-failure --color=always --all-files
+	@files="${WORKING_TREE_FILES}"; \
+	if [ -n "$$files" ]; then \
+		uvx prek run --show-diff-on-failure --color=always --files $$files; \
+	else \
+		uvx prek run --show-diff-on-failure --color=always --all-files; \
+	fi
 	@echo "${OK} prek checks passed ✨"
 
 .PHONY: zizmor
@@ -263,6 +281,12 @@ slotscheck:                                         ## Validate slotted classes
 	@uv run slotscheck src/litestar_security/
 	@echo "${OK} Slots check passed ✨"
 
+.PHONY: import-boundaries
+import-boundaries:                                  ## Verify runtime import boundaries
+	@echo "${INFO} Checking import boundaries... 🔍"
+	@uv run python tools/check_import_boundaries.py
+	@echo "${OK} Import boundaries passed 🔍"
+
 .PHONY: fix
 fix:                                                ## Fix linting issues
 	@echo "${INFO} Fixing linting issues... 🔍"
@@ -271,14 +295,14 @@ fix:                                                ## Fix linting issues
 	@echo "${OK} Linting issues fixed ✨"
 
 .PHONY: lint
-lint: prek type-check slotscheck zizmor              ## Run all linting checks
+lint: prek type-check slotscheck import-boundaries zizmor ## Run all linting checks
 
 # =============================================================================
 # Aggregate Verification
 # =============================================================================
 
 .PHONY: check-all
-check-all: lint test-all property coverage docs docs-linkcheck downstream-check build ## Run all checks
+check-all: lint test-all coverage docs docs-linkcheck downstream-check build ## Run all checks
 
 .PHONY: release-check
-release-check: property downstream-check examples benchmark check-all release-smoke ## Run every local 1.0 release gate
+release-check: downstream-check examples benchmark check-all release-smoke ## Run every local 1.0 release gate

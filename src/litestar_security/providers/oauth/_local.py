@@ -9,11 +9,11 @@ from litestar import Request, Response
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
 from litestar.status_codes import HTTP_200_OK
 
-from litestar_security.accounts import LocalAccountResponse, RefreshTokenResponse
+from litestar_security.accounts import LocalAccount, TokenPair
 from litestar_security.authentication import VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
 from litestar_security.providers.oauth._provider import ProviderIdentity
-from litestar_security.providers.oauth._routes import OAuthRouteResponse
+from litestar_security.providers.oauth._routes import OAuthRouteStatus
 
 __all__ = ("OAuthLocalAuthTransport",)
 
@@ -35,7 +35,7 @@ class _VerifiedLocalAuthService(Protocol):
         *,
         transport: str | None,
         evidence: AuthenticationEvidence,
-    ) -> LocalAccountResponse | RefreshTokenResponse | VerificationUnavailable | object: ...  # pragma: no cover
+    ) -> LocalAccount | TokenPair | VerificationUnavailable | object: ...  # pragma: no cover
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +66,7 @@ class OAuthLocalAuthTransport:
         identity: ProviderIdentity,
         request: Request[Any, Any, Any],
         authenticated_at: datetime,
-    ) -> OAuthRouteResponse | Response[Any]:
+    ) -> OAuthRouteStatus | Response[Any]:
         """Establish the selected local transport with normalized OAuth evidence."""
         result = await self.local_auth_service.verified_login(
             request,
@@ -82,9 +82,9 @@ class OAuthLocalAuthTransport:
                 amr=identity.amr,
             ),
         )
-        if isinstance(result, LocalAccountResponse):
-            return OAuthRouteResponse(detail="Authenticated.", account_id=account_id)
-        if isinstance(result, RefreshTokenResponse):
+        if isinstance(result, LocalAccount):
+            return OAuthRouteStatus(detail="Authenticated.", account_id=account_id)
+        if isinstance(result, TokenPair):
             return Response(content=result, status_code=HTTP_200_OK)
         if isinstance(result, VerificationUnavailable):
             raise ServiceUnavailableException(detail="Local authentication is unavailable")

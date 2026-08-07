@@ -15,7 +15,7 @@ from litestar_security.accounts import (
     LocalAuth,
     LocalAuthConfig,
     LocalAuthSecrets,
-    PasswordVerificationResult,
+    PasswordVerificationOutcome,
     PasswordVerificationStatus,
     PurposeTokenCodec,
     RefreshReceiptKey,
@@ -31,9 +31,9 @@ from litestar_security.providers.jwt import LocalKeyRing, SigningKey
 from litestar_security.providers.oauth import (
     OAuthAuthorization,
     OAuthConfig,
-    OAuthLogoutResult,
+    OAuthLogout,
     OAuthOperation,
-    OAuthRouteResponse,
+    OAuthRouteStatus,
     ProviderIdentity,
     ProviderTokenSet,
     SecretStr,
@@ -118,18 +118,18 @@ class _ExampleOAuthService:
 
     async def callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteResponse:
+    ) -> OAuthRouteStatus:
         del code, state, request
-        return OAuthRouteResponse(detail="Authenticated.", provider_account_id=f"{provider}-account")
+        return OAuthRouteStatus(detail="Authenticated.", provider_account_id=f"{provider}-account")
 
-    async def unlink(self, **_kwargs: object) -> OAuthRouteResponse:
-        return OAuthRouteResponse(detail="Unlinked.")
+    async def unlink(self, **_kwargs: object) -> OAuthRouteStatus:
+        return OAuthRouteStatus(detail="Unlinked.")
 
-    async def revoke(self, **_kwargs: object) -> OAuthRouteResponse:
-        return OAuthRouteResponse(detail="Revoked.")
+    async def revoke(self, **_kwargs: object) -> OAuthRouteStatus:
+        return OAuthRouteStatus(detail="Revoked.")
 
-    async def logout(self, **_kwargs: object) -> OAuthLogoutResult:
-        return OAuthLogoutResult()
+    async def logout(self, **_kwargs: object) -> OAuthLogout:
+        return OAuthLogout()
 
 
 def build_iap_config() -> GoogleIAPConfig[object]:
@@ -206,8 +206,8 @@ class _ExamplePasswordHasher:
     async def hash(self, password: str) -> str:
         return f"example-hash:{password}"
 
-    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationResult:
-        return PasswordVerificationResult(
+    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationOutcome:
+        return PasswordVerificationOutcome(
             PasswordVerificationStatus.VERIFIED
             if encoded_hash == f"example-hash:{password}"
             else PasswordVerificationStatus.INVALID

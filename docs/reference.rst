@@ -94,3 +94,4 @@ Providers
 
 .. automodule:: litestar_security.websocket
    :members:
+   :no-index:

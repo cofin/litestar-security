@@ -33,16 +33,16 @@ from litestar_security.accounts._operations import (
     RECOVERY_ISSUE,
     SESSION_REVOKE_ALL_SUFFIX,
 )
-from litestar_security.accounts._passwords import PasswordHasher, PasswordPolicy, PasswordPolicyResult
+from litestar_security.accounts._passwords import PasswordHasher, PasswordPolicy, PasswordPolicyDecision
 from litestar_security.accounts._purpose_tokens import PurposeTokenCodec, approved_return_url
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, validate_rate_limits
 from litestar_security.accounts._records import (
-    InvalidLifecycleRequest,
     LifecycleAccepted,
-    PasswordChangeResult,
+    LifecycleRejected,
+    PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordReauthenticationProof,
-    PasswordResetResult,
+    PasswordResetOutcome,
     PasswordResetStatus,
     TokenPurpose,
     lifecycle_event,
@@ -135,10 +135,10 @@ class PasswordChangeService:
         compromise: bool = False,
         now: datetime | None = None,
     ) -> (
-        PasswordChangeResult
-        | PasswordPolicyResult
+        PasswordChangeOutcome
+        | PasswordPolicyDecision
         | InvalidCredentials
-        | InvalidLifecycleRequest
+        | LifecycleRejected
         | VerificationUnavailable
     ):
         """Change a password after recent proof and preserve only an explicitly rebound session.
@@ -161,7 +161,7 @@ class PasswordChangeService:
         try:
             occurred_at = aware_utc_time(self.clock() if now is None else now)
         except (AttributeError, TypeError, ValueError):
-            return InvalidLifecycleRequest()
+            return LifecycleRejected()
         if not self._recent_password_proof(account_id, proof, occurred_at):
             return InvalidCredentials()
         return await self._replace(
@@ -184,7 +184,7 @@ class PasswordChangeService:
         expected_epoch: int,
         normalized_identifier: str | None = None,
         now: datetime | None = None,
-    ) -> PasswordChangeResult | PasswordPolicyResult | InvalidLifecycleRequest | VerificationUnavailable:
+    ) -> PasswordChangeOutcome | PasswordPolicyDecision | LifecycleRejected | VerificationUnavailable:
         """Perform an application-authorized reset without registering an admin route.
 
         No generated route reaches this. The library ships no administrative
@@ -204,7 +204,7 @@ class PasswordChangeService:
         try:
             occurred_at = aware_utc_time(self.clock() if now is None else now)
         except (AttributeError, TypeError, ValueError):
-            return InvalidLifecycleRequest()
+            return LifecycleRejected()
         return await self._replace(
             account_id,
             password,
@@ -229,7 +229,7 @@ class PasswordChangeService:
         compromise: bool,
         occurred_at: datetime,
         operation: str,
-    ) -> PasswordChangeResult | PasswordPolicyResult | InvalidLifecycleRequest | VerificationUnavailable:
+    ) -> PasswordChangeOutcome | PasswordPolicyDecision | LifecycleRejected | VerificationUnavailable:
         if (
             not strict_text(account_id)
             or not valid_security_epoch(expected_epoch)
@@ -241,9 +241,9 @@ class PasswordChangeService:
                 compromise=compromise,
             )
         ):
-            return InvalidLifecycleRequest()
+            return LifecycleRejected()
         if expected_epoch == _MAXIMUM_SECURITY_EPOCH:
-            return PasswordChangeResult(PasswordChangeStatus.EPOCH_EXHAUSTED)
+            return PasswordChangeOutcome(PasswordChangeStatus.EPOCH_EXHAUSTED)
         try:
             policy_result = self.password_policy.check(password, normalized_identifier=normalized_identifier)
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
@@ -495,7 +495,7 @@ class RecoveryTokenService(Generic[UserT]):
 
     async def reset(
         self, token: object, password: str, *, now: datetime | None = None, client_key: str | None = None
-    ) -> PasswordResetResult | PasswordPolicyResult | RateLimited | VerificationUnavailable:
+    ) -> PasswordResetOutcome | PasswordPolicyDecision | RateLimited | VerificationUnavailable:
         """Apply policy and delegate token consumption and password replacement atomically.
 
         Only the client bucket applies: the presented value is a recovery token,
@@ -518,7 +518,7 @@ class RecoveryTokenService(Generic[UserT]):
             return limited
         proof = self.tokens.proof(token, expected_purpose=TokenPurpose.RECOVERY)
         if proof is None:
-            return PasswordResetResult(PasswordResetStatus.INVALID)
+            return PasswordResetOutcome(PasswordResetStatus.INVALID)
         try:
             policy_result = self.password_policy.check(password)
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome

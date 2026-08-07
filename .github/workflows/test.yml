@@ -10,6 +10,10 @@ on:
         required: false
         type: boolean
         default: false
+      shuffle:
+        required: false
+        type: boolean
+        default: false
       os:
         required: false
         type: string
@@ -49,17 +53,18 @@ jobs:
         run: uv sync --group tests --all-extras --python "$PYTHON_VERSION"
 
       - name: Test
-        if: ${{ !inputs.coverage }}
+        if: ${{ !inputs.coverage && !inputs.shuffle }}
         run: make test
+
+      - name: Test in deterministic shuffled order
+        if: ${{ inputs.shuffle }}
+        env:
+          LITESTAR_SECURITY_TEST_SHUFFLE_SEED: "140314"
+        run: uv run pytest -n auto -m "not performance"
 
       - name: Test with coverage
         if: ${{ inputs.coverage }}
-        run: >-
-          uv run pytest -m "not performance"
-          --cov=litestar_security
-          --cov-branch
-          --cov-report=term-missing
-          --cov-report=xml
+        run: make coverage-ci
 
       - name: Build and smoke-test installed wheel
         run: |

@@ -7,14 +7,20 @@ from dataclasses import dataclass, field, replace
 from inspect import iscoroutine
 from itertools import combinations
 from math import comb
+from re import Pattern
+from re import compile as recompile
 from types import MappingProxyType
 from typing import Generic, NoReturn, TypeVar, cast
-from warnings import catch_warnings, simplefilter
+from warnings import catch_warnings, simplefilter, warn
 
+from litestar import Response
 from litestar._openapi.plugin import OpenAPIPlugin
-from litestar.exceptions import ImproperlyConfiguredException, LitestarDeprecationWarning
+from litestar.exceptions import ImproperlyConfiguredException, LitestarDeprecationWarning, LitestarWarning
 from litestar.handlers.base import BaseRouteHandler
 from litestar.handlers.http_handlers import HTTPRouteHandler
+from litestar.middleware._utils import (
+    build_exclude_path_pattern,  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized re.Pattern
+)
 from litestar.openapi.config import OpenAPIConfig
 from litestar.openapi.controller import OpenAPIController
 from litestar.openapi.plugins import OpenAPIRenderPlugin
@@ -22,7 +28,8 @@ from litestar.openapi.spec import Components, Reference, SecurityRequirement, Se
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 from litestar.types import Empty
 
-from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
+from litestar_security._docs import converted_denial, describes_raised_denial
+from litestar_security._internal import GENERATED_ROUTE_OPT_KEY, RUNTIME_PLAN_OPT_KEY
 from litestar_security.authentication import (
     AUTH_POLICY_OPT_KEY,
     CSRF_REQUIRED_OPT_KEY,
@@ -67,6 +74,7 @@ _RESERVED_OPT_KEYS = frozenset({
     CSRF_REQUIRED_OPT_KEY,
     _CSRF_COVERAGE_OPT_KEY,
     _OPENAPI_SECURITY_OPT_KEY,
+    GENERATED_ROUTE_OPT_KEY,
     RUNTIME_PLAN_OPT_KEY,
 })
 _EXCLUDE_FROM_AUTH_OPT_KEY = "exclude_from_auth"
@@ -290,14 +298,26 @@ class RouteCompiler(Generic[UserT]):
     csrf_exclude_key: str | None = None
     external_csrf: ExternalCSRF | None = None
     websocket_config: WebSocketSecurityConfig = field(default_factory=WebSocketSecurityConfig)
+    exclude: Sequence[str] | str | None = None
+    converts_to_problem_details: bool = False
     _policy_compiler: PolicyCompiler[UserT] = field(init=False, repr=False)
     _schemes: OpenAPISchemeSet | None = field(init=False, repr=False)
+    _exclude_pattern: Pattern[str] | None = field(init=False, repr=False)
+    _reported_exclusions: tuple[tuple[str, Pattern[str]], ...] = field(init=False, repr=False)
+    _matched_exclusions: set[str] = field(init=False, repr=False, default_factory=set[str])
+    _reported_response_classes: set[type] = field(init=False, repr=False, default_factory=set[type])
 
     def __post_init__(self) -> None:
         """Create one per-registry policy compiler."""
         if self.csrf_exclude_key in _RESERVED_OPT_KEYS:
             message = "Native CSRF exclusion opt key collides with reserved Litestar Security metadata"
             raise ImproperlyConfiguredException(detail=message)
+        self._exclude_pattern = build_exclude_path_pattern(exclude=self.exclude, middleware_cls=type(self))
+        # build_exclude_path_pattern joins the sequence into one expression, so
+        # attributing a match back to the pattern that produced it needs the
+        # originals compiled separately. These are used for reporting only.
+        sources = (self.exclude,) if isinstance(self.exclude, str) else tuple(self.exclude or ())
+        self._reported_exclusions = tuple((source, recompile(source)) for source in sources)
         self._policy_compiler = PolicyCompiler(self.registry, max_openapi_combinations=self.max_openapi_combinations)
         self._schemes = (
             OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", self.registry))
@@ -337,11 +357,87 @@ class RouteCompiler(Generic[UserT]):
             asgi_route, asgi_route.route_handler, self._effective_plan(asgi_route, asgi_route.route_handler)
         )
 
+    def unmatched_exclusions(self) -> tuple[str, ...]:
+        """Report configured exclusion patterns that no compiled route has matched.
+
+        Returns:
+            The configured patterns, in declaration order, whose own expression
+            matched no route path seen so far.
+        """
+        return tuple(source for source, _ in self._reported_exclusions if source not in self._matched_exclusions)
+
+    def _report_customized_response_class(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> None:
+        """Report once that a generated route no longer renders through Litestar's own response.
+
+        The documented response specifications describe what the generated
+        handlers return. A response class that reshapes the body - a
+        presentation plugin's, or an application's own - makes them describe
+        something the route no longer sends. Every generated handler resolves
+        the same application-level class, so the report is one per distinct
+        class rather than one per route.
+
+        This warns rather than raises: a customized response class is
+        legitimate, and refusing to run beside one would make this plugin
+        incompatible with presentation plugins for no security reason.
+
+        Args:
+            route: The route being compiled, named as the representative one.
+            route_handler: The handler whose resolved response class is read.
+        """
+        if not route_handler.opt.get(GENERATED_ROUTE_OPT_KEY) or self._is_generated_options(route_handler):
+            return
+        resolved = cast(
+            "type[object]",
+            route_handler.resolve_response_class(),  # pyright: ignore[reportUnknownMemberType] - Litestar returns an unparameterized Response type
+        )
+        if resolved is Response or resolved in self._reported_response_classes:
+            return
+        self._reported_response_classes.add(resolved)
+        message = (
+            f"Generated Litestar Security routes resolve the response class {resolved.__qualname__!r} "
+            f"rather than Litestar's own, first at {route.path}. The documented response schemas describe "
+            "what the handlers return, so a response class that reshapes the body makes them inaccurate."
+        )
+        warn(message, category=LitestarWarning, stacklevel=1)
+
+    def _restate_denials_as_problem_details(self, route_handler: HTTPRouteHandler) -> None:
+        """Restate a generated route's raised denials as the bodies the application converts them to.
+
+        The denial specifications are module-level, shared by every application
+        that installs this plugin, so whether problem details are in effect
+        cannot be decided where they are declared. It is decided here, per
+        application, against the copy of the handler this registration owns -
+        by assigning a new mapping rather than mutating the shared one.
+
+        Only a specification for a status the route *raises* is restated. A
+        status the handler returns is untouched: the second-factor challenge
+        and the conflict are return values, and no exception handling sees
+        them.
+
+        Args:
+            route_handler: The handler whose response specifications are restated.
+        """
+        if not self.converts_to_problem_details or not route_handler.opt.get(GENERATED_ROUTE_OPT_KEY):
+            return
+        responses = route_handler.responses
+        if not responses or not any(describes_raised_denial(spec) for spec in responses.values()):
+            return
+        route_handler.responses = {
+            status: converted_denial(spec.description) if describes_raised_denial(spec) else spec
+            for status, spec in responses.items()
+        }
+
     def _compile_http_handler(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> None:
+        self._report_customized_response_class(route, route_handler)
+        self._restate_denials_as_problem_details(route_handler)
         policy: AuthenticationPolicy
         csrf_override: bool | None
         native_exclude = self._handler_excludes_auth(route, route_handler)
-        if self._is_generated_options(route_handler):
+        if self._is_excluded(route):
+            self._reject_excluded_policy(route, route_handler, self._resolved_policy(route, route_handler))
+            policy = exclude()
+            csrf_override = self._http_csrf_override(route, route_handler)
+        elif self._is_generated_options(route_handler):
             policy = public()
             csrf_override = False
         elif self._is_openapi_handler(route_handler):
@@ -458,6 +554,9 @@ class RouteCompiler(Generic[UserT]):
         policy = self._resolved_policy(route, route_handler)
         if native_exclude and policy is not None:
             self._raise_route_error(route, route_handler, "Route declares both auth and exclude_from_auth")
+        if self._is_excluded(route):
+            self._reject_excluded_policy(route, route_handler, policy)
+            return self._compile_policy(route, route_handler, exclude())
         if native_exclude:
             return self._compile_policy(route, route_handler, exclude())
         if policy is not None:
@@ -468,6 +567,23 @@ class RouteCompiler(Generic[UserT]):
         if not self.registry.mechanism_names:
             return self._compile_policy(route, route_handler, public())
         return self._compile_policy(route, route_handler, required())
+
+    def _is_excluded(self, route: BaseRoute) -> bool:
+        if self._exclude_pattern is None or not self._exclude_pattern.match(route.path):
+            return False
+        self._matched_exclusions.update(
+            source for source, pattern in self._reported_exclusions if pattern.match(route.path)
+        )
+        return True
+
+    def _reject_excluded_policy(
+        self, route: BaseRoute, route_handler: BaseRouteHandler, policy: AuthenticationPolicy | None
+    ) -> None:
+        # A route that declares a policy and also matches an exclusion pattern
+        # states two incompatible intentions, so neither is silently preferred.
+        if policy is not None:
+            message = "Route declares auth but matches a security exclusion pattern"
+            self._raise_route_error(route, route_handler, message)
 
     def _compile_policy(
         self,

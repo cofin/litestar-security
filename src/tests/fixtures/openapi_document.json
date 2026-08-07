@@ -1,0 +1,4075 @@
+{
+  "components": {
+    "schemas": {
+      "LifecycleAccepted": {
+        "properties": {
+          "detail": {
+            "default": "If eligible, the request will be processed.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "title": "LifecycleAccepted",
+        "type": "object"
+      },
+      "LocalAccount": {
+        "properties": {
+          "account_id": {
+            "description": "The stable application-owned account identifier.",
+            "type": "string"
+          },
+          "display_name": {
+            "description": "An optional human-readable name to store with the account.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "account_id"
+        ],
+        "title": "LocalAccount",
+        "type": "object"
+      },
+      "LocalCredentials": {
+        "properties": {
+          "identifier": {
+            "description": "The account identifier, normally an email address.",
+            "type": "string"
+          },
+          "password": {
+            "description": "The account password.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identifier",
+          "password"
+        ],
+        "title": "LocalCredentials",
+        "type": "object"
+      },
+      "LocalIdentifier": {
+        "properties": {
+          "identifier": {
+            "description": "The account identifier, normally an email address.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identifier"
+        ],
+        "title": "LocalIdentifier",
+        "type": "object"
+      },
+      "LocalMFAChallenge": {
+        "properties": {
+          "account_id": {
+            "description": "The account bound to this challenge.",
+            "type": "string"
+          },
+          "challenge": {
+            "description": "The opaque one-time challenge to present at completion.",
+            "type": "string"
+          },
+          "code": {
+            "default": "mfa_required",
+            "description": "The stable machine-readable MFA challenge outcome.",
+            "type": "string"
+          },
+          "detail": {
+            "default": "Multi-factor authentication is required.",
+            "description": "The human-readable MFA challenge outcome.",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "When the opaque challenge can no longer be used.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "methods": {
+            "description": "The permitted second-factor methods.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "account_id",
+          "challenge",
+          "expires_at",
+          "methods"
+        ],
+        "title": "LocalMFAChallenge",
+        "type": "object"
+      },
+      "LocalPasswordChange": {
+        "properties": {
+          "compromise": {
+            "default": false,
+            "description": "Set when the current password is believed compromised. The caller's own session is revoked with the others rather than rebound.",
+            "type": "boolean"
+          },
+          "current_password": {
+            "description": "The caller's current password.",
+            "type": "string"
+          },
+          "password": {
+            "description": "The replacement password, checked against the configured password policy.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "current_password",
+          "password"
+        ],
+        "title": "LocalPasswordChange",
+        "type": "object"
+      },
+      "LocalPasswordReset": {
+        "properties": {
+          "password": {
+            "description": "The replacement password, checked against the configured password policy.",
+            "type": "string"
+          },
+          "token": {
+            "description": "The single-use recovery token.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password",
+          "token"
+        ],
+        "title": "LocalPasswordReset",
+        "type": "object"
+      },
+      "LocalRegistration": {
+        "properties": {
+          "display_name": {
+            "description": "An optional human-readable name to store with the account.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "identifier": {
+            "description": "The account identifier, normally an email address.",
+            "type": "string"
+          },
+          "password": {
+            "description": "The replacement password, checked against the configured password policy.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identifier",
+          "password"
+        ],
+        "title": "LocalRegistration",
+        "type": "object"
+      },
+      "LocalSession": {
+        "properties": {
+          "created_at": {
+            "description": "When the session was established.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "current": {
+            "description": "Whether this is the session that made the request.",
+            "type": "boolean"
+          },
+          "display_metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Application-supplied display fields, such as a device label or coarse location.",
+            "type": "object"
+          },
+          "expires_at": {
+            "description": "When the session expires without further use.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "last_seen_at": {
+            "description": "When the session was last used.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "The session identifier, accepted by the revoke route.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "created_at",
+          "current",
+          "display_metadata",
+          "expires_at",
+          "last_seen_at",
+          "session_id"
+        ],
+        "title": "LocalSession",
+        "type": "object"
+      },
+      "LocalSessionList": {
+        "properties": {
+          "sessions": {
+            "description": "The caller's own active sessions.",
+            "items": {
+              "$ref": "#/components/schemas/LocalSession"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "title": "LocalSessionList",
+        "type": "object"
+      },
+      "LocalToken": {
+        "properties": {
+          "token": {
+            "description": "The opaque token issued by a previous request.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "LocalToken",
+        "type": "object"
+      },
+      "OAuthLink": {
+        "properties": {
+          "return_to": {
+            "default": "/",
+            "type": "string"
+          },
+          "step_up_grant": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_up_grant"
+        ],
+        "title": "OAuthLink",
+        "type": "object"
+      },
+      "OAuthRouteStatus": {
+        "properties": {
+          "account_id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "provider_account_id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revoked_sessions": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "OAuthRouteStatus",
+        "type": "object"
+      },
+      "OAuthScopeUpgrade": {
+        "properties": {
+          "provider_account_id": {
+            "type": "string"
+          },
+          "return_to": {
+            "default": "/",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "step_up_grant": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_account_id",
+          "scopes",
+          "step_up_grant"
+        ],
+        "title": "OAuthScopeUpgrade",
+        "type": "object"
+      },
+      "OAuthStepUp": {
+        "properties": {
+          "step_up_grant": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_up_grant"
+        ],
+        "title": "OAuthStepUp",
+        "type": "object"
+      },
+      "OIDCBackchannelLogout": {
+        "properties": {
+          "logout_token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "logout_token"
+        ],
+        "title": "OIDCBackchannelLogout",
+        "type": "object"
+      },
+      "PasskeyAuthenticationStart": {
+        "properties": {
+          "account_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id"
+        ],
+        "title": "PasskeyAuthenticationStart",
+        "type": "object"
+      },
+      "PasskeyOptions": {
+        "properties": {
+          "binding": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "options": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expires_at",
+          "options"
+        ],
+        "title": "PasskeyOptions",
+        "type": "object"
+      },
+      "PasskeyRegistrationStart": {
+        "properties": {
+          "step_up_grant": {
+            "type": "string"
+          },
+          "user_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_up_grant",
+          "user_name"
+        ],
+        "title": "PasskeyRegistrationStart",
+        "type": "object"
+      },
+      "PasskeySummary": {
+        "properties": {
+          "backup_eligible": {
+            "type": "boolean"
+          },
+          "backup_state": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "credential_id": {
+            "type": "string"
+          },
+          "display_name": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_used_at": {
+            "oneOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "suspect": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "backup_eligible",
+          "backup_state",
+          "created_at",
+          "credential_id",
+          "display_name",
+          "last_used_at",
+          "suspect"
+        ],
+        "title": "PasskeySummary",
+        "type": "object"
+      },
+      "PasskeyVerification": {
+        "properties": {
+          "account_id": {
+            "type": "string"
+          },
+          "binding": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "response": {
+            "type": "string"
+          },
+          "transport": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "account_id",
+          "response"
+        ],
+        "title": "PasskeyVerification",
+        "type": "object"
+      },
+      "RecoveryCodes": {
+        "properties": {
+          "codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "codes"
+        ],
+        "title": "RecoveryCodes",
+        "type": "object"
+      },
+      "RouteError": {
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "extra": {
+            "oneOf": [
+              {
+                "additionalProperties": {},
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status_code": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "detail",
+          "status_code"
+        ],
+        "title": "RouteError",
+        "type": "object"
+      },
+      "RouteStatus": {
+        "properties": {
+          "detail": {
+            "description": "A human-readable outcome that never names an account.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "RouteStatus",
+        "type": "object"
+      },
+      "StepUpAuthorization": {
+        "properties": {
+          "step_up_grant": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_up_grant"
+        ],
+        "title": "StepUpAuthorization",
+        "type": "object"
+      },
+      "StepUpGrant": {
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "grant": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expires_at",
+          "grant",
+          "purpose"
+        ],
+        "title": "StepUpGrant",
+        "type": "object"
+      },
+      "StepUpVerification": {
+        "properties": {
+          "credential": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "method_id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "credential",
+          "method"
+        ],
+        "title": "StepUpVerification",
+        "type": "object"
+      },
+      "TOTPEnrollment": {
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "step_up_grant": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "step_up_grant"
+        ],
+        "title": "TOTPEnrollment",
+        "type": "object"
+      },
+      "TOTPProvisioning": {
+        "properties": {
+          "enrollment_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "method_id": {
+            "type": "string"
+          },
+          "provisioning_uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "expires_at",
+          "method_id",
+          "provisioning_uri"
+        ],
+        "title": "TOTPProvisioning",
+        "type": "object"
+      },
+      "TOTPVerification": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "enrollment_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "enrollment_id"
+        ],
+        "title": "TOTPVerification",
+        "type": "object"
+      },
+      "TokenPair": {
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "expires_in": {
+            "type": "integer"
+          },
+          "refresh_token": {
+            "type": "string"
+          },
+          "token_type": {
+            "const": "Bearer",
+            "default": "Bearer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "access_token",
+          "expires_in",
+          "refresh_token"
+        ],
+        "title": "TokenPair",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "LocalSession": {
+        "description": "Litestar native session plus independent binding cookie.",
+        "in": "cookie",
+        "name": "__Host-litestar-security-binding",
+        "type": "apiKey"
+      },
+      "bearer": {
+        "bearerFormat": "JWT",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "Litestar Security",
+    "version": "0.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/auth/login": {
+      "post": {
+        "deprecated": false,
+        "description": "Verify a password and establish one native session. A rejected identifier and a rejected password are reported identically.",
+        "operationId": "LocalSessionLogin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalCredentials"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalAccount"
+                }
+              }
+            },
+            "description": "The signed-in account projection."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The lifecycle request is invalid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalMFAChallenge"
+                }
+              }
+            },
+            "description": "The password was verified and the returned challenge requires a second factor."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Session login",
+        "tags": [
+          "Local sessions"
+        ]
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "deprecated": false,
+        "description": "Revoke the caller's current session and clear its browser credentials.",
+        "operationId": "LocalSessionLogout",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            },
+            "description": "The session was revoked.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication is required."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Session logout",
+        "tags": [
+          "Local sessions"
+        ]
+      }
+    },
+    "/auth/mfa/recovery-codes": {
+      "post": {
+        "deprecated": false,
+        "description": "Invalidate the caller's existing recovery codes and reveal a replacement set exactly once. The previous set stops working immediately.",
+        "operationId": "MFAReplaceRecoveryCodes",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StepUpAuthorization"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCodes"
+                }
+              }
+            },
+            "description": "The reveal-once replacement code set.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The factor service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Replace recovery codes",
+        "tags": [
+          "Multi-factor authentication"
+        ]
+      }
+    },
+    "/auth/mfa/totp/enroll": {
+      "post": {
+        "deprecated": false,
+        "description": "Create one pending TOTP enrollment and reveal its provisioning URI exactly once. The factor is not usable until it is verified.",
+        "operationId": "MFAEnrollTOTP",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TOTPEnrollment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TOTPProvisioning"
+                }
+              }
+            },
+            "description": "The reveal-once provisioning URI and its expiry.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The factor service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Begin TOTP enrollment",
+        "tags": [
+          "Multi-factor authentication"
+        ]
+      }
+    },
+    "/auth/mfa/totp/verify": {
+      "post": {
+        "deprecated": false,
+        "description": "Activate one pending enrollment by presenting a current code. Activating the first factor reveals the caller's recovery codes once.",
+        "operationId": "MFAVerifyTOTPEnrollment",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TOTPVerification"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCodes"
+                }
+              }
+            },
+            "description": "The reveal-once recovery-code set.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The factor service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Activate TOTP enrollment",
+        "tags": [
+          "Multi-factor authentication"
+        ]
+      }
+    },
+    "/auth/mfa/totp/{method_id}/remove": {
+      "post": {
+        "deprecated": false,
+        "description": "Remove one TOTP factor after exact step-up. A removal that would leave the account with no login method is refused.",
+        "operationId": "MFARemoveTOTP",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "method_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StepUpAuthorization"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            },
+            "description": "The removal outcome.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            },
+            "description": "The change would remove the final login method."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The factor service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Remove a TOTP factor",
+        "tags": [
+          "Multi-factor authentication"
+        ]
+      }
+    },
+    "/auth/oauth/{provider}/callback": {
+      "get": {
+        "deprecated": false,
+        "description": "Consume one transaction-bound callback and establish the configured local transport. The stored transaction, its browser binding, and the parameters the provider returned must all agree.",
+        "operationId": "OAuthCallback",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "allowReserved": false,
+            "deprecated": false,
+            "in": "query",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/OAuthRouteStatus"
+                    },
+                    {}
+                  ]
+                }
+              }
+            },
+            "description": "The authenticated local account, or the issued token pair.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider exchange was rejected."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Complete a provider transaction",
+        "tags": [
+          "OAuth providers"
+        ]
+      }
+    },
+    "/auth/oauth/{provider}/link": {
+      "post": {
+        "deprecated": false,
+        "description": "Start a step-up-authorized transaction that links a provider identity to the caller's account.",
+        "operationId": "OAuthLink",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthLink"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "302": {
+            "description": "A redirect to the provider authorization endpoint.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "location": {
+                "deprecated": false,
+                "description": "target path for the redirect",
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Link a provider account",
+        "tags": [
+          "OAuth providers"
+        ]
+      }
+    },
+    "/auth/oauth/{provider}/links/{provider_account_id}/unlink": {
+      "post": {
+        "deprecated": false,
+        "description": "Unlink one provider identity after exact step-up. An unlink that would leave the account with no login method is refused.",
+        "operationId": "OAuthUnlink",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "provider_account_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthStepUp"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                }
+              }
+            },
+            "description": "The unlink outcome.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Unlink a provider account",
+        "tags": [
+          "OAuth providers"
+        ]
+      }
+    },
+    "/auth/oauth/{provider}/login": {
+      "get": {
+        "deprecated": false,
+        "description": "Start a public login transaction and redirect to the provider. A dedicated browser-binding cookie is set so the callback can only be completed by the browser that began the flow.",
+        "operationId": "OAuthLogin",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "allowReserved": false,
+            "deprecated": false,
+            "in": "query",
+            "name": "return_to",
+            "required": false,
+            "schema": {
+              "default": "/",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "A redirect to the provider authorization endpoint.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "location": {
+                "deprecated": false,
+                "description": "target path for the redirect",
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider exchange was rejected."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Begin provider login",
+        "tags": [
+          "OAuth providers"
+        ]
+      }
+    },
+    "/auth/oauth/{provider}/logout": {
+      "post": {
+        "deprecated": false,
+        "description": "End the local session and, when the provider registration supplies an end-session endpoint, redirect onward to it.",
+        "operationId": "OAuthLogout",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {},
+                    {
+                      "$ref": "#/components/schemas/OAuthRouteStatus"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "The logout outcome, or a redirect to the provider end-session endpoint.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Log out of the provider session",
+        "tags": [
+          "OAuth providers"
+        ]
+      }
+    },
+    "/auth/oauth/{provider}/revoke": {
+      "post": {
+        "deprecated": false,
+        "description": "Delete the locally stored provider tokens for the caller. The deletion is local and final regardless of whether the upstream revocation call succeeds.",
+        "operationId": "OAuthRevoke",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthStepUp"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                }
+              }
+            },
+            "description": "The revocation outcome.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Revoke stored provider tokens",
+        "tags": [
+          "OAuth providers"
+        ]
+      }
+    },
+    "/auth/oauth/{provider}/scopes": {
+      "post": {
+        "deprecated": false,
+        "description": "Start a step-up-authorized transaction that requests further scopes for a linked account.",
+        "operationId": "OAuthScopeUpgrade",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthScopeUpgrade"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "302": {
+            "description": "A redirect to the provider authorization endpoint.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "location": {
+                "deprecated": false,
+                "description": "target path for the redirect",
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Request additional provider scopes",
+        "tags": [
+          "OAuth providers"
+        ]
+      }
+    },
+    "/auth/oidc/{provider}/backchannel-logout": {
+      "post": {
+        "deprecated": false,
+        "description": "Verify a logout token, consume its identifier so it cannot be replayed, and revoke the local sessions it maps to.",
+        "operationId": "OIDCBackchannelLogout",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/OIDCBackchannelLogout"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                }
+              }
+            },
+            "description": "How many local sessions were revoked.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider exchange was rejected."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Back-channel logout",
+        "tags": [
+          "OIDC logout"
+        ]
+      }
+    },
+    "/auth/oidc/{provider}/frontchannel-logout": {
+      "get": {
+        "deprecated": false,
+        "description": "Revoke the local sessions that the caller's browser binding owns for one exact issuer and provider session identifier. The revocation consumes a one-shot marker, so a repeated request is rejected.",
+        "operationId": "OIDCFrontchannelLogout",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "allowReserved": false,
+            "deprecated": false,
+            "in": "query",
+            "name": "iss",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "allowReserved": false,
+            "deprecated": false,
+            "in": "query",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                }
+              }
+            },
+            "description": "How many local sessions were revoked.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider exchange was rejected."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Front-channel logout",
+        "tags": [
+          "OIDC logout"
+        ]
+      }
+    },
+    "/auth/passkeys": {
+      "get": {
+        "deprecated": false,
+        "description": "List only the caller's own credential metadata; no public key or challenge material is returned.",
+        "operationId": "PasskeyList",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PasskeySummary"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The caller's own registered credentials.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The factor service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "List registered passkeys",
+        "tags": [
+          "Passkeys"
+        ]
+      }
+    },
+    "/auth/passkeys/authentication/options": {
+      "post": {
+        "deprecated": false,
+        "description": "Return WebAuthn authentication options and a reveal-once binding. The binding lets the public verification route complete the ceremony without relying on an existing cookie or token.",
+        "operationId": "PasskeyAuthenticationOptions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasskeyAuthenticationStart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyOptions"
+                }
+              }
+            },
+            "description": "The WebAuthn options and their reveal-once binding.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The factor service is unavailable."
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Request passkey authentication options",
+        "tags": [
+          "Passkeys"
+        ]
+      }
+    },
+    "/auth/passkeys/authentication/session/verify": {
+      "post": {
+        "deprecated": false,
+        "description": "Complete one authentication ceremony and establish the hybrid profile's session transport. CSRF policy is fixed by this route rather than selected by an untrusted request field.",
+        "operationId": "PasskeySessionAuthenticationVerify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasskeyVerification"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The established local transport.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The factor service is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Verify a passkey for a session",
+        "tags": [
+          "Passkeys"
+        ]
+      }
+    },
+    "/auth/passkeys/authentication/tokens/verify": {
+      "post": {
+        "deprecated": false,
+        "description": "Complete one authentication ceremony and issue the hybrid profile's local token pair. CSRF policy is fixed by this route rather than selected by an untrusted request field.",
+        "operationId": "PasskeyTokenAuthenticationVerify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasskeyVerification"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The established local transport.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The factor service is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Verify a passkey for tokens",
+        "tags": [
+          "Passkeys"
+        ]
+      }
+    },
+    "/auth/passkeys/registration/options": {
+      "post": {
+        "deprecated": false,
+        "description": "Return bound WebAuthn registration options after exact step-up. The reveal-once binding returned alongside them must be presented unchanged to the verification route.",
+        "operationId": "PasskeyRegistrationOptions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasskeyRegistrationStart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyOptions"
+                }
+              }
+            },
+            "description": "The WebAuthn options and their reveal-once binding.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The factor service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Request passkey registration options",
+        "tags": [
+          "Passkeys"
+        ]
+      }
+    },
+    "/auth/passkeys/registration/verify": {
+      "post": {
+        "deprecated": false,
+        "description": "Complete one registration ceremony and store the credential against the caller's account.",
+        "operationId": "PasskeyRegistrationVerify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasskeyVerification"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            },
+            "description": "The registration outcome.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The factor service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Register a passkey",
+        "tags": [
+          "Passkeys"
+        ]
+      }
+    },
+    "/auth/passkeys/{credential_id}/remove": {
+      "post": {
+        "deprecated": false,
+        "description": "Remove one of the caller's own credentials after exact step-up. A removal that would leave the account with no login method is refused.",
+        "operationId": "PasskeyRemove",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "credential_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StepUpAuthorization"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            },
+            "description": "The removal outcome.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            },
+            "description": "The change would remove the final login method."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The factor service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Remove a passkey",
+        "tags": [
+          "Passkeys"
+        ]
+      }
+    },
+    "/auth/password/change": {
+      "post": {
+        "deprecated": false,
+        "description": "Replace the caller's password after re-verifying the current one. The caller's own session is rebound and stays usable; every other session and credential for the account is invalidated.",
+        "operationId": "LocalPasswordChange",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalPasswordChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            },
+            "description": "The password was replaced.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The lifecycle request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication is required."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Change password",
+        "tags": [
+          "Local passwords"
+        ]
+      }
+    },
+    "/auth/password/recovery": {
+      "post": {
+        "deprecated": false,
+        "description": "Request a recovery token for an identifier. The response is identical whether or not the account exists, so it never confirms one.",
+        "operationId": "LocalPasswordRecovery",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalIdentifier"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleAccepted"
+                }
+              }
+            },
+            "description": "The request was accepted for processing.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The lifecycle request is invalid."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Request password recovery",
+        "tags": [
+          "Local passwords"
+        ]
+      }
+    },
+    "/auth/password/reset": {
+      "post": {
+        "deprecated": false,
+        "description": "Consume one recovery token and replace the account password. The token is single-use, and a successful reset raises the account security epoch, invalidating every credential issued before it.",
+        "operationId": "LocalPasswordReset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalPasswordReset"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            },
+            "description": "The password was replaced.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The lifecycle request is invalid."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Reset password",
+        "tags": [
+          "Local passwords"
+        ]
+      }
+    },
+    "/auth/register": {
+      "post": {
+        "deprecated": false,
+        "description": "Create an account under the public registration policy. The response is identical whether or not the identifier was already taken, so it never confirms an existing account.",
+        "operationId": "LocalRegister",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalRegistration"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleAccepted"
+                }
+              }
+            },
+            "description": "The registration was accepted for processing.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The lifecycle request is invalid."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Register",
+        "tags": [
+          "Local registration"
+        ]
+      }
+    },
+    "/auth/sessions": {
+      "get": {
+        "deprecated": false,
+        "description": "List the caller's own active sessions, with the session used for this request flagged as current. A caller can never see another account's sessions.",
+        "operationId": "LocalSessionList",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalSessionList"
+                }
+              }
+            },
+            "description": "The caller's active sessions.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication is required."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "List sessions",
+        "tags": [
+          "Local sessions"
+        ]
+      }
+    },
+    "/auth/sessions/{session_id}": {
+      "delete": {
+        "deprecated": false,
+        "description": "Revoke one of the caller's own sessions. Revoking a session the caller does not own is reported the same way as revoking one that does not exist.",
+        "operationId": "LocalSessionRevoke",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            },
+            "description": "The session was revoked.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Validation Exception",
+                  "examples": [
+                    {
+                      "detail": "Bad Request",
+                      "extra": {},
+                      "status_code": 400
+                    }
+                  ],
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    },
+                    "extra": {
+                      "additionalProperties": {},
+                      "type": [
+                        "null",
+                        "object",
+                        "array"
+                      ]
+                    },
+                    "status_code": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "detail",
+                    "status_code"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Bad request syntax or unsupported method"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication is required."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Revoke session",
+        "tags": [
+          "Local sessions"
+        ]
+      }
+    },
+    "/auth/step-up/{purpose}": {
+      "post": {
+        "deprecated": false,
+        "description": "Present a configured factor to obtain one short-lived grant bound to this exact purpose, the caller's current security epoch, and the current transport. A grant for one purpose cannot authorize another.",
+        "operationId": "SecurityStepUp",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "purpose",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StepUpVerification"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StepUpGrant"
+                }
+              }
+            },
+            "description": "The reveal-once grant and its expiry.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The factor service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Obtain a step-up grant",
+        "tags": [
+          "Step-up authentication"
+        ]
+      }
+    },
+    "/auth/token": {
+      "post": {
+        "deprecated": false,
+        "description": "Verify a password and issue an access and refresh token pair. This route shares its rate-limit budget with session login, so alternating between the two does not widen the allowance.",
+        "operationId": "LocalTokenLogin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalCredentials"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenPair"
+                }
+              }
+            },
+            "description": "A newly issued access and refresh token pair."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The lifecycle request is invalid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalMFAChallenge"
+                }
+              }
+            },
+            "description": "The password was verified and the returned challenge requires a second factor."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Token login",
+        "tags": [
+          "Local tokens"
+        ]
+      }
+    },
+    "/auth/token/password/change": {
+      "post": {
+        "deprecated": false,
+        "description": "Replace the password of the account named by the caller's access token, after re-verifying the current one. Every credential for the account, including the caller's own, is invalidated.",
+        "operationId": "LocalTokenPasswordChange",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalPasswordChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            },
+            "description": "The password was replaced.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The lifecycle request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication is required."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Change password (bearer)",
+        "tags": [
+          "Local passwords"
+        ]
+      }
+    },
+    "/auth/token/refresh": {
+      "post": {
+        "deprecated": false,
+        "description": "Exchange one opaque refresh token for a new pair. Rotation is strict: presenting a token that was already consumed revokes the whole family. Retry a lost response with the same `Idempotency-Key` to receive the original pair instead of tripping that reuse detection.",
+        "operationId": "LocalTokenRefresh",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenPair"
+                }
+              }
+            },
+            "description": "A newly rotated access and refresh token pair.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The lifecycle request is invalid."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Rotate refresh token",
+        "tags": [
+          "Local tokens"
+        ]
+      }
+    },
+    "/auth/token/revoke": {
+      "post": {
+        "deprecated": false,
+        "description": "Revoke the presented refresh token and the rest of its family. The caller must hold a valid access token for the account that owns the token.",
+        "operationId": "LocalTokenRevoke",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            },
+            "description": "The token family was revoked.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Validation Exception",
+                  "examples": [
+                    {
+                      "detail": "Bad Request",
+                      "extra": {},
+                      "status_code": 400
+                    }
+                  ],
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    },
+                    "extra": {
+                      "additionalProperties": {},
+                      "type": [
+                        "null",
+                        "object",
+                        "array"
+                      ]
+                    },
+                    "status_code": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "detail",
+                    "status_code"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Bad request syntax or unsupported method"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication is required."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Revoke refresh token",
+        "tags": [
+          "Local tokens"
+        ]
+      }
+    },
+    "/auth/verification": {
+      "post": {
+        "deprecated": false,
+        "description": "Request a verification token for an identifier. The response is identical whether or not the account exists or is already verified, so it never confirms one.",
+        "operationId": "LocalVerificationResend",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalIdentifier"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleAccepted"
+                }
+              }
+            },
+            "description": "The request was accepted for processing.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The lifecycle request is invalid."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Request account verification",
+        "tags": [
+          "Local verification"
+        ]
+      }
+    },
+    "/auth/verification/confirm": {
+      "post": {
+        "deprecated": false,
+        "description": "Consume one single-use verification token and mark its account verified.",
+        "operationId": "LocalVerificationConfirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            },
+            "description": "The account was verified.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The lifecycle request is invalid."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The operation exceeded its rate limit."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The authentication service is unavailable."
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Confirm account verification",
+        "tags": [
+          "Local verification"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "tags": [
+    {
+      "description": "Cookie-based login for browser clients, plus the caller's own session inventory. Every route here is scoped to the authenticated caller: there is no administrative view.",
+      "name": "Local sessions"
+    },
+    {
+      "description": "Bearer login for non-browser clients. Refresh tokens rotate strictly, so replaying a consumed token revokes its whole family rather than returning a new pair.",
+      "name": "Local tokens"
+    },
+    {
+      "description": "Self-service account creation under the configured registration policy. The response is identical whether or not the identifier was already taken, so it never confirms an account.",
+      "name": "Local registration"
+    },
+    {
+      "description": "Password change for an authenticated caller and the recovery flow for one who cannot sign in. Both raise the account security epoch, which invalidates credentials issued before the change.",
+      "name": "Local passwords"
+    },
+    {
+      "description": "Account-verification token issue and consumption. Requesting a token returns the same response for every identifier, so it never confirms an account.",
+      "name": "Local verification"
+    },
+    {
+      "description": "Enrollment and removal of time-based codes and recovery codes. Changing how an account is protected consumes a fresh step-up grant, so a stolen session cannot weaken it silently.",
+      "name": "Multi-factor authentication"
+    },
+    {
+      "description": "WebAuthn credential registration and assertion. Each challenge is single-use and bound to the browser that requested it, and the credential's private key never leaves the authenticator.",
+      "name": "Passkeys"
+    },
+    {
+      "description": "Re-proof of a strong factor immediately before a sensitive operation. A grant is bound to one purpose at one security epoch and is consumed on first use, so it cannot be replayed or reused.",
+      "name": "Step-up authentication"
+    },
+    {
+      "description": "Interactive provider login, account linking, scope upgrades, and token revocation. Every authorization round trip is bound to a cookie the same browser must present at the callback.",
+      "name": "OAuth providers"
+    },
+    {
+      "description": "Provider-initiated front- and back-channel logout. A logout token is verified against the configured issuer and its identifier is consumed once, so a replayed notification revokes nothing.",
+      "name": "OIDC logout"
+    }
+  ]
+}

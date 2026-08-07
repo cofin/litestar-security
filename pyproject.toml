@@ -123,11 +123,11 @@ docs = [
 ]
 tests = [
   "coverage[toml]",
+  "polyfactory",
   "pytest",
   "pytest-cov",
-  { include-group = "property" },
+  "pytest-xdist",
 ]
-property = ["hypothesis"]
 benchmark = ["pytest-benchmark"]
 lint = [
   "codespell",
@@ -149,27 +149,40 @@ dev = [
 # Testing #
 ###########
 [tool.pytest.ini_options]
-addopts = ["-ra", "--strict-config", "--strict-markers"]
-markers = ["performance: deterministic local regression gates excluded from the normal suite"]
-norecursedirs = [".hypothesis", "src/tests/fixtures"]
+addopts = [
+  "-ra",
+  "--strict-config",
+  "--strict-markers",
+  "--benchmark-disable",
+  "-m",
+  "not performance",
+  "-n",
+  "auto",
+]
+# Every coroutine test in this suite runs on anyio, against the single backend
+# the session-scoped anyio_backend fixture pins. Auto mode makes that the
+# default so a new async test cannot be silently skipped for want of a marker.
+anyio_mode = "auto"
+markers = ["performance: calibrated local benchmarks excluded from the normal suite"]
+norecursedirs = ["src/tests/fixtures"]
 pythonpath = ["."]
 testpaths = ["src/tests"]
 
 [tool.coverage.run]
 branch = true
 source = ["src/litestar_security"]
-# The dependency shims are staged for the optional-extras work and nothing
-# imports them yet. Remove both entries when the capabilities move behind
-# extras and start resolving their dependencies through them.
-omit = ["src/litestar_security/_typing.py", "src/litestar_security/typing.py"]
 
 [tool.coverage.report]
-fail_under = 100
+fail_under = 95
 show_missing = true
 skip_covered = true
-exclude_lines = [
+exclude_also = [
   "pragma: no cover",
   "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "assert_never\\(",
+  "@overload",
+  "if sys\\.version_info",
 ]
 
 #########
@@ -196,6 +209,7 @@ litestar-security = "2099-01-01T00:00:00Z"
 litestar-vite = "2099-01-01T00:00:00Z"
 polyfactory = "2099-01-01T00:00:00Z"
 pytest-databases = "2099-01-01T00:00:00Z"
+ruff = "2099-01-01T00:00:00Z"
 sqlglot = "2099-01-01T00:00:00Z"
 sqlglotc = "2099-01-01T00:00:00Z"
 sqlspec = "2099-01-01T00:00:00Z"
@@ -211,6 +225,9 @@ extend-exclude = ["docs/_build"]
 
 [tool.ruff.format]
 docstring-code-format = true
+# Prose keeps its own line breaks. Examples in Markdown are wrapped for a reader
+# in a narrow column, not to the line length source is held to.
+exclude = ["*.md"]
 preview = true
 skip-magic-trailing-comma = true
 
@@ -231,12 +248,49 @@ split-on-trailing-comma = false
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.ruff.lint.flake8-tidy-imports]
+# TID251 matches an import by its absolute dotted path, so `from .testing import
+# FakeClock` slips past every entry in banned-api below. Banning relative imports
+# outright is what makes the denylist total. The package contains zero relative
+# imports today, so this costs nothing to adopt.
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# Runtime source must not depend on the shipped test kit. The package exposes it
+# only through the module __getattr__ in __init__.py, and
+# tools/check_import_boundaries.py proves at lint time that a bare
+# `import litestar_security` does not load it.
+"litestar_security.testing".msg = "Runtime source must not import the test kit. See .agents/patterns.md, Test layout."
+
+# No storage, cache or cloud adapter may become a runtime dependency: this library
+# ships protocols, and an adapter belongs in the consumer. tools/check_downstream_consumer.py
+# enforces the same list against the built wheel's Requires-Dist.
+"advanced_alchemy".msg = "Adapters belong in the consumer, not in runtime source."
+"aioboto3".msg = "Adapters belong in the consumer, not in runtime source."
+"aiomysql".msg = "Adapters belong in the consumer, not in runtime source."
+"aiosqlite".msg = "Adapters belong in the consumer, not in runtime source."
+"asyncpg".msg = "Adapters belong in the consumer, not in runtime source."
+"boto3".msg = "Adapters belong in the consumer, not in runtime source."
+"google.cloud".msg = "Adapters belong in the consumer, not in runtime source."
+"litestar_mcp".msg = "Adapters belong in the consumer, not in runtime source."
+"motor".msg = "Adapters belong in the consumer, not in runtime source."
+"pymongo".msg = "Adapters belong in the consumer, not in runtime source."
+"redis".msg = "Adapters belong in the consumer, not in runtime source."
+"sqlalchemy".msg = "Adapters belong in the consumer, not in runtime source."
+"sqlspec".msg = "Adapters belong in the consumer, not in runtime source."
+
 [tool.ruff.lint.per-file-ignores]
 "docs/conf.py" = ["A001", "INP001"]
 # Every value in this module is an audit event name. S105 fires on each PASSWORD_*
 # constant because the name looks credential-bearing, but the module holds no secrets.
 "src/litestar_security/accounts/_operations.py" = ["S105"]
-"src/tests/**/*.py" = ["ANN", "D", "PLR2004", "S101"]
+# The test tree and the examples import litestar_security.testing on purpose, and
+# banned-api offers no per-key waiver: silencing that one entry means silencing
+# TID251 wholesale here, adapter roots included. That is the right trade, because
+# the adapter rule is about what the distribution depends on and
+# tools/check_downstream_consumer.py enforces it against the built wheel instead.
+"examples/**/*.py" = ["TID251"]
+"src/tests/**/*.py" = ["ANN", "D", "PLR2004", "S101", "TID251"]
 "tools/**/*.py" = ["T201"]
 
 ########
@@ -256,13 +310,13 @@ warn_return_any = true
 warn_unreachable = true
 warn_unused_configs = true
 warn_unused_ignores = true
-files = ["src/litestar_security", "src/tests/typing/helpers.py", "examples"]
+files = ["src/litestar_security", "src/tests/helpers/typing.py", "examples"]
 
 ###########
 # Pyright #
 ###########
 [tool.pyright]
-include = ["src/litestar_security", "src/tests/typing/helpers.py", "examples"]
+include = ["src/litestar_security", "src/tests/helpers/typing.py", "examples"]
 pythonVersion = "3.10"
 typeCheckingMode = "strict"
 

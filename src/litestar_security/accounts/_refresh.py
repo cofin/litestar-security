@@ -38,13 +38,13 @@ from litestar_security.accounts._operations import (
 )
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, validate_rate_limits
 from litestar_security.accounts._receipts import RefreshReceiptContext, RefreshReceiptReplay, RefreshReceiptSealer
-from litestar_security.accounts._records import LocalAccount, SecurityEvent
+from litestar_security.accounts._records import LocalAccountRecord, SecurityEvent
 from litestar_security.accounts._refresh_tokens import (
     RefreshFamilyContext,
     RefreshRotationStatus,
     RefreshTokenCodec,
     RefreshTokenProof,
-    RefreshTokenResponse,
+    TokenPair,
     normalize_refresh_scopes,
     valid_refresh_scope,
 )
@@ -57,11 +57,11 @@ if TYPE_CHECKING:
 __all__ = (
     "REFRESH_RESPONSE_HEADERS",
     "CreateRefreshFamilyCommand",
-    "PrepareRefreshResult",
+    "RefreshPreflightOutcome",
+    "RefreshRotationOutcome",
     "RefreshTokenFamilyStore",
     "RefreshTokenService",
     "RotateRefreshCommand",
-    "RotateRefreshResult",
 )
 
 UserT = TypeVar("UserT")
@@ -188,7 +188,7 @@ class RotateRefreshCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class RotateRefreshResult:
+class RefreshRotationOutcome:
     """Atomic strict rotation, idempotent receipt, or replay outcome."""
 
     status: RefreshRotationStatus
@@ -198,7 +198,7 @@ class RotateRefreshResult:
     def __post_init__(self) -> None:
         """Reject contradictory receipt and revocation outcomes."""
         if self.status.__class__ is not RefreshRotationStatus or self.family_revoked.__class__ is not bool:
-            msg = "Refresh rotation result is invalid"
+            msg = "Refresh rotation outcome is invalid"
             raise ValueError(msg)
         receipt_status = self.status in {RefreshRotationStatus.ROTATED, RefreshRotationStatus.IDEMPOTENT_REPLAY}
         if (
@@ -213,16 +213,16 @@ class RotateRefreshResult:
                 )
             )
         ):
-            msg = "Successful refresh rotation results require exactly one sealed receipt"
+            msg = "Successful refresh rotation outcomes require exactly one sealed receipt"
             raise ValueError(msg)
         revoked_status = self.status in {RefreshRotationStatus.REPLAY_DETECTED, RefreshRotationStatus.REVOKED}
         if revoked_status != self.family_revoked:
-            msg = "Replay or revoked refresh results must report family revocation"
+            msg = "Replay or revoked refresh outcomes must report family revocation"
             raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
-class PrepareRefreshResult:
+class RefreshPreflightOutcome:
     """Proof-checked negative preflight outcome with exact revocation evidence."""
 
     status: RefreshRotationStatus
@@ -238,11 +238,11 @@ class PrepareRefreshResult:
             RefreshRotationStatus.INVALID,
         }
         if self.status.__class__ is not RefreshRotationStatus or self.status not in allowed:
-            msg = "Refresh preparation result requires a negative status"
+            msg = "Refresh preflight outcome requires a negative status"
             raise ValueError(msg)
         revoked_status = self.status in {RefreshRotationStatus.REPLAY_DETECTED, RefreshRotationStatus.REVOKED}
         if self.family_revoked.__class__ is not bool or revoked_status != self.family_revoked:
-            msg = "Refresh preparation revocation status is invalid"
+            msg = "Refresh preflight revocation status is invalid"
             raise ValueError(msg)
 
 
@@ -266,7 +266,7 @@ class RefreshTokenFamilyStore(Protocol):
 
     async def prepare_rotation(
         self, proof: RefreshTokenProof, idempotency_digest: bytes | None, *, now: "datetime", event: "SecurityEvent"
-    ) -> RefreshFamilyContext | RefreshReceiptReplay | PrepareRefreshResult:
+    ) -> RefreshFamilyContext | RefreshReceiptReplay | RefreshPreflightOutcome:
         """Atomically return active state, recover a receipt, or revoke and record consumed reuse.
 
         This is where reuse detection lives. A token that was already consumed
@@ -290,7 +290,7 @@ class RefreshTokenFamilyStore(Protocol):
 
     async def rotate(
         self, command: RotateRefreshCommand, *, now: "datetime", event: "SecurityEvent"
-    ) -> RotateRefreshResult:
+    ) -> RefreshRotationOutcome:
         """Atomically revalidate context/current epoch and rotate or revoke.
 
         Revalidate rather than trusting the prepared context: the epoch can move
@@ -431,12 +431,12 @@ class RefreshTokenService(Generic[UserT]):
 
     async def issue(  # noqa: PLR0911 - preserve explicit sanitized outcomes
         self,
-        account: "LocalAccount[UserT]",
+        account: "LocalAccountRecord[UserT]",
         *,
         scopes: AbstractSet[str] = frozenset(),
         evidence: AuthenticationEvidence | None = None,
         now: datetime | None = None,
-    ) -> RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+    ) -> TokenPair | InvalidCredentials | VerificationUnavailable:
         """Create the initial family before revealing either credential.
 
         Args:
@@ -451,7 +451,7 @@ class RefreshTokenService(Generic[UserT]):
         """
         account_value: object = account
         if (
-            not isinstance(account_value, LocalAccount)  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
+            not isinstance(account_value, LocalAccountRecord)  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
             or not account_value.active
             or not account_value.verified
         ):
@@ -513,7 +513,7 @@ class RefreshTokenService(Generic[UserT]):
             return VerificationUnavailable()
         if created is not True:
             return VerificationUnavailable()
-        return RefreshTokenResponse(
+        return TokenPair(
             access_token=access.access_token, refresh_token=refresh.refresh_token, expires_in=access.expires_in
         )
 
@@ -524,7 +524,7 @@ class RefreshTokenService(Generic[UserT]):
         idempotency_key: str | None = None,
         now: datetime | None = None,
         client_key: str | None = None,
-    ) -> RefreshTokenResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
+    ) -> TokenPair | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Return exactly the store-accepted sealed response or one safe failure.
 
         Only the client bucket applies: the presented value is a refresh token,
@@ -573,7 +573,7 @@ class RefreshTokenService(Generic[UserT]):
             return VerificationUnavailable()
         if isinstance(prepared, RefreshReceiptReplay):
             account_result = await self._resolve_account(prepared.context)
-            if not isinstance(account_result, LocalAccount):
+            if not isinstance(account_result, LocalAccountRecord):
                 return account_result
             return await self._recover_receipt(
                 prepared.context,
@@ -582,7 +582,7 @@ class RefreshTokenService(Generic[UserT]):
                 idempotency_digest=idempotency_digest,
                 occurred_at=rotated_at,
             )
-        if isinstance(prepared, PrepareRefreshResult):
+        if isinstance(prepared, RefreshPreflightOutcome):
             return InvalidCredentials()
         if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
             prepared, RefreshFamilyContext
@@ -593,7 +593,7 @@ class RefreshTokenService(Generic[UserT]):
         if prepared.token_expires_at <= rotated_at or prepared.family_expires_at <= rotated_at:
             return InvalidCredentials()
         account_result = await self._resolve_account(prepared)
-        if not isinstance(account_result, LocalAccount):
+        if not isinstance(account_result, LocalAccountRecord):
             return account_result
         account = account_result
         try:
@@ -611,7 +611,7 @@ class RefreshTokenService(Generic[UserT]):
                 )
                 else VerificationUnavailable()
             )
-        response = RefreshTokenResponse(
+        response = TokenPair(
             access_token=access.access_token, refresh_token=successor.refresh_token, expires_in=access.expires_in
         )
         successor_expires_at = min(rotated_at + self.idle_lifetime, prepared.family_expires_at)
@@ -654,7 +654,7 @@ class RefreshTokenService(Generic[UserT]):
             )
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
-        if not isinstance(result_value, RotateRefreshResult):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
+        if not isinstance(result_value, RefreshRotationOutcome):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
             return VerificationUnavailable()
         result = result_value
         if result.status not in {RefreshRotationStatus.ROTATED, RefreshRotationStatus.IDEMPOTENT_REPLAY}:
@@ -735,7 +735,7 @@ class RefreshTokenService(Generic[UserT]):
 
     async def _resolve_account(
         self, context: RefreshFamilyContext
-    ) -> "LocalAccount[UserT] | InvalidCredentials | VerificationUnavailable":
+    ) -> "LocalAccountRecord[UserT] | InvalidCredentials | VerificationUnavailable":
 
         try:
             account = await cast("Any", self.accounts).get_by_id(context.account_id)
@@ -743,7 +743,7 @@ class RefreshTokenService(Generic[UserT]):
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
         if (
-            not isinstance(account, LocalAccount)
+            not isinstance(account, LocalAccountRecord)
             or account.account_id != context.account_id
             or not account.active
             or not account.verified
@@ -752,7 +752,7 @@ class RefreshTokenService(Generic[UserT]):
             or current_epoch != context.security_epoch
         ):
             return InvalidCredentials()
-        return cast("LocalAccount[UserT]", account)
+        return cast("LocalAccountRecord[UserT]", account)
 
     async def _fail_closed_receipt(
         self, context: RefreshFamilyContext, occurred_at: datetime
@@ -780,7 +780,7 @@ class RefreshTokenService(Generic[UserT]):
         token_id: str,
         idempotency_digest: bytes | None,
         occurred_at: datetime,
-    ) -> RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+    ) -> TokenPair | InvalidCredentials | VerificationUnavailable:
         receipt_context = RefreshReceiptContext(
             token_id=token_id,
             family_id=context.family_id,
@@ -789,11 +789,7 @@ class RefreshTokenService(Generic[UserT]):
             idempotency_digest=idempotency_digest,
         )
         accepted = self.receipts.unseal(sealed_receipt, receipt_context, now=occurred_at)
-        return (
-            accepted
-            if isinstance(accepted, RefreshTokenResponse)
-            else await self._fail_closed_receipt(context, occurred_at)
-        )
+        return accepted if isinstance(accepted, TokenPair) else await self._fail_closed_receipt(context, occurred_at)
 
     def _event(
         self, occurred_at: datetime, *, operation: str, outcome: str, account_id: str | None, family_id: str | None

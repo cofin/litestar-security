@@ -1,17 +1,25 @@
-"""Cache policy and the immutable per-issuer cache entry.
+"""Cache policy, the configured source entry, and the shareable key snapshot.
 
-Entries are immutable snapshots: a refresh builds a new entry and replaces the old
-one atomically, so a reader never observes a half-updated key set.
+Snapshots are immutable: a refresh builds a new one and replaces the old one
+atomically, so a reader never observes a half-updated key set. The store holding
+them is swappable, which is how two components in one application share a single
+key set and a single fetch schedule.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Protocol, TypeAlias, runtime_checkable
 
 from litestar_security.providers._internal import raise_config
 from litestar_security.providers.jwks._internal import strict_value
+from litestar_security.providers.jwt import VerificationKey
 
-__all__ = ("JWKSCacheEntry", "JWKSCachePolicy")
+__all__ = ("InMemoryJWKSCache", "JWKSCache", "JWKSCacheEntry", "JWKSCachePolicy", "JWKSSnapshot")
+
+
+SelectionKey: TypeAlias = tuple[str, str]
+"""The exact ``(kid, algorithm)`` pair a token header names."""
 
 
 _DEFAULT_TTL = timedelta(minutes=15)
@@ -125,3 +133,125 @@ class JWKSCachePolicy:
             or not 1 <= self.maximum_unknown_keys <= _MAXIMUM_UNKNOWN_KEYS
         ):
             raise_config("JWKS cache limits must be positive and bounded")
+
+
+@dataclass(frozen=True, slots=True)
+class JWKSSnapshot:
+    """One immutable parsed key set together with its freshness bounds.
+
+    Args:
+        keys: Verification keys indexed by the exact ``(kid, algorithm)`` pair a
+            token header names.
+        etag: The entity tag the source returned, used for conditional refresh.
+        fresh_until: When the snapshot stops being served without a refresh.
+        stale_until: How long the snapshot may still answer while the source is
+            unreachable.
+        generation: Increases on every parsed replacement, so a consumer can tell
+            a rotation from a revalidation.
+        source_uri: The key set this snapshot was parsed from.
+    """
+
+    keys: Mapping[SelectionKey, VerificationKey]
+    etag: str | None
+    fresh_until: datetime
+    stale_until: datetime
+    generation: int
+    source_uri: str
+
+
+@runtime_checkable
+class JWKSCache(Protocol):
+    """Store remote key snapshots so components can share one fetch schedule.
+
+    An implementer must honor three invariants:
+
+    - **Snapshots are immutable.** Store and return the value as given; never
+      mutate one in place, and never hand back a partially populated key set.
+    - **``set`` is last-write-wins.** The most recent write for a key is the one
+      a later ``get`` returns. No merging, no ordering by generation.
+    - **A miss is indistinguishable from an expired entry.** Returning ``None``
+      is always safe: the caller refetches. An implementation may therefore
+      evict, expire, or bound itself however it likes, and must never fabricate
+      or extend a snapshot to avoid a miss.
+
+    Methods are synchronous because they sit on the token-verification hot path,
+    where the fresh read must not await.
+    """
+
+    def get(self, issuer: str, jwks_uri: str) -> "JWKSSnapshot | None":
+        """Return the stored snapshot for one configured source.
+
+        Args:
+            issuer: The configured issuer the snapshot belongs to.
+            jwks_uri: The key set the snapshot was parsed from.
+
+        Returns:
+            The stored snapshot, or ``None`` when nothing is stored.
+        """
+        ...  # pragma: no cover
+
+    def set(self, issuer: str, jwks_uri: str, snapshot: "JWKSSnapshot") -> None:
+        """Store the newest snapshot for one configured source.
+
+        Args:
+            issuer: The configured issuer the snapshot belongs to.
+            jwks_uri: The key set the snapshot was parsed from.
+            snapshot: The immutable snapshot to store.
+        """
+        ...  # pragma: no cover
+
+    def invalidate(self, issuer: str, jwks_uri: str) -> None:
+        """Drop any snapshot stored for one configured source.
+
+        Dropping an absent entry is not an error.
+
+        Args:
+            issuer: The configured issuer the snapshot belongs to.
+            jwks_uri: The key set the snapshot was parsed from.
+        """
+        ...  # pragma: no cover
+
+
+class InMemoryJWKSCache:
+    """Hold key snapshots for the lifetime of one process.
+
+    This is the default. Construct one explicitly and hand it to several
+    providers to give them a shared key set and a shared fetch schedule.
+    """
+
+    __slots__ = ("_entries",)
+
+    def __init__(self) -> None:
+        """Start with no stored snapshots."""
+        self._entries: dict[SelectionKey, JWKSSnapshot] = {}
+
+    def get(self, issuer: str, jwks_uri: str) -> "JWKSSnapshot | None":
+        """Return the stored snapshot for one configured source.
+
+        Args:
+            issuer: The configured issuer the snapshot belongs to.
+            jwks_uri: The key set the snapshot was parsed from.
+
+        Returns:
+            The stored snapshot, or ``None`` when nothing is stored.
+        """
+        return self._entries.get((issuer, jwks_uri))
+
+    def set(self, issuer: str, jwks_uri: str, snapshot: "JWKSSnapshot") -> None:
+        """Store the newest snapshot for one configured source.
+
+        Args:
+            issuer: The configured issuer the snapshot belongs to.
+            jwks_uri: The key set the snapshot was parsed from.
+            snapshot: The immutable snapshot to store.
+        """
+        self._entries[issuer, jwks_uri] = snapshot
+
+    def invalidate(self, issuer: str, jwks_uri: str) -> None:
+        """Drop any snapshot stored for one configured source.
+
+        Args:
+            issuer: The configured issuer the snapshot belongs to.
+            jwks_uri: The key set the snapshot was parsed from.
+        """
+        self._entries.pop((issuer, jwks_uri), None)

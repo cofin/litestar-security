@@ -20,9 +20,9 @@ profile receives neither a session backend nor a session store; configure
 Wire format
 ===========
 
-Every request and response body in the generated tree uses ``snake_case``
-members, spelled exactly as the Python attribute is spelled, and rejects a
-member it does not model. A body carrying an unrecognized field is a
+By default, every request and response body in the generated tree uses
+``snake_case`` members, spelled exactly as the Python attribute is spelled, and
+rejects a member it does not model. A body carrying an unrecognized field is a
 ``400``, not a silently discarded key.
 
 Rejecting the member is what keeps a stale or misspelled optional field from
@@ -30,15 +30,69 @@ resolving to its default. A client sending ``returnTo`` where the schema
 declares ``return_to`` gets an error naming the field, rather than a successful
 request that quietly redirected somewhere else.
 
-Two surfaces are snake_case because their specifications say so rather than
-because of this convention: the JWKS document (:rfc:`7517`), the OIDC
-back-channel logout body, and the ``token_type``/``expires_in``/
-``refresh_token`` members of the token response (:rfc:`6749`, section 5.1).
-Their member names are fixed by the specification and are not ours to rename.
+Choosing the casing
+-------------------
+
+Two settings on :class:`~litestar_security.SecurityConfig` decide how the
+generated bodies are spelled. If your API is camelCase, say so once and the
+whole ``/auth`` tree follows:
+
+.. code-block:: python
+
+   from litestar_security import SecurityConfig
+
+   config = SecurityConfig(local_auth=local_auth, wire_rename="camel")
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Setting
+     - Meaning
+   * - ``wire_rename``
+     - ``None`` (the default) keeps the names as Python spells them. Otherwise
+       one of ``"lower"``, ``"upper"``, ``"camel"``, ``"pascal"``, and
+       ``"kebab"``, or a ``Callable[[str], str]`` for a house convention
+       outside those five.
+   * - ``wire_forbid_unknown_fields``
+     - ``True`` (the default) makes an unrecognized member in a request body a
+       ``400``. ``False`` ignores it. Strictness applies to decoding, so it
+       constrains request bodies only.
+
+The choice reaches the request body, the response body, and the OpenAPI schema
+together, so a client generated from the document is already speaking the right
+convention. It does not change which routes exist, what they require, or what
+their component type names are: a casing change moves members, never the type
+names your generated client is compiled against.
+
+A callable receives the Python attribute name and returns the wire name:
+
+.. code-block:: python
+
+   config = SecurityConfig(local_auth=local_auth, wire_rename=lambda name: name.upper())
+
+Names that are not ours to rename
+---------------------------------
+
+A few members are fixed by the specification that defines them, and no casing
+setting reaches them:
+
+- the JWKS document (:rfc:`7517`) and the protected-resource metadata document
+  (:rfc:`9728`), which are published as-is;
+- the OIDC back-channel logout body, whose single member is the one the
+  identity provider sends;
+- the token response (:rfc:`6749`, section 5.1) — ``access_token``,
+  ``refresh_token``, ``expires_in``, and ``token_type``.
+
+The error body is left alone for a different reason: it is rendered by your
+application's exception handling rather than by these routes, so renaming it in
+the document would describe a body the route never sends.
+
+Sharing the convention with your own schemas
+--------------------------------------------
 
 Applications defining their own schemas alongside the generated routes can
-inherit :class:`~litestar_security.WireStruct` to hold the same convention
-across the whole tree:
+inherit :class:`~litestar_security.WireStruct` to hold the same default:
 
 .. code-block:: python
 
@@ -49,41 +103,74 @@ across the whole tree:
         team_id: str
         invited_identifier: str
 
+``WireStruct`` defines the default spelling, not the effective one — the
+setting above is applied to the generated routes when they are built, and a
+schema of your own is spelled however the handler carrying it is configured.
+
 A schema that must tolerate members it does not model - a specification-defined
 body whose sender may legitimately add them - overrides the policy for itself
-with ``forbid_unknown_fields=False`` rather than relaxing the shared base.
+with ``forbid_unknown_fields=False`` rather than relaxing the shared base. A
+schema whose member names belong to a specification rather than to your API
+declares ``__wire_casing__ = False`` for the same reason, and no casing setting
+touches it.
 
 Tag groups
 ==========
 
-Generated operations are filed under five tags rather than one, so the rendered
+Generated operations are filed under ten tags rather than one, so the rendered
 document separates the ways to sign in from the flows that repair an account
-nobody can sign in to:
+nobody can sign in to. Each group is addressed in configuration by a stable key
+that does not change when its display name does:
 
 .. list-table::
    :header-rows: 1
-   :widths: 25 75
+   :widths: 20 22 58
 
-   * - Tag
+   * - Key
+     - Tag
      - Operations
-   * - ``Local sessions``
+   * - ``local.sessions``
+     - ``Local sessions``
      - ``LocalSessionLogin``, ``LocalSessionLogout``, ``LocalSessionList``,
        ``LocalSessionRevoke``, ``LocalSessionMFALogin``
-   * - ``Local tokens``
+   * - ``local.tokens``
+     - ``Local tokens``
      - ``LocalTokenLogin``, ``LocalTokenRefresh``, ``LocalTokenRevoke``,
        ``LocalTokenMFALogin``
-   * - ``Local registration``
+   * - ``local.registration``
+     - ``Local registration``
      - ``LocalRegister``
-   * - ``Local passwords``
+   * - ``local.passwords``
+     - ``Local passwords``
      - ``LocalPasswordChange``, ``LocalTokenPasswordChange``,
        ``LocalPasswordRecovery``, ``LocalPasswordReset``
-   * - ``Local verification``
+   * - ``local.verification``
+     - ``Local verification``
      - ``LocalVerificationResend``, ``LocalVerificationConfirm``
+   * - ``mfa``
+     - ``Multi-factor authentication``
+     - ``MFAEnrollTOTP``, ``MFAVerifyTOTPEnrollment``, ``MFARemoveTOTP``,
+       ``MFAReplaceRecoveryCodes``
+   * - ``passkeys``
+     - ``Passkeys``
+     - ``PasskeyRegistrationOptions``, ``PasskeyRegistrationVerify``,
+       ``PasskeyAuthenticationOptions``, ``PasskeySessionAuthenticationVerify``,
+       ``PasskeyTokenAuthenticationVerify``, ``PasskeyList``, ``PasskeyRemove``
+   * - ``step_up``
+     - ``Step-up authentication``
+     - ``SecurityStepUp``
+   * - ``oauth.providers``
+     - ``OAuth providers``
+     - ``OAuthLogin``, ``OAuthCallback``, ``OAuthLink``, ``OAuthUnlink``,
+       ``OAuthScopeUpgrade``, ``OAuthRevoke``, ``OAuthLogout``
+   * - ``oidc.logout``
+     - ``OIDC logout``
+     - ``OIDCFrontchannelLogout``, ``OIDCBackchannelLogout``
 
-Descriptions for these tags are contributed to your OpenAPI config when local
-authentication is configured. Declaring a tag of the same name yourself keeps
-your description: the operations still land in that group, described the way you
-chose.
+Descriptions for every group a configured feature generates routes for are
+contributed to your OpenAPI config. Declaring a tag of the same name yourself
+keeps your description: the operations still land in that group, described the
+way you chose.
 
 .. code-block:: python
 
@@ -96,12 +183,96 @@ chose.
        tags=[Tag(name="Local sessions", description="Sign-in for the web client.")],
    )
 
-The tags are also available directly, which is useful for ordering them among
-your own:
+The defaults are also available directly, keyed by the stable key, which is
+useful for ordering them among your own:
 
 .. code-block:: python
 
-   from litestar_security.accounts import LOCAL_AUTH_TAGS
+   from litestar_security import ROUTE_TAGS
+
+   ROUTE_TAGS["local.sessions"].name  # "Local sessions"
+
+Documentation metadata
+======================
+
+Tag names, tag descriptions, operation identifiers, and route names are the
+application's to set. Pass a :class:`~litestar_security.RouteDocs` to any
+feature configuration:
+
+.. code-block:: python
+
+   from litestar_security import RouteDocs
+   from litestar_security.accounts import LocalAuth
+
+   local_auth = LocalAuth.session(
+       accounts=accounts,
+       secrets=secrets,
+       binding=binding,
+       docs=RouteDocs(
+           tags={"local.sessions": "Sign-in", "local.passwords": "Account recovery"},
+           tag_descriptions={"local.sessions": "Sign-in for the web client."},
+       ),
+   )
+
+Routes regroup under the new name, and the renamed group carries either your
+description or the built-in one. Renaming two groups to the same name merges
+them into one group deliberately. A key that names no group raises
+``ImproperlyConfiguredException`` at configuration time, so a typo never
+silently does nothing.
+
+``MFAConfig`` and ``PasskeyConfig`` generate one shared route bundle, and the
+``step_up`` group belongs to both, so when both features are configured they
+must carry the same ``RouteDocs``.
+
+Renaming operations
+-------------------
+
+``operation_id`` and ``route_name`` take a callable receiving the built-in value
+and returning the replacement, so a naming convention is one function rather
+than an override per route. Under ``litestar-vite``'s ``TypeGenConfig`` the
+operation identifier becomes the generated TypeScript client's function name,
+which is usually why an application wants to change it:
+
+.. code-block:: python
+
+   from litestar_security import RouteDocs
+
+   docs = RouteDocs(operation_id=lambda name: name[0].lower() + name[1:])
+   # LocalSessionLogin -> localSessionLogin, PasskeyList -> passkeyList
+
+The built-in identifiers are noun-first, so ``LocalSessionLogin`` and
+``LocalSessionList`` sort next to each other in a generated client. A verb-first
+convention is the same shape of transform:
+
+.. code-block:: python
+
+   _VERBS = {"Login", "Logout", "List", "Revoke", "Remove", "Refresh"}
+
+
+   def verb_first(name: str) -> str:
+       for verb in _VERBS:
+           if name.endswith(verb):
+               return verb + name[: -len(verb)]
+       return name
+
+
+   docs = RouteDocs(operation_id=verb_first)
+   # LocalSessionLogin -> LoginLocalSession
+
+Two routes resolving to the same operation identifier or the same route name
+after a transform raise ``ImproperlyConfiguredException`` when the routes are
+built. Litestar notices a duplicate operation identifier only when the OpenAPI
+schema is first generated, and a duplicate route name silently misdirects
+``route_reverse``, so both are rejected up front instead.
+
+Documentation is never policy
+-----------------------------
+
+Nothing reachable through ``RouteDocs`` changes what a route requires. Renaming
+a tag, rewriting an operation identifier, or replacing a route name leaves the
+authentication requirement, the guards, the CSRF enforcement, and the rate
+limits of every generated route exactly as they were. A route's protection is
+selected by its configuration, never by how it is documented.
 
 Operation identifiers
 =====================
@@ -133,7 +304,7 @@ success case:
        satisfies the account security epoch.
    * - ``403``
      - A password was verified but a configured second factor is still owed.
-       The typed ``LocalMFARequiredResponse`` contains ``code="mfa_required"``,
+       The typed ``LocalMFAChallenge`` contains ``code="mfa_required"``,
        ``detail``, ``account_id``, ``challenge``, ``expires_at``, and
        ``methods``.
    * - ``429``
@@ -142,6 +313,75 @@ success case:
    * - ``503``
      - An application-supplied dependency was unavailable. Security decisions
        fail closed, so this never means the request was allowed.
+
+What an error body looks like
+-----------------------------
+
+Two different things produce a non-success status, and they produce different
+bodies. The distinction is raised versus returned, not error versus success.
+
+A **raised** status — ``400``, ``401``, ``429``, ``503``, and the OAuth
+``409`` — never reaches the handler's return value. It travels through the
+application's exception handling, so the body is
+:class:`~litestar_security.RouteError`: the status repeated inside the payload,
+a human-readable ``detail``, and ``extra`` when the failure carries structured
+context. A request-validation failure always carries one, listing the members
+it rejected.
+
+.. code-block:: json
+
+   {"status_code": 401, "detail": "Authentication required."}
+
+A **returned** status is a value the handler produced, so its schema is the
+handler's own type and no exception handling touches it. That covers every
+``2xx``, the typed ``403`` second-factor challenge above, and the ``409``
+conflict raised when a change would remove an account's last login method.
+
+Registering your own error format on the application reaches the generated
+routes, including the OAuth ones:
+
+.. code-block:: python
+
+   Litestar(exception_handlers={HTTPException: my_error_format}, ...)
+
+Problem details
+~~~~~~~~~~~~~~~
+
+An application can install Litestar's problem-details plugin and ask it to
+convert every HTTP exception:
+
+.. code-block:: python
+
+   from litestar.plugins.problem_details import ProblemDetailsConfig, ProblemDetailsPlugin
+
+   Litestar(
+       plugins=[
+           SecurityPlugin(config),
+           ProblemDetailsPlugin(ProblemDetailsConfig(enable_for_all_http_exceptions=True)),
+       ],
+   )
+
+Every raised status then arrives as ``application/problem+json`` carrying
+:class:`~litestar_security.ProblemDetail`, and the published document says so.
+Note what Litestar's conversion actually emits, which is not the :rfc:`9457`
+five-member shape: the raised explanation moves to ``title``, ``detail`` falls
+back to the HTTP reason phrase, structured context carries through as
+``extra``, and ``type`` and ``instance`` are never produced.
+
+.. code-block:: json
+
+   {"status": 401, "title": "Authentication required.", "detail": "Unauthorized"}
+
+``ProblemDetailsPlugin()`` on its own converts nothing. Its default
+configuration registers a handler for ``ProblemDetailsException`` alone, which
+the generated routes never raise, so the responses and the document both stay
+exactly as they were. Returned statuses are unaffected in either mode.
+
+If the application installs a response class of its own — its own, or one a
+presentation plugin contributes — the generated routes warn once at startup,
+naming the class. The documented schemas describe what the handlers return, and
+a response class that reshapes the body makes them inaccurate. It is a warning
+rather than an error: a customized response class is legitimate.
 
 Enumeration resistance shows up in the schema as well. Recovery, verification,
 and registration answer ``202`` with the same body for every identifier, so a

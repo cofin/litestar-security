@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast
 
 from litestar.exceptions import ImproperlyConfiguredException
 
+from litestar_security._docs import RouteDocs
 from litestar_security.authentication import (
     AuthenticationMechanism,
     AuthenticationPolicy,
@@ -16,10 +17,13 @@ from litestar_security.authentication import (
     CredentialSlot,
 )
 from litestar_security.headers import SecurityHeadersConfig
+from litestar_security.schema import WirePolicy
 from litestar_security.websocket import WebSocketSecurityConfig
 from litestar_security.workers import BlockingIntegration, NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 
 if TYPE_CHECKING:
+    from litestar.dto.types import RenameStrategy
+
     from litestar_security.accounts import (
         AttestationTrustMapper,
         LocalAuthConfig,
@@ -32,7 +36,7 @@ if TYPE_CHECKING:
     from litestar_security.providers.iap import GoogleIAPConfig
     from litestar_security.providers.jwks import JWKSProvider
     from litestar_security.providers.jwt import LocalJWKSConfig
-    from litestar_security.providers.oauth import OAuthConfig
+    from litestar_security.providers.oauth import OAuthConfig, ProtectedResourceConfig
     from litestar_security.providers.oidc import ServiceTokenConfig
 
 __all__ = (
@@ -97,6 +101,7 @@ class MFAConfig:
     route_prefix: str = "/auth"
     issuer: str = "Litestar Security"
     register_routes: bool = True
+    docs: RouteDocs = field(default_factory=RouteDocs, repr=False)
     mfa_service: object = field(init=False, repr=False, compare=False)
     step_up_service: object | None = field(init=False, repr=False, compare=False)
 
@@ -131,6 +136,9 @@ class MFAConfig:
         register_routes_value = cast("object", self.register_routes)
         if register_routes_value.__class__ is not bool:
             msg = "MFA route registration must be boolean"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.docs.__class__ is not RouteDocs:
+            msg = "MFA documentation metadata must be RouteDocs"
             raise ImproperlyConfiguredException(detail=msg)
         require_at_login_value = cast("object", self.require_at_login)
         if require_at_login_value.__class__ is not bool:
@@ -167,6 +175,7 @@ class PasskeyConfig:
     step_up_store: object | None = field(default=None, repr=False)
     route_prefix: str = "/auth"
     register_routes: bool = True
+    docs: RouteDocs = field(default_factory=RouteDocs, repr=False)
     passkey_service: object = field(init=False, repr=False, compare=False)
     step_up_service: object | None = field(init=False, repr=False, compare=False)
 
@@ -206,6 +215,9 @@ class PasskeyConfig:
         if register_routes_value.__class__ is not bool:
             msg = "Passkey route registration must be boolean"
             raise ImproperlyConfiguredException(detail=msg)
+        if self.docs.__class__ is not RouteDocs:
+            msg = "Passkey documentation metadata must be RouteDocs"
+            raise ImproperlyConfiguredException(detail=msg)
         if self.register_routes and self.login_methods is None:
             msg = "Generated passkey routes require a login-method store"
             raise ImproperlyConfiguredException(detail=msg)
@@ -227,6 +239,18 @@ def _feature_route_prefix(value: object) -> str:
     return normalized
 
 
+def _exclude_patterns(value: object) -> tuple[str, ...] | str | None:
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, Sequence):
+        given = tuple(cast("Sequence[object]", value))
+        patterns = tuple(pattern for pattern in given if isinstance(pattern, str))
+        if len(patterns) == len(given):
+            return patterns
+    msg = "Route exclusion patterns must be text or a sequence of text"
+    raise ImproperlyConfiguredException(detail=msg)
+
+
 @dataclass(slots=True)
 class SecurityConfig(Generic[UserT]):
     """Configure the per-application security runtime."""
@@ -235,10 +259,33 @@ class SecurityConfig(Generic[UserT]):
     mechanisms: Sequence[AuthenticationMechanism[Any, Any, UserT]] = ()
     max_openapi_combinations: int = 32
     external_csrf: ExternalCSRF | None = None
+    exclude: Sequence[str] | str | None = None
+    """Regular expressions matched against a route path to exclude it from security.
+
+    Mirrors ``JWTAuth.exclude``: a single pattern or a sequence of patterns,
+    joined into one expression and compiled with :mod:`re`. A pattern is
+    anchored at the start of the route path, so ``"^/static"`` and ``"/static"``
+    both exclude ``/static/{file_path:path}`` while a bare ``"static"`` does not.
+
+    Exclusion is total and applies when the route is compiled, not per request:
+    an excluded route is never authenticated, carries no principal, and
+    contributes an anonymous security requirement to OpenAPI rather than the
+    configured schemes. A route that declares its own ``auth=`` and also matches
+    a pattern is a contradiction and is rejected at startup.
+    """
     require_default: bool = False
     local_auth: "LocalAuthConfig[UserT] | None" = None
     local_jwks: "LocalJWKSConfig | None" = None
     oauth: "OAuthConfig | None" = None
+    protected_resource: "ProtectedResourceConfig | None" = None
+    """Describe this application as an OAuth 2.1 protected resource.
+
+    When set, the plugin publishes the RFC 9728 metadata document at
+    ``/.well-known/oauth-protected-resource`` so an authorization server or a
+    client can discover which issuers this resource trusts, which scopes it
+    understands, and how a bearer token may be presented to it. The route is
+    unauthenticated, as the specification requires.
+    """
     mfa: MFAConfig | None = None
     passkeys: PasskeyConfig | None = None
     api_key: "APIKeyConfig | None" = None
@@ -249,6 +296,28 @@ class SecurityConfig(Generic[UserT]):
     authorization_resolver: AuthorizationResolver[UserT] | None = field(default=None, repr=False)
     jwks_providers: Sequence["JWKSProvider"] = ()
     jwks_warmup_failure: Literal["fail_startup", "lazy"] = "fail_startup"
+    wire_rename: "RenameStrategy | None" = None
+    """How generated request and response members are spelled on the wire.
+
+    ``None`` keeps the field names as Python spells them, which is snake_case.
+    Any of ``"lower"``, ``"upper"``, ``"camel"``, ``"pascal"``, and ``"kebab"``
+    selects a named strategy, and a ``Callable[[str], str]`` covers a house
+    convention outside those five. The choice reaches the OpenAPI document as
+    well as the wire, so a generated client follows it without further work.
+
+    A handful of generated schemas opt out because their member names belong to
+    a specification rather than to this library - the RFC 6749 token response,
+    the OIDC back-channel logout form, and the bodies Litestar's own exception
+    handling renders.
+    """
+    wire_forbid_unknown_fields: bool = True
+    """Whether an unrecognized member in a request body is a decoding error.
+
+    Strictness applies to decoding, so it constrains request schemas only.
+    Rejecting the unknown member is what keeps a stale or misspelled optional
+    field from resolving to its default and producing a wrong but successful
+    request.
+    """
 
     def __post_init__(self) -> None:
         """Freeze ordered authentication collections."""
@@ -263,6 +332,8 @@ class SecurityConfig(Generic[UserT]):
         if headers is not None and not isinstance(headers, SecurityHeadersConfig):
             msg = "Browser security headers must be a SecurityHeadersConfig"
             raise ImproperlyConfiguredException(detail=msg)
+        self._validate_protected_resource()
+        self.exclude = _exclude_patterns(self.exclude)
         self.slots = tuple(self.slots)
         self.mechanisms = tuple(self.mechanisms)
         local_accounts = getattr(self.local_auth, "accounts", None)
@@ -279,4 +350,29 @@ class SecurityConfig(Generic[UserT]):
         self.jwks_providers = tuple(jwks_providers)
         if self.jwks_warmup_failure not in {"fail_startup", "lazy"}:
             msg = "JWKS warmup failure mode must be 'fail_startup' or 'lazy'"
+            raise ImproperlyConfiguredException(detail=msg)
+        self.wire_policy()
+
+    def wire_policy(self) -> WirePolicy:
+        """Return the wire convention every generated route body is built with.
+
+        Returns:
+            The casing strategy and unknown-field policy as one hashable value.
+
+        Raises:
+            ImproperlyConfiguredException: If the strategy is neither one of the
+                named strategies nor a callable, or the unknown-field policy is
+                not boolean.
+        """
+        return WirePolicy(rename=self.wire_rename, forbid_unknown_fields=self.wire_forbid_unknown_fields)
+
+    def _validate_protected_resource(self) -> None:
+        if self.protected_resource is None:
+            return
+        from litestar_security.providers.oauth import (  # noqa: PLC0415 - the OAuth tree loads only when configured
+            ProtectedResourceConfig,
+        )
+
+        if not isinstance(cast("object", self.protected_resource), ProtectedResourceConfig):
+            msg = "Protected resource metadata must be a ProtectedResourceConfig"
             raise ImproperlyConfiguredException(detail=msg)

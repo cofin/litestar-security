@@ -272,6 +272,12 @@ Discovery starts only from an exact issuer configured by the operator:
            metadata = await discovery.discover(issuer)
        return metadata.issuer, metadata.jwks_uri, metadata.algorithms
 
+A provider that does not publish its document at
+``{issuer}/.well-known/openid-configuration`` takes an explicit
+``discovery.discover(issuer, discovery_url=...)``. The override must share the
+issuer's exact origin, so it changes the path the client requests and never the
+host it reaches.
+
 The client disables redirects and proxy-environment trust, validates public
 network addresses, requires exact metadata issuer equality, and permits a JWKS
 URI on the issuer origin only. Add an exact origin to
@@ -330,6 +336,35 @@ closing it.
 
 ``AsyncJWKSFetcher`` and ``SyncJWKSFetcher`` remain the extension points when
 an application needs a custom transport.
+
+Sharing one cache
+~~~~~~~~~~~~~~~~~
+
+A provider keeps its snapshots in a ``JWKSCache``. It creates an
+``InMemoryJWKSCache`` for itself unless it is given one, so two providers
+configured for the same issuer fetch separately. Pass one cache to both to give
+them a single key set and a single fetch schedule:
+
+.. code-block:: python
+
+   from litestar_security.providers import CachedJWKSProvider, InMemoryJWKSCache
+
+   shared_keys = InMemoryJWKSCache()
+
+   reports = CachedJWKSProvider(entries=entries, fetcher=fetcher, cache=shared_keys)
+   admin = CachedJWKSProvider(entries=entries, fetcher=fetcher, cache=shared_keys)
+
+An application may implement ``JWKSCache`` itself. Three invariants make an
+implementation safe to use: a stored ``JWKSSnapshot`` is immutable and is
+returned as given, ``set`` is last-write-wins, and returning ``None`` is always
+allowed. That last one is what lets an implementation bound or evict itself
+freely — the provider treats a miss exactly like an expired entry and refetches.
+The methods are synchronous because a fresh key selection runs on the
+token-verification path and must not await.
+
+Single-flight refresh remains per provider. Two providers sharing a cache can
+still issue one fetch each on a cold start; sharing the provider itself is what
+collapses that too, and is the arrangement to prefer.
 
 Fresh snapshots are immutable and selected without network I/O or lock
 acquisition. Expiry and unknown key IDs use per-entry single-flight refreshes;

@@ -19,22 +19,22 @@ from litestar_security.accounts._internal import aware_utc_time
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._mfa_login import MFALoginChallenge, MFALoginService, MFARequired
 from litestar_security.accounts._operations import LOGIN_MFA
-from litestar_security.accounts._passwords import PasswordPolicyResult
+from litestar_security.accounts._passwords import PasswordPolicyDecision
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
-    InvalidLifecycleRequest,
-    LocalAccount,
-    PasswordChangeResult,
+    LifecycleRejected,
+    LocalAccountRecord,
+    PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordReauthenticationProof,
 )
 from litestar_security.accounts._recovery import PasswordChangeService, RecoveryTokenService
 from litestar_security.accounts._refresh import RefreshTokenService
-from litestar_security.accounts._refresh_tokens import RefreshTokenResponse
+from litestar_security.accounts._refresh_tokens import TokenPair
 from litestar_security.accounts._registration import RegistrationService, VerificationTokenService
 from litestar_security.accounts._sessions import NativeSessionAuth, SessionAuthentication
 from litestar_security.accounts._stores import LocalAccountCapabilities
-from litestar_security.accounts.schemas import LocalAccountResponse, LocalCredentials, LocalPasswordChangeRequest
+from litestar_security.accounts.schemas import LocalAccount, LocalCredentials, LocalPasswordChange
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
 
@@ -213,7 +213,7 @@ class LocalAuthService(Generic[UserT]):
 
     async def session_login(
         self, request: Request[Any, Any, Any], credentials: LocalCredentials
-    ) -> LocalAccountResponse | MFARequired | RateLimited | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccount | MFARequired | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Authenticate a password and establish fixation-safe session state.
 
         Args:
@@ -228,22 +228,22 @@ class LocalAuthService(Generic[UserT]):
         account = await self.password_login.authenticate(
             credentials.identifier, credentials.password, client_key=client_key
         )
-        if not isinstance(account, LocalAccount):
+        if not isinstance(account, LocalAccountRecord):
             return account
         mfa_login = self.mfa_login
         if mfa_login is not None:
-            return await mfa_login.issue(cast("LocalAccount[object]", account), client_key=client_key)
+            return await mfa_login.issue(cast("LocalAccountRecord[object]", account), client_key=client_key)
         session_auth = self.session_auth
         if session_auth is None:
             return VerificationUnavailable()
         established = await session_auth.establish(request, account)
         if not isinstance(established, SessionAuthentication):
             return established
-        return LocalAccountResponse(account_id=account.account_id, display_name=account.display_name)
+        return LocalAccount(account_id=account.account_id, display_name=account.display_name)
 
     async def token_login(
         self, request: Request[Any, Any, Any], credentials: LocalCredentials
-    ) -> RefreshTokenResponse | MFARequired | RateLimited | InvalidCredentials | VerificationUnavailable:
+    ) -> TokenPair | MFARequired | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Authenticate a password and issue one access/refresh pair.
 
         Args:
@@ -258,11 +258,11 @@ class LocalAuthService(Generic[UserT]):
         account = await self.password_login.authenticate(
             credentials.identifier, credentials.password, client_key=client_key
         )
-        if not isinstance(account, LocalAccount):
+        if not isinstance(account, LocalAccountRecord):
             return account
         mfa_login = self.mfa_login
         if mfa_login is not None:
-            return await mfa_login.issue(cast("LocalAccount[object]", account), client_key=client_key)
+            return await mfa_login.issue(cast("LocalAccountRecord[object]", account), client_key=client_key)
         refresh_tokens = self.refresh_tokens
         if refresh_tokens is None:
             return VerificationUnavailable()
@@ -282,7 +282,7 @@ class LocalAuthService(Generic[UserT]):
         *,
         transport: str | None,
         evidence: AuthenticationEvidence,
-    ) -> LocalAccountResponse | RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccount | TokenPair | InvalidCredentials | VerificationUnavailable:
         """Establish a configured local transport after verified passkey evidence.
 
         Args:
@@ -305,7 +305,7 @@ class LocalAuthService(Generic[UserT]):
         transport: str | None,
         evidence: AuthenticationEvidence,
         expected_security_epoch: int | None = None,
-    ) -> LocalAccountResponse | RefreshTokenResponse | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccount | TokenPair | InvalidCredentials | VerificationUnavailable:
         """Establish a local transport after externally verified authentication.
 
         Args:
@@ -339,7 +339,7 @@ class LocalAuthService(Generic[UserT]):
             established = await session_auth.establish(request, account, evidence=evidence)
             if not isinstance(established, SessionAuthentication):
                 return established
-            return LocalAccountResponse(account_id=account.account_id, display_name=account.display_name)
+            return LocalAccount(account_id=account.account_id, display_name=account.display_name)
         if transport == "tokens" or (
             transport is None and self.refresh_tokens is not None and self.session_auth is None
         ):
@@ -359,7 +359,7 @@ class LocalAuthService(Generic[UserT]):
         code: str,
         method_id: str | None = None,
         transport: str | None = None,
-    ) -> LocalAccountResponse | RefreshTokenResponse | RateLimited | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccount | TokenPair | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Complete an MFA-gated password login through the normal issuer path.
 
         The rate limit, authoritative account read, and atomic challenge consume
@@ -414,12 +414,12 @@ class LocalAuthService(Generic[UserT]):
         )
 
     async def change_session_password(  # noqa: PLR0911 - preserve explicit sanitized outcomes
-        self, request: Request[Any, Any, Any], account_id: str, data: LocalPasswordChangeRequest
+        self, request: Request[Any, Any, Any], account_id: str, data: LocalPasswordChange
     ) -> (
-        PasswordChangeResult
-        | PasswordPolicyResult
+        PasswordChangeOutcome
+        | PasswordPolicyDecision
         | InvalidCredentials
-        | InvalidLifecycleRequest
+        | LifecycleRejected
         | VerificationUnavailable
     ):
         """Change a password and atomically prepare the current session rebind.
@@ -442,7 +442,7 @@ class LocalAuthService(Generic[UserT]):
             return proof
         if data.compromise:
             result = await self.password_change.change(account_id, data.password, proof=proof, compromise=True)
-            if isinstance(result, PasswordChangeResult) and result.status is PasswordChangeStatus.CHANGED:
+            if isinstance(result, PasswordChangeOutcome) and result.status is PasswordChangeStatus.CHANGED:
                 await session_auth.logout(request)
             return result
         authentication = session_auth.current_authentication(request)
@@ -465,7 +465,7 @@ class LocalAuthService(Generic[UserT]):
             replacement_session=plan.command,
         )
         if (
-            isinstance(result, PasswordChangeResult)
+            isinstance(result, PasswordChangeOutcome)
             and result.status is PasswordChangeStatus.CHANGED
             and result.security_epoch is not None
         ):
@@ -473,12 +473,12 @@ class LocalAuthService(Generic[UserT]):
         return result
 
     async def change_token_password(
-        self, account_id: str, data: LocalPasswordChangeRequest
+        self, account_id: str, data: LocalPasswordChange
     ) -> (
-        PasswordChangeResult
-        | PasswordPolicyResult
+        PasswordChangeOutcome
+        | PasswordPolicyDecision
         | InvalidCredentials
-        | InvalidLifecycleRequest
+        | LifecycleRejected
         | VerificationUnavailable
     ):
         """Change a bearer-authenticated password and revoke local transports.

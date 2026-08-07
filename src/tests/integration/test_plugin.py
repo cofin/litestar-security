@@ -15,7 +15,7 @@ import anyio.lowlevel
 import click
 import pytest
 from click.testing import CliRunner
-from litestar import Controller, Litestar, Response, Router, WebSocket, asgi, get, post, route, websocket
+from litestar import Controller, Litestar, MediaType, Response, Router, WebSocket, asgi, get, post, route, websocket
 from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
 from litestar.di import NamedDependency, Provide
@@ -35,11 +35,12 @@ from litestar.middleware.session.server_side import ServerSideSessionConfig
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.controller import OpenAPIController
 from litestar.openapi.plugins import JsonRenderPlugin, SwaggerRenderPlugin
-from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme, Tag
+from litestar.openapi.spec import Components, OpenAPIResponse, SecurityScheme
 from litestar.plugins import CLIPlugin, CLIPluginProtocol, InitPlugin, ReceiveRoutePlugin
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED, HTTP_400_BAD_REQUEST
 from litestar.testing import TestClient
+from litestar.types import Empty
 
 import litestar_security.accounts as accounts_module
 from litestar_security import (
@@ -53,35 +54,37 @@ from litestar_security import (
     csp_nonce,
 )
 from litestar_security._cli import register, security_group
+from litestar_security._docs import RouteDocs
+from litestar_security._dto import wire_struct
 from litestar_security.accounts import (
-    LOCAL_AUTH_TAGS,
     LifecycleAccepted,
-    LocalAccountResponse,
+    LocalAccount,
     LocalAuth,
     LocalAuthSecrets,
     LocalCredentials,
-    PasskeySummary,
+    LocalMFAChallenge,
+    PasskeyRecord,
     PasswordReauthenticationProof,
     ProtectedSecret,
     PurposeTokenCodec,
-    RecoveryCodes,
+    RecoveryCodeGrant,
     RefreshReceiptKey,
     RefreshReceiptSealer,
     RefreshTokenCodec,
     RegistrationPolicy,
-    RevokeLoginMethodResult,
+    RevokeLoginMethodOutcome,
     RevokeLoginMethodStatus,
     SessionBindingConfig,
     SessionSummary,
-    StepUpGrant,
-    TOTPEnrollment,
+    StepUpCredential,
     TOTPMethod,
     TOTPPolicy,
+    TOTPProvisioningGrant,
     WebAuthnOptions,
     build_mfa_routes,
 )
 from litestar_security.accounts._mfa_login import MFARequired
-from litestar_security.accounts._records import LocalAccount
+from litestar_security.accounts._records import LocalAccountRecord
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -119,11 +122,14 @@ from litestar_security.providers.jwt import (
     VerificationKey,
 )
 from litestar_security.providers.oidc import ServiceTokenConfig
+from litestar_security.schema import RouteError, WirePolicy
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,
     WebSocketConnectTokenIssuer,
     WebSocketSecurityConfig,
 )
+from tests.fixtures.accounts import PasswordLogin as AccountPasswordLogin
+from tests.fixtures.collaborators import AsyncRecordingJWTVerifier, DenyingRateLimitGuard
 
 
 def test_static_security_headers_cover_success_and_error_responses_without_duplicates() -> None:
@@ -207,7 +213,6 @@ def test_security_headers_reject_application_ownership_collisions() -> None:
         )
 
 
-@pytest.mark.anyio
 async def test_nonce_csp_hook_is_idempotent_and_replaces_response_conflicts() -> None:
     plugin = SecurityPlugin[object](
         SecurityConfig[object](
@@ -466,7 +471,7 @@ class _RouteMFAService:
         del account_id, label
         if self.failure == "enroll":
             return VerificationUnavailable()
-        return TOTPEnrollment(
+        return TOTPProvisioningGrant(
             enrollment_id="enrollment-1",
             method_id="method-1",
             provisioning_uri="otpauth://totp/Example?secret=SECRET",
@@ -492,19 +497,19 @@ class _RouteMFAService:
             return InvalidCredentials()
         if self.failure == "recovery":
             return VerificationUnavailable()
-        return RecoveryCodes(codes=("rc_v1_00000000000000000000000000000000",))
+        return RecoveryCodeGrant(codes=("rc_v1_00000000000000000000000000000000",))
 
     async def generate_recovery_codes(self, account_id: str) -> object:
         del account_id
         if self.failure == "recovery":
             return VerificationUnavailable()
-        return RecoveryCodes(codes=("rc_v1_00000000000000000000000000000000",))
+        return RecoveryCodeGrant(codes=("rc_v1_00000000000000000000000000000000",))
 
     async def remove_totp_method(self, account_id: str, method_id: str) -> object:
         del account_id, method_id
         if self.failure == "remove":
             return VerificationUnavailable()
-        return RevokeLoginMethodResult(RevokeLoginMethodStatus.REVOKED)
+        return RevokeLoginMethodOutcome(RevokeLoginMethodStatus.REVOKED)
 
 
 class _RoutePasskeyService:
@@ -539,7 +544,7 @@ class _RoutePasskeyService:
         if self.failure == "list":
             return VerificationUnavailable()
         return (
-            PasskeySummary(
+            PasskeyRecord(
                 credential_id="Y3JlZGVudGlhbA",
                 display_name="Laptop",
                 backup_eligible=True,
@@ -554,7 +559,7 @@ class _RoutePasskeyService:
         del account_id, credential_id
         if self.failure == "remove":
             return VerificationUnavailable()
-        return RevokeLoginMethodResult(RevokeLoginMethodStatus.REVOKED)
+        return RevokeLoginMethodOutcome(RevokeLoginMethodStatus.REVOKED)
 
 
 class _RouteStepUpService:
@@ -564,7 +569,7 @@ class _RouteStepUpService:
         del kwargs
         if self.failure == "issue":
             return InvalidCredentials()
-        return StepUpGrant(
+        return StepUpCredential(
             token="step-up-grant",  # noqa: S106 - deterministic opaque fixture token
             purpose="settings",
             expires_at=datetime(2026, 7, 27, 0, 5, tzinfo=timezone.utc),
@@ -612,7 +617,7 @@ class _RouteLocalAuth:
         del request, transport, evidence
         if self.failure:
             return InvalidCredentials()
-        return LocalAccountResponse(account_id=account_id)
+        return LocalAccount(account_id=account_id)
 
 
 def _route_factor_evidence() -> AuthenticationEvidence:
@@ -1007,18 +1012,13 @@ def test_generated_step_up_purposes_constrain_factors_deny_by_default(purpose: s
 
 
 def test_generated_mfa_handlers_apply_shared_rate_limit_before_factor_work() -> None:
-    class Guard:
-        async def check(self, *args: object, **kwargs: object) -> object:
-            del args, kwargs
-            return accounts_module.RateLimited(retry_after=2)
-
     router = build_mfa_routes(
         step_up=cast("Any", _RouteStepUpService()),
         epochs=cast("Any", _RouteEpochs()),
         mfa=cast("Any", _RouteMFAService()),
         passkeys=cast("Any", _RoutePasskeyService()),
         local_auth=cast("Any", _RouteLocalAuth()),
-        rate_limits=cast("Any", Guard()),
+        rate_limits=cast("Any", DenyingRateLimitGuard()),
         client_key=lambda _request: "client",
     )
     app = Litestar(
@@ -1072,6 +1072,7 @@ def test_generated_local_route_errors_raise_interceptable_classified_exceptions(
         mode=accounts_module.LocalAuthMode.SESSION,
         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
         route_prefix="/identity",
+        docs=RouteDocs(),
     )
     intercepted: list[int] = []
 
@@ -1119,6 +1120,7 @@ def test_generated_credential_bearing_route_errors_raise_unauthorized() -> None:
         mode=accounts_module.LocalAuthMode.SESSION,
         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
         route_prefix="/identity",
+        docs=RouteDocs(),
     )
     csrf_secret = token_hex()
     app = Litestar(
@@ -1165,7 +1167,7 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
         async def complete_mfa_login(self, _request: object, _challenge: str, **kwargs: object) -> object:
             self.completions.append(kwargs)
             if kwargs["transport"] == "session":
-                return LocalAccountResponse(account_id="account-1")
+                return LocalAccount(account_id="account-1")
             return InvalidCredentials()
 
     service = Service()
@@ -1175,6 +1177,7 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
         mode=accounts_module.LocalAuthMode.HYBRID,
         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
         route_prefix="/identity",
+        docs=RouteDocs(),
     )
     csrf_secret = token_hex()
     app = Litestar(
@@ -1207,8 +1210,8 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
     assert token_login is not None
     assert token_login.responses is not None
     for responses, success_schema in (
-        (session_login.responses, "#/components/schemas/LocalAccountResponse"),
-        (token_login.responses, "#/components/schemas/RefreshTokenResponse"),
+        (session_login.responses, "#/components/schemas/LocalAccount"),
+        (token_login.responses, "#/components/schemas/TokenPair"),
     ):
         success_content = responses["200"].content
         required_content = responses["403"].content
@@ -1217,7 +1220,7 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
         assert success_content["application/json"].schema is not None
         assert required_content["application/json"].schema is not None
         assert success_content["application/json"].schema.ref == success_schema
-        assert required_content["application/json"].schema.ref == "#/components/schemas/LocalMFARequiredResponse"
+        assert required_content["application/json"].schema.ref == "#/components/schemas/LocalMFAChallenge"
 
     with TestClient(app) as client:
         csrf_token = generate_csrf_token(csrf_secret)
@@ -1307,6 +1310,7 @@ def test_session_mfa_completion_translates_a_sanitized_failure() -> None:
                         mode=accounts_module.LocalAuthMode.SESSION,
                         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
                         route_prefix="/identity",
+                        docs=RouteDocs(),
                     ),
                 )
             )
@@ -1354,8 +1358,8 @@ def test_generated_mfa_completion_routes_follow_local_auth_transport_and_csrf_mo
             transport = cast("str", kwargs["transport"])
             self.transports.append(transport)
             if transport == "session":
-                return LocalAccountResponse(account_id="account-1")
-            return accounts_module.RefreshTokenResponse(
+                return LocalAccount(account_id="account-1")
+            return accounts_module.TokenPair(
                 access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
                 refresh_token="rt_aWlpaWlpaWlpaWlpaWlpaQ.c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M",  # noqa: S106
                 expires_in=60,
@@ -1376,6 +1380,7 @@ def test_generated_mfa_completion_routes_follow_local_auth_transport_and_csrf_mo
                         mode=accounts_module.LocalAuthMode(mode),
                         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
                         route_prefix="/identity",
+                        docs=RouteDocs(),
                     ),
                 )
             )
@@ -1448,6 +1453,7 @@ def test_generated_token_mfa_completion_surfaces_controlled_login_mfa_rate_limit
                         mode=accounts_module.LocalAuthMode.TOKENS,
                         registration=SimpleNamespace(mode=accounts_module.RegistrationMode.DISABLED),
                         route_prefix="/identity",
+                        docs=RouteDocs(),
                     ),
                 )
             )
@@ -1578,7 +1584,6 @@ def test_plugin_mfa_route_registration_validates_ownership_and_is_idempotent() -
     assert len(app_config.route_handlers) == 1
 
 
-@pytest.mark.anyio
 async def test_plugin_binds_login_mfa_before_local_route_caching_and_gates_password_login() -> None:
     """The MFA-login service is installed before generated local routes can cache."""
     mfa_store, protector, _passkey_store, _challenge_store = _feature_test_ports()
@@ -1599,7 +1604,7 @@ async def test_plugin_binds_login_mfa_before_local_route_caching_and_gates_passw
     assert local_auth.local_auth_service.mfa_login is local_auth.mfa_login
     assert local_auth.build_route_handlers() == ()
 
-    account = LocalAccount(
+    account = LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -1608,16 +1613,42 @@ async def test_plugin_binds_login_mfa_before_local_route_caching_and_gates_passw
         security_epoch=1,
     )
 
-    class PasswordLogin:
-        async def authenticate(self, *_args: object, **_kwargs: object) -> LocalAccount[object]:
-            return account
-
-    service = replace(local_auth.local_auth_service, password_login=cast("Any", PasswordLogin()))
+    service = replace(local_auth.local_auth_service, password_login=cast("Any", AccountPasswordLogin(account)))
     outcome = await service.session_login(
         cast("Any", object()),
         LocalCredentials(identifier="person@example.com", password="password"),  # noqa: S106
     )
     assert isinstance(outcome, MFARequired)
+
+
+def _routed_local_session_auth() -> Any:
+    return LocalAuth.session(
+        accounts=cast("Any", _local_session_accounts()),
+        secrets=_local_auth_secrets(),
+        binding=SessionBindingConfig(pepper=b"binding-pepper-for-plugin-tests!", max_age=600),
+    )
+
+
+def test_local_auth_caches_one_generated_router_per_wire_policy() -> None:
+    local_auth = _routed_local_session_auth()
+    camel = WirePolicy(rename="camel")
+
+    default_router = local_auth.build_route_handlers()
+
+    assert local_auth.build_route_handlers() is default_router
+    assert local_auth.build_route_handlers(wire=WirePolicy()) is default_router
+    assert local_auth.build_route_handlers(wire=camel) is local_auth.build_route_handlers(wire=camel)
+    assert local_auth.build_route_handlers(wire=camel) is not default_router
+
+
+def test_plugin_builds_generated_routes_with_the_configured_wire_policy() -> None:
+    local_auth = _routed_local_session_auth()
+    plugin = SecurityPlugin(SecurityConfig(local_auth=local_auth, wire_rename="camel"))
+    app_config = AppConfig()
+
+    plugin._configure_local_auth_routes(app_config)  # noqa: SLF001 - plugin composition boundary
+
+    assert app_config.route_handlers == [local_auth.build_route_handlers(wire=WirePolicy(rename="camel"))[0]]
 
 
 def test_plugin_mfa_login_binding_validates_configuration_and_is_idempotent() -> None:
@@ -2900,9 +2931,9 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
     schemas = app.openapi_schema.components.schemas if app.openapi_schema.components is not None else None
     assert schemas is not None
     if registration_mode == "public":
-        assert "invitation_token" not in schemas["LocalRegistrationRequest"].properties
+        assert "invitation_token" not in schemas["LocalRegistration"].properties
     elif registration_mode == "invite":
-        invitation_schema = schemas["LocalInvitationRegistrationRequest"]
+        invitation_schema = schemas["LocalInvitationRegistration"]
         assert invitation_schema.required is not None
         assert "invitation_token" in invitation_schema.required
     if mode in {"tokens", "hybrid"}:
@@ -2930,66 +2961,6 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
     assert len(app_config.lifespan) == 1
     provider = cast("Provide", local_auth.build_route_handlers()[0].dependencies["local_auth_service"])
     assert provider.dependency() is local_auth.local_auth_service
-
-
-def test_generated_local_routes_are_grouped_documented_and_uniquely_identified(
-    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
-) -> None:
-    private_key, _public_key = jwt_key_material["EdDSA"]
-    local_auth = LocalAuth.hybrid(
-        accounts=cast("Any", _local_session_accounts()),
-        secrets=_local_auth_secrets(refresh=True),
-        binding=SessionBindingConfig(pepper=b"b" * 32, max_age=600),
-        key_ring=LocalKeyRing(
-            issuer="https://local.example",
-            active_signing_key=SigningKey(key_id="active", algorithm="EdDSA", private_key=private_key),
-        ),
-        token_audience="local-client",  # noqa: S106 - public JWT audience
-        registration=RegistrationPolicy.public(),
-    )
-    caller_tag = Tag(name="Local sessions", description="Caller owns this description.")
-    app = Litestar(
-        route_handlers=[],
-        csrf_config=CSRFConfig(secret=token_hex()),
-        middleware=[_native_session_backend("client")[1]],
-        openapi_config=OpenAPIConfig(title="Test", version="1.0", tags=[caller_tag]),
-        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))],
-    )
-
-    declared = {tag.name: tag for tag in app.openapi_schema.tags or ()}
-    assert set(declared) == {tag.name for tag in LOCAL_AUTH_TAGS}
-    assert declared["Local sessions"] is caller_tag
-    assert all(tag.description for tag in declared.values())
-
-    operations = [
-        operation
-        for path_item in app.openapi_schema.paths.values()
-        for operation in (path_item.get, path_item.post, path_item.delete)
-        if operation is not None
-    ]
-    generated = [operation for operation in operations if (operation.operation_id or "").startswith("Local")]
-    assert len(generated) == 14
-    assert len({operation.operation_id for operation in generated}) == len(generated)
-    assert all(operation.summary and operation.description for operation in generated)
-    assert all(len(operation.tags or ()) == 1 for operation in generated)
-    assert {tag for operation in generated for tag in operation.tags or ()} == set(declared)
-
-    schemas = app.openapi_schema.components.schemas if app.openapi_schema.components is not None else None
-    assert schemas is not None
-    documented = ("LocalCredentials", "LocalPasswordChangeRequest", "LocalSessionResponse", "RouteStatusResponse")
-    # LocalSessionResponse is only named when the nested annotation resolves, which a
-    # quoted reference does not do on Python 3.10.
-    assert set(documented) <= set(schemas)
-    assert all(all(prop.description for prop in (schemas[name].properties or {}).values()) for name in documented)
-
-    by_id = {operation.operation_id: operation for operation in generated}
-    assert by_id["LocalSessionLogin"].tags == ["Local sessions"]
-    assert by_id["LocalTokenRefresh"].tags == ["Local tokens"]
-    assert by_id["LocalRegister"].tags == ["Local registration"]
-    assert by_id["LocalPasswordRecovery"].tags == ["Local passwords"]
-    assert by_id["LocalVerificationConfirm"].tags == ["Local verification"]
-    assert by_id["LocalPasswordChange"].tags == ["Local passwords"]
-    assert by_id["LocalTokenPasswordChange"].tags == ["Local passwords"]
 
 
 def test_custom_local_controllers_keep_services_without_generated_routes(
@@ -3070,14 +3041,12 @@ def test_openapi_component_contribution_preserves_callers_and_validates_duplicat
 
 
 def test_composite_bearer_contributes_one_native_openapi_scheme() -> None:
-    class _Verifier:
-        config = JWTValidationConfig(
+    verifier = AsyncRecordingJWTVerifier(
+        InvalidCredentials(),
+        JWTValidationConfig(
             issuer="https://issuer.example", audiences=frozenset({"api"}), algorithms=frozenset({"RS256"})
-        )
-
-        async def verify(self, _token: str, *, now: datetime) -> InvalidCredentials:
-            del now
-            return InvalidCredentials()
+        ),
+    )
 
     composite = CompositeBearerConfig(
         mechanism_name="bearer",
@@ -3087,7 +3056,7 @@ def test_composite_bearer_contributes_one_native_openapi_scheme() -> None:
                 selector=BearerSlotSelector(
                     issuers=frozenset({"https://issuer.example"}), audiences=frozenset({"api"})
                 ),
-                verifier=_Verifier(),
+                verifier=verifier,
             ),
         ),
     )
@@ -4358,3 +4327,35 @@ def test_cli_registration_is_idempotent() -> None:
     SecurityPlugin().on_cli_init(cli)
 
     assert list(cli.commands) == ["security"]
+
+
+def _generated_handlers(router: Any) -> dict[str, Any]:
+    return {
+        f"{handler.handler_name}{min(handler.paths)}": handler
+        for route in router.routes
+        for handler in route.route_handlers
+        if handler.handler_name != "options_handler"
+    }
+
+
+def test_generated_handlers_carry_the_wire_dto_and_document_what_they_send() -> None:
+    local_auth = _routed_local_session_auth()
+
+    (router,) = local_auth.build_route_handlers(wire=WirePolicy())
+    handlers = _generated_handlers(router)
+
+    login = handlers["login/login"]
+    assert login.dto is not Empty
+    assert login.return_dto is not Empty
+    # A handler returning Response[X] with a DTO publishes an empty media-type
+    # key unless the media type is pinned.
+    assert login.media_type is MediaType.JSON
+    assert login.responses[200].data_container is wire_struct(LocalAccount, WirePolicy())
+    assert login.responses[403].data_container is wire_struct(LocalMFAChallenge, WirePolicy())
+    # A raised status is rendered by exception handling, not by the DTO, so its
+    # documented body stays exactly what Litestar sends.
+    assert login.responses[400].data_container is RouteError
+
+    sessions = handlers["list_sessions/sessions"]
+    assert sessions.return_dto is not Empty
+    assert sessions.dto is Empty

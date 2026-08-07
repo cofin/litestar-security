@@ -132,7 +132,6 @@ class _AuthorizationResolver:
         return self.outcome
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("status", [200, 401], ids=["normal", "exception"])
 async def test_security_wrapper_appends_queued_headers_to_every_http_response(status: int) -> None:
     sent: list[Message] = []
@@ -156,7 +155,6 @@ async def test_security_wrapper_appends_queued_headers_to_every_http_response(st
     assert sent[1] == {"type": "http.response.body", "body": b""}
 
 
-@pytest.mark.anyio
 async def test_security_response_headers_are_not_queued_or_injected_for_websocket() -> None:
     sent: list[Message] = []
     existing = (b"x-existing", b"value")
@@ -242,7 +240,6 @@ def _policy_evaluator(
     return registry.evaluator(), PolicyCompiler(registry), slots
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     "case",
     [
@@ -292,7 +289,6 @@ def test_policy_compiler_is_deterministic_cached_and_preserves_forced_csrf() -> 
     assert [slot.calls for slot in slots] == [0, 0, 0]
 
 
-@pytest.mark.anyio
 async def test_exclude_compiled_plan_skips_all_credential_work() -> None:
     evaluator, compiler, slots = _policy_evaluator({"a", "b", "c"})
 
@@ -306,7 +302,6 @@ async def test_exclude_compiled_plan_skips_all_credential_work() -> None:
     assert [slot.calls for slot in slots] == [0, 0, 0]
 
 
-@pytest.mark.anyio
 async def test_public_compiled_plan_skips_all_credential_work() -> None:
     evaluator, compiler, slots = _policy_evaluator({"a", "b", "c"})
 
@@ -317,7 +312,6 @@ async def test_public_compiled_plan_skips_all_credential_work() -> None:
     assert [slot.calls for slot in slots] == [0, 0, 0]
 
 
-@pytest.mark.anyio
 async def test_nonqualifying_credentials_still_merge_or_reject_different_subjects() -> None:
     evaluator, compiler, _ = _policy_evaluator({"a", "c"})
 
@@ -352,7 +346,6 @@ def test_policy_compiler_rejects_foreign_policy_subclasses() -> None:
         PolicyCompiler(AuthenticationRegistry()).compile(_ForeignPolicy())
 
 
-@pytest.mark.anyio
 async def test_no_credentials_required_rejects_and_optional_remains_anonymous() -> None:
     events: list[str] = []
     evaluator, slots, authenticators, resolvers = _evaluator(
@@ -370,7 +363,6 @@ async def test_no_credentials_required_rejects_and_optional_remains_anonymous() 
     assert [resolver.calls for resolver in resolvers] == [0]
 
 
-@pytest.mark.anyio
 async def test_one_valid_credential_resolves_once() -> None:
     events: list[str] = []
     principal = Principal(id="user-1")
@@ -388,7 +380,6 @@ async def test_one_valid_credential_resolves_once() -> None:
     assert events == ["extract:slot-local", "authenticate:local", "resolve:local"]
 
 
-@pytest.mark.anyio
 async def test_malformed_extraction_is_terminal() -> None:
     events: list[str] = []
     evaluator, slots, authenticators, resolvers = _evaluator(
@@ -403,7 +394,6 @@ async def test_malformed_extraction_is_terminal() -> None:
     assert [resolver.calls for resolver in resolvers] == [0]
 
 
-@pytest.mark.anyio
 async def test_presented_slot_without_authenticator_is_terminal() -> None:
     events: list[str] = []
     slot = _Slot("unowned", PresentedCredential("token"), events)
@@ -419,7 +409,6 @@ async def test_presented_slot_without_authenticator_is_terminal() -> None:
     assert slot.calls == 1
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("order", ["forward", "reverse"])
 async def test_valid_plus_invalid_is_terminal_in_either_order(order: str) -> None:
     events: list[str] = []
@@ -439,7 +428,6 @@ async def test_valid_plus_invalid_is_terminal_in_either_order(order: str) -> Non
     assert [resolver.calls for resolver in resolvers] == [0, 0]
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("order", ["forward", "reverse"])
 async def test_valid_plus_unavailable_returns_503_in_either_order(order: str) -> None:
     events: list[str] = []
@@ -464,7 +452,6 @@ async def test_valid_plus_unavailable_returns_503_in_either_order(order: str) ->
     assert [resolver.calls for resolver in resolvers] == [0, 0]
 
 
-@pytest.mark.anyio
 async def test_different_subjects_reject_after_single_resolution_each() -> None:
     events: list[str] = []
     evaluator, _, _, resolvers = _evaluator(
@@ -481,7 +468,6 @@ async def test_different_subjects_reject_after_single_resolution_each() -> None:
     assert [resolver.calls for resolver in resolvers] == [1, 1]
 
 
-@pytest.mark.anyio
 async def test_authenticated_outcome_cannot_resolve_to_anonymous() -> None:
     events: list[str] = []
     evaluator, _, _, resolvers = _evaluator(
@@ -495,7 +481,6 @@ async def test_authenticated_outcome_cannot_resolve_to_anonymous() -> None:
     assert [resolver.calls for resolver in resolvers] == [1]
 
 
-@pytest.mark.anyio
 async def test_explicit_participant_set_controls_required_satisfaction() -> None:
     events: list[str] = []
     evaluator, _, _, _ = _evaluator(
@@ -511,7 +496,6 @@ async def test_explicit_participant_set_controls_required_satisfaction() -> None
     assert principal.id == "user-1"
 
 
-@pytest.mark.anyio
 async def test_same_subject_merges_evidence_and_grants_in_order() -> None:
     events: list[str] = []
     evaluator, _, _, _ = _evaluator(
@@ -581,7 +565,6 @@ def _authorization_for_dimension(dimension: str) -> AuthorizationSnapshot:
     return AuthorizationSnapshot(**{dimension: {"a", "b", "c"}})
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("dimension", ["scopes", "roles", "capabilities", "team_ids", "tenant_ids"])
 @pytest.mark.parametrize(
     ("bounds", "expected"),
@@ -680,7 +663,6 @@ def test_resolve_authorization_narrows_team_roles_with_credential_role_bound(
     assert effective.team_roles == expected
 
 
-@pytest.mark.anyio
 async def test_team_role_guard_denies_role_removed_by_credential_ceiling() -> None:
     events: list[str] = []
     evaluator, _, _, _ = _evaluator(
@@ -712,7 +694,6 @@ async def test_team_role_guard_denies_role_removed_by_credential_ceiling() -> No
     assert decision.code == "missing_team_role"
 
 
-@pytest.mark.anyio
 async def test_application_authorization_is_resolved_once_then_narrowed_by_all_credentials() -> None:
     events: list[str] = []
     application = AuthorizationSnapshot(
@@ -771,7 +752,6 @@ async def test_application_authorization_is_resolved_once_then_narrowed_by_all_c
     assert events[-1] == "authorize:user-1"
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("resolution", "error"),
     [(InvalidCredentials(), NotAuthorizedException), (VerificationUnavailable(), ServiceUnavailableException)],
@@ -790,7 +770,6 @@ async def test_authorization_resolution_preserves_structured_failure(
         await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True)
 
 
-@pytest.mark.anyio
 async def test_static_resolvers_supply_the_configured_happy_path() -> None:
     events: list[str] = []
     principal = Principal(id="user-1")
@@ -820,7 +799,6 @@ def test_registry_rejects_malformed_authorization_resolver() -> None:
         AuthenticationRegistry(authorization_resolver=object())  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
 async def test_presented_credential_cannot_normalize_back_to_missing() -> None:
     events: list[str] = []
     evaluator, _, authenticators, resolvers = _evaluator(
@@ -834,7 +812,6 @@ async def test_presented_credential_cannot_normalize_back_to_missing() -> None:
     assert [resolver.calls for resolver in resolvers] == [0]
 
 
-@pytest.mark.anyio
 async def test_identity_resolution_unavailable_wins_over_invalid_after_all_resolvers_run() -> None:
     events: list[str] = []
     evaluator, _, _, resolvers = _evaluator(
@@ -879,7 +856,6 @@ class _RaisingAuthorizationResolver:
         raise RuntimeError
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("port", ["slot", "authenticator", "identity_resolver", "authorization_resolver"])
 async def test_raising_application_port_fails_closed_as_unavailable(port: str) -> None:
     events: list[str] = []

@@ -8,19 +8,19 @@ import msgspec
 from litestar_security.schema import WireStruct
 
 __all__ = (
-    "LocalAccountResponse",
+    "LocalAccount",
     "LocalCredentials",
-    "LocalIdentifierRequest",
-    "LocalInvitationRegistrationRequest",
-    "LocalMFACompletionRequest",
-    "LocalMFARequiredResponse",
-    "LocalPasswordChangeRequest",
-    "LocalPasswordResetRequest",
-    "LocalRegistrationRequest",
-    "LocalSessionListResponse",
-    "LocalSessionResponse",
-    "LocalTokenRequest",
-    "RouteStatusResponse",
+    "LocalIdentifier",
+    "LocalInvitationRegistration",
+    "LocalMFAChallenge",
+    "LocalMFACompletion",
+    "LocalPasswordChange",
+    "LocalPasswordReset",
+    "LocalRegistration",
+    "LocalSession",
+    "LocalSessionList",
+    "LocalToken",
+    "RouteStatus",
 )
 
 _IDENTIFIER = msgspec.Meta(description="The account identifier, normally an email address.")
@@ -39,7 +39,7 @@ class LocalCredentials(WireStruct, frozen=True):
         return f"{type(self).__name__}(identifier={self.identifier!r}, password=<redacted>)"
 
 
-class LocalMFARequiredResponse(WireStruct, frozen=True):
+class LocalMFAChallenge(WireStruct, frozen=True):
     """A one-time challenge returned when password login requires MFA completion."""
 
     challenge: Annotated[str, msgspec.Meta(description="The opaque one-time challenge to present at completion.")]
@@ -61,7 +61,7 @@ class LocalMFARequiredResponse(WireStruct, frozen=True):
         )
 
 
-class LocalMFACompletionRequest(WireStruct, frozen=True):
+class LocalMFACompletion(WireStruct, frozen=True):
     """Typed input that completes a pending password-login MFA challenge."""
 
     challenge: Annotated[str, msgspec.Meta(description="The opaque one-time challenge from password login.")]
@@ -80,7 +80,7 @@ class LocalMFACompletionRequest(WireStruct, frozen=True):
         )
 
 
-class LocalRegistrationRequest(WireStruct, frozen=True):
+class LocalRegistration(WireStruct, frozen=True):
     """Typed public self-service registration input."""
 
     identifier: Annotated[str, _IDENTIFIER]
@@ -95,7 +95,7 @@ class LocalRegistrationRequest(WireStruct, frozen=True):
         )
 
 
-class LocalInvitationRegistrationRequest(WireStruct, frozen=True):
+class LocalInvitationRegistration(WireStruct, frozen=True):
     """Typed invite-only self-service registration input."""
 
     identifier: Annotated[str, _IDENTIFIER]
@@ -111,13 +111,13 @@ class LocalInvitationRegistrationRequest(WireStruct, frozen=True):
         )
 
 
-class LocalIdentifierRequest(WireStruct, frozen=True):
+class LocalIdentifier(WireStruct, frozen=True):
     """Typed enumeration-resistant identifier request."""
 
     identifier: Annotated[str, _IDENTIFIER]
 
 
-class LocalTokenRequest(WireStruct, frozen=True):
+class LocalToken(WireStruct, frozen=True):
     """Typed one-time or refresh-token request."""
 
     token: Annotated[str, msgspec.Meta(description="The opaque token issued by a previous request.")]
@@ -127,7 +127,7 @@ class LocalTokenRequest(WireStruct, frozen=True):
         return f"{type(self).__name__}(token=<redacted>)"
 
 
-class LocalPasswordResetRequest(WireStruct, frozen=True):
+class LocalPasswordReset(WireStruct, frozen=True):
     """Typed password recovery completion input."""
 
     token: Annotated[str, msgspec.Meta(description="The single-use recovery token.")]
@@ -138,7 +138,7 @@ class LocalPasswordResetRequest(WireStruct, frozen=True):
         return f"{type(self).__name__}(token=<redacted>, password=<redacted>)"
 
 
-class LocalPasswordChangeRequest(WireStruct, frozen=True):
+class LocalPasswordChange(WireStruct, frozen=True):
     """Typed authenticated password-change input."""
 
     current_password: Annotated[str, msgspec.Meta(description="The caller's current password.")]
@@ -160,20 +160,20 @@ class LocalPasswordChangeRequest(WireStruct, frozen=True):
         )
 
 
-class LocalAccountResponse(WireStruct, frozen=True):
+class LocalAccount(WireStruct, frozen=True):
     """Minimal account projection returned after session login."""
 
     account_id: Annotated[str, msgspec.Meta(description="The stable application-owned account identifier.")]
     display_name: Annotated[str | None, _DISPLAY_NAME] = None
 
 
-class RouteStatusResponse(WireStruct, frozen=True):
+class RouteStatus(WireStruct, frozen=True):
     """Stable generated-route status body, shared by every route in the tree."""
 
     detail: Annotated[str, msgspec.Meta(description="A human-readable outcome that never names an account.")]
 
 
-class LocalSessionResponse(WireStruct, frozen=True):
+class LocalSession(WireStruct, frozen=True):
     """JSON-safe generated-route session projection."""
 
     session_id: Annotated[str, msgspec.Meta(description="The session identifier, accepted by the revoke route.")]
@@ -187,10 +187,10 @@ class LocalSessionResponse(WireStruct, frozen=True):
     ]
 
 
-class LocalSessionListResponse(WireStruct, frozen=True):
+class LocalSessionList(WireStruct, frozen=True):
     """Safe caller-owned session inventory."""
 
     # Unquoted deliberately: the reference is backward, and on Python 3.10 a quoted
     # forward reference nested in a subscript stays an unresolved string, which drops
     # the element type from the generated schema.
-    sessions: Annotated[tuple[LocalSessionResponse, ...], msgspec.Meta(description="The caller's own active sessions.")]
+    sessions: Annotated[tuple[LocalSession, ...], msgspec.Meta(description="The caller's own active sessions.")]

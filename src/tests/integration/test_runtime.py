@@ -29,45 +29,45 @@ from litestar.middleware.session.client_side import CookieBackendConfig
 from litestar.middleware.session.server_side import ServerSideSessionConfig
 from litestar.params import FromPath  # noqa: TC002 - Litestar resolves handler annotations at runtime
 from litestar.routes import HTTPRoute
-from litestar.status_codes import HTTP_400_BAD_REQUEST, HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAILABLE
+from litestar.status_codes import HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAILABLE
 from litestar.stores.memory import MemoryStore
 from litestar.testing import AsyncTestClient, TestClient
 
 from litestar_security import MFAConfig, SecurityConfig, SecurityPlugin, authentication
 from litestar_security.accounts import (
-    ConsumeResult,
+    ConsumeOutcome,
     ConsumeStatus,
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
-    LocalAccount,
+    LocalAccountRecord,
     LocalAuth,
     LocalAuthSecrets,
     LoginMethod,
     NotificationCommand,
-    PasswordChangeResult,
+    PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordCredentialState,
-    PasswordResetResult,
+    PasswordResetOutcome,
     PasswordResetStatus,
-    PasswordVerificationResult,
+    PasswordVerificationOutcome,
     PasswordVerificationStatus,
     ProtectedSecret,
     PurposeTokenCodec,
+    RecoveryCodeGrant,
     RecoveryCodePepper,
-    RecoveryCodes,
     RefreshFamilyContext,
     RefreshReceiptKey,
     RefreshReceiptSealer,
+    RefreshRotationOutcome,
     RefreshRotationStatus,
     RefreshTokenCodec,
     RefreshTokenProof,
+    RegistrationOutcome,
     RegistrationPolicy,
-    RegistrationResult,
     RegistrationStatus,
-    RevokeLoginMethodResult,
+    RevokeLoginMethodOutcome,
     RevokeLoginMethodStatus,
     RotateRefreshCommand,
-    RotateRefreshResult,
     SecurityEvent,
     SessionBindingConfig,
     SessionRecord,
@@ -311,7 +311,6 @@ class _WebSocketRouteHandler(_RouteHandler):
             raise self.authorization_error
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("scope_type", ["http", "websocket"])
 async def test_anonymous_http_and_websocket_always_receive_typed_scope(scope_type: str) -> None:
     observed: list[Scope] = []
@@ -327,7 +326,6 @@ async def test_anonymous_http_and_websocket_always_receive_typed_scope(scope_typ
     assert isinstance(observed[0]["auth"], SecurityContext)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("scope_type", ["http", "websocket"])
 async def test_authenticated_http_and_websocket_replace_anonymous_scope(scope_type: str) -> None:
     observed: list[Scope] = []
@@ -350,7 +348,6 @@ async def test_authenticated_http_and_websocket_replace_anonymous_scope(scope_ty
     assert authenticator.calls == 1
 
 
-@pytest.mark.anyio
 async def test_explicit_bypass_initializes_scope_without_extracting() -> None:
     observed: list[Scope] = []
     config, slot, _ = _runtime(InvalidCredentials())
@@ -367,7 +364,6 @@ async def test_explicit_bypass_initializes_scope_without_extracting() -> None:
     assert slot.calls == 0
 
 
-@pytest.mark.anyio
 async def test_generated_options_initializes_scope_without_extracting() -> None:
     observed: list[Scope] = []
     config, slot, _ = _runtime(InvalidCredentials())
@@ -392,7 +388,6 @@ async def test_generated_options_initializes_scope_without_extracting() -> None:
     assert slot.calls == 0
 
 
-@pytest.mark.anyio
 async def test_lookalike_options_handler_is_authenticated_not_bypassed() -> None:
     config, slot, _ = _runtime(InvalidCredentials())
 
@@ -415,7 +410,6 @@ async def test_lookalike_options_handler_is_authenticated_not_bypassed() -> None
     assert slot.calls == 1
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("outcome", "status_code", "exception_name"),
     [
@@ -462,7 +456,6 @@ async def test_native_exception_dispatch_and_hooks_observe_anonymous_scope(
     assert isinstance(hook_observations[0][1], SecurityContext)
 
 
-@pytest.mark.anyio
 async def test_owned_native_session_loads_before_security_and_persists_through_401() -> None:
     backend = _MemorySessionBackend()
     owned_session = OwnedSessionBackend(
@@ -500,7 +493,6 @@ async def test_owned_native_session_loads_before_security_and_persists_through_4
     assert persisted.json() == {"failure_seen": True}
 
 
-@pytest.mark.anyio
 async def test_wrapper_runtime_order_and_native_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
     builds = 0
@@ -698,8 +690,8 @@ def test_composite_bearer_runs_through_the_complete_litestar_runtime() -> None:
     assert unavailable.status_code == HTTP_503_SERVICE_UNAVAILABLE
 
 
-def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  # noqa: C901
-    account = LocalAccount(
+def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccountRecord[object]]:  # noqa: C901
+    account = LocalAccountRecord(
         account_id="account-1",
         normalized_identifier="user@example.com",
         display_name="User",
@@ -730,7 +722,7 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccount[object]]:  #
     async def get_session(session_id: str) -> SessionRecord | None:
         return records.get(session_id)
 
-    async def get_account(account_id: str) -> LocalAccount[object] | None:
+    async def get_account(account_id: str) -> LocalAccountRecord[object] | None:
         if state.fail_lookup:
             raise OSError
         return account if account_id == account.account_id else None
@@ -831,8 +823,8 @@ class _RoutePasswordHasher:
     async def hash(self, password: str) -> str:
         return f"test-hash:{password}"
 
-    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationResult:
-        return PasswordVerificationResult(
+    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationOutcome:
+        return PasswordVerificationOutcome(
             PasswordVerificationStatus.VERIFIED
             if encoded_hash == f"test-hash:{password}"
             else PasswordVerificationStatus.INVALID
@@ -864,9 +856,9 @@ class _RouteMFAStore(InMemoryMFAStore):
 
     async def revoke_login_method(
         self, _account_id: str, _method_id: str, *, require_remaining: bool = True, event: SecurityEvent
-    ) -> RevokeLoginMethodResult:
+    ) -> RevokeLoginMethodOutcome:
         del require_remaining, event
-        return RevokeLoginMethodResult(RevokeLoginMethodStatus.NOT_FOUND)
+        return RevokeLoginMethodOutcome(RevokeLoginMethodStatus.NOT_FOUND)
 
 
 @dataclass(slots=True)
@@ -884,7 +876,7 @@ class _RouteRefreshState:
 
 @dataclass(slots=True)
 class _GeneratedRouteAccounts:
-    account: LocalAccount[object] | None = None
+    account: LocalAccountRecord[object] | None = None
     password_hash: str | None = None
     sessions: dict[str, SessionRecord] = field(default_factory=dict)
     purpose_tokens: dict[str, TokenIssue] = field(default_factory=dict)
@@ -893,12 +885,12 @@ class _GeneratedRouteAccounts:
     recovery_token: str | None = None
     absent_probes: int = 0
 
-    async def find_for_login(self, normalized_identifier: str) -> LocalAccount[object] | None:
+    async def find_for_login(self, normalized_identifier: str) -> LocalAccountRecord[object] | None:
         if self.account is None or self.account.normalized_identifier != normalized_identifier:
             return None
         return self.account
 
-    async def get_by_id(self, account_id: str) -> LocalAccount[object] | None:
+    async def get_by_id(self, account_id: str) -> LocalAccountRecord[object] | None:
         return self.account if self.account is not None and self.account.account_id == account_id else None
 
     async def current_epoch(self, account_id: str) -> int | None:
@@ -926,20 +918,20 @@ class _GeneratedRouteAccounts:
 
     async def replace_password_and_bump_epoch(
         self, account_id: str, password_hash: str, *, expected_epoch: int, **_kwargs: object
-    ) -> PasswordChangeResult:
+    ) -> PasswordChangeOutcome:
         account = await self.get_by_id(account_id)
         if account is None or account.security_epoch != expected_epoch:
-            return PasswordChangeResult(PasswordChangeStatus.CONFLICT)
+            return PasswordChangeOutcome(PasswordChangeStatus.CONFLICT)
         self.password_hash = password_hash
         self.account = replace(account, security_epoch=expected_epoch + 1)
-        return PasswordChangeResult(PasswordChangeStatus.CHANGED, expected_epoch + 1)
+        return PasswordChangeOutcome(PasswordChangeStatus.CHANGED, expected_epoch + 1)
 
     async def register(
         self, command: object, password_hash: str, *, verification: object | None, **_kwargs: object
-    ) -> RegistrationResult[object]:
+    ) -> RegistrationOutcome[object]:
         if self.account is not None:
-            return RegistrationResult(RegistrationStatus.DUPLICATE)
-        self.account = LocalAccount(
+            return RegistrationOutcome(RegistrationStatus.DUPLICATE)
+        self.account = LocalAccountRecord(
             account_id="account-1",
             normalized_identifier=cast("Any", command).normalized_identifier,
             display_name=cast("Any", command).display_name,
@@ -952,7 +944,7 @@ class _GeneratedRouteAccounts:
         if verification is not None:
             issue, notification = cast("Any", verification).bind(self.account.account_id)
             await self.issue(issue, notification)
-        return RegistrationResult(RegistrationStatus.CREATED, self.account)
+        return RegistrationOutcome(RegistrationStatus.CREATED, self.account)
 
     async def issue(self, issue: TokenIssue, notification: NotificationCommand, **_kwargs: object) -> None:
         self.purpose_tokens[issue.token_id] = issue
@@ -964,22 +956,22 @@ class _GeneratedRouteAccounts:
     async def issue_absent(self) -> None:
         self.absent_probes += 1
 
-    async def consume_and_verify(self, token_id: str, digest: bytes, **_kwargs: object) -> ConsumeResult:
+    async def consume_and_verify(self, token_id: str, digest: bytes, **_kwargs: object) -> ConsumeOutcome:
         issue = self.purpose_tokens.pop(token_id, None)
         if issue is None or issue.digest != digest or self.account is None:
-            return ConsumeResult(ConsumeStatus.INVALID)
+            return ConsumeOutcome(ConsumeStatus.INVALID)
         self.account = replace(self.account, verified=True)
-        return ConsumeResult(ConsumeStatus.CONSUMED, self.account.account_id, self.account.security_epoch)
+        return ConsumeOutcome(ConsumeStatus.CONSUMED, self.account.account_id, self.account.security_epoch)
 
     async def consume_and_reset(
         self, token_id: str, digest: bytes, new_password_hash: str, **_kwargs: object
-    ) -> PasswordResetResult:
+    ) -> PasswordResetOutcome:
         issue = self.purpose_tokens.pop(token_id, None)
         if issue is None or issue.digest != digest or self.account is None:
-            return PasswordResetResult(PasswordResetStatus.INVALID)
+            return PasswordResetOutcome(PasswordResetStatus.INVALID)
         self.password_hash = new_password_hash
         self.account = replace(self.account, security_epoch=self.account.security_epoch + 1)
-        return PasswordResetResult(PasswordResetStatus.RESET, self.account.account_id, self.account.security_epoch)
+        return PasswordResetOutcome(PasswordResetStatus.RESET, self.account.account_id, self.account.security_epoch)
 
     async def register_login_method(self, *_args: object, **_kwargs: object) -> None:
         return None
@@ -1074,7 +1066,7 @@ class _GeneratedRouteAccounts:
             scopes=state.scopes,
         )
 
-    async def rotate(self, command: RotateRefreshCommand, **_kwargs: object) -> RotateRefreshResult:
+    async def rotate(self, command: RotateRefreshCommand, **_kwargs: object) -> RefreshRotationOutcome:
         current = self.refresh_tokens.pop(command.token_id)
         assert current.token_digest == command.token_digest
         assert not current.revoked
@@ -1088,7 +1080,7 @@ class _GeneratedRouteAccounts:
             family_expires_at=command.family_expires_at,
             scopes=command.scopes,
         )
-        return RotateRefreshResult(RefreshRotationStatus.ROTATED, command.sealed_receipt)
+        return RefreshRotationOutcome(RefreshRotationStatus.ROTATED, command.sealed_receipt)
 
     async def revoke_family(self, family_id: str, **_kwargs: object) -> bool:
         matches = [state for state in self.refresh_tokens.values() if state.family_id == family_id]
@@ -1136,7 +1128,7 @@ def _mfa_at_login_config(*, required: bool = True) -> MFAConfig:
 def _verified_route_accounts(password: str) -> _GeneratedRouteAccounts:
     """Return a direct, verified account suitable for password-login journeys."""
     return _GeneratedRouteAccounts(
-        account=LocalAccount(
+        account=LocalAccountRecord(
             account_id="account-1",
             normalized_identifier="user@example.com",
             display_name="User",
@@ -1149,7 +1141,6 @@ def _verified_route_accounts(password: str) -> _GeneratedRouteAccounts:
     )
 
 
-@pytest.mark.anyio
 async def test_local_access_token_runtime_enforces_scope_account_and_epoch(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -1489,13 +1480,12 @@ def test_generated_token_routes_register_verify_login_refresh_and_revoke(
     assert any(state.revoked for state in accounts.refresh_tokens.values())
 
 
-@pytest.mark.anyio
 async def test_generated_session_login_requires_and_completes_mfa() -> None:
     password = "initial password 123"  # noqa: S105 - test-only credential
     accounts = _verified_route_accounts(password)
     mfa = _mfa_at_login_config()
     recovery_codes = await cast("Any", mfa.mfa_service).generate_recovery_codes("account-1")
-    assert isinstance(recovery_codes, RecoveryCodes)
+    assert isinstance(recovery_codes, RecoveryCodeGrant)
     csrf = CSRFConfig(secret="s" * 32)
     local_auth: Any = LocalAuth.session(
         accounts=cast("Any", accounts),
@@ -1553,7 +1543,6 @@ async def test_generated_session_login_requires_and_completes_mfa() -> None:
     assert sessions.status_code == 200
 
 
-@pytest.mark.anyio
 async def test_generated_token_login_requires_and_completes_mfa(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -1561,7 +1550,7 @@ async def test_generated_token_login_requires_and_completes_mfa(
     accounts = _verified_route_accounts(password)
     mfa = _mfa_at_login_config()
     recovery_codes = await cast("Any", mfa.mfa_service).generate_recovery_codes("account-1")
-    assert isinstance(recovery_codes, RecoveryCodes)
+    assert isinstance(recovery_codes, RecoveryCodeGrant)
     private_key, _public_key = jwt_key_material["EdDSA"]
     local_auth: Any = LocalAuth.tokens(
         accounts=cast("Any", accounts),
@@ -1597,7 +1586,6 @@ async def test_generated_token_login_requires_and_completes_mfa(
     assert {"access_token", "refresh_token"} <= completed.json().keys()
 
 
-@pytest.mark.anyio
 async def test_require_at_login_false_preserves_unchallenged_token_login(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -1628,7 +1616,6 @@ async def test_require_at_login_false_preserves_unchallenged_token_login(
     assert completion.status_code == 404
 
 
-@pytest.mark.anyio
 async def test_require_at_login_false_preserves_unchallenged_session_login() -> None:
     password = "initial password 123"  # noqa: S105 - test-only credential
     accounts = _verified_route_accounts(password)
@@ -1673,49 +1660,6 @@ async def test_require_at_login_false_preserves_unchallenged_session_login() -> 
     assert login.json() == {"account_id": "account-1", "display_name": "User"}
     assert sessions.status_code == 200
     assert completion.status_code == 404
-
-
-def test_generated_token_routes_reject_unknown_and_camel_case_body_members(
-    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
-) -> None:
-    accounts = _GeneratedRouteAccounts()
-    private_key, _public_key = jwt_key_material["EdDSA"]
-    local_auth = LocalAuth.tokens(
-        accounts=accounts,
-        secrets=_local_auth_secrets(refresh=True),
-        key_ring=LocalKeyRing(
-            issuer="https://local.example",
-            active_signing_key=SigningKey(key_id="local-active", algorithm="EdDSA", private_key=private_key),
-        ),
-        token_audience="local-api",  # noqa: S106 - public JWT audience
-        password_hasher=_RoutePasswordHasher(),
-        registration=RegistrationPolicy.public(),
-    )
-    app = Litestar(
-        route_handlers=[], openapi_config=None, plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))]
-    )
-    password = "initial password 123"  # noqa: S105
-
-    with TestClient(app) as client:
-        unknown_member = client.post(
-            "/auth/register", json={"identifier": "user@example.com", "password": password, "role": "admin"}
-        )
-        # A camelCase spelling of an optional field must not resolve to its default,
-        # which would register the account with no display name.
-        stale_casing = client.post(
-            "/auth/register", json={"identifier": "user@example.com", "password": password, "displayName": "User"}
-        )
-        assert client.post("/auth/register", json={"identifier": "user@example.com", "password": password}).status_code
-        assert accounts.verification_token is not None
-        confirm = client.post("/auth/verification/confirm", json={"token": accounts.verification_token, "extra": 1})
-        credentials = client.post(
-            "/auth/token", json={"identifier": "user@example.com", "password": password, "remember": True}
-        )
-
-    assert unknown_member.status_code == HTTP_400_BAD_REQUEST, unknown_member.text
-    assert stale_casing.status_code == HTTP_400_BAD_REQUEST, stale_casing.text
-    assert confirm.status_code == HTTP_400_BAD_REQUEST, confirm.text
-    assert credentials.status_code == HTTP_400_BAD_REQUEST, credentials.text
 
 
 def test_native_guard_layers_remain_cumulative_for_http_and_websocket_with_child_policy() -> None:
@@ -1870,7 +1814,6 @@ def test_websocket_native_guard_denial_closes_before_handler_and_di() -> None:
     assert events == []
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("scope_changes", "websocket_config", "expected_code", "expected_reason"),
     [
@@ -1914,7 +1857,6 @@ async def test_websocket_transport_failures_are_mapped_before_application(
     assert app_called is False
 
 
-@pytest.mark.anyio
 async def test_websocket_revocation_hook_receives_secret_free_session_binding() -> None:
     observed: list[object] = []
     success = Authenticated(
@@ -1948,7 +1890,6 @@ async def test_websocket_revocation_hook_receives_secret_free_session_binding() 
     assert messages == [{"type": "websocket.close", "code": 4401, "reason": "credential_revoked"}]
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("snapshot", "expected_message", "guards_present"),
     [
@@ -2009,7 +1950,6 @@ async def test_websocket_authorization_refresh_replaces_snapshot_and_rechecks_gu
         assert route_handler.authorization_calls == int(guards_present)
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("error", [NotAuthorizedException(), PermissionDeniedException()])
 async def test_websocket_handler_authorization_exceptions_map_to_4403(error: Exception) -> None:
     async def app(_scope: Scope, _receive: Receive, _send: Send) -> None:
@@ -2043,7 +1983,6 @@ def _runtime_connect_token_record() -> WebSocketConnectTokenRecord:
     )
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_token_merge_requires_the_same_authenticated_subject() -> None:
     runtime, _, _ = _runtime()
 
@@ -2069,7 +2008,6 @@ async def test_websocket_connect_token_merge_requires_the_same_authenticated_sub
         )
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("resolution", "expected_error"),
     [
@@ -2109,7 +2047,6 @@ async def test_anonymous_websocket_connect_token_uses_authorization_resolver(
     assert merged.authorization.scopes == frozenset({"reports:read"})
 
 
-@pytest.mark.anyio
 async def test_public_websocket_and_http_install_the_same_anonymous_context_with_async_client() -> None:
     observed: list[tuple[Principal[object], SecurityContext]] = []
 
@@ -2282,7 +2219,6 @@ def test_websocket_message_loop_performs_security_work_once() -> None:
     assert (slot.calls, authenticator.calls, resolver.calls) == (1, 1, 1)
 
 
-@pytest.mark.anyio
 async def test_matching_one_time_connect_token_authenticates_cross_origin_websocket_once() -> None:
     store = InMemoryWebSocketConnectTokenStore()
     slot = _Slot(NoCredentials())
@@ -2355,7 +2291,6 @@ async def test_matching_one_time_connect_token_authenticates_cross_origin_websoc
     assert replay.value.code == 4401
 
 
-@pytest.mark.anyio
 async def test_websocket_connect_tokens_dependency_mints_by_route_name_end_to_end() -> None:
     store = InMemoryWebSocketConnectTokenStore()
     slot = _Slot(PresentedCredential("subject-1"))

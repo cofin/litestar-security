@@ -4,6 +4,81 @@ Changelog
 Unreleased
 ----------
 
+Added
+~~~~~
+
+* ``SecurityConfig(exclude=[...])`` takes path patterns that remove routes from
+  security entirely, mirroring ``JWTAuth.exclude``. It is what lets an
+  application serve static assets, or any other route tree a plugin registered,
+  without authentication. Patterns apply when routes are compiled, so an
+  excluded operation also documents anonymous access in OpenAPI instead of
+  claiming a protection it does not have. A route that declares its own ``auth``
+  and also matches a pattern is rejected at startup, and a pattern matching no
+  registered route warns once. See :doc:`composition`.
+* ``SecurityConfig(protected_resource=ProtectedResourceConfig(...))`` publishes
+  the :rfc:`9728` protected-resource metadata document at
+  ``/.well-known/oauth-protected-resource``, so a client or an authorization
+  server can discover which issuers this resource trusts, which scopes it
+  understands, and how a bearer token may be presented to it. The route is
+  unauthenticated, answers conditional requests with ``304``, and the document
+  is computed once at configuration time. See :doc:`resource-server`.
+* ``CachedJWKSProvider(cache=...)`` takes a ``JWKSCache``. Handing the same
+  cache to two providers gives them one key set and one fetch schedule instead
+  of two. ``InMemoryJWKSCache`` is the default and stays the behavior when the
+  argument is omitted; an application may implement the protocol itself over
+  the immutable ``JWKSSnapshot``. See :doc:`jwt-and-jwks`.
+* ``OIDCDiscoveryClient.discover(issuer, discovery_url=...)`` reaches a provider
+  that does not publish its metadata at
+  ``{issuer}/.well-known/openid-configuration``. The override must share the
+  issuer's exact origin.
+* ``RouteDocs`` puts the OpenAPI documentation of the generated routes in the
+  application's hands. Pass one to any feature configuration to rename a tag
+  group, replace its description, or rewrite every operation identifier and
+  route name through a single callable — useful when a generated TypeScript
+  client should follow the project's own naming. Groups are addressed by a
+  stable key such as ``local.sessions`` or ``oauth.providers``, so a rename does
+  not invalidate the key, and a key naming no group is rejected at startup
+  rather than silently ignored. None of it is security policy: a route's
+  protection is unaffected by how it is documented. See
+  :doc:`generated-routes`.
+
+Changed
+~~~~~~~
+
+* All ten generated tag groups now carry a description in the emitted OpenAPI
+  document. Multi-factor authentication, passkeys, step-up authentication,
+  OAuth providers, and OIDC logout previously appeared as bare names because
+  only the local-auth groups reached the OpenAPI config. Nothing else about the
+  document changes.
+* An application's own exception handlers now apply to the generated OAuth
+  routes. Those routes previously answered their provider and account failures
+  themselves, which took precedence over every application-level handler, so an
+  application publishing its own error format received it everywhere except
+  there. Statuses, messages, and ``Retry-After`` are unchanged, and a failure
+  still reveals nothing about its cause. An application relying on the previous
+  bodies while also configuring its own error format will now see its own
+  format on those paths.
+* The generated routes document their error bodies as the new ``RouteError``
+  rather than ``RouteStatus``. A ``400``, ``401``, ``429``, or ``503`` is
+  raised rather than returned, so the body has always been Litestar's
+  ``{status_code, detail}`` plus ``extra`` — a member the published document
+  never declared, leaving clients generated from it with no typed access to it
+  and, under strict decoding, rejecting every error response. ``RouteStatus``
+  keeps its real role as the body a handler *returns*: the ``200``
+  confirmations and the ``409`` conflict. The typed ``403`` second-factor
+  challenge is unaffected. A generated client will need regenerating.
+* An application converting every HTTP exception to problem details — Litestar's
+  ``ProblemDetailsPlugin`` with ``enable_for_all_http_exceptions=True`` — now
+  has its error bodies described as ``ProblemDetail`` at
+  ``application/problem+json``. The plugin in its default configuration
+  converts nothing the generated routes raise, and the document is unchanged
+  for it. See :doc:`generated-routes`.
+* Generated routes warn once at startup when the application installs a
+  response class other than Litestar's, naming it. The documented response
+  schemas describe what the handlers return, so a response class that reshapes
+  the body makes them inaccurate. Routes the application writes itself are
+  never checked, and this warns rather than raises.
+
 0.2.0
 -----
 

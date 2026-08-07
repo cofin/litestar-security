@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 from litestar_security.__metadata__ import __project__, __version__
+from litestar_security._docs import ROUTE_TAGS, RouteDocs
 from litestar_security._lazy import import_optional_attribute
 from litestar_security.authentication import (
     CSRF_REQUIRED_OPT_KEY,
@@ -66,7 +67,7 @@ from litestar_security.guards import at_least as guard_at_least
 from litestar_security.guards import one_of as guard_one_of
 from litestar_security.headers import ContentSecurityPolicy, CSPMode, SecurityHeadersConfig, csp_nonce
 from litestar_security.plugin import CurrentUser, SecurityPlugin
-from litestar_security.schema import WireStruct
+from litestar_security.schema import ProblemDetail, RouteError, WireStruct
 from litestar_security.websocket import (
     AuthorizationSnapshotRefresher,
     InMemoryWebSocketConnectTokenStore,
@@ -98,6 +99,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "CSRF_REQUIRED_OPT_KEY",
+    "ROUTE_TAGS",
     "AESGCMOAuthTransactionProtector",
     "AssuranceRequirement",
     "AssuranceTrait",
@@ -140,9 +142,12 @@ __all__ = (
     "PasskeyConfig",
     "PresentedCredential",
     "Principal",
+    "ProblemDetail",
     "PublicController",
     "RequestAuthenticator",
     "ResourcePermission",
+    "RouteDocs",
+    "RouteError",
     "SecureController",
     "SecurityConfig",
     "SecurityContext",

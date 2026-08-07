@@ -1,6 +1,12 @@
 """Remote JWKS discovery with immutable per-issuer cache snapshots."""
 
-from litestar_security.providers.jwks._cache import JWKSCacheEntry, JWKSCachePolicy
+from litestar_security.providers.jwks._cache import (
+    InMemoryJWKSCache,
+    JWKSCache,
+    JWKSCacheEntry,
+    JWKSCachePolicy,
+    JWKSSnapshot,
+)
 from litestar_security.providers.jwks._fetching import (
     AsyncJWKSFetcher,
     JWKSFetchRequest,
@@ -16,11 +22,14 @@ __all__ = (
     "AsyncJWKSFetcher",
     "CachedJWKSProvider",
     "HttpxJWKSFetcher",
+    "InMemoryJWKSCache",
+    "JWKSCache",
     "JWKSCacheEntry",
     "JWKSCachePolicy",
     "JWKSFetchRequest",
     "JWKSFetchResponse",
     "JWKSProvider",
+    "JWKSSnapshot",
     "NoOpSecurityMetrics",
     "SecurityMetrics",
     "SyncJWKSFetcher",

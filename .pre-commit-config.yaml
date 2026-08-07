@@ -29,7 +29,10 @@ repos:
       - id: trailing-whitespace
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.0
+    # Must match the locked ruff. A hook on a different release enables a
+    # different set of rules, so the gate and `uv run ruff` would disagree
+    # about the same file.
+    rev: v0.16.1
     hooks:
       - id: ruff-check
         args: [--fix]

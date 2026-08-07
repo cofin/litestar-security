@@ -24,7 +24,7 @@ from litestar_security.authentication import InvalidCredentials, VerificationUna
 from litestar_security.context import AuthenticationEvidence
 
 if TYPE_CHECKING:
-    from litestar_security.accounts._records import LocalAccount
+    from litestar_security.accounts._records import LocalAccountRecord
 
 __all__ = ("MFA_LOGIN_METHODS", "MFALoginChallenge", "MFALoginChallengeStore", "MFALoginService", "MFARequired")
 
@@ -146,7 +146,7 @@ class MFALoginService:
             raise ImproperlyConfiguredException(detail=message)
 
     async def issue(
-        self, account: "LocalAccount[object]", *, client_key: str | None
+        self, account: "LocalAccountRecord[object]", *, client_key: str | None
     ) -> MFARequired | VerificationUnavailable:
         """Persist and reveal one short-lived MFA challenge for a verified password login."""
         try:

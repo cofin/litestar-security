@@ -13,7 +13,7 @@ from enum import Enum
 from hashlib import sha256
 from hmac import digest as hmac_digest
 from secrets import token_bytes
-from typing import TYPE_CHECKING, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar, cast
 
 from litestar.exceptions import ImproperlyConfiguredException
 
@@ -44,7 +44,7 @@ __all__ = (
     "RefreshTokenCodec",
     "RefreshTokenIssue",
     "RefreshTokenProof",
-    "RefreshTokenResponse",
+    "TokenPair",
 )
 
 
@@ -237,8 +237,11 @@ class RefreshTokenCodec:
         return hmac_digest(self.pepper, _REFRESH_TOKEN_DOMAIN + token_id.encode("ascii") + b"\x00" + secret, sha256)
 
 
-class RefreshTokenResponse(WireStruct, frozen=True):
+class TokenPair(WireStruct, frozen=True):
     """Secret-safe token response recovered from a sealed rotation receipt."""
+
+    __wire_casing__: ClassVar[bool] = False
+    """RFC 6749 section 5.1 names every member below, so no policy may rename them."""
 
     access_token: str
     refresh_token: str

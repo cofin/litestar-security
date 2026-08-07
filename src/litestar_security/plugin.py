@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Callable, Iterator, Mapping, Sequenc
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Generic, TypeAlias, TypeVar, cast
+from warnings import warn
 
 from click import Group as ClickGroup
 from litestar import Litestar
@@ -13,16 +14,17 @@ from litestar.config.app import AppConfig
 from litestar.controller import Controller
 from litestar.di import NamedDependency, Provide
 from litestar.enums import ScopeType
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar.exceptions import ImproperlyConfiguredException, LitestarWarning
 from litestar.handlers.base import BaseRouteHandler
 from litestar.middleware import DefineMiddleware
 from litestar.middleware.session.base import SessionMiddleware
-from litestar.openapi.spec import SecurityScheme
+from litestar.openapi.spec import SecurityScheme, Tag
 from litestar.plugins import CLIPlugin, InitPlugin, ReceiveRoutePlugin
 from litestar.router import Router
 from litestar.routes import BaseRoute
 from litestar.types import Scope
 
+from litestar_security._docs import LOCAL_TAG_KEYS, RouteDocs, merge_route_tags
 from litestar_security._openapi import OpenAPISchemeSet, RouteCompiler, merge_openapi_tags, prepare_openapi_config
 from litestar_security.authentication import (
     AuthenticationMechanism,
@@ -32,7 +34,7 @@ from litestar_security.authentication import (
     SecurityRuntimeConfig,
     VerificationUnavailable,
 )
-from litestar_security.config import SecurityConfig
+from litestar_security.config import MFAConfig, PasskeyConfig, SecurityConfig
 from litestar_security.context import Principal, SecurityContext
 from litestar_security.headers import CSPHook, configure_security_headers
 from litestar_security.websocket import WebSocketConnectTokenIssuer
@@ -65,6 +67,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     __slots__ = (
         "_api_key_lifespan",
         "_api_key_service",
+        "_exclusion_lifespan",
         "_headers_hooks",
         "_jwks_lifespan",
         "_local_auth_route_handlers",
@@ -102,6 +105,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._oauth_route_handlers: tuple[Router, ...] | None = None
         self._oauth_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
         self._rate_limit_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
+        self._exclusion_lifespan: Callable[[Litestar], AbstractAsyncContextManager[None]] | None = None
 
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
         """Validate ownership and install one typed security runtime.
@@ -126,6 +130,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         self._configure_oauth_routes(app_config)
         self._configure_oauth_lifespan(app_config)
         self._configure_local_jwks(app_config)
+        self._configure_protected_resource(app_config)
         self._configure_jwks_lifespan(app_config)
         self._validate_dependency_map(app_config.dependencies, "application")
         self._validate_native_security(app_config)
@@ -152,9 +157,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if openapi_config is not None:
             schemes = OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", runtime.registry))
             openapi_config = prepare_openapi_config(openapi_config, schemes)
-            local_auth = self.config.local_auth
-            if local_auth is not None:
-                openapi_config = merge_openapi_tags(openapi_config, local_auth.openapi_tags())
+            openapi_config = merge_openapi_tags(openapi_config, self._generated_openapi_tags())
             app_config.openapi_config = openapi_config
         if self._route_compiler is None:
             self._route_compiler = RouteCompiler(
@@ -166,7 +169,10 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 ),
                 external_csrf=self.config.external_csrf,
                 websocket_config=self.config.websocket,
+                exclude=self.config.exclude,
+                converts_to_problem_details=self._converts_to_problem_details(app_config),
             )
+        self._configure_exclusion_report(app_config)
         app_config.dependencies.update(self._providers)
         for name, value in _SIGNATURE_NAMESPACE.items():
             app_config.signature_namespace.setdefault(name, value)
@@ -346,6 +352,68 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if self._api_key_lifespan not in lifespan_handlers:
             lifespan_handlers.append(self._api_key_lifespan)
 
+    @staticmethod
+    def _converts_to_problem_details(app_config: AppConfig) -> bool:
+        """Report whether the application converts every HTTP exception to problem details.
+
+        Presence of the plugin is not the trigger. ``ProblemDetailsConfig``
+        leaves ``enable_for_all_http_exceptions`` off, and a plugin in that
+        default state registers one handler for ``ProblemDetailsException``
+        alone - which the generated routes never raise, so nothing they send
+        changes. Rewriting the document on presence would publish a shape no
+        response actually takes.
+
+        The match is on the class rather than on a name string, so a Litestar
+        reorganization fails at import instead of silently detecting nothing.
+        A configuration converting only selected exception types is left
+        undetected: which statuses it reaches depends on the exact types the
+        generated routes raise on each path, which no per-route specification
+        can state.
+
+        Args:
+            app_config: The application configuration being extended.
+
+        Returns:
+            Whether raised denials reach the wire as problem details.
+        """
+        from litestar.plugins.problem_details import (  # noqa: PLC0415 - the problem-details tree loads only when detected
+            ProblemDetailsPlugin,
+        )
+
+        return any(
+            plugin.config.enable_for_all_http_exceptions
+            for plugin in app_config.plugins
+            if isinstance(plugin, ProblemDetailsPlugin)
+        )
+
+    def _configure_exclusion_report(self, app_config: AppConfig) -> None:
+        # Every route is known once the application has finished building, so an
+        # exclusion pattern that still matches nothing is reported at startup.
+        # It warns rather than raises, matching Litestar's own posture towards
+        # exclude patterns: a pattern that greedily disables the middleware
+        # entirely is a warning there too, and a pattern for a route mounted
+        # only in production or only with an optional plugin stays legitimate.
+        if not self.config.exclude:
+            return
+        if self._exclusion_lifespan is None:
+            compiler = cast("RouteCompiler[UserT]", self._route_compiler)
+
+            @asynccontextmanager
+            async def exclusion_lifespan(_app: Litestar) -> AsyncGenerator[None, None]:
+                unmatched = compiler.unmatched_exclusions()
+                if unmatched:
+                    message = f"Litestar Security exclusion patterns match no registered route: {', '.join(unmatched)}"
+                    warn(message, category=LitestarWarning, stacklevel=1)
+                yield
+
+            self._exclusion_lifespan = exclusion_lifespan
+        lifespan_handlers = cast(
+            "list[Callable[[Litestar], AbstractAsyncContextManager[None]]]",
+            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType] - third-party callable is untyped
+        )
+        if self._exclusion_lifespan not in lifespan_handlers:
+            lifespan_handlers.append(self._exclusion_lifespan)
+
     def _validate_dependency_map(self, dependencies: Mapping[str, object] | None, owner: str) -> None:
         for name in _RESERVED_DEPENDENCIES:
             if dependencies and name in dependencies and dependencies[name] is not self._providers[name]:
@@ -431,7 +499,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             return
         route_handlers = self._local_auth_route_handlers
         if route_handlers is None:
-            route_handlers = local_auth.build_route_handlers()
+            route_handlers = local_auth.build_route_handlers(wire=self.config.wire_policy())
             self._local_auth_route_handlers = route_handlers
         for route_handler in route_handlers:
             if not any(existing is route_handler for existing in app_config.route_handlers):
@@ -449,6 +517,48 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         _validate_local_auth(local_auth)
         local_auth.bind_mfa_login(mfa)
 
+    @staticmethod
+    def _shared_factor_docs(mfa: MFAConfig | None, passkeys: PasskeyConfig | None) -> RouteDocs:
+        """Return the one documentation configuration the shared factor router is built with.
+
+        MFA and passkey routes are one router, and the step-up group belongs to
+        both, so two disagreeing configurations cannot both apply.
+
+        Args:
+            mfa: The MFA configuration, when it generates routes.
+            passkeys: The passkey configuration, when it generates routes.
+
+        Returns:
+            The agreed documentation metadata.
+
+        Raises:
+            ImproperlyConfiguredException: If both features are configured with
+                different documentation metadata.
+        """
+        configured = [config.docs for config in (mfa, passkeys) if config is not None]
+        if any(docs != configured[0] for docs in configured):
+            message = "Generated MFA and passkey routes must share one documentation configuration"
+            raise ImproperlyConfiguredException(detail=message)
+        return configured[0]
+
+    def _generated_openapi_tags(self) -> tuple[Tag, ...]:
+        """Return the effective tag groups every configured generated route is filed under."""
+        sources: list[tuple[frozenset[str], RouteDocs]] = []
+        local_auth = self.config.local_auth
+        if local_auth is not None and local_auth.register_routes:
+            sources.append((LOCAL_TAG_KEYS, local_auth.docs))
+        mfa = self.config.mfa
+        if mfa is not None and mfa.register_routes:
+            sources.append((frozenset({"mfa", "step_up"}), mfa.docs))
+        passkeys = self.config.passkeys
+        if passkeys is not None and passkeys.register_routes:
+            sources.append((frozenset({"passkeys", "step_up"}), passkeys.docs))
+        oauth = self.config.oauth
+        if oauth is not None and oauth.register_routes:
+            oauth_keys = {"oauth.providers"} if oauth.oidc_service is None else {"oauth.providers", "oidc.logout"}
+            sources.append((frozenset(oauth_keys), oauth.docs))
+        return merge_route_tags(sources)
+
     def _configure_mfa_routes(self, app_config: AppConfig) -> None:
         mfa_config = self.config.mfa
         passkey_config = self.config.passkeys
@@ -464,6 +574,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if len(prefixes) != 1:
             message = "Generated MFA and passkey routes must share one route prefix"
             raise ImproperlyConfiguredException(detail=message)
+        docs = self._shared_factor_docs(enabled_mfa, enabled_passkeys)
         step_up = (
             enabled_mfa.step_up_service
             if enabled_mfa is not None and enabled_mfa.step_up_service is not None
@@ -505,6 +616,8 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 session_capable=local_auth.session_auth is not None,
                 token_capable=local_auth.local_auth_service.refresh_tokens is not None,
                 route_prefix=prefixes.pop(),
+                docs=docs,
+                wire=self.config.wire_policy(),
             )
             route_handlers = (router,)
             self._mfa_route_handlers = route_handlers
@@ -518,7 +631,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             return
         route_handlers = self._oauth_route_handlers
         if route_handlers is None:
-            route_handlers = oauth.build_route_handlers()
+            route_handlers = oauth.build_route_handlers(wire=self.config.wire_policy())
             self._oauth_route_handlers = route_handlers
         for route_handler in route_handlers:
             if not any(existing is route_handler for existing in app_config.route_handlers):
@@ -602,6 +715,15 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         from litestar_security.providers.jwt import build_local_jwks_handler  # noqa: PLC0415 - breaks an import cycle
 
         app_config.route_handlers.append(build_local_jwks_handler(self.config.local_jwks))
+
+    def _configure_protected_resource(self, app_config: AppConfig) -> None:
+        if self.config.protected_resource is None:
+            return
+        from litestar_security.providers.oauth import (  # noqa: PLC0415 - the OAuth tree loads only when configured
+            build_protected_resource_handler,
+        )
+
+        app_config.route_handlers.append(build_protected_resource_handler(self.config.protected_resource))
 
     def _configure_jwks_lifespan(self, app_config: AppConfig) -> None:
         if not self.config.jwks_providers:

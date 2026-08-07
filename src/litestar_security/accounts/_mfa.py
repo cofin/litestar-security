@@ -35,7 +35,7 @@ from litestar_security.accounts._operations import (
 from litestar_security.accounts._records import (
     LoginMethod,
     NoOpSecurityEventSink,
-    RevokeLoginMethodResult,
+    RevokeLoginMethodOutcome,
     SecurityEvent,
     SecurityEventSink,
 )
@@ -50,17 +50,17 @@ __all__ = (
     "PendingTOTPEnrollment",
     "ProtectedSecret",
     "RecoveryCodeDigest",
+    "RecoveryCodeGrant",
     "RecoveryCodePepper",
-    "RecoveryCodes",
     "SecretProtector",
     "SecretProtectorKey",
-    "StepUpGrant",
+    "StepUpCredential",
     "StepUpRecord",
     "StepUpService",
     "StepUpStore",
-    "TOTPEnrollment",
     "TOTPMethod",
     "TOTPPolicy",
+    "TOTPProvisioningGrant",
 )
 
 _MINIMUM_SECRET_BITS = 160
@@ -316,7 +316,7 @@ class TOTPMethod:
 
 
 @dataclass(frozen=True, slots=True)
-class TOTPEnrollment:
+class TOTPProvisioningGrant:
     """Reveal-once enrollment URI response."""
 
     enrollment_id: str
@@ -368,14 +368,14 @@ class RecoveryCodeDigest:
 
 
 @dataclass(frozen=True, slots=True)
-class RecoveryCodes:
+class RecoveryCodeGrant:
     """Reveal-once recovery-code response."""
 
     codes: tuple[str, ...] = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
-class StepUpGrant:
+class StepUpCredential:
     """Reveal-once transport-bound step-up credential."""
 
     token: str = field(repr=False)
@@ -626,7 +626,9 @@ class MFAService:
             raise ImproperlyConfiguredException(detail=message)
         self.recovery_peppers = tuple(self.recovery_peppers)
 
-    async def begin_totp_enrollment(self, account_id: str, *, label: str) -> TOTPEnrollment | VerificationUnavailable:
+    async def begin_totp_enrollment(
+        self, account_id: str, *, label: str
+    ) -> TOTPProvisioningGrant | VerificationUnavailable:
         """Create and persist one reveal-once TOTP enrollment.
 
         Args:
@@ -668,7 +670,7 @@ class MFAService:
         await self._emit_event(
             operation=MFA_TOTP_ENROLL, outcome=OUTCOME_CREATED, account_id=account_id, occurred_at=now
         )
-        return TOTPEnrollment(
+        return TOTPProvisioningGrant(
             enrollment_id=enrollment_id, method_id=method_id, provisioning_uri=uri, expires_at=pending.expires_at
         )
 
@@ -717,7 +719,7 @@ class MFAService:
 
     async def activate_totp_with_recovery_codes(
         self, account_id: str, enrollment_id: str, code: str
-    ) -> RecoveryCodes | InvalidCredentials | VerificationUnavailable:
+    ) -> RecoveryCodeGrant | InvalidCredentials | VerificationUnavailable:
         """Activate one enrollment and replace recovery codes in one atomic commit.
 
         Args:
@@ -774,7 +776,7 @@ class MFAService:
         await self._emit_event(
             operation=MFA_RECOVERY_REPLACE, outcome=OUTCOME_CREATED, account_id=account_id, occurred_at=now
         )
-        return RecoveryCodes(codes=codes)
+        return RecoveryCodeGrant(codes=codes)
 
     async def verify_totp(
         self, account_id: str, method_id: str, code: str
@@ -807,7 +809,7 @@ class MFAService:
         )
         return AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=now, methods=frozenset({"totp"}))
 
-    async def generate_recovery_codes(self, account_id: str) -> RecoveryCodes | VerificationUnavailable:
+    async def generate_recovery_codes(self, account_id: str) -> RecoveryCodeGrant | VerificationUnavailable:
         """Atomically replace and reveal one set of recovery codes.
 
         Args:
@@ -835,7 +837,7 @@ class MFAService:
         await self._emit_event(
             operation=MFA_RECOVERY_REPLACE, outcome=OUTCOME_UPDATED, account_id=account_id, occurred_at=now
         )
-        return RecoveryCodes(codes=codes)
+        return RecoveryCodeGrant(codes=codes)
 
     async def consume_recovery_code(
         self, account_id: str, code: str
@@ -871,7 +873,7 @@ class MFAService:
 
     async def remove_totp_method(
         self, account_id: str, method_id: str
-    ) -> RevokeLoginMethodResult | VerificationUnavailable:
+    ) -> RevokeLoginMethodOutcome | VerificationUnavailable:
         """Remove a TOTP method through the shared final-method-safe operation.
 
         Args:
@@ -945,7 +947,7 @@ class StepUpService:
         purpose: str,
         transport_binding: bytes,
         evidence: AuthenticationEvidence,
-    ) -> StepUpGrant | InvalidCredentials | VerificationUnavailable:
+    ) -> StepUpCredential | InvalidCredentials | VerificationUnavailable:
         """Issue one opaque grant from freshly verified factor evidence.
 
         Args:
@@ -990,7 +992,7 @@ class StepUpService:
             )
         except Exception:  # noqa: BLE001 - sanitize application stores, clocks, and entropy failures
             return VerificationUnavailable()
-        return StepUpGrant(token=token, purpose=purpose, expires_at=expires_at)
+        return StepUpCredential(token=token, purpose=purpose, expires_at=expires_at)
 
     async def consume(
         self, token: str, *, principal_id: str, security_epoch: int, purpose: str, transport_binding: bytes

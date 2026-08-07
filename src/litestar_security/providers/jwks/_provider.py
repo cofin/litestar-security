@@ -7,10 +7,9 @@ bounded so a hostile issuer cannot grow it without limit.
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from inspect import isawaitable
 from time import perf_counter
 from types import MappingProxyType
 from typing import Protocol, TypeAlias, cast, runtime_checkable
@@ -20,7 +19,14 @@ from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.providers._internal import raise_config, safe_increment, safe_observe
-from litestar_security.providers.jwks._cache import JWKSCacheEntry, JWKSCachePolicy, freshness
+from litestar_security.providers.jwks._cache import (
+    InMemoryJWKSCache,
+    JWKSCache,
+    JWKSCacheEntry,
+    JWKSCachePolicy,
+    JWKSSnapshot,
+    freshness,
+)
 from litestar_security.providers.jwks._documents import parse_document
 from litestar_security.providers.jwks._fetching import (
     AsyncJWKSFetcher,
@@ -94,7 +100,7 @@ class JWKSProvider(Protocol):
 class CachedJWKSProvider:
     """Configured remote-key cache with a lock-free immutable fresh path."""
 
-    __slots__ = ("_closed", "_entries", "_fetcher", "_fetcher_closed", "_fetcher_owned", "_metrics", "policy")
+    __slots__ = ("_cache", "_closed", "_entries", "_fetcher", "_fetcher_closed", "_fetcher_owned", "_metrics", "policy")
 
     def __init__(  # noqa: PLR0913 - provider assembly keeps ownership, workers, policy, and metrics explicit
         self,
@@ -102,6 +108,7 @@ class CachedJWKSProvider:
         fetcher: AsyncJWKSFetcher | SyncJWKSFetcher,
         *,
         policy: JWKSCachePolicy | None = None,
+        cache: JWKSCache | None = None,
         metrics: SecurityMetrics | None = None,
         fetcher_owned: bool = False,
         worker_limits: WorkerLimits | None = None,
@@ -128,10 +135,16 @@ class CachedJWKSProvider:
             raise_config("JWKS metrics must implement SecurityMetrics")
         if not isinstance(fetcher_owned, bool):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
             raise_config("JWKS fetcher ownership must be boolean")
+        snapshots = InMemoryJWKSCache() if cache is None else cache
+        if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
+            snapshots, JWKSCache
+        ):
+            raise_config("JWKS cache must implement JWKSCache")
         normalized_fetcher = normalize_fetcher(
             fetcher, limiter=workers.network_limiter, timeout=workers.timeout, metrics=metric_sink
         )
         self.policy = policy or JWKSCachePolicy()
+        self._cache = snapshots
         self._fetcher = normalized_fetcher
         self._fetcher_owned = fetcher_owned
         self._fetcher_closed = False
@@ -169,7 +182,7 @@ class CachedJWKSProvider:
         ):
             return _INVALID
         selection = (kid, algorithm)
-        snapshot = state.snapshot
+        snapshot = self._snapshot(state)
         if snapshot is not None and normalized_now < snapshot.fresh_until:
             selected = snapshot.keys.get(selection)
             if selected is not None:
@@ -221,7 +234,7 @@ class CachedJWKSProvider:
         """Close this provider idempotently without closing its caller-owned fetcher."""
         self._closed = True
         refreshes: list[tuple[_EntryState, _Refresh]] = []
-        tasks: list[asyncio.Task[_Snapshot | VerificationUnavailable]] = []
+        tasks: list[asyncio.Task[JWKSSnapshot | VerificationUnavailable]] = []
         for state in self._entries.values():
             async with state.lock:
                 if state.refresh is not None:
@@ -238,14 +251,10 @@ class CachedJWKSProvider:
                 state.refresh = None
         if self._fetcher_owned and not self._fetcher_closed:
             self._fetcher_closed = True
-            close = getattr(self._fetcher, "aclose", None)
-            if callable(close):
-                close_result = close()
-                if isawaitable(close_result):
-                    await close_result
+            await self._fetcher.aclose()
 
     async def _select_unknown(
-        self, state: "_EntryState", snapshot: "_Snapshot", selection: _SelectionKey, now: datetime
+        self, state: "_EntryState", snapshot: "JWKSSnapshot", selection: _SelectionKey, now: datetime
     ) -> JWKSSelection:
         self._increment("security.jwks.unknown_key")
         if await self._negative_hit(state, snapshot.generation, selection, now):
@@ -263,7 +272,7 @@ class CachedJWKSProvider:
 
     async def _refresh_singleflight(
         self, state: "_EntryState", now: datetime, *, forced_generation: int | None = None
-    ) -> "_Snapshot | VerificationUnavailable":
+    ) -> "JWKSSnapshot | VerificationUnavailable":
         candidate = _Refresh(forced_generation=forced_generation)
         refresh, immediate = await self._coordinate_refresh(state, candidate, now, forced_generation)
         if refresh is None:
@@ -286,11 +295,11 @@ class CachedJWKSProvider:
 
     async def _coordinate_refresh(
         self, state: "_EntryState", candidate: "_Refresh", now: datetime, forced_generation: int | None
-    ) -> "tuple[_Refresh | None, _Snapshot | VerificationUnavailable]":
+    ) -> "tuple[_Refresh | None, JWKSSnapshot | VerificationUnavailable]":
         refresh: _Refresh | None = None
-        immediate: _Snapshot | VerificationUnavailable = _UNAVAILABLE
+        immediate: JWKSSnapshot | VerificationUnavailable = _UNAVAILABLE
         async with state.lock:
-            current = state.snapshot
+            current = self._snapshot(state)
             current_is_fresh = current is not None and now < current.fresh_until
             forced_generation_changed = forced_generation is not None and (
                 current is None or current.generation != forced_generation
@@ -316,7 +325,7 @@ class CachedJWKSProvider:
 
     async def _run_refresh(
         self, state: "_EntryState", refresh: "_Refresh", now: datetime
-    ) -> "_Snapshot | VerificationUnavailable":
+    ) -> "JWKSSnapshot | VerificationUnavailable":
         try:
             result = await self._fetch_snapshot(state, now)
         except asyncio.CancelledError:
@@ -330,12 +339,12 @@ class CachedJWKSProvider:
         return _UNAVAILABLE if self._closed else result
 
     async def _publish_refresh(
-        self, state: "_EntryState", refresh: "_Refresh", result: "_Snapshot | VerificationUnavailable"
+        self, state: "_EntryState", refresh: "_Refresh", result: "JWKSSnapshot | VerificationUnavailable"
     ) -> None:
         async with state.lock:
-            current = state.snapshot
-            if isinstance(result, _Snapshot) and not self._closed:
-                state.snapshot = result
+            current = self._snapshot(state)
+            if isinstance(result, JWKSSnapshot) and not self._closed:
+                self._cache.set(state.config.issuer, state.config.jwks_uri, result)
                 if refresh.forced_generation is not None:
                     state.forced_generation = result.generation
                 if current is None or result.generation != current.generation:
@@ -344,8 +353,8 @@ class CachedJWKSProvider:
                         self._increment("security.jwks.rotation")
             state.refresh = None
 
-    async def _fetch_snapshot(self, state: "_EntryState", now: datetime) -> "_Snapshot | VerificationUnavailable":
-        current = state.snapshot
+    async def _fetch_snapshot(self, state: "_EntryState", now: datetime) -> "JWKSSnapshot | VerificationUnavailable":
+        current = self._snapshot(state)
         request = JWKSFetchRequest(
             issuer=state.config.issuer, jwks_uri=state.config.jwks_uri, etag=None if current is None else current.etag
         )
@@ -363,7 +372,7 @@ class CachedJWKSProvider:
                     return _UNAVAILABLE
                 self._increment("security.jwks.not_modified")
                 fresh_until, stale_until = freshness(response.headers, self.policy, now)
-                snapshot = _Snapshot(
+                snapshot = JWKSSnapshot(
                     keys=current.keys,
                     etag=etag(response.headers.get("etag")) or current.etag,
                     fresh_until=fresh_until,
@@ -381,7 +390,7 @@ class CachedJWKSProvider:
                 finally:
                     self._observe("security.jwks.parse_duration", perf_counter() - parse_started)
                 fresh_until, stale_until = freshness(response.headers, self.policy, now)
-                snapshot = _Snapshot(
+                snapshot = JWKSSnapshot(
                     keys=keys,
                     etag=etag(response.headers.get("etag")),
                     fresh_until=fresh_until,
@@ -394,6 +403,9 @@ class CachedJWKSProvider:
         except Exception:  # noqa: BLE001 - custom fetcher and parser failures are one sanitized operational outcome
             return _UNAVAILABLE
         return snapshot
+
+    def _snapshot(self, state: "_EntryState") -> "JWKSSnapshot | None":
+        return self._cache.get(state.config.issuer, state.config.jwks_uri)
 
     def _increment(self, name: str) -> None:
         safe_increment(self._metrics, name)
@@ -431,26 +443,15 @@ class CachedJWKSProvider:
             del state.negative[key]
 
 
-@dataclass(frozen=True, slots=True)
-class _Snapshot:
-    keys: Mapping[_SelectionKey, VerificationKey]
-    etag: str | None
-    fresh_until: datetime
-    stale_until: datetime
-    generation: int
-    source_uri: str
-
-
 @dataclass(slots=True)
 class _Refresh:
     forced_generation: int | None = None
-    task: asyncio.Task[_Snapshot | VerificationUnavailable] | None = None
+    task: asyncio.Task[JWKSSnapshot | VerificationUnavailable] | None = None
 
 
 @dataclass(slots=True)
 class _EntryState:
     config: JWKSCacheEntry
-    snapshot: _Snapshot | None = None
     lock: Lock = field(default_factory=Lock)
     refresh: _Refresh | None = None
     forced_generation: int | None = None

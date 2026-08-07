@@ -12,6 +12,7 @@ from litestar import Router
 from litestar.connection import ASGIConnection
 from litestar.exceptions import ImproperlyConfiguredException
 
+from litestar_security._docs import LOCAL_TAG_KEYS, RouteDocs, resolve_tags
 from litestar_security.accounts._access_tokens import (
     LocalAccessTokenIssuer,
     LocalAccessVerifier,
@@ -53,8 +54,9 @@ from litestar_security.accounts._stores import (
     SecurityEpochStore,
     VerificationTokenStore,
 )
-from litestar_security.accounts.controllers import LOCAL_AUTH_TAGS, build_local_auth_routes
+from litestar_security.accounts.controllers import build_local_auth_routes
 from litestar_security.providers.jwt import BearerSlotSelector, BearerTokenSlot, JWTValidationConfig, LocalKeyRing
+from litestar_security.schema import WirePolicy
 
 if TYPE_CHECKING:
     from litestar.openapi.spec import Tag
@@ -179,6 +181,7 @@ class LocalAuthConfig(Generic[UserT]):
     client_key: "Callable[[ASGIConnection[Any, Any, Any, Any]], str | None]" = field(
         default=trusted_client_key, repr=False, compare=False
     )
+    docs: RouteDocs = field(default_factory=RouteDocs, repr=False)
     rate_limits: RateLimitGuard = field(init=False, repr=False, compare=False)
     password_login: PasswordLoginService[UserT] = field(init=False, repr=False, compare=False)
     access_token_issuer: LocalAccessTokenIssuer[UserT] | None = field(
@@ -191,9 +194,11 @@ class LocalAuthConfig(Generic[UserT]):
     local_auth_service: LocalAuthService[UserT] = field(init=False, repr=False, compare=False)
     mfa_login: "MFALoginService | None" = field(init=False, default=None, repr=False, compare=False)
     _mfa_login_config: object | None = field(init=False, default=None, repr=False, compare=False)
-    _route_handlers: tuple[Router, ...] | None = field(init=False, default=None, repr=False, compare=False)
+    _route_handlers: "dict[WirePolicy, tuple[Router, ...]]" = field(
+        init=False, default_factory=dict[WirePolicy, "tuple[Router, ...]"], repr=False, compare=False
+    )
 
-    def __post_init__(self) -> None:  # noqa: C901 - explicit transport invariants remain centralized
+    def __post_init__(self) -> None:  # noqa: C901, PLR0915 - transport invariants remain centralized
         """Validate transport-specific values and structural capabilities."""
         if self.mode.__class__ is not LocalAuthMode:
             msg = "Local authentication mode must be a LocalAuthMode"
@@ -203,6 +208,9 @@ class LocalAuthConfig(Generic[UserT]):
             raise ImproperlyConfiguredException(detail=msg)
         if self.secrets.__class__ is not LocalAuthSecrets:
             msg = "Local authentication secrets must be LocalAuthSecrets"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.docs.__class__ is not RouteDocs:
+            msg = "Local authentication documentation metadata must be RouteDocs"
             raise ImproperlyConfiguredException(detail=msg)
         register_routes_value: object = self.register_routes
         if register_routes_value.__class__ is not bool:
@@ -334,7 +342,7 @@ class LocalAuthConfig(Generic[UserT]):
                 return
             msg = "Local authentication MFA login is already bound to a different MFA configuration"
             raise ImproperlyConfiguredException(detail=msg)
-        if self._route_handlers is not None:
+        if self._route_handlers:
             msg = "Local authentication MFA login must bind before route handlers are cached"
             raise ImproperlyConfiguredException(detail=msg)
         store = mfa.login_challenge_store
@@ -491,28 +499,41 @@ class LocalAuthConfig(Generic[UserT]):
             ),
         )
 
-    def build_route_handlers(self) -> tuple[Router, ...]:
+    def build_route_handlers(self, *, wire: "WirePolicy | None" = None) -> tuple[Router, ...]:
         """Build and cache the standard end-user route tree.
+
+        One router is cached per wire policy rather than one overall, so a
+        router stays a pure function of the configuration that caches it. Two
+        applications sharing this configuration with different casing each get
+        their own, and neither finds the other's already built.
+
+        Args:
+            wire: How the generated bodies are spelled on the wire. Defaults to
+                the field names as Python spells them, with unknown members
+                rejected.
 
         Returns:
             One router, or an empty tuple when ``register_routes`` is ``False``.
-            The same object is returned on every call.
+            The same object is returned for every call naming the same policy.
         """
         if not self.register_routes:
             return ()
-        if self._route_handlers is None:
-            object.__setattr__(self, "_route_handlers", (build_local_auth_routes(self),))
-        return cast("tuple[Router, ...]", self._route_handlers)
+        policy = WirePolicy() if wire is None else wire
+        cached = self._route_handlers.get(policy)
+        if cached is None:
+            cached = self._route_handlers[policy] = (build_local_auth_routes(self, policy),)
+        return cached
 
     def openapi_tags(self) -> "tuple[Tag, ...]":
         """Return the documented tag groups the generated routes are filed under.
 
         Returns:
-            The tags, or an empty tuple when no routes are generated.
+            The effective tags after this profile's documentation metadata is
+            applied, or an empty tuple when no routes are generated.
         """
         if not self.register_routes:
             return ()
-        return LOCAL_AUTH_TAGS
+        return resolve_tags(LOCAL_TAG_KEYS, self.docs)
 
 
 class LocalAuth:
@@ -530,6 +551,7 @@ class LocalAuth:
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
         register_routes: bool = True,
+        docs: RouteDocs | None = None,
         rate_limiter: RateLimiter | None = None,
         events: SecurityEventSink | None = None,
         client_key: Callable[[ASGIConnection[Any, Any, Any, Any]], str | None] = trusted_client_key,
@@ -549,6 +571,9 @@ class LocalAuth:
             route_prefix: The path the generated route tree is mounted under.
             register_routes: Build the services without generating routes when
                 ``False``, so an application can mount its own controllers.
+            docs: Application-owned OpenAPI documentation for the generated
+                routes: tag renames, tag descriptions, and optional operation-id
+                and route-name transforms.
             rate_limiter: Override the bundled store-backed limiter, or pass
                 ``UnlimitedRateLimiter`` to limit only at the edge.
             events: The sink offered every observational security event.
@@ -570,6 +595,7 @@ class LocalAuth:
             registration=registration,
             route_prefix=route_prefix,
             register_routes=register_routes,
+            docs=RouteDocs() if docs is None else docs,
             rate_limiter=rate_limiter,
             events=NoOpSecurityEventSink() if events is None else events,
             client_key=client_key,
@@ -589,6 +615,7 @@ class LocalAuth:
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
         register_routes: bool = True,
+        docs: RouteDocs | None = None,
         rate_limiter: RateLimiter | None = None,
         events: SecurityEventSink | None = None,
         client_key: Callable[[ASGIConnection[Any, Any, Any, Any]], str | None] = trusted_client_key,
@@ -610,6 +637,9 @@ class LocalAuth:
             route_prefix: The path the generated route tree is mounted under.
             register_routes: Build the services without generating routes when
                 ``False``, so an application can mount its own controllers.
+            docs: Application-owned OpenAPI documentation for the generated
+                routes: tag renames, tag descriptions, and optional operation-id
+                and route-name transforms.
             rate_limiter: Override the bundled store-backed limiter, or pass
                 ``UnlimitedRateLimiter`` to limit only at the edge.
             events: The sink offered every observational security event.
@@ -637,6 +667,7 @@ class LocalAuth:
             registration=registration,
             route_prefix=route_prefix,
             register_routes=register_routes,
+            docs=RouteDocs() if docs is None else docs,
             rate_limiter=rate_limiter,
             events=NoOpSecurityEventSink() if events is None else events,
             client_key=client_key,
@@ -658,6 +689,7 @@ class LocalAuth:
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
         register_routes: bool = True,
+        docs: RouteDocs | None = None,
         rate_limiter: RateLimiter | None = None,
         events: SecurityEventSink | None = None,
         client_key: Callable[[ASGIConnection[Any, Any, Any, Any]], str | None] = trusted_client_key,
@@ -681,6 +713,9 @@ class LocalAuth:
             route_prefix: The path the generated route tree is mounted under.
             register_routes: Build the services without generating routes when
                 ``False``, so an application can mount its own controllers.
+            docs: Application-owned OpenAPI documentation for the generated
+                routes: tag renames, tag descriptions, and optional operation-id
+                and route-name transforms.
             rate_limiter: Override the bundled store-backed limiter, or pass
                 ``UnlimitedRateLimiter`` to limit only at the edge.
             events: The sink offered every observational security event.
@@ -712,6 +747,7 @@ class LocalAuth:
             registration=registration,
             route_prefix=route_prefix,
             register_routes=register_routes,
+            docs=RouteDocs() if docs is None else docs,
             rate_limiter=rate_limiter,
             events=NoOpSecurityEventSink() if events is None else events,
             client_key=client_key,

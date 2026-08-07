@@ -39,7 +39,7 @@ __all__ = (
     "ProviderTokenReference",
     "StoredProviderTokens",
     "TokenVault",
-    "UnlinkResult",
+    "UnlinkOutcome",
     "UnlinkStatus",
 )
 
@@ -94,8 +94,8 @@ class UnlinkStatus(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class UnlinkResult:
-    """Result of one atomic identity, login-method, and grant removal."""
+class UnlinkOutcome:
+    """Outcome of one atomic identity, login-method, and grant removal."""
 
     status: UnlinkStatus
     provider_account_id: str | None = None
@@ -105,7 +105,7 @@ class UnlinkResult:
         if self.status.__class__ is not UnlinkStatus or (self.status is UnlinkStatus.UNLINKED) != (
             self.provider_account_id is not None
         ):
-            message = "OAuth unlink result is invalid"
+            message = "OAuth unlink outcome is invalid"
             raise ValueError(message)
 
 
@@ -208,7 +208,7 @@ class OAuthAccountStore(Protocol):
 
     async def unlink_identity(
         self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
-    ) -> UnlinkResult:
+    ) -> UnlinkOutcome:
         """Atomically remove identity, login method, and grant."""
         ...  # pragma: no cover
 
@@ -328,21 +328,21 @@ class MemoryOAuthAccountStore:
 
     async def unlink_identity(
         self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
-    ) -> UnlinkResult:
+    ) -> UnlinkOutcome:
         """Atomically remove provider identity, method, and grant."""
         if not _strict_text(account_id) or not _strict_text(provider_account_id) or not _aware(now):
             raise OAuthAccountError
         async with self._lock:
             linked = self._links.get(provider_account_id)
             if linked is None or linked.account_id != account_id:
-                return UnlinkResult(UnlinkStatus.NOT_FOUND)
+                return UnlinkOutcome(UnlinkStatus.NOT_FOUND)
             count = self._method_counts.get(account_id, 0)
             if require_remaining and count <= 1:
-                return UnlinkResult(UnlinkStatus.FINAL_METHOD)
+                return UnlinkOutcome(UnlinkStatus.FINAL_METHOD)
             del self._links[provider_account_id]
             del self._identity_index[(linked.provider, linked.issuer, linked.subject)]
             self._method_counts[account_id] = max(0, count - 1)
-            return UnlinkResult(UnlinkStatus.UNLINKED, provider_account_id)
+            return UnlinkOutcome(UnlinkStatus.UNLINKED, provider_account_id)
 
     async def apply_grant(
         self, account_id: str, provider_account_id: str, grant: ProviderGrant, *, now: datetime
@@ -613,7 +613,7 @@ class OAuthAccountService:
             await self.vault.put(linked.provider_account_id, tokens, now=now)
         return linked
 
-    async def unlink(self, proof: OAuthLinkProof, provider_account_id: str, *, now: datetime) -> UnlinkResult:
+    async def unlink(self, proof: OAuthLinkProof, provider_account_id: str, *, now: datetime) -> UnlinkOutcome:
         """Atomically preserve a remaining login method, then discard tokens."""
         if not proof.valid_for("oauth-unlink"):
             raise OAuthAccountError

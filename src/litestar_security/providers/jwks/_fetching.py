@@ -4,7 +4,7 @@ Applications supply the HTTP client, so this module never imports one. Sync
 fetchers are shared and run through an explicit finite worker limit.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from inspect import iscoroutinefunction
 from math import isfinite
@@ -99,6 +99,10 @@ class AsyncJWKSFetcher(Protocol):
         """
         ...  # pragma: no cover
 
+    async def aclose(self) -> None:
+        """Close resources owned by the fetcher."""
+        ...  # pragma: no cover
+
 
 @runtime_checkable
 class SyncJWKSFetcher(Protocol):
@@ -164,7 +168,27 @@ def normalize_fetcher(
     if not callable(getattr(metric_sink, "increment", None)) or not callable(getattr(metric_sink, "observe", None)):
         raise_config("JWKS metrics must implement SecurityMetrics")
     if iscoroutinefunction(fetch_method):
-        return cast("AsyncJWKSFetcher", fetcher)
+        close_method = getattr(fetcher, "aclose", None)
+        if iscoroutinefunction(close_method):
+            normalized_close = cast("Callable[[], Awaitable[None]]", close_method)
+        elif callable(close_method):
+
+            async def close_sync_method() -> None:
+                close_method()
+
+            normalized_close = close_sync_method
+
+        else:
+
+            async def close_noop() -> None:
+                return None
+
+            normalized_close = close_noop
+
+        return _AsyncJWKSFetcher(
+            fetch_async=cast("Callable[[JWKSFetchRequest], Awaitable[JWKSFetchResponse]]", fetch_method),
+            close_async=normalized_close,
+        )
     return _WorkerJWKSFetcher(
         fetch_sync=cast("Callable[[JWKSFetchRequest], JWKSFetchResponse]", fetch_method),
         limiter=limiter,
@@ -172,6 +196,20 @@ def normalize_fetcher(
         metrics=metric_sink,
         source=fetcher,
     )
+
+
+@dataclass(slots=True)
+class _AsyncJWKSFetcher:
+    fetch_async: Callable[[JWKSFetchRequest], Awaitable[JWKSFetchResponse]] = field(repr=False)
+    close_async: Callable[[], Awaitable[None]] = field(repr=False)
+
+    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+        """Delegate to the configured async transport."""
+        return await self.fetch_async(request)
+
+    async def aclose(self) -> None:
+        """Close the configured transport through one async contract."""
+        await self.close_async()
 
 
 @dataclass(slots=True)
