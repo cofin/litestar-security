@@ -33,6 +33,7 @@ __all__ = (
     "merge_route_tags",
     "raised_denial",
     "resolve_tags",
+    "restated_denial",
 )
 
 
@@ -73,6 +74,20 @@ def converted_denial(description: str) -> ResponseSpec:
     return ResponseSpec(
         ProblemDetail, description=description, media_type="application/problem+json", generate_examples=False
     )
+
+
+def restated_denial(schema: type[object], media_type: str, description: str) -> ResponseSpec:
+    """Restate a raised status using an application-declared error contract.
+
+    Args:
+        schema: The body type serialized by application exception handlers.
+        media_type: The content type emitted for that body.
+        description: The description carried over from the generated route.
+
+    Returns:
+        The raised status described by the application's declared contract.
+    """
+    return ResponseSpec(schema, description=description, media_type=media_type, generate_examples=False)
 
 
 def describes_raised_denial(spec: ResponseSpec) -> bool:

@@ -28,7 +28,7 @@ from litestar.openapi.spec import Components, Reference, SecurityRequirement, Se
 from litestar.routes import ASGIRoute, BaseRoute, HTTPRoute, WebSocketRoute
 from litestar.types import Empty
 
-from litestar_security._docs import converted_denial, describes_raised_denial
+from litestar_security._docs import converted_denial, describes_raised_denial, restated_denial
 from litestar_security._internal import GENERATED_ROUTE_OPT_KEY, RUNTIME_PLAN_OPT_KEY
 from litestar_security.authentication import (
     AUTH_POLICY_OPT_KEY,
@@ -47,7 +47,7 @@ from litestar_security.authentication import (
     public,
     required,
 )
-from litestar_security.config import ExternalCSRF
+from litestar_security.config import ExternalCSRF, RaisedErrorSchema
 from litestar_security.websocket import WebSocketSecurityConfig
 
 __all__ = ()
@@ -300,6 +300,7 @@ class RouteCompiler(Generic[UserT]):
     websocket_config: WebSocketSecurityConfig = field(default_factory=WebSocketSecurityConfig)
     exclude: Sequence[str] | str | None = None
     converts_to_problem_details: bool = False
+    raised_error_schema: RaisedErrorSchema | None = None
     _policy_compiler: PolicyCompiler[UserT] = field(init=False, repr=False)
     _schemes: OpenAPISchemeSet | None = field(init=False, repr=False)
     _exclude_pattern: Pattern[str] | None = field(init=False, repr=False)
@@ -390,7 +391,7 @@ class RouteCompiler(Generic[UserT]):
             "type[object]",
             route_handler.resolve_response_class(),  # pyright: ignore[reportUnknownMemberType] - Litestar returns an unparameterized Response type
         )
-        if resolved is Response or resolved in self._reported_response_classes:
+        if resolved is Response or resolved in self._reported_response_classes or self.raised_error_schema is not None:
             return
         self._reported_response_classes.add(resolved)
         message = (
@@ -417,13 +418,22 @@ class RouteCompiler(Generic[UserT]):
         Args:
             route_handler: The handler whose response specifications are restated.
         """
-        if not self.converts_to_problem_details or not route_handler.opt.get(GENERATED_ROUTE_OPT_KEY):
+        if not route_handler.opt.get(GENERATED_ROUTE_OPT_KEY):
+            return
+        declaration = self.raised_error_schema
+        if declaration is None and not self.converts_to_problem_details:
             return
         responses = route_handler.responses
         if not responses or not any(describes_raised_denial(spec) for spec in responses.values()):
             return
         route_handler.responses = {
-            status: converted_denial(spec.description) if describes_raised_denial(spec) else spec
+            status: (
+                restated_denial(declaration.schema, declaration.media_type, spec.description)
+                if declaration is not None and describes_raised_denial(spec)
+                else converted_denial(spec.description)
+                if describes_raised_denial(spec)
+                else spec
+            )
             for status, spec in responses.items()
         }
 

@@ -171,6 +171,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 websocket_config=self.config.websocket,
                 exclude=self.config.exclude,
                 converts_to_problem_details=self._converts_to_problem_details(app_config),
+                raised_error_schema=self.config.raised_error_schema,
             )
         self._configure_exclusion_report(app_config)
         app_config.dependencies.update(self._providers)
