@@ -3,7 +3,7 @@
 ####################
 [project]
 name = "litestar-security"
-version = "0.2.0"
+version = "0.3.0"
 description = "Authentication and authorization for Litestar applications"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -70,7 +70,7 @@ build-backend = "hatchling.build"
 packages = ["src/litestar_security"]
 
 [tool.bumpversion]
-current_version = "0.2.0"
+current_version = "0.3.0"
 parse = """(?x)
     (?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)
     (-(?P<pre>alpha|beta|rc)\\.(?P<pre_n>\\d+))?
@@ -109,6 +109,11 @@ replace = """
 name = "litestar-security"
 version = "{new_version}"
 """
+
+[[tool.bumpversion.files]]
+filename = "tools/check_release.py"
+search = "{current_version}"
+replace = "{new_version}"
 
 #####################
 # Dependency Groups #
