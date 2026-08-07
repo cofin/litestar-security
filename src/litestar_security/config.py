@@ -45,6 +45,7 @@ __all__ = (
     "MFAConfig",
     "NoOpSecurityMetrics",
     "PasskeyConfig",
+    "RaisedErrorSchema",
     "SecurityConfig",
     "SecurityMetrics",
     "WorkerLimits",
@@ -56,6 +57,34 @@ ResultT = TypeVar("ResultT")
 _EMPTY_METRIC_ATTRIBUTES: Mapping[str, str] = MappingProxyType({})
 _MAXIMUM_WORKER_TOKENS = 1_024
 _ASCII_CONTROL_LIMIT = 32
+
+
+@dataclass(frozen=True, slots=True)
+class RaisedErrorSchema:
+    """Declare how application exception handling renders raised route errors.
+
+    Args:
+        schema: The body type application exception handlers serialize.
+        media_type: The response content type used for that serialized body.
+
+    Raises:
+        ImproperlyConfiguredException: If ``schema`` is not a type or
+            ``media_type`` is not a non-blank string.
+    """
+
+    schema: type[object]
+    media_type: str
+
+    def __post_init__(self) -> None:
+        """Validate and normalize the application-owned response declaration."""
+        if not isinstance(cast("object", self.schema), type):
+            message = "Raised-error schema must be a type"
+            raise ImproperlyConfiguredException(detail=message)
+        media_type = cast("object", self.media_type)
+        if media_type.__class__ is not str or not cast("str", media_type).strip():  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
+            message = "Raised-error media type must be a non-blank string"
+            raise ImproperlyConfiguredException(detail=message)
+        object.__setattr__(self, "media_type", cast("str", media_type).strip())  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +347,15 @@ class SecurityConfig(Generic[UserT]):
     field from resolving to its default and producing a wrong but successful
     request.
     """
+    raised_error_schema: RaisedErrorSchema | None = None
+    """The body type and media type application handlers use for raised errors.
+
+    Generated routes raise their denial statuses through the application's
+    exception handlers. Set this when those handlers render a body other than
+    Litestar's default :class:`~litestar_security.RouteError`. The declaration
+    changes only generated-route OpenAPI response specifications; it does not
+    install an exception handler or alter runtime responses.
+    """
 
     def __post_init__(self) -> None:
         """Freeze ordered authentication collections."""
@@ -331,6 +369,10 @@ class SecurityConfig(Generic[UserT]):
         headers = cast("object | None", self.headers)
         if headers is not None and not isinstance(headers, SecurityHeadersConfig):
             msg = "Browser security headers must be a SecurityHeadersConfig"
+            raise ImproperlyConfiguredException(detail=msg)
+        raised_error_schema = cast("object | None", self.raised_error_schema)
+        if raised_error_schema is not None and not isinstance(raised_error_schema, RaisedErrorSchema):
+            msg = "Raised-error schema must be a RaisedErrorSchema declaration"
             raise ImproperlyConfiguredException(detail=msg)
         self._validate_protected_resource()
         self.exclude = _exclude_patterns(self.exclude)
