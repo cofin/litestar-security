@@ -38,10 +38,13 @@ class _Fetcher:
 
 
 @pytest.fixture
-def asyncio_runner() -> Generator[asyncio.Runner, None, None]:
+def asyncio_runner() -> Generator[asyncio.AbstractEventLoop, None, None]:
     """Own one persistent event loop for all iterations of a benchmark case."""
-    with asyncio.Runner() as runner:
+    runner = asyncio.new_event_loop()
+    try:
         yield runner
+    finally:
+        runner.close()
 
 
 def _claims() -> dict[str, object]:
@@ -79,7 +82,7 @@ def _verify(token: str, key: bytes) -> object:
 
 @pytest.mark.benchmark(group="jwks-cached-select-and-verify")
 def test_direct_jwt_verification_benchmark(
-    benchmark: Any, asyncio_runner: asyncio.Runner, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+    benchmark: Any, asyncio_runner: asyncio.AbstractEventLoop, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
     private_key, public_key = jwt_key_material["EdDSA"]
     token = jwt.encode(_claims(), private_key, algorithm="EdDSA", headers={"typ": "at+jwt", "kid": "key-1"})
@@ -89,7 +92,7 @@ def test_direct_jwt_verification_benchmark(
         return _verify(token, public_key)
 
     def run() -> object:
-        return asyncio_runner.run(verify())
+        return asyncio_runner.run_until_complete(verify())
 
     result = benchmark(run)
 
@@ -98,7 +101,7 @@ def test_direct_jwt_verification_benchmark(
 
 @pytest.mark.benchmark(group="jwks-cached-select-and-verify")
 def test_cached_jwks_select_and_verification_benchmark(
-    benchmark: Any, asyncio_runner: asyncio.Runner, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+    benchmark: Any, asyncio_runner: asyncio.AbstractEventLoop, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
     private_key, _public_key = jwt_key_material["EdDSA"]
     token = jwt.encode(_claims(), private_key, algorithm="EdDSA", headers={"typ": "at+jwt", "kid": "key-1"})
@@ -106,7 +109,7 @@ def test_cached_jwks_select_and_verification_benchmark(
         entries=(JWKSCacheEntry(_ISSUER, _JWKS_URI, frozenset({"EdDSA"})),),
         fetcher=_Fetcher(_response(jwt_key_material)),
     )
-    selected = asyncio_runner.run(provider.select_key(_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_NOW))
+    selected = asyncio_runner.run_until_complete(provider.select_key(_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_NOW))
     assert isinstance(selected, VerificationKey)
     benchmark.extra_info.update({"algorithm": "EdDSA", "issuer_count": 1, "concurrency": 1, "workload_size": 1})
 
@@ -116,7 +119,7 @@ def test_cached_jwks_select_and_verification_benchmark(
         return _verify(token, key.key)
 
     def run() -> object:
-        return asyncio_runner.run(select_and_verify())
+        return asyncio_runner.run_until_complete(select_and_verify())
 
     result = benchmark(run)
 
@@ -124,7 +127,7 @@ def test_cached_jwks_select_and_verification_benchmark(
 
 
 @pytest.mark.benchmark(group="saturated-sync-verification")
-def test_saturated_sync_verification_benchmark(benchmark: Any, asyncio_runner: asyncio.Runner) -> None:
+def test_saturated_sync_verification_benchmark(benchmark: Any, asyncio_runner: asyncio.AbstractEventLoop) -> None:
     class SyncVerifier:
         config = JWTValidationConfig(issuer=_ISSUER, audiences=frozenset({_AUDIENCE}), algorithms=frozenset({"EdDSA"}))
 
@@ -160,7 +163,7 @@ def test_saturated_sync_verification_benchmark(benchmark: Any, asyncio_runner: a
         return completed, ticks
 
     def run() -> tuple[int, int]:
-        return asyncio_runner.run(workload())
+        return asyncio_runner.run_until_complete(workload())
 
     completed, ticks = benchmark(run)
 

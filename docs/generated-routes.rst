@@ -315,7 +315,7 @@ success case:
        fail closed, so this never means the request was allowed.
 
 What an error body looks like
-----------------------------
+-----------------------------
 
 Two different things produce a non-success status, and they produce different
 bodies. The distinction is raised versus returned, not error versus success.
