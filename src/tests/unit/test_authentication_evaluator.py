@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
+from litestar.openapi.spec import SecurityScheme
 
+import litestar_security.authentication as authentication_module
 from litestar_security._openapi import PolicyCompiler
 from litestar_security.authentication import (
     Authenticated,
@@ -51,6 +53,35 @@ if TYPE_CHECKING:
 
 _CONNECTION = cast("ASGIConnection", object())
 _NOW = datetime(2026, 7, 26, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("challenge", "expected"),
+    [
+        (
+            'Bearer error="invalid_token"',
+            'Bearer error="invalid_token", resource_metadata="https://api.example.com/metadata"',
+        ),
+        ('Basic realm="example"', 'Basic realm="example"'),
+        (
+            'Bearer resource_metadata="https://elsewhere.example.com/metadata"',
+            'Bearer resource_metadata="https://elsewhere.example.com/metadata"',
+        ),
+    ],
+)
+def test_resource_metadata_preserves_existing_authentication_challenges(challenge: str, expected: str) -> None:
+    scheme = SecurityScheme(type="http", scheme="bearer")
+    registry = SimpleNamespace(
+        default_mechanism_names=("bearer",), get_mechanism=lambda _name: SimpleNamespace(security_scheme=scheme)
+    )
+    config = SimpleNamespace(resource_metadata_url="https://api.example.com/metadata", registry=registry)
+    plan = SimpleNamespace(participant_names=frozenset({"bearer"}))
+    exception = NotAuthorizedException(headers={"WWW-Authenticate": challenge})
+    advertise = cast("Any", authentication_module._advertise_resource_metadata)  # noqa: SLF001 - unit coverage targets the challenge normalizer directly
+
+    advertise(exception, config=config, plan=plan)
+
+    assert exception.headers == {"WWW-Authenticate": expected}
 
 
 def _scope(scope_type: str = "http") -> Scope:
