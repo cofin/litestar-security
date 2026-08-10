@@ -20,7 +20,7 @@ from litestar_security.authentication import (
     VerificationUnavailable,
 )
 from litestar_security.context import AuthenticationEvidence, NullSessionHandle, Principal, SecurityContext
-from litestar_security.guards import requires_assurance
+from litestar_security.guards import require_assurance
 from tests.fixtures.accounts import (
     _copy_native_session,
     _native_session_connection,
@@ -73,7 +73,7 @@ def test_native_session_legacy_v1_decode_does_not_synthesize_password_assurance(
         traits=authentication.traits,
         amr=authentication.amr,
     )
-    decision = requires_assurance(methods={"password"}, clock=lambda: _JWT_NOW).decide(
+    decision = require_assurance(methods={"password"}, clock=lambda: _JWT_NOW).decide(
         cast(
             "Any",
             SimpleNamespace(
@@ -141,7 +141,7 @@ async def test_native_session_remains_authenticated_after_step_up_assurance_expi
     assert isinstance(outcome, Authenticated)
     authenticated_connection.scope["user"] = Principal(id="account-1")
     authenticated_connection.scope["auth"] = SecurityContext(session=NullSessionHandle(), evidence=(outcome.evidence,))
-    decision = requires_assurance(methods={"totp"}, clock=lambda: current[0]).decide(authenticated_connection)
+    decision = require_assurance(methods={"totp"}, clock=lambda: current[0]).decide(authenticated_connection)
     assert decision.code == "missing_assurance"
 
 

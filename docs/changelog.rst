@@ -7,6 +7,16 @@ Changelog
 Changed (breaking)
 ~~~~~~~~~~~~~~~~~~
 
+* Authorization predicates and combinators now use the singular ``require_*``
+  names. Replace ``requires_role`` with ``require_role`` and the former
+  ``guard_all_of``/``guard_any_of``/``guard_one_of``/``guard_at_least`` names
+  with ``require_all_of``/``require_any_of``/``require_one_of``/
+  ``require_at_least``. No compatibility aliases are provided.
+* OAuth callback completion is presentation-neutral through
+  ``OAuthCallbackOutcome`` and ``OAuthLifecycleService.complete_callback()``;
+  generated routes adapt that result through ``callback()``. OAuth persistence
+  is now one aggregate ``OAuthAccountStore`` boundary, and ``OAuthConfig`` no
+  longer duplicates the lifecycle service's providers.
 * Public domain and protocol types now use semantic names. No compatibility
   aliases are provided: ``TOTPEnrollment`` becomes
   ``TOTPProvisioningGrant``, ``RecoveryCodes`` becomes

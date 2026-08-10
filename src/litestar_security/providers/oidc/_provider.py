@@ -40,6 +40,7 @@ class OIDCProvider:
     oauth: OAuthProviderClient
     metadata: OIDCMetadata
     verifier: JWTVerifier[JWTClaims]
+    retain_tokens_by_default: bool = True
 
     def __post_init__(self) -> None:
         """Pin discovery, OAuth endpoints, and JWT trust to one issuer/client."""
@@ -61,6 +62,7 @@ class OIDCProvider:
             or not config.algorithms
             or not config.algorithms.issubset(self.metadata.algorithms)
             or "openid" not in self.oauth.config.required_scopes
+            or self.retain_tokens_by_default.__class__ is not bool
         ):
             _raise_config("OIDC provider trust configuration is inconsistent")
 
@@ -257,6 +259,7 @@ def google_oidc_provider(  # noqa: PLR0913 - constructor keeps the provider trus
     metadata: OIDCMetadata,
     verifier: JWTVerifier[JWTClaims],
     scopes: frozenset[str] = _DEFAULT_SCOPES,
+    offline_access: bool = False,
     http_policy: OAuthHTTPPolicy | None = None,
 ) -> OIDCProvider:
     """Construct Google's pinned OIDC profile.
@@ -267,6 +270,7 @@ def google_oidc_provider(  # noqa: PLR0913 - constructor keeps the provider trus
         metadata: Validated Google discovery result.
         verifier: ID-token verifier pinned to Google and the client.
         scopes: Allowed Google scopes.
+        offline_access: Request refresh access while the user is absent.
         http_policy: Bounded OAuth transport policy.
 
     Returns:
@@ -277,15 +281,22 @@ def google_oidc_provider(  # noqa: PLR0913 - constructor keeps the provider trus
     """
     if metadata.issuer != _GOOGLE_ISSUER:
         _raise_config("Google OIDC issuer is invalid")
-    return oidc_provider(
+    configured = oidc_provider(
         name="google",
         client_id=client_id,
         client_secret=client_secret,
         metadata=metadata,
         verifier=verifier,
         scopes=scopes,
-        extra_authorization_parameters={"access_type": "offline"},
+        revocation_endpoint=metadata.revocation_endpoint,
+        extra_authorization_parameters={"access_type": "offline"} if offline_access else None,
         http_policy=http_policy,
+    )
+    return OIDCProvider(
+        oauth=configured.oauth,
+        metadata=configured.metadata,
+        verifier=configured.verifier,
+        retain_tokens_by_default=offline_access,
     )
 
 

@@ -54,9 +54,9 @@ for the store contracts; it is not a production persistence implementation.
    * - ``StepUpStore``
      - :func:`~litestar_security.testing.assert_step_up_store_conformance`
      - ``InMemoryStepUpStore``
-   * - ``TokenVault``
-     - :func:`~litestar_security.testing.assert_token_vault_conformance`
-     - ``MemoryTokenVault`` with an AEAD protector
+   * - ``OAuthAccountStore``
+     - OAuth account-store conformance helpers
+     - ``MemoryOAuthAccountStore`` with an AEAD protector
    * - ``WebAuthnChallengeStore``
      - :func:`~litestar_security.testing.assert_webauthn_challenge_store_conformance`
      - ``InMemorySecurityBackend.challenges``

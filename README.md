@@ -51,13 +51,13 @@ guards can enforce application permissions:
 ```python
 from litestar import get
 
-from litestar_security import required, requires_team_role
+from litestar_security import require_team_role, required
 
 
 @get(
     "/teams/{team_id:str}",
     auth=required(),
-    guards=[requires_team_role(team_parameter="team_id", roles={"owner"})],
+    guards=[require_team_role(team_parameter="team_id", roles={"owner"})],
 )
 async def team_settings(team_id: str) -> dict[str, str]:
     return {"team_id": team_id}

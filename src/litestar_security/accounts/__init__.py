@@ -191,7 +191,7 @@ if TYPE_CHECKING:
         LOCAL_AUTH_TAGS,
         build_local_auth_routes,
         build_mfa_routes,
-        requires_local_bearer,
+        require_local_bearer,
     )
 
 __all__ = (
@@ -362,7 +362,7 @@ __all__ = (
     "build_mfa_routes",
     "forwarded_client_key",
     "normalize_identifier",
-    "requires_local_bearer",
+    "require_local_bearer",
     "trusted_client_key",
 )
 
@@ -421,7 +421,7 @@ _CONTROLLER_EXPORTS = frozenset({
     "LOCAL_AUTH_TAGS",
     "build_local_auth_routes",
     "build_mfa_routes",
-    "requires_local_bearer",
+    "require_local_bearer",
 })
 _OPTIONAL_EXPORTS = (
     dict.fromkeys(_MFA_EXPORTS, ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})))

@@ -1,5 +1,6 @@
 """Native Litestar route bundle for interactive OAuth provider lifecycles."""
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -47,6 +48,7 @@ from litestar_security.authentication import InvalidCredentials, VerificationUna
 from litestar_security.context import Principal
 from litestar_security.providers.oauth._accounts import (
     AccountLinkError,
+    LinkedProviderAccount,
     OAuthAccountError,
     OAuthAccountService,
     OAuthLinkProof,
@@ -75,6 +77,7 @@ if TYPE_CHECKING:
 __all__ = (
     "OIDC_FRONTCHANNEL_LOGOUT",
     "OAuthAuthorization",
+    "OAuthCallbackOutcome",
     "OAuthConfig",
     "OAuthLifecycleService",
     "OAuthLink",
@@ -178,6 +181,18 @@ class OAuthAuthorization(msgspec.Struct, frozen=True, kw_only=True):
     binding_cookie: Cookie
 
 
+@dataclass(frozen=True, slots=True)
+class OAuthCallbackOutcome:
+    """Presentation-neutral result of one consumed OAuth callback."""
+
+    operation: OAuthOperation
+    return_to: str
+    identity: ProviderIdentity
+    linked: LinkedProviderAccount
+    authenticated_at: datetime
+    provisioned: bool
+
+
 class OAuthLogout(msgspec.Struct, frozen=True, kw_only=True):
     """Local logout confirmation plus optional validated provider redirect."""
 
@@ -222,6 +237,43 @@ class OAuthProviderRegistration:
     include_nonce: bool = False
     end_session_endpoint: str | None = None
     post_logout_redirect_uri: str | None = None
+    retain_tokens: bool = False
+
+    @classmethod
+    def oidc(
+        cls, *, provider: OAuthProvider, redirect_uri: str, post_logout_redirect_uri: str | None = None
+    ) -> "OAuthProviderRegistration":
+        """Derive an OIDC registration from one validated provider.
+
+        Args:
+            provider: Configured OIDC provider exposing validated metadata.
+            redirect_uri: Exact application callback URI.
+            post_logout_redirect_uri: Fixed return URI for provider logout.
+
+        Returns:
+            An immutable registration with nonce, issuer, scopes, logout, and retention derived.
+
+        Raises:
+            ImproperlyConfiguredException: If the provider is not a configured OIDC provider.
+        """
+        oidc = cast("Any", provider)
+        metadata = getattr(oidc, "metadata", None)
+        oauth = getattr(oidc, "oauth", None)
+        config = getattr(oauth, "config", None)
+        if metadata is None or config is None:
+            message = "OIDC provider registration is invalid"
+            raise ImproperlyConfiguredException(detail=message)
+        end_session_endpoint = getattr(metadata, "end_session_endpoint", None)
+        return cls(
+            provider=provider,
+            redirect_uri=redirect_uri,
+            default_scopes=config.allowed_scopes,
+            expected_issuer=metadata.issuer,
+            include_nonce=True,
+            end_session_endpoint=end_session_endpoint if post_logout_redirect_uri is not None else None,
+            post_logout_redirect_uri=post_logout_redirect_uri,
+            retain_tokens=bool(getattr(oidc, "retain_tokens_by_default", True)),
+        )
 
     def __post_init__(self) -> None:
         """Require immutable registration metadata matching the provider."""
@@ -236,6 +288,7 @@ class OAuthProviderRegistration:
             or (self.end_session_endpoint is not None and not _exact_https_url(self.end_session_endpoint))
             or (self.post_logout_redirect_uri is not None and not _exact_https_url(self.post_logout_redirect_uri))
             or ((self.end_session_endpoint is None) != (self.post_logout_redirect_uri is None))
+            or self.retain_tokens.__class__ is not bool
         ):
             message = "OAuth provider registration is invalid"
             raise ImproperlyConfiguredException(detail=message)
@@ -492,7 +545,7 @@ class OAuthRouteService(Protocol):
 class OAuthLifecycleService:
     """Concrete OAuth transaction, provider, account, and local-login workflow."""
 
-    __slots__ = ("_registrations", "accounts", "clock", "local", "step_up", "transactions")
+    __slots__ = ("_closed", "_registrations", "accounts", "clock", "local", "step_up", "transactions")
 
     def __init__(  # noqa: PLR0913 - lifecycle dependencies remain explicit and independently replaceable
         self,
@@ -518,6 +571,12 @@ class OAuthLifecycleService:
             message = "OAuth lifecycle service configuration is invalid"
             raise ImproperlyConfiguredException(detail=message)
         self._registrations = {registration.provider.name: registration for registration in registrations}
+        for registration in registrations:
+            configured = transactions.redirects.callback_uris.get(registration.provider.name)
+            if configured is None or registration.redirect_uri not in configured:
+                message = "OAuth provider callback URI is not allowed by the redirect policy"
+                raise ImproperlyConfiguredException(detail=message)
+        self._closed = False
         self.transactions = transactions
         self.accounts = accounts
         self.local = local
@@ -577,7 +636,17 @@ class OAuthLifecycleService:
     async def callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
     ) -> OAuthRouteStatus | Response[Any]:
-        """Consume one callback and complete its stored login, link, or scope purpose."""
+        """Adapt a neutral callback outcome to the generated route response."""
+        outcome = await self.complete_callback(provider=provider, code=code, state=state, request=request)
+        if outcome.operation is OAuthOperation.LOGIN:
+            return await self.establish_login(outcome, request=request)
+        detail = "Linked." if outcome.operation is OAuthOperation.LINK else "Scopes updated."
+        return OAuthRouteStatus(detail=detail, provider_account_id=outcome.linked.provider_account_id)
+
+    async def complete_callback(
+        self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
+    ) -> OAuthCallbackOutcome:
+        """Consume a callback and commit account state without presenting HTTP or establishing a session."""
         if not code or not state:
             raise InvalidOAuthCallback
         registration = self._registration(provider)
@@ -593,21 +662,69 @@ class OAuthLifecycleService:
         tokens = await registration.provider.exchange_code(code=SecretStr(code), transaction=transaction, now=now)
         identity = await registration.provider.resolve_identity(tokens, transaction=transaction, now=now)
         grant = ProviderGrant(scopes=tokens.scopes, expires_at=tokens.expires_at)
+        provisioned = False
         if transaction.operation is OAuthOperation.LOGIN:
-            linked = await self.accounts.login(identity, grant, tokens, now=now)
-            return await self.local.establish(
-                account_id=linked.account_id, identity=identity, request=request, authenticated_at=now
+            login = await self.accounts.login(
+                identity, grant, tokens, retain_tokens=registration.retain_tokens, now=now
             )
-        proof = await self._callback_proof(transaction.account_id, transaction.security_epoch, transaction.operation)
-        if transaction.operation is OAuthOperation.LINK:
-            linked = await self.accounts.link(proof, identity, grant, tokens, now=now)
-            return OAuthRouteStatus(detail="Linked.", provider_account_id=linked.provider_account_id)
-        if transaction.provider_account_id is None:
-            raise OAuthAccountError
-        linked = await self.accounts.apply_scope_upgrade(
-            proof, transaction.provider_account_id, grant, required_scopes=transaction.requested_scopes, now=now
+            linked = login.linked
+            provisioned = login.provisioned
+        else:
+            proof = await self._callback_proof(
+                transaction.account_id, transaction.security_epoch, transaction.operation
+            )
+            if transaction.operation is OAuthOperation.LINK:
+                linked = await self.accounts.link(
+                    proof, identity, grant, tokens, retain_tokens=registration.retain_tokens, now=now
+                )
+            else:
+                if transaction.provider_account_id is None:
+                    raise OAuthAccountError
+                linked = await self.accounts.apply_scope_upgrade(
+                    proof,
+                    transaction.provider_account_id,
+                    grant,
+                    tokens,
+                    required_scopes=transaction.requested_scopes,
+                    retain_tokens=registration.retain_tokens,
+                    now=now,
+                )
+        return OAuthCallbackOutcome(
+            operation=transaction.operation,
+            return_to=transaction.return_to,
+            identity=identity,
+            linked=linked,
+            authenticated_at=now,
+            provisioned=provisioned,
         )
-        return OAuthRouteStatus(detail="Scopes updated.", provider_account_id=linked.provider_account_id)
+
+    async def establish_login(
+        self, outcome: OAuthCallbackOutcome, *, request: Request[Any, Any, Any]
+    ) -> OAuthRouteStatus | Response[Any]:
+        """Establish the configured local transport for a completed login only."""
+        if outcome.__class__ is not OAuthCallbackOutcome or outcome.operation is not OAuthOperation.LOGIN:
+            raise OAuthAccountError
+        return await self.local.establish(
+            account_id=outcome.linked.account_id,
+            identity=outcome.identity,
+            request=request,
+            authenticated_at=outcome.authenticated_at,
+        )
+
+    async def aclose(self) -> None:
+        """Close each lifecycle-owned provider exactly once."""
+        if self._closed:
+            return
+        self._closed = True
+        closers = tuple(
+            cast("Callable[[], Awaitable[None]]", closer)
+            for registration in self._registrations.values()
+            if callable(closer := getattr(registration.provider, "aclose", None))
+        )
+        results = await asyncio.gather(*(closer() for closer in closers), return_exceptions=True)
+        if any(isinstance(result, BaseException) for result in results):
+            message = "OAuth provider shutdown failed"
+            raise ImproperlyConfiguredException(detail=message)
 
     async def unlink(
         self,
@@ -648,8 +765,8 @@ class OAuthLifecycleService:
         try:
             linked = await self.accounts.store.resolve_provider_account(account_id, provider)
             stored = (
-                await self.accounts.vault.get_for_refresh(linked.provider_account_id, now=self._now())
-                if linked is not None and self.accounts.vault is not None
+                await self.accounts.store.get_tokens(linked.provider_account_id, now=self._now())
+                if linked is not None
                 else None
             )
         except Exception:  # noqa: BLE001 - local logout remains successful when optional provider state is unavailable
@@ -850,21 +967,12 @@ class OIDCLogoutLifecycleService:
 class OAuthConfig:
     """Interactive provider route configuration and service graph."""
 
-    __slots__ = (
-        "_route_handlers",
-        "docs",
-        "oauth_service",
-        "oidc_service",
-        "providers",
-        "register_routes",
-        "route_prefix",
-    )
+    __slots__ = ("_route_handlers", "docs", "oauth_service", "oidc_service", "register_routes", "route_prefix")
 
-    def __init__(  # noqa: PLR0913 - explicit configuration surface; every input is named
+    def __init__(
         self,
         *,
         oauth_service: OAuthRouteService,
-        providers: tuple[object, ...],
         oidc_service: OIDCLogoutLifecycleService | None = None,
         route_prefix: str = "/auth",
         register_routes: bool = True,
@@ -874,7 +982,6 @@ class OAuthConfig:
 
         Args:
             oauth_service: Shared route and custom-controller service.
-            providers: Configured interactive providers.
             oidc_service: Optional verified OIDC logout workflow.
             route_prefix: Absolute non-root mount path.
             register_routes: Whether the plugin installs generated routes.
@@ -889,18 +996,12 @@ class OAuthConfig:
         if not isinstance(oauth_service_value, OAuthRouteService):
             message = "OAuth route service is invalid"
             raise ImproperlyConfiguredException(detail=message)
-        names = tuple(getattr(provider, "name", None) for provider in providers)
-        if (
-            not providers
-            or any(not isinstance(name, str) or not name.strip() for name in names)
-            or len(names) != len(set(names))
-            or frozenset(cast("tuple[str, ...]", names)) != oauth_service.provider_names
-        ):
+        names = oauth_service.provider_names
+        if not names:
             message = "OAuth providers are invalid"
             raise ImproperlyConfiguredException(detail=message)
         if oidc_service is not None and (
-            oidc_service.__class__ is not OIDCLogoutLifecycleService
-            or not oidc_service.provider_names.issubset(frozenset(cast("tuple[str, ...]", names)))
+            oidc_service.__class__ is not OIDCLogoutLifecycleService or not oidc_service.provider_names.issubset(names)
         ):
             message = "OIDC logout providers are invalid"
             raise ImproperlyConfiguredException(detail=message)
@@ -922,7 +1023,6 @@ class OAuthConfig:
             raise ImproperlyConfiguredException(detail=message)
         self.docs = RouteDocs() if docs is None else docs
         self.oauth_service = oauth_service
-        self.providers = providers
         self.oidc_service = oidc_service
         self.route_prefix = normalized_prefix
         self.register_routes = register_routes

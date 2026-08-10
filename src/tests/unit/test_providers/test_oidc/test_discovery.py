@@ -29,6 +29,7 @@ def _oidc_document(**overrides: object) -> dict[str, object]:
         "authorization_endpoint": f"{_OIDC_ISSUER}/authorize",
         "token_endpoint": f"{_OIDC_ISSUER}/token",
         "end_session_endpoint": f"{_OIDC_ISSUER}/logout",
+        "revocation_endpoint": f"{_OIDC_ISSUER}/revoke",
         "id_token_signing_alg_values_supported": ["EdDSA", "RS256"],
     }
     document.update(overrides)
@@ -94,6 +95,7 @@ async def test_oidc_discovery_derives_one_exact_url_and_returns_pinned_metadata(
         authorization_endpoint=f"{_OIDC_ISSUER}/authorize",
         token_endpoint=f"{_OIDC_ISSUER}/token",
         end_session_endpoint=f"{_OIDC_ISSUER}/logout",
+        revocation_endpoint=f"{_OIDC_ISSUER}/revoke",
         algorithms=frozenset({"EdDSA"}),
     )
     assert transport.was_closed is True
@@ -377,6 +379,7 @@ async def test_oidc_discovery_classifies_literal_public_ip_without_resolving() -
                 authorization_endpoint=None,
                 token_endpoint=None,
                 end_session_endpoint=None,
+                revocation_endpoint=None,
             )
         )
 
@@ -441,6 +444,7 @@ async def test_oidc_discovery_allows_explicit_controlled_private_keycloak_hosts(
                 authorization_endpoint=None,
                 token_endpoint=None,
                 end_session_endpoint=None,
+                revocation_endpoint=None,
             )
         )
 

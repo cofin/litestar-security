@@ -31,10 +31,10 @@ from litestar_security.providers.oauth import (
     LinkedProviderAccount,
     MemoryOAuthAccountStore,
     MemoryOAuthTransactionStore,
-    MemoryTokenVault,
     OAuthAccountError,
     OAuthAccountService,
     OAuthAuthorization,
+    OAuthCallbackOutcome,
     OAuthConfig,
     OAuthLifecycleService,
     OAuthLink,
@@ -325,7 +325,7 @@ class LogoutSessions:
 
 
 def oauth_config(*, register_routes: bool = True) -> OAuthConfig:
-    return OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), register_routes=register_routes)
+    return OAuthConfig(oauth_service=RouteService(), register_routes=register_routes)
 
 
 def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycle dependencies
@@ -334,14 +334,10 @@ def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycl
     store: MemoryOAuthAccountStore | None = None,
     step_up: StepUpAuthorizer | None = None,
     local: LocalTransport | None = None,
-    vault: MemoryTokenVault | None = None,
     rp_logout: bool = True,
+    retain_tokens: bool = False,
     clock: object = lambda: NOW,
 ) -> OAuthLifecycleService:
-    async def provision(identity: ProviderIdentity) -> str:
-        del identity
-        return "account-1"
-
     return OAuthLifecycleService(
         registrations=(
             OAuthProviderRegistration(
@@ -351,6 +347,7 @@ def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycl
                 expected_issuer="https://issuer.example",
                 end_session_endpoint="https://issuer.example/logout" if rp_logout else None,
                 post_logout_redirect_uri="https://app.example/logged-out" if rp_logout else None,
+                retain_tokens=retain_tokens,
             ),
         ),
         transactions=OAuthTransactionService(
@@ -360,7 +357,7 @@ def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycl
                 callback_uris={"example": frozenset({"https://app.example/auth/oauth/example/callback"})}
             ),
         ),
-        accounts=OAuthAccountService(store=store or MemoryOAuthAccountStore(), vault=vault, provision=provision),
+        accounts=OAuthAccountService(store=store or MemoryOAuthAccountStore(), provision_unknown=True),
         local=local or LocalTransport(),
         step_up=step_up,
         clock=cast("Any", clock),
@@ -368,7 +365,7 @@ def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycl
 
 
 def oauth_app(*, openapi: bool, oauth_service: RouteService | None = None, authenticated: bool = True) -> Litestar:
-    config = OAuthConfig(oauth_service=oauth_service or RouteService(), providers=(Provider(),))
+    config = OAuthConfig(oauth_service=oauth_service or RouteService())
 
     def provide_principal() -> Principal[object]:
         return Principal(id="account-1") if authenticated else Principal[object].anonymous()
@@ -612,10 +609,6 @@ async def test_concrete_lifecycle_composes_login_transaction_provider_account_an
         ),
     )
 
-    async def provision(identity: ProviderIdentity) -> str:
-        assert identity.subject == "subject"
-        return "account-1"
-
     local_services = VerifiedLocalServices()
     local = OAuthLocalAuthTransport(local_auth_service=cast("Any", local_services), transport="session")
     service = OAuthLifecycleService(
@@ -634,13 +627,13 @@ async def test_concrete_lifecycle_composes_login_transaction_provider_account_an
                 callback_uris={"example": frozenset({"https://app.example/auth/oauth/example/callback"})}
             ),
         ),
-        accounts=OAuthAccountService(store=MemoryOAuthAccountStore(), provision=provision),
+        accounts=OAuthAccountService(store=MemoryOAuthAccountStore(), provision_unknown=True),
         local=local,
         step_up=StepUpAuthorizer(),
         clock=lambda: NOW,
     )
     app = Litestar(
-        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service, providers=(provider,)))],
+        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service))],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
         openapi_config=None,
     )
@@ -653,6 +646,34 @@ async def test_concrete_lifecycle_composes_login_transaction_provider_account_an
     assert callback.json() == {"detail": "Authenticated.", "account_id": "account-1"}
     assert local_services.established == ["account-1"]
     assert provider.calls == ["authorize", "exchange", "identity"]
+
+
+async def test_custom_callback_completion_is_presentation_neutral_until_login_is_established() -> None:
+    provider = oauth_fake_provider()
+    local = LocalTransport()
+    service = lifecycle_service(provider=provider, local=local)
+    request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {"cookies": {}})())
+    start = await service.begin(
+        provider="example",
+        operation=OAuthOperation.LOGIN,
+        account_id=None,
+        provider_account_id=None,
+        return_to="/",
+        scopes=None,
+        step_up_grant=None,
+        request=request,
+    )
+    request.cookies["__Host-litestar-security-oauth"] = start.binding_cookie.value
+
+    outcome = await service.complete_callback(
+        provider="example", code="code", state=parse_qs(urlsplit(start.url).query)["state"][0], request=request
+    )
+
+    assert isinstance(outcome, OAuthCallbackOutcome)
+    assert (outcome.operation, outcome.return_to, outcome.provisioned) == (OAuthOperation.LOGIN, "/", True)
+    assert local.established == []
+    await service.establish_login(outcome, request=request)
+    assert local.established == ["account-1"]
 
 
 async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout() -> None:
@@ -675,11 +696,10 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
             raw_claims={"sub": "subject"},
         ),
     )
-    store = MemoryOAuthAccountStore(login_method_counts={"account-1": 1})
+    store = MemoryOAuthAccountStore(login_method_counts={"account-1": 1}, protector=Protector())
     step_up = StepUpAuthorizer()
     local = LocalTransport()
-    vault = MemoryTokenVault(provider="example", client_id="client", protector=Protector())
-    service = lifecycle_service(provider=provider, store=store, step_up=step_up, local=local, vault=vault)
+    service = lifecycle_service(provider=provider, store=store, step_up=step_up, local=local, retain_tokens=True)
     request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {"cookies": {}})())
 
     link_start = await service.begin(
@@ -1057,7 +1077,7 @@ async def test_oidc_front_and_backchannel_logout_routes_delegate_verified_lifecy
     oidc_logout = OIDCLogoutLifecycleService(
         provider_issuers={"example": "https://issuer.example"}, consumer=consumer, sessions=sessions, clock=lambda: NOW
     )
-    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
     router = build_oauth_routes(config)
     assert set(router.dependencies) == {"oauth_service", "oidc_service"}
     app = Litestar(
@@ -1092,7 +1112,7 @@ async def test_frontchannel_logout_requires_ownership_binding_and_consumes_repla
         sessions=sessions,
         clock=lambda: NOW,
     )
-    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
     app = Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
@@ -1133,7 +1153,7 @@ async def test_frontchannel_logout_consumes_budget_and_rejects_bursts_with_retry
         rate_limits=guard,
         clock=lambda: NOW,
     )
-    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
     app = Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
@@ -1166,7 +1186,7 @@ async def test_frontchannel_logout_fails_closed_when_the_limiter_is_unavailable(
         rate_limits=RateLimitGuard(limiter=BrokenLimiter(), pepper=b"p" * 32),
         clock=lambda: NOW,
     )
-    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
     app = Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
@@ -1291,13 +1311,11 @@ async def test_oidc_logout_lifecycle_rejects_mismatches_unknown_provider_and_nai
 async def test_plugin_closes_lifecycle_owned_oauth_providers() -> None:
     events: list[str] = []
 
-    class ClosableProvider:
-        name = "example"
-
+    class ClosableService(RouteService):
         async def aclose(self) -> None:
             events.append("close")
 
-    config = OAuthConfig(oauth_service=RouteService(), providers=(ClosableProvider(),), register_routes=False)
+    config = OAuthConfig(oauth_service=ClosableService(), register_routes=False)
     plugin = SecurityPlugin[object](SecurityConfig[object](oauth=config))
     app_config = plugin.on_app_init(AppConfig())
     assert plugin.on_app_init(app_config).lifespan == app_config.lifespan
@@ -1310,13 +1328,11 @@ async def test_plugin_closes_lifecycle_owned_oauth_providers() -> None:
 
 
 async def test_plugin_reports_oauth_provider_shutdown_failure() -> None:
-    class BrokenProvider:
-        name = "example"
-
+    class BrokenService(RouteService):
         async def aclose(self) -> None:
             raise RuntimeError
 
-    config = OAuthConfig(oauth_service=RouteService(), providers=(BrokenProvider(),), register_routes=False)
+    config = OAuthConfig(oauth_service=BrokenService(), register_routes=False)
     app = Litestar(route_handlers=[], plugins=[SecurityPlugin[object](SecurityConfig[object](oauth=config))])
 
     with pytest.RaisesGroup(pytest.RaisesExc(ImproperlyConfiguredException, match="shutdown")):
@@ -1324,18 +1340,9 @@ async def test_plugin_reports_oauth_provider_shutdown_failure() -> None:
             pass
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"oauth_service": object()},
-        {"providers": ()},
-        {"providers": (Provider(), Provider())},
-        {"route_prefix": "auth"},
-        {"register_routes": 1},
-    ],
-)
+@pytest.mark.parametrize("kwargs", [{"oauth_service": object()}, {"route_prefix": "auth"}, {"register_routes": 1}])
 def test_oauth_config_rejects_invalid_startup(kwargs: dict[str, object]) -> None:
-    values: dict[str, object] = {"oauth_service": RouteService(), "providers": (Provider(),)}
+    values: dict[str, object] = {"oauth_service": RouteService()}
     values.update(kwargs)
 
     with pytest.raises(ImproperlyConfiguredException, match="OAuth"):
@@ -1350,7 +1357,7 @@ def test_oauth_config_rejects_mismatched_oidc_logout_providers() -> None:
         clock=lambda: NOW,
     )
     with pytest.raises(ImproperlyConfiguredException, match="OIDC logout providers"):
-        OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+        OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
 
 
 async def test_public_login_and_callback_have_binding_and_no_store_headers() -> None:
@@ -1429,7 +1436,7 @@ async def test_lifecycle_response_names_each_identifier_it_carries() -> None:
         sessions=LogoutSessions(),
         clock=lambda: NOW,
     )
-    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
     app = Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
@@ -1450,7 +1457,7 @@ async def test_backchannel_logout_form_rejects_unknown_members() -> None:
         sessions=LogoutSessions(),
         clock=lambda: NOW,
     )
-    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
     app = Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
@@ -1501,7 +1508,7 @@ def raising_oauth_app(exception: Exception, *, exception_handlers: Mapping[Any, 
     Returns:
         One application exposing only the generated OAuth route tree.
     """
-    config = OAuthConfig(oauth_service=RaisingRouteService(exception), providers=(Provider(),))
+    config = OAuthConfig(oauth_service=RaisingRouteService(exception))
     return Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
@@ -1542,7 +1549,7 @@ async def test_empty_code_or_state_callback_classifies_as_unauthorized(empty: st
     provider = oauth_fake_provider()
     service = lifecycle_service(provider=provider)
     app = Litestar(
-        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service, providers=(provider,)))],
+        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service))],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
         openapi_config=None,
         debug=True,
@@ -1562,7 +1569,7 @@ async def test_empty_cookie_binding_on_login_behaves_as_absent() -> None:
     provider = oauth_fake_provider()
     service = lifecycle_service(provider=provider)
     app = Litestar(
-        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service, providers=(provider,)))],
+        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service))],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
         openapi_config=None,
         debug=True,
@@ -1580,7 +1587,7 @@ async def test_replayed_callback_state_classifies_as_unauthorized() -> None:
     provider = oauth_fake_provider()
     service = lifecycle_service(provider=provider)
     app = Litestar(
-        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service, providers=(provider,)))],
+        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service))],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
         openapi_config=None,
         debug=True,

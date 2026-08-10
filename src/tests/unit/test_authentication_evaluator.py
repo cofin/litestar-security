@@ -42,7 +42,7 @@ from litestar_security.context import (
     ResourcePermission,
     resolve_authorization,
 )
-from litestar_security.guards import requires_team_role
+from litestar_security.guards import require_team_role
 from litestar_security.testing import StaticAuthorizationResolver, StaticIdentityResolver
 
 if TYPE_CHECKING:
@@ -719,7 +719,7 @@ async def test_team_role_guard_denies_role_removed_by_credential_ceiling() -> No
         SimpleNamespace(user=principal, auth=context, path_params={"team_id": "team-1"}),
     )
 
-    decision = requires_team_role(roles={"admin"}).decide(connection)
+    decision = require_team_role(roles={"admin"}).decide(connection)
 
     assert not decision.granted
     assert decision.code == "missing_team_role"

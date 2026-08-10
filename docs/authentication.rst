@@ -84,10 +84,14 @@ on the router or controller that owns them.
 
 Authorization guards compose separately:
 
-* ``requires_scope`` and ``requires_capability``;
-* ``requires_role`` and ``requires_team_role``;
-* ``requires_tenant``; and
-* ``requires_assurance`` for recent or stronger evidence.
+* ``require_scope`` and ``require_capability``;
+* ``require_role`` and ``require_team_role``;
+* ``require_tenant``; and
+* ``require_assurance`` for recent or stronger evidence.
+
+Compose predicates with ``require_all_of``, ``require_any_of``,
+``require_one_of``, and ``require_at_least``. These names are distinct from the
+unprefixed authentication-policy helpers, which compose mechanism names.
 
 The ``principal`` and ``security_context`` dependencies remain typed on public
 and protected routes. ``current_user`` is the explicit narrowing dependency

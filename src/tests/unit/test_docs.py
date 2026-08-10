@@ -227,10 +227,7 @@ def _oauth_kwargs() -> "dict[str, Any]":
         async def logout(self, **kwargs: object) -> None:
             del kwargs
 
-    class _Provider:
-        name = "example"
-
-    return {"oauth_service": cast("Any", _Service()), "providers": (_Provider(),), "register_routes": False}
+    return {"oauth_service": cast("Any", _Service()), "register_routes": False}
 
 
 def test_every_feature_config_carries_documentation_metadata_by_default() -> None:

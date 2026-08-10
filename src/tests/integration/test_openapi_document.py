@@ -201,7 +201,6 @@ def build_documented_app(  # noqa: PLR0913 - one variation point per configurabl
     )
     oauth = OAuthConfig(
         oauth_service=cast("Any", _OAuthRouteService()),
-        providers=(_Provider(),),
         oidc_service=OIDCLogoutLifecycleService(
             provider_issuers={"example": "https://issuer.example"},
             consumer=cast("Any", _LogoutTokenConsumer()),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 from cryptography.hazmat.primitives import serialization
@@ -34,12 +34,9 @@ from litestar_security.providers.oauth import (
     OAuthLogout,
     OAuthOperation,
     OAuthRouteStatus,
-    ProviderIdentity,
-    ProviderTokenSet,
-    SecretStr,
 )
 from litestar_security.providers.oidc import ServiceTokenConfig
-from litestar_security.testing import FakeOAuthProvider, InMemoryLocalAccountStore, InMemorySecurityBackend
+from litestar_security.testing import InMemoryLocalAccountStore, InMemorySecurityBackend
 from litestar_security.websocket import WebSocketSecurityConfig
 
 if TYPE_CHECKING:
@@ -147,25 +144,7 @@ def build_oauth_config(mode: str) -> OAuthConfig:
     if provider_name is None:
         message = f"Unsupported OAuth example mode: {mode}"
         raise ValueError(message)
-    provider = FakeOAuthProvider(
-        name=provider_name,
-        tokens=ProviderTokenSet(
-            access_token=SecretStr("example-access"),
-            token_type="Bearer",  # noqa: S106 - standardized OAuth token type
-            scopes=frozenset({"openid", "profile", "email"}),
-            expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(hours=1),
-        ),
-        identity=ProviderIdentity(
-            provider=provider_name,
-            issuer=f"https://{provider_name}.example",
-            subject="example-subject",
-            display_name="Example User",
-            email="user@example.com",
-            email_verified=True,
-            raw_claims={},
-        ),
-    )
-    return OAuthConfig(oauth_service=_ExampleOAuthService(provider_name), providers=(provider,))
+    return OAuthConfig(oauth_service=_ExampleOAuthService(provider_name))
 
 
 def build_api_team_config() -> tuple[APIKeyConfig, ServiceTokenConfig]:

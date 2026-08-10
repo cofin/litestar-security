@@ -21,15 +21,15 @@ OAuth transaction and token protection
 
 The in-memory OAuth references require an ``OAuthTransactionProtector`` so
 that the PKCE verifier, nonce, and refreshable provider tokens are not kept as
-plaintext. The first-party AES-256-GCM protector supplies that port to both
-stores:
+plaintext. The first-party AES-256-GCM protector supplies that port to the
+transaction store and aggregate account store:
 
 .. code-block:: python
 
    from litestar_security.providers.oauth import (
        AESGCMOAuthTransactionProtector,
+       MemoryOAuthAccountStore,
        MemoryOAuthTransactionStore,
-       MemoryTokenVault,
        OAuthTransactionProtectorKey,
    )
 
@@ -47,7 +47,7 @@ stores:
        ),
    )
    transactions = MemoryOAuthTransactionStore(protector=protector)
-   token_vault = MemoryTokenVault(
+   accounts = MemoryOAuthAccountStore(
        provider="github",
        client_id="github-client-id",
        protector=protector,
@@ -63,6 +63,11 @@ An application may instead supply its own protector. Run
 :func:`~litestar_security.testing.assert_oauth_transaction_protector_conformance`
 against a fresh instance factory to verify the public protection contract.
 
+``OAuthAccountStore`` is the durable application boundary for provisioning,
+exact identity linking, grants, retained tokens, refresh compare-and-swap, and
+revocation retry staging. Implement each operation as one database transaction;
+the library ships no ORM or database-specific adapter.
+
 Team authorization
 ------------------
 
@@ -73,13 +78,13 @@ check the team named by the route:
 
    from litestar import get
 
-   from litestar_security import required, requires_team_role
+   from litestar_security import require_team_role, required
 
 
    @get(
        "/teams/{team_id:str}",
        auth=required(),
-       guards=[requires_team_role(team_parameter="team_id", roles={"owner"})],
+       guards=[require_team_role(team_parameter="team_id", roles={"owner"})],
    )
    async def team_settings(team_id: str) -> dict[str, str]:
        return {"team_id": team_id}

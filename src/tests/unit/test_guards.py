@@ -9,6 +9,8 @@ from typing import Any, cast
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, PermissionDeniedException
 
+import litestar_security
+import litestar_security.guards as guards_module
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -19,20 +21,20 @@ from litestar_security.context import (
 from litestar_security.guards import (
     AssuranceRequirement,
     AssuranceTrait,
-    one_of,
-    requires_assurance,
-    requires_authenticated,
-    requires_capability,
-    requires_role,
-    requires_scope,
-    requires_team_role,
-    requires_tenant,
+    require_all_of,
+    require_any_of,
+    require_assurance,
+    require_at_least,
+    require_authenticated,
+    require_capability,
+    require_one_of,
+    require_role,
+    require_scope,
+    require_team_role,
+    require_tenant,
 )
-from litestar_security.guards import all_of as guards_all_of
-from litestar_security.guards import any_of as guards_any_of
-from litestar_security.guards import at_least as guards_at_least
 
-_DUPLICATE_GUARD = requires_authenticated()
+_DUPLICATE_GUARD = require_authenticated()
 
 
 def _guard_connection(
@@ -70,7 +72,7 @@ def test_assurance_requires_distinct_method_and_trait_evidence_at_the_freshness_
             ),
         )
     )
-    predicate = requires_assurance(
+    predicate = require_assurance(
         methods={"password", "totp"},
         traits={AssuranceTrait.USER_VERIFIED},
         max_age=timedelta(minutes=5),
@@ -121,7 +123,7 @@ def test_assurance_rejects_stale_raw_provider_or_wrong_purpose_evidence(
     evidence: AuthenticationEvidence, purpose: str | None, code: str
 ) -> None:
     connection = _guard_connection(evidence=(evidence,))
-    predicate = requires_assurance(
+    predicate = require_assurance(
         methods={"password"},
         max_age=timedelta(minutes=5),
         purpose=purpose,
@@ -134,7 +136,7 @@ def test_assurance_rejects_stale_raw_provider_or_wrong_purpose_evidence(
 def test_assurance_rejects_expired_evidence_without_max_age() -> None:
     """Expired evidence cannot satisfy a bare assurance requirement."""
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
-    predicate = requires_assurance(methods={"totp"}, clock=lambda: now)
+    predicate = require_assurance(methods={"totp"}, clock=lambda: now)
     expired = AuthenticationEvidence(
         mechanism="totp",
         slot="mfa",
@@ -157,7 +159,7 @@ def test_assurance_rejects_expired_evidence_without_max_age() -> None:
 def test_assurance_contract_validates_utc_clock_and_requirement_values() -> None:
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     with pytest.raises(ImproperlyConfiguredException, match="clock must return a timezone-aware"):
-        requires_assurance(clock=lambda: datetime(2026, 7, 27, 12)).decide(  # noqa: DTZ001
+        require_assurance(clock=lambda: datetime(2026, 7, 27, 12)).decide(  # noqa: DTZ001
             _guard_connection()  # type: ignore[arg-type]
         )
     with pytest.raises(ImproperlyConfiguredException, match="max_age must be positive"):
@@ -168,8 +170,8 @@ def test_assurance_contract_validates_utc_clock_and_requirement_values() -> None
         with pytest.raises(ImproperlyConfiguredException, match="methods and traits"):
             AssuranceRequirement(**kwargs)
 
-    predicate = requires_assurance(max_age=timedelta(minutes=5), clock=lambda: now)
-    assert requires_assurance(clock=lambda: now).decide(_guard_connection()).granted  # type: ignore[arg-type]
+    predicate = require_assurance(max_age=timedelta(minutes=5), clock=lambda: now)
+    assert require_assurance(clock=lambda: now).decide(_guard_connection()).granted  # type: ignore[arg-type]
     assert predicate.decide(_guard_connection(authenticated=False)).code == "authentication_required"  # type: ignore[arg-type]
     assert predicate.decide(  # type: ignore[arg-type]
         _guard_connection(
@@ -190,7 +192,7 @@ def test_assurance_contract_validates_utc_clock_and_requirement_values() -> None
 def test_native_authorization_guard_allows_matching_scope_and_denies_without_leaking_grant() -> None:
     allowed = _guard_connection(authorization=AuthorizationSnapshot(scopes={"reports:read"}))
     denied = _guard_connection()
-    guard = requires_scope("reports:read")
+    guard = require_scope("reports:read")
 
     guard(allowed, object())  # type: ignore[arg-type]
     with pytest.raises(PermissionDeniedException, match="Permission denied") as exc_info:
@@ -225,25 +227,25 @@ def test_authorization_base_guard_truth_table(case: str, allowed: bool) -> None:
     )
     path_params: dict[str, object] = {"team_id": "team-1", "tenant_id": "tenant-1"}
     if case == "team-role-mismatch":
-        guard = requires_team_role(team_parameter="team_id", roles={"admin"})
+        guard = require_team_role(team_parameter="team_id", roles={"admin"})
     elif case == "team-missing-param":
-        guard = requires_team_role(team_parameter="missing", roles={"owner"})
+        guard = require_team_role(team_parameter="missing", roles={"owner"})
     elif case == "team-forged-param":
-        guard = requires_team_role(team_parameter="team_id", roles={"owner"})
+        guard = require_team_role(team_parameter="team_id", roles={"owner"})
         path_params["team_id"] = "team-2"
     elif case == "tenant-mismatch":
-        guard = requires_tenant(tenant_parameter="tenant_id")
+        guard = require_tenant(tenant_parameter="tenant_id")
         path_params["tenant_id"] = "tenant-2"
     elif case == "tenant-missing-param":
-        guard = requires_tenant(tenant_parameter="missing")
+        guard = require_tenant(tenant_parameter="missing")
     else:
         guard = {
-            "authenticated": requires_authenticated(),
-            "scope": requires_scope("reports:read"),
-            "role": requires_role("admin"),
-            "capability": requires_capability("reports.export"),
-            "team": requires_team_role(team_parameter="team_id", roles={"owner", "admin"}),
-            "tenant": requires_tenant(tenant_parameter="tenant_id"),
+            "authenticated": require_authenticated(),
+            "scope": require_scope("reports:read"),
+            "role": require_role("admin"),
+            "capability": require_capability("reports.export"),
+            "team": require_team_role(team_parameter="team_id", roles={"owner", "admin"}),
+            "tenant": require_tenant(tenant_parameter="tenant_id"),
         }[case]
     connection = _guard_connection(authorization=authorization, path_params=path_params)
 
@@ -257,13 +259,13 @@ def test_authorization_base_guard_truth_table(case: str, allowed: bool) -> None:
 @pytest.mark.parametrize(
     "guard",
     [
-        requires_authenticated(),
-        requires_scope("reports:read"),
-        requires_role("admin"),
-        requires_capability("reports.export"),
-        requires_team_role(team_parameter="team_id", roles={"owner"}),
-        requires_tenant(tenant_parameter="tenant_id"),
-        guards_any_of(requires_scope("reports:read"), requires_role("admin")),
+        require_authenticated(),
+        require_scope("reports:read"),
+        require_role("admin"),
+        require_capability("reports.export"),
+        require_team_role(team_parameter="team_id", roles={"owner"}),
+        require_tenant(tenant_parameter="tenant_id"),
+        require_any_of(require_scope("reports:read"), require_role("admin")),
     ],
 )
 def test_authorization_base_guards_map_anonymous_denial_to_generic_401(guard: object) -> None:
@@ -275,17 +277,17 @@ def test_authorization_base_guards_map_anonymous_denial_to_generic_401(guard: ob
 
 @pytest.mark.parametrize(
     ("operator", "mask", "allowed"),
-    [(guards_all_of, mask, mask == 0b111) for mask in range(8)]
-    + [(guards_any_of, mask, mask != 0) for mask in range(8)]
-    + [(one_of, mask, mask.bit_count() == 1) for mask in range(8)]
-    + [(lambda *children: guards_at_least(2, *children), mask, mask.bit_count() >= 2) for mask in range(8)],
+    [(require_all_of, mask, mask == 0b111) for mask in range(8)]
+    + [(require_any_of, mask, mask != 0) for mask in range(8)]
+    + [(require_one_of, mask, mask.bit_count() == 1) for mask in range(8)]
+    + [(lambda *children: require_at_least(2, *children), mask, mask.bit_count() >= 2) for mask in range(8)],
 )
 def test_authorization_combinator_truth_tables(
     operator: object,
     mask: int,
     allowed: bool,  # noqa: FBT001
 ) -> None:
-    guards = (requires_scope("a"), requires_scope("b"), requires_scope("c"))
+    guards = (require_scope("a"), require_scope("b"), require_scope("c"))
     scopes = {name for index, name in enumerate(("a", "b", "c")) if mask & (1 << index)}
     guard = operator(*guards)  # type: ignore[operator]
     connection = _guard_connection(authorization=AuthorizationSnapshot(scopes=scopes))
@@ -300,14 +302,14 @@ def test_authorization_combinator_truth_tables(
 @pytest.mark.parametrize(
     ("factory", "match"),
     [
-        (guards_all_of, "at least one"),
-        (guards_any_of, "at least one"),
-        (one_of, "at least one"),
-        (partial(guards_at_least, 0, requires_authenticated()), "between 1 and 1"),
-        (partial(guards_at_least, 2, requires_authenticated()), "between 1 and 1"),
-        (partial(guards_all_of, _DUPLICATE_GUARD, _DUPLICATE_GUARD), "duplicate child"),
-        (partial(requires_scope, " "), "must not be blank"),
-        (partial(requires_team_role, team_parameter="team_id", roles=set()), "at least one role"),
+        (require_all_of, "at least one"),
+        (require_any_of, "at least one"),
+        (require_one_of, "at least one"),
+        (partial(require_at_least, 0, require_authenticated()), "between 1 and 1"),
+        (partial(require_at_least, 2, require_authenticated()), "between 1 and 1"),
+        (partial(require_all_of, _DUPLICATE_GUARD, _DUPLICATE_GUARD), "duplicate child"),
+        (partial(require_scope, " "), "must not be blank"),
+        (partial(require_team_role, team_parameter="team_id", roles=set()), "at least one role"),
     ],
 )
 def test_authorization_guard_construction_rejects_invalid_expressions(factory: object, match: str) -> None:
@@ -316,7 +318,7 @@ def test_authorization_guard_construction_rejects_invalid_expressions(factory: o
 
 
 def test_authorization_guards_are_frozen_hashable_and_expose_stable_denial() -> None:
-    guard = guards_all_of(requires_scope("reports:read"), requires_role("admin"))
+    guard = require_all_of(require_scope("reports:read"), require_role("admin"))
     connection = _guard_connection(authorization=AuthorizationSnapshot(scopes={"reports:read"}))
 
     decision = guard.decide(connection)
@@ -338,6 +340,46 @@ def test_authorization_guards_do_not_call_application_resolvers_or_adapters() ->
         authorization=AuthorizationSnapshot(scopes={"reports:read"}, attributes={"storage_lookup": storage_lookup})
     )
 
-    requires_scope("reports:read")(connection, object())  # type: ignore[arg-type]
+    require_scope("reports:read")(connection, object())  # type: ignore[arg-type]
 
     assert calls == 0
+
+
+def test_require_guard_exports_and_clean_break() -> None:
+    """Verify require_* combinators and predicates are exported from top-level and guard_*/requires_* are removed."""
+    assert litestar_security.require_all_of is require_all_of
+    assert litestar_security.require_any_of is require_any_of
+    assert litestar_security.require_at_least is require_at_least
+    assert litestar_security.require_one_of is require_one_of
+    assert litestar_security.require_authenticated is require_authenticated
+    assert litestar_security.require_assurance is require_assurance
+    assert litestar_security.require_scope is require_scope
+    assert litestar_security.require_role is require_role
+    assert litestar_security.require_capability is require_capability
+    assert litestar_security.require_team_role is require_team_role
+    assert litestar_security.require_tenant is require_tenant
+
+    for name in ("require_all_of", "require_any_of", "require_at_least", "require_one_of"):
+        assert getattr(guards_module, name).__name__ == name
+
+    for name in ("all_of", "any_of", "at_least", "one_of"):
+        assert not hasattr(guards_module, name)
+        assert name not in guards_module.__all__
+
+    for name in (
+        "guard_all_of",
+        "guard_any_of",
+        "guard_at_least",
+        "guard_one_of",
+        "requires_authenticated",
+        "requires_assurance",
+        "requires_scope",
+        "requires_role",
+        "requires_capability",
+        "requires_team_role",
+        "requires_tenant",
+    ):
+        assert not hasattr(litestar_security, name)
+        assert name not in litestar_security.__all__
+        assert not hasattr(guards_module, name)
+        assert name not in guards_module.__all__

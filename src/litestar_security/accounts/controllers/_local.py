@@ -67,7 +67,7 @@ from litestar_security.schema import WirePolicy
 if TYPE_CHECKING:
     from litestar_security.accounts._profiles import LocalAuthConfig
 
-__all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "requires_local_bearer")
+__all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "require_local_bearer")
 
 
 _SESSIONS_TAG = ROUTE_TAGS["local.sessions"].name
@@ -118,7 +118,7 @@ _LOCAL_TOKEN_MFA_LOGIN_RESPONSES = {
 _LOCAL_REAUTHENTICATION_RESPONSES = {**_LOCAL_BAD_REQUEST_RESPONSES, **_LOCAL_AUTH_REQUIRED_RESPONSES}
 
 
-def requires_local_bearer(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler) -> None:
+def require_local_bearer(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler) -> None:
     """Require bearer evidence produced by the configured local JWT slot.
 
     Args:
@@ -475,7 +475,7 @@ class _LocalTokenController(Controller):
         ),
         response_description="The token family was revoked.",
         status_code=HTTP_200_OK,
-        guards=(requires_local_bearer,),
+        guards=(require_local_bearer,),
         responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
         auth=required("bearer"),
     )
@@ -782,7 +782,7 @@ class _LocalTokenPasswordController(Controller):
         ),
         response_description="The password was replaced.",
         status_code=HTTP_200_OK,
-        guards=(requires_local_bearer,),
+        guards=(require_local_bearer,),
         responses=_LOCAL_REAUTHENTICATION_RESPONSES,
         auth=required("bearer"),
     )
@@ -817,7 +817,7 @@ class _LocalTokenOnlyPasswordController(Controller):
         ),
         response_description="The password was replaced.",
         status_code=HTTP_200_OK,
-        guards=(requires_local_bearer,),
+        guards=(require_local_bearer,),
         responses=_LOCAL_REAUTHENTICATION_RESPONSES,
         auth=required("bearer"),
     )

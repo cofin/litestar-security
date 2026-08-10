@@ -244,6 +244,7 @@ def metadata(*, issuer: str = ISSUER) -> OIDCMetadata:
         authorization_endpoint=f"{issuer}/authorize",
         token_endpoint=f"{issuer}/token",
         end_session_endpoint=f"{issuer}/logout",
+        revocation_endpoint=f"{issuer}/revoke",
         algorithms=frozenset({"RS256"}),
     )
 
@@ -434,7 +435,11 @@ def test_oidc_logout_consumer_rejects_non_logout_token_types(token_types: frozen
         OIDCJWTLogoutTokenConsumer(verifiers={"oidc": rejected})  # type: ignore[arg-type]
 
 
-def test_google_constructor_uses_pinned_profile() -> None:
+@pytest.mark.parametrize(("offline_access", "access_type"), [(False, None), (True, "offline")])
+def test_google_constructor_uses_pinned_profile(
+    offline_access: bool,  # noqa: FBT001 - parametrized profile matrix
+    access_type: str | None,
+) -> None:
     google_verifier = verifier(InvalidCredentials())
     google_verifier.config = JWTValidationConfig(
         issuer="https://accounts.google.com",
@@ -448,11 +453,14 @@ def test_google_constructor_uses_pinned_profile() -> None:
         client_secret=SecretStr("secret"),
         metadata=metadata(issuer="https://accounts.google.com"),
         verifier=google_verifier,  # type: ignore[arg-type]
+        offline_access=offline_access,
     )
 
     assert google.name == "google"
     assert google.end_session_endpoint == "https://accounts.google.com/logout"
-    assert google.oauth.config.extra_authorization_parameters["access_type"] == "offline"
+    assert google.oauth.config.extra_authorization_parameters.get("access_type") == access_type
+    assert "prompt" not in google.oauth.config.extra_authorization_parameters
+    assert google.oauth.config.revocation_endpoint == "https://accounts.google.com/revoke"
 
 
 def test_keycloak_constructor_requires_exact_realm_issuer() -> None:
