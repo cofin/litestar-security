@@ -42,6 +42,7 @@ from litestar_security.accounts._sessions import (
     NativeSessionStore,
     SessionBindingConfig,
     SessionRegistry,
+    UserAuthSessionResolver,
 )
 from litestar_security.accounts._stores import (
     AccountLookup,
@@ -176,6 +177,7 @@ class LocalAuthConfig(Generic[UserT]):
     access_token_lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME
     password_hasher: PasswordHasher = field(default_factory=Argon2PasswordHasher, repr=False, compare=False)
     session_auth: NativeSessionAuth[UserT] | None = field(default=None, repr=False, compare=False)
+    session_resolver: UserAuthSessionResolver[UserT] | None = field(default=None, repr=False, compare=False)
     rate_limiter: RateLimiter | None = field(default=None, repr=False, compare=False)
     events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
     client_key: "Callable[[ASGIConnection[Any, Any, Any, Any]], str | None]" = field(
@@ -280,9 +282,17 @@ class LocalAuthConfig(Generic[UserT]):
             object.__setattr__(
                 self,
                 "session_auth",
-                NativeSessionAuth[UserT](accounts=cast("NativeSessionStore[UserT]", self.accounts), binding=binding),
+                NativeSessionAuth[UserT](
+                    accounts=cast("NativeSessionStore[UserT]", self.accounts),
+                    binding=binding,
+                    resolver=self.session_resolver,
+                ),
             )
-        elif id(session_auth.accounts) != id(self.accounts) or session_auth.binding is not binding:
+        elif (
+            id(session_auth.accounts) != id(self.accounts)
+            or session_auth.binding is not binding
+            or (self.session_resolver is not None and session_auth.resolver is not self.session_resolver)
+        ):
             msg = "Custom native session authentication must share the configured accounts and binding"
             raise ImproperlyConfiguredException(detail=msg)
 
@@ -547,6 +557,7 @@ class LocalAuth:
         secrets: LocalAuthSecrets,
         binding: SessionBindingConfig,
         session_auth: NativeSessionAuth[UserT] | None = None,
+        session_resolver: UserAuthSessionResolver[UserT] | None = None,
         password_hasher: PasswordHasher | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
@@ -561,6 +572,7 @@ class LocalAuth:
         Args:
             binding: The proof-of-possession cookie configuration bound to each session.
             session_auth: Override the bundled native session backend.
+            session_resolver: Optional one-read authoritative session resolver.
             accounts: The application store implementing every local account capability.
             secrets: The stable cryptographic inputs for purpose tokens and, in
                 token profiles, refresh tokens and receipts.
@@ -591,6 +603,7 @@ class LocalAuth:
             secrets=secrets,
             binding=binding,
             session_auth=session_auth,
+            session_resolver=session_resolver,
             password_hasher=Argon2PasswordHasher() if password_hasher is None else password_hasher,
             registration=registration,
             route_prefix=route_prefix,
@@ -685,6 +698,7 @@ class LocalAuth:
         token_client_id: str = _DEFAULT_LOCAL_CLIENT_ID,
         access_token_lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME,
         session_auth: NativeSessionAuth[UserT] | None = None,
+        session_resolver: UserAuthSessionResolver[UserT] | None = None,
         password_hasher: PasswordHasher | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
@@ -699,6 +713,7 @@ class LocalAuth:
         Args:
             binding: The proof-of-possession cookie configuration bound to each session.
             session_auth: Override the bundled native session backend.
+            session_resolver: Optional one-read authoritative session resolver.
             key_ring: The signing keys and issuer for local access tokens.
             token_audience: The audience claim local access tokens are issued for.
             token_client_id: The client identifier recorded on issued tokens.
@@ -739,6 +754,7 @@ class LocalAuth:
             token_client_id=token_client_id,
             access_token_lifetime=access_token_lifetime,
             session_auth=session_auth,
+            session_resolver=session_resolver,
             password_hasher=(
                 Argon2PasswordHasher(worker_limits=key_ring.worker_limits)
                 if password_hasher is None

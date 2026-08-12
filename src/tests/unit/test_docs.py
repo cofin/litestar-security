@@ -215,7 +215,16 @@ def _oauth_kwargs() -> "dict[str, Any]":
         async def begin(self, **kwargs: object) -> None:
             del kwargs
 
-        async def callback(self, **kwargs: object) -> None:
+        async def complete_callback(self, **kwargs: object) -> None:
+            del kwargs
+
+        async def establish_login(self, **kwargs: object) -> None:
+            del kwargs
+
+        async def revalidate(self, **kwargs: object) -> None:
+            del kwargs
+
+        async def reauthenticate(self, **kwargs: object) -> None:
             del kwargs
 
         async def unlink(self, **kwargs: object) -> None:
@@ -227,10 +236,7 @@ def _oauth_kwargs() -> "dict[str, Any]":
         async def logout(self, **kwargs: object) -> None:
             del kwargs
 
-    class _Provider:
-        name = "example"
-
-    return {"oauth_service": cast("Any", _Service()), "providers": (_Provider(),), "register_routes": False}
+    return {"oauth_service": cast("Any", _Service()), "register_routes": False}
 
 
 def test_every_feature_config_carries_documentation_metadata_by_default() -> None:

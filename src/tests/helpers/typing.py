@@ -23,11 +23,11 @@ from litestar_security import (
     all_of,
     any_of,
     exclude,
-    guard_any_of,
     mechanism,
     optional,
     public,
     required,
+    requires_any_of,
     requires_authenticated,
     requires_scope,
 )
@@ -62,7 +62,7 @@ no_session: SecurityContext = SecurityContext(session=NullSessionHandle())
 native_scope = cast("Scope", {"type": "http", "session": {}})
 native_session: SecurityContext = SecurityContext(session=LitestarSessionHandle(native_scope))
 
-authorization_guard: AuthorizationPredicate = guard_any_of(requires_authenticated(), requires_scope("reports:read"))
+authorization_guard: AuthorizationPredicate = requires_any_of(requires_authenticated(), requires_scope("reports:read"))
 public_metadata = {"auth": public()}
 csrf_metadata = {CSRF_REQUIRED_OPT_KEY: True}
 

@@ -5,7 +5,7 @@ from datetime import datetime
 
 from anyio import Lock
 
-from litestar_security.providers.api_key import APIKeyRecord
+from litestar_security.providers.api_key import APIKeyState
 
 __all__ = ("MappingAPIKeyStore",)
 
@@ -18,14 +18,14 @@ class MappingAPIKeyStore:
     def __init__(self) -> None:
         """Initialize isolated application-owned state."""
         self._lock = Lock()
-        self._records: dict[str, APIKeyRecord] = {}
+        self._records: dict[str, APIKeyState] = {}
 
-    async def get(self, key_id: str) -> APIKeyRecord | None:
+    async def get(self, key_id: str) -> APIKeyState | None:
         """Return one digest-only record."""
         async with self._lock:
             return self._records.get(key_id)
 
-    async def create(self, record: APIKeyRecord) -> None:
+    async def create(self, record: APIKeyState) -> None:
         """Create one record only when its lookup is absent."""
         async with self._lock:
             if record.key_id in self._records:
@@ -34,7 +34,7 @@ class MappingAPIKeyStore:
             self._records[record.key_id] = record
 
     async def rotate(
-        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+        self, *, current_key_id: str, replacement: APIKeyState, overlap_until: datetime | None, now: datetime
     ) -> None:
         """Atomically revoke one current key and create one successor."""
         async with self._lock:

@@ -2,7 +2,7 @@
 
 import asyncio
 import sys
-from collections.abc import AsyncGenerator, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Generic, TypeAlias, TypeVar, cast
@@ -650,9 +650,11 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         oauth = self.config.oauth
         if oauth is None:
             return
-        closable = tuple(provider for provider in oauth.providers if callable(getattr(provider, "aclose", None)))
-        if not closable:
+        service = oauth.oauth_service
+        close = getattr(service, "aclose", None)
+        if not callable(close):
             return
+        closer = cast("Callable[[], Awaitable[None]]", close)
         if self._oauth_lifespan is None:
 
             @asynccontextmanager
@@ -661,10 +663,8 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                     yield
                 finally:
                     primary_error = sys.exc_info()[1]
-                    results = await asyncio.gather(
-                        *(cast("Any", provider).aclose() for provider in closable), return_exceptions=True
-                    )
-                    if primary_error is None and any(isinstance(result, BaseException) for result in results):
+                    result = await asyncio.gather(closer(), return_exceptions=True)
+                    if primary_error is None and isinstance(result[0], BaseException):
                         message = "OAuth provider shutdown failed"
                         raise ImproperlyConfiguredException(detail=message)
 

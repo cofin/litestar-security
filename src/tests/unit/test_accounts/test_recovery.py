@@ -273,8 +273,8 @@ def test_notification_destination_rejects_control_characters() -> None:
         )
 
 
-def _lifecycle_account(*, active: bool = True, verified: bool = False) -> "accounts_module.LocalAccountRecord[object]":
-    return accounts_module.LocalAccountRecord(
+def _lifecycle_account(*, active: bool = True, verified: bool = False) -> "accounts_module.LocalAccountState[object]":
+    return accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="user@example.com",
         display_name="User",
@@ -447,7 +447,7 @@ async def test_registration_service_returns_password_policy_without_hash_or_stor
     ],
 )
 async def test_verification_resend_is_generic_across_account_and_store_states(
-    account: "accounts_module.LocalAccountRecord[object] | None",
+    account: "accounts_module.LocalAccountState[object] | None",
     *,
     fail: bool,
     issue_count: int,
@@ -480,14 +480,14 @@ async def test_verification_resend_is_generic_across_account_and_store_states(
 @pytest.mark.parametrize(
     "status",
     [
-        accounts_module.ConsumeStatus.CONSUMED,
-        accounts_module.ConsumeStatus.INVALID,
-        accounts_module.ConsumeStatus.EXPIRED,
-        accounts_module.ConsumeStatus.USED,
+        accounts_module.VerificationStatus.CONSUMED,
+        accounts_module.VerificationStatus.INVALID,
+        accounts_module.VerificationStatus.EXPIRED,
+        accounts_module.VerificationStatus.USED,
     ],
 )
 async def test_verification_consume_delegates_replay_and_expiry_atomically(
-    status: accounts_module.ConsumeStatus,
+    status: accounts_module.VerificationStatus,
 ) -> None:
     codec = accounts_module.PurposeTokenCodec(pepper=b"p" * 32)
     issued = _lifecycle_token(codec, accounts_module.TokenPurpose.VERIFICATION, timedelta(hours=24))
@@ -496,7 +496,7 @@ async def test_verification_consume_delegates_replay_and_expiry_atomically(
 
     outcome = await service.consume(issued.notification.token, now=_JWT_NOW)
 
-    assert isinstance(outcome, accounts_module.ConsumeOutcome)
+    assert isinstance(outcome, accounts_module.VerificationOutcome)
     assert outcome.status is status
     assert len(store.consumptions) == 1
     token_id, digest, now, event = store.consumptions[0]
@@ -512,7 +512,7 @@ async def test_verification_consume_rejects_purpose_swap_without_store_access() 
 
     outcome = await service.consume(recovery.notification.token, now=_JWT_NOW)
 
-    assert outcome == accounts_module.ConsumeOutcome(accounts_module.ConsumeStatus.INVALID)
+    assert outcome == accounts_module.VerificationOutcome(accounts_module.VerificationStatus.INVALID)
     assert store.consumptions == []
 
 
@@ -538,7 +538,7 @@ async def test_verification_consume_maps_atomic_store_failure_to_unavailable() -
     ],
 )
 async def test_recovery_request_is_generic_and_emits_only_atomic_outbox_commands(
-    account: "accounts_module.LocalAccountRecord[object] | None",
+    account: "accounts_module.LocalAccountState[object] | None",
     *,
     fail: bool,
     issue_count: int,

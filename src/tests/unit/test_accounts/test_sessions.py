@@ -127,7 +127,7 @@ async def test_native_session_remains_authenticated_after_step_up_assurance_expi
         methods=frozenset({"totp"}),
     )
     established = await auth.establish(
-        connection, cast("accounts_module.LocalAccountRecord[object]", store.account), evidence=evidence
+        connection, cast("accounts_module.LocalAccountState[object]", store.account), evidence=evidence
     )
     assert isinstance(established, accounts_module.SessionAuthentication)
     token = _queued_binding_token(connection)
@@ -143,6 +143,44 @@ async def test_native_session_remains_authenticated_after_step_up_assurance_expi
     authenticated_connection.scope["auth"] = SecurityContext(session=NullSessionHandle(), evidence=(outcome.evidence,))
     decision = requires_assurance(methods={"totp"}, clock=lambda: current[0]).decide(authenticated_connection)
     assert decision.code == "missing_assurance"
+
+
+async def test_native_session_configured_resolver_uses_one_consistent_read() -> None:
+    store = _NativeSessionStore()
+    calls: list[tuple[str, str, datetime]] = []
+
+    class Resolver:
+        async def resolve_user_auth_session(
+            self, session_id: str, account_id: str, *, now: datetime
+        ) -> accounts_module.ResolvedUserAuthSession[object] | None:
+            calls.append((session_id, account_id, now))
+            session = store.records.get(session_id)
+            account = store.account
+            if session is None or account is None or account.account_id != account_id:
+                return None
+            return accounts_module.ResolvedUserAuthSession(session=session, account=account)
+
+    auth = accounts_module.NativeSessionAuth(
+        accounts=store,
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        resolver=Resolver(),
+        clock=lambda: _JWT_NOW,
+        entropy=_SessionEntropy(),
+    )
+    browser_session: dict[str, object] = {}
+    connection = _native_session_connection(browser_session)
+    established = await auth.establish(connection, cast("accounts_module.LocalAccountState[object]", store.account))
+    assert isinstance(established, accounts_module.SessionAuthentication)
+    authenticated_connection = _native_session_connection(
+        browser_session, binding_token=_queued_binding_token(connection)
+    )
+    extraction = auth.extract(authenticated_connection)
+    assert isinstance(extraction, PresentedCredential)
+
+    outcome = await auth.authenticate(extraction.value, authenticated_connection)
+
+    assert isinstance(outcome, Authenticated)
+    assert calls == [(established.session_id, "account-1", _JWT_NOW)]
 
 
 async def test_native_session_establish_authenticate_touch_and_rebind_are_fixation_safe(
@@ -162,7 +200,7 @@ async def test_native_session_establish_authenticate_touch_and_rebind_are_fixati
 
     authentication = await auth.establish(
         connection,
-        cast("accounts_module.LocalAccountRecord[object]", store.account),
+        cast("accounts_module.LocalAccountState[object]", store.account),
         display_metadata={"device": "browser"},
     )
 
@@ -219,7 +257,7 @@ async def test_native_session_establish_authenticate_touch_and_rebind_are_fixati
 
     old_session = _copy_native_session(session)
     old_token = token
-    replacement = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
+    replacement = await auth.establish(connection, cast("accounts_module.LocalAccountState[object]", store.account))
     assert isinstance(replacement, accounts_module.SessionAuthentication)
     assert replacement.session_id != authentication.session_id
     assert store.rebinds[0][0] == authentication.session_id
@@ -250,7 +288,7 @@ async def test_native_session_binds_evidence_authentication_time_to_durable_reco
     evidence_authenticated_at = _JWT_NOW - timedelta(minutes=5)
     established = await auth.establish(
         establishing_connection,
-        cast("accounts_module.LocalAccountRecord[object]", store.account),
+        cast("accounts_module.LocalAccountState[object]", store.account),
         evidence=AuthenticationEvidence(
             mechanism="local",
             slot="password",
@@ -317,9 +355,7 @@ async def test_native_session_transient_verification_failures_preserve_retryable
     session: dict[str, object] = {}
     establishing_connection = _native_session_connection(session)
     assert isinstance(
-        await auth.establish(
-            establishing_connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
-        ),
+        await auth.establish(establishing_connection, cast("accounts_module.LocalAccountState[object]", store.account)),
         accounts_module.SessionAuthentication,
     )
     connection = _native_session_connection(session, binding_token=_queued_binding_token(establishing_connection))
@@ -349,13 +385,13 @@ async def test_native_session_current_state_mismatch_is_invalid_and_cleared(inva
     session: dict[str, object] = {}
     establishing_connection = _native_session_connection(session)
     established = await auth.establish(
-        establishing_connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
+        establishing_connection, cast("accounts_module.LocalAccountState[object]", store.account)
     )
     assert isinstance(established, accounts_module.SessionAuthentication)
     if invalid_state == "missing":
         store.records.clear()
     elif invalid_state in {"disabled", "unverified"}:
-        store.account = accounts_module.LocalAccountRecord(
+        store.account = accounts_module.LocalAccountState(
             account_id="account-1",
             normalized_identifier="user@example.com",
             display_name="User",
@@ -367,7 +403,7 @@ async def test_native_session_current_state_mismatch_is_invalid_and_cleared(inva
         store.epoch = 2
     elif invalid_state == "binding":
         record = store.records[established.session_id]
-        store.records[established.session_id] = accounts_module.SessionRecord(
+        store.records[established.session_id] = accounts_module.UserAuthSession(
             session_id=record.session_id,
             binding_id=record.binding_id,
             binding_digest=b"x" * 32,
@@ -405,7 +441,7 @@ async def test_native_session_logout_and_account_qualified_revoke_are_explicit_a
     )
     session: dict[str, object] = {}
     connection = _native_session_connection(session)
-    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountState[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     other = _NativeSessionStore.record(
         accounts_module.CreateSessionCommand(
@@ -444,11 +480,11 @@ async def test_native_session_password_rebind_plan_activates_only_the_committed_
     )
     session: dict[str, object] = {}
     connection = _native_session_connection(session)
-    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountState[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     assert auth.current_authentication(connection) == current
 
-    plan = auth.prepare_password_rebind(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
+    plan = auth.prepare_password_rebind(connection, cast("accounts_module.LocalAccountState[object]", store.account))
     assert isinstance(plan, accounts_module.SessionRebindPlan)
     assert plan.binding_token not in repr(plan)
     replacement = replace(plan.command, security_epoch=2)
@@ -473,13 +509,13 @@ async def test_native_session_password_rebind_plan_activates_only_the_committed_
     empty_connection = _native_session_connection({})
     assert isinstance(
         auth.prepare_password_rebind(
-            empty_connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
+            empty_connection, cast("accounts_module.LocalAccountState[object]", store.account)
         ),
         VerificationUnavailable,
     )
     assert isinstance(
         replace(auth, entropy=lambda _size: b"").prepare_password_rebind(
-            connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
+            connection, cast("accounts_module.LocalAccountState[object]", store.account)
         ),
         VerificationUnavailable,
     )
@@ -487,14 +523,14 @@ async def test_native_session_password_rebind_plan_activates_only_the_committed_
     assert not await auth.activate_password_rebind(connection, cast("Any", object()), 2)
     assert auth.current_authentication(connection) is None
 
-    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountState[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     failed_plan = auth.prepare_password_rebind(
-        connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
+        connection, cast("accounts_module.LocalAccountState[object]", store.account)
     )
     assert isinstance(failed_plan, accounts_module.SessionRebindPlan)
 
-    async def failing_get(_session_id: str) -> accounts_module.SessionRecord | None:
+    async def failing_get(_session_id: str) -> accounts_module.UserAuthSession | None:
         raise OSError
 
     original_get = store.get
@@ -502,18 +538,18 @@ async def test_native_session_password_rebind_plan_activates_only_the_committed_
     assert not await auth.activate_password_rebind(connection, failed_plan, 2)
     store.get = original_get  # type: ignore[method-assign]
 
-    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountState[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     missing_plan = auth.prepare_password_rebind(
-        connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
+        connection, cast("accounts_module.LocalAccountState[object]", store.account)
     )
     assert isinstance(missing_plan, accounts_module.SessionRebindPlan)
     assert not await auth.activate_password_rebind(connection, missing_plan, 2)
 
-    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountState[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     mismatch_plan = auth.prepare_password_rebind(
-        connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
+        connection, cast("accounts_module.LocalAccountState[object]", store.account)
     )
     assert isinstance(mismatch_plan, accounts_module.SessionRebindPlan)
     store.records[mismatch_plan.command.session_id] = _NativeSessionStore.record(
@@ -532,7 +568,7 @@ async def test_native_session_lists_safe_summaries_and_websocket_lifecycle_is_re
     )
     session: dict[str, object] = {}
     connection = _native_session_connection(session)
-    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountState[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     summaries = await auth.list_sessions("account-1", current_session_id=current.session_id)
     assert len(summaries) == 1
@@ -549,7 +585,7 @@ async def test_native_session_lists_safe_summaries_and_websocket_lifecycle_is_re
     assert isinstance(extraction, PresentedCredential)
     assert isinstance(await auth.authenticate(extraction.value, websocket), Authenticated)
     assert isinstance(
-        await auth.establish(websocket, cast("accounts_module.LocalAccountRecord[object]", store.account)),
+        await auth.establish(websocket, cast("accounts_module.LocalAccountState[object]", store.account)),
         VerificationUnavailable,
     )
     assert isinstance(await auth.logout(websocket), VerificationUnavailable)
@@ -601,7 +637,7 @@ async def test_native_session_rejects_wrong_credential_and_ignores_touch_failure
     session: dict[str, object] = {}
     establishing_connection = _native_session_connection(session)
     established = await auth.establish(
-        establishing_connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
+        establishing_connection, cast("accounts_module.LocalAccountState[object]", store.account)
     )
     assert isinstance(established, accounts_module.SessionAuthentication)
     wrong_connection = _native_session_connection(_copy_native_session(session))
@@ -649,7 +685,7 @@ async def test_native_session_establishment_fails_closed_without_revealing_a_coo
     clock: Callable[[], datetime] = valid_clock
     account = store.account
     if case == "invalid_account":
-        account = accounts_module.LocalAccountRecord(
+        account = accounts_module.LocalAccountState(
             "account-1", "user@example.com", None, active=False, verified=True, security_epoch=1
         )
     elif case == "create_failure":
@@ -674,7 +710,7 @@ async def test_native_session_establishment_fails_closed_without_revealing_a_coo
     session: dict[str, object] = {"anonymous": "value"}
     connection = _native_session_connection(session)
 
-    outcome = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", account))
+    outcome = await auth.establish(connection, cast("accounts_module.LocalAccountState[object]", account))
 
     assert isinstance(outcome, VerificationUnavailable)
     assert session == {"anonymous": "value"}
@@ -693,9 +729,7 @@ async def test_native_session_rejects_canonical_length_malformed_binding_and_pay
     session: dict[str, object] = {}
     establishing_connection = _native_session_connection(session)
     assert isinstance(
-        await auth.establish(
-            establishing_connection, cast("accounts_module.LocalAccountRecord[object]", store.account)
-        ),
+        await auth.establish(establishing_connection, cast("accounts_module.LocalAccountState[object]", store.account)),
         accounts_module.SessionAuthentication,
     )
     token = _queued_binding_token(establishing_connection)
@@ -729,7 +763,7 @@ async def test_native_session_logout_and_revoke_report_store_failure_after_local
     )
     session: dict[str, object] = {}
     connection = _native_session_connection(session)
-    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountState[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
     store.failures.add("revoke")
 
@@ -751,9 +785,9 @@ async def test_native_session_current_revoke_clears_browser_state_and_list_filte
     )
     session: dict[str, object] = {}
     connection = _native_session_connection(session)
-    current = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
+    current = await auth.establish(connection, cast("accounts_module.LocalAccountState[object]", store.account))
     assert isinstance(current, accounts_module.SessionAuthentication)
-    leaked = accounts_module.SessionRecord(
+    leaked = accounts_module.UserAuthSession(
         session_id="bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4",
         binding_id="sb_aWlpaWlpaWlpaWlpaWlpaQ",
         binding_digest=b"b" * 32,
@@ -771,7 +805,7 @@ async def test_native_session_current_revoke_clears_browser_state_and_list_filte
     assert await auth.revoke_session(connection, "account-1", current.session_id)
     assert "_litestar_security" not in session
 
-    replacement = await auth.establish(connection, cast("accounts_module.LocalAccountRecord[object]", store.account))
+    replacement = await auth.establish(connection, cast("accounts_module.LocalAccountState[object]", store.account))
     assert isinstance(replacement, accounts_module.SessionAuthentication)
     store.records.clear()
     assert not await auth.revoke_session(connection, "account-1", replacement.session_id)
@@ -793,8 +827,8 @@ def test_native_session_http_cleanup_without_mutable_native_session_only_expires
 
 def _local_access_account(
     *, active: bool = True, verified: bool = True, security_epoch: int = 3
-) -> accounts_module.LocalAccountRecord[object]:
-    return accounts_module.LocalAccountRecord(
+) -> accounts_module.LocalAccountState[object]:
+    return accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Local Person",
@@ -955,7 +989,7 @@ def test_native_session_contracts_reject_malformed_state(
     factories = {
         "authentication": accounts_module.SessionAuthentication,
         "proof": accounts_module.SessionBindingProof,
-        "record": accounts_module.SessionRecord,
+        "record": accounts_module.UserAuthSession,
         "create": accounts_module.CreateSessionCommand,
         "summary": accounts_module.SessionSummary,
     }

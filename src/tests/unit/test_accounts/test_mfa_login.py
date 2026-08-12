@@ -82,7 +82,7 @@ async def test_mfa_login_issue_derives_a_domain_separated_digest_and_consumes_on
         entropy=lambda size: b"x" * size,
     )
     issued = await service.issue(
-        accounts_module.LocalAccountRecord(
+        accounts_module.LocalAccountState(
             account_id="account-1",
             normalized_identifier="person@example.com",
             display_name="Person",
@@ -180,7 +180,7 @@ def test_mfa_login_service_rejects_incomplete_or_unbounded_dependencies(kwargs: 
 
 
 async def test_mfa_login_service_fail_closes_invalid_inputs_and_collaborators() -> None:
-    account = accounts_module.LocalAccountRecord(
+    account = accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -205,7 +205,7 @@ async def test_mfa_login_service_fail_closes_invalid_inputs_and_collaborators() 
 
 
 async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_key() -> None:
-    account = accounts_module.LocalAccountRecord(
+    account = accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -296,7 +296,7 @@ async def test_local_auth_mfa_completion_gates_issuance_and_reuses_one_client_ke
 
 @pytest.mark.parametrize("failure", ["limit", "account", "consume", "verify"])
 async def test_local_auth_mfa_completion_fail_closes_collaborator_failures(failure: str) -> None:
-    account = accounts_module.LocalAccountRecord(
+    account = accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -372,7 +372,7 @@ async def test_mfa_login_rejects_malformed_challenges_and_burns_client_key_misma
         clock=lambda: now,
         entropy=lambda size: b"x" * size,
     )
-    account = accounts_module.LocalAccountRecord(
+    account = accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -415,7 +415,7 @@ async def test_mfa_login_rejects_malformed_challenges_and_burns_client_key_misma
         (None, None, InvalidCredentials()),
         (
             None,
-            accounts_module.LocalAccountRecord(
+            accounts_module.LocalAccountState(
                 account_id="account-1",
                 normalized_identifier="person@example.com",
                 display_name="Person",
@@ -488,7 +488,7 @@ async def test_mfa_login_helper_boundaries_fail_closed_without_secret_processing
 
 
 async def test_local_auth_mfa_completion_rejects_an_epoch_advance_before_issuance() -> None:
-    account = accounts_module.LocalAccountRecord(
+    account = accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -545,7 +545,7 @@ async def test_local_auth_mfa_completion_rejects_an_epoch_advance_before_issuanc
 
 
 async def test_local_auth_mfa_completion_burns_a_wrong_factor_before_a_retry() -> None:
-    account = accounts_module.LocalAccountRecord(
+    account = accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",

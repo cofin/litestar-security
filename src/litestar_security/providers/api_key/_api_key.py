@@ -30,7 +30,7 @@ __all__ = (
     "APIKeyConfig",
     "APIKeyGenerationError",
     "APIKeyProof",
-    "APIKeyRecord",
+    "APIKeyState",
     "APIKeyStore",
     "APIKeyUsageSink",
     "IssuedAPIKey",
@@ -57,7 +57,7 @@ def _utc_now() -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
-class APIKeyRecord:
+class APIKeyState:
     """Storage-safe API-key state containing only a keyed digest.
 
     The application store must persist this record without adding the raw key
@@ -201,7 +201,7 @@ class APIKeyStore(Protocol):
     method may accept or persist a raw key or secret component.
     """
 
-    async def get(self, key_id: str) -> APIKeyRecord | None:
+    async def get(self, key_id: str) -> APIKeyState | None:
         """Return one record by its indexed public lookup.
 
         Args:
@@ -212,7 +212,7 @@ class APIKeyStore(Protocol):
         """
         ...  # pragma: no cover
 
-    async def create(self, record: APIKeyRecord) -> None:
+    async def create(self, record: APIKeyState) -> None:
         """Persist one new record and reject a duplicate ID atomically.
 
         Args:
@@ -224,7 +224,7 @@ class APIKeyStore(Protocol):
         ...  # pragma: no cover
 
     async def rotate(
-        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+        self, *, current_key_id: str, replacement: APIKeyState, overlap_until: datetime | None, now: datetime
     ) -> None:
         """Atomically create a successor and revoke the current record.
 
@@ -283,12 +283,12 @@ class APIKeyUsageSink(Protocol):
 
 
 class _SyncAPIKeyStore(Protocol):
-    def get(self, key_id: str) -> APIKeyRecord | None: ...  # pragma: no cover
+    def get(self, key_id: str) -> APIKeyState | None: ...  # pragma: no cover
 
-    def create(self, record: APIKeyRecord) -> None: ...  # pragma: no cover
+    def create(self, record: APIKeyState) -> None: ...  # pragma: no cover
 
     def rotate(
-        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+        self, *, current_key_id: str, replacement: APIKeyState, overlap_until: datetime | None, now: datetime
     ) -> None: ...  # pragma: no cover
 
     def revoke(self, *, key_id: str, now: datetime) -> None: ...  # pragma: no cover
@@ -299,16 +299,16 @@ class _BlockingAPIKeyStore:
     implementation: "_SyncAPIKeyStore" = field(repr=False)
     runner: BlockingCallRunner = field(default_factory=BlockingCallRunner, repr=False)
 
-    async def get(self, key_id: str) -> APIKeyRecord | None:
-        method = cast("Callable[[str], APIKeyRecord | None]", self.implementation.get)
+    async def get(self, key_id: str) -> APIKeyState | None:
+        method = cast("Callable[[str], APIKeyState | None]", self.implementation.get)
         return await self.runner.run(method, key_id)
 
-    async def create(self, record: APIKeyRecord) -> None:
-        method = cast("Callable[[APIKeyRecord], None]", self.implementation.create)
+    async def create(self, record: APIKeyState) -> None:
+        method = cast("Callable[[APIKeyState], None]", self.implementation.create)
         await self.runner.run(method, record)
 
     async def rotate(
-        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+        self, *, current_key_id: str, replacement: APIKeyState, overlap_until: datetime | None, now: datetime
     ) -> None:
         method = cast("Callable[..., None]", self.implementation.rotate)
         await self.runner.run(
@@ -478,7 +478,7 @@ class APIKeyCodec:
 
     def issue(
         self, *, subject_id: str, restrictions: CredentialRestrictions | None = None, expires_at: datetime | None = None
-    ) -> tuple[IssuedAPIKey, APIKeyRecord]:
+    ) -> tuple[IssuedAPIKey, APIKeyState]:
         """Create reveal-once key material paired with a digest-only record.
 
         Args:
@@ -498,7 +498,7 @@ class APIKeyCodec:
         secret = _encode_segment(self._entropy(_SECRET_BYTES))
         value = f"{self.prefix}_{key_id}_{secret}"
         issued = IssuedAPIKey(key_id=key_id, value=value)
-        record = APIKeyRecord(
+        record = APIKeyState(
             key_id=key_id,
             subject_id=subject_id,
             digest=_digest(self.pepper, key_id, secret),
@@ -530,7 +530,7 @@ class APIKeyCodec:
             return None
         return APIKeyProof(key_id=key_id, digest=_digest(self.pepper, key_id, secret))
 
-    def matches(self, proof: APIKeyProof, record: APIKeyRecord) -> bool:
+    def matches(self, proof: APIKeyProof, record: APIKeyState) -> bool:
         """Compare one computed digest with a record through the configured comparator.
 
         The comparator receives two equal-length digests and must compare them

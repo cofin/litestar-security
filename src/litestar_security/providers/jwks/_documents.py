@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from jwt import PyJWK
 
 from litestar_security.providers._internal import JSONValue, reject_non_finite, unique_object, validate_depth
-from litestar_security.providers.jwks._cache import JWKSCacheEntry, JWKSCachePolicy
+from litestar_security.providers.jwks._cache import JWKSCachePolicy, JWKSSource
 from litestar_security.providers.jwks._internal import valid_selection_value
 from litestar_security.providers.jwt import JWTAlgorithm, VerificationKey
 
@@ -33,9 +33,7 @@ _SUPPORTED_REMOTE_ALGORITHMS = frozenset({"EdDSA", "ES256", "RS256"})
 _PRIVATE_JWK_MEMBERS = frozenset({"d", "dp", "dq", "k", "oth", "p", "q", "qi"})
 
 
-def parse_document(
-    body: bytes, entry: JWKSCacheEntry, policy: JWKSCachePolicy
-) -> Mapping[_SelectionKey, VerificationKey]:
+def parse_document(body: bytes, entry: JWKSSource, policy: JWKSCachePolicy) -> Mapping[_SelectionKey, VerificationKey]:
     if len(body) > policy.maximum_document_bytes:
         raise ValueError
     decoded = cast("object", json.loads(body, object_pairs_hook=unique_object, parse_constant=reject_non_finite))
@@ -61,7 +59,7 @@ def parse_document(
     return MappingProxyType(keys)
 
 
-def _parse_key(value: Mapping[str, JSONValue], entry: JWKSCacheEntry) -> VerificationKey:
+def _parse_key(value: Mapping[str, JSONValue], entry: JWKSSource) -> VerificationKey:
     if _PRIVATE_JWK_MEMBERS.intersection(value):
         raise ValueError
     algorithm = value.get("alg")

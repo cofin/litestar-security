@@ -17,10 +17,10 @@ from litestar_security.providers.jwks import (
     AsyncJWKSFetcher,
     CachedJWKSProvider,
     InMemoryJWKSCache,
-    JWKSCacheEntry,
     JWKSCachePolicy,
-    JWKSFetchRequest,
-    JWKSFetchResponse,
+    JWKSFetchOutcome,
+    JWKSFetchTarget,
+    JWKSSource,
     normalize_fetcher,
 )
 from litestar_security.providers.jwt import VerificationKey
@@ -34,7 +34,7 @@ _JWKS_URI = f"{_JWT_ISSUER}/.well-known/jwks.json"
 
 
 def _RecordingJWKSFetcher(  # noqa: N802 - constructor-shaped adapter over the shared collaborator
-    *responses: JWKSFetchResponse | Exception | Callable[[JWKSFetchRequest], JWKSFetchResponse],
+    *responses: JWKSFetchOutcome | Exception | Callable[[JWKSFetchTarget], JWKSFetchOutcome],
 ) -> RecordingJWKSFetcher:
     return RecordingJWKSFetcher(list(responses))
 
@@ -42,7 +42,7 @@ def _RecordingJWKSFetcher(  # noqa: N802 - constructor-shaped adapter over the s
 class _BlockingJWKSFetcher:
     def __init__(
         self,
-        *responses: JWKSFetchResponse | Exception | Callable[[JWKSFetchRequest], JWKSFetchResponse],
+        *responses: JWKSFetchOutcome | Exception | Callable[[JWKSFetchTarget], JWKSFetchOutcome],
         immediate_calls: int = 0,
         maximum_calls: int = 1,
         issuers: tuple[str, ...] = (),
@@ -50,7 +50,7 @@ class _BlockingJWKSFetcher:
         self.responses = responses
         self.immediate_calls = immediate_calls
         self.maximum_calls = maximum_calls
-        self.requests: list[JWKSFetchRequest] = []
+        self.requests: list[JWKSFetchTarget] = []
         self.started = Event()
         self.started_by_issuer = {issuer: Event() for issuer in issuers}
         self.release = Event()
@@ -58,7 +58,7 @@ class _BlockingJWKSFetcher:
         self.active = 0
         self.cancelled = 0
 
-    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+    async def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
         self.requests.append(request)
         call_number = len(self.requests)
         if call_number > self.maximum_calls:
@@ -101,25 +101,25 @@ def _jwks_response(
     body: bytes | None = None,
     cache_control: str | None = None,
     etag: str | None = None,
-) -> JWKSFetchResponse:
+) -> JWKSFetchOutcome:
     headers: dict[str, str] = {"content-type": "application/json"}
     if cache_control is not None:
         headers["cache-control"] = cache_control
     if etag is not None:
         headers["etag"] = etag
-    return JWKSFetchResponse(status_code=status_code, body=_jwks_body(*keys) if body is None else body, headers=headers)
+    return JWKSFetchOutcome(status_code=status_code, body=_jwks_body(*keys) if body is None else body, headers=headers)
 
 
 def _jwks_entry(
     issuer: str = _JWT_ISSUER, jwks_uri: str = _JWKS_URI, algorithms: frozenset[str] = frozenset({"EdDSA"})
-) -> JWKSCacheEntry:
-    return JWKSCacheEntry(issuer=issuer, jwks_uri=jwks_uri, algorithms=algorithms)
+) -> JWKSSource:
+    return JWKSSource(issuer=issuer, jwks_uri=jwks_uri, algorithms=algorithms)
 
 
 def test_jwks_public_cache_defaults_and_fetcher_contract() -> None:
     policy = JWKSCachePolicy()
-    response = JWKSFetchResponse(status_code=304, body=b"", headers={"cache-control": "max-age=60"})
-    default_response = JWKSFetchResponse(status_code=304)
+    response = JWKSFetchOutcome(status_code=304, body=b"", headers={"cache-control": "max-age=60"})
+    default_response = JWKSFetchOutcome(status_code=304)
     fetcher = _RecordingJWKSFetcher(response)
 
     assert isinstance(fetcher, AsyncJWKSFetcher)
@@ -209,16 +209,16 @@ def test_jwks_cache_policy_rejects_unsafe_bounds(kwargs: dict[str, object]) -> N
 )
 def test_jwks_fetch_response_rejects_invalid_transport_values(kwargs: dict[str, object]) -> None:
     with pytest.raises(ImproperlyConfiguredException):
-        JWKSFetchResponse(**kwargs)  # type: ignore[arg-type]
+        JWKSFetchOutcome(**kwargs)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
     "factory",
     [
-        lambda: JWKSCacheEntry(issuer=" ", jwks_uri=_JWKS_URI, algorithms=frozenset({"EdDSA"})),
-        lambda: JWKSCacheEntry(issuer=_JWT_ISSUER, jwks_uri=" ", algorithms=frozenset({"EdDSA"})),
-        lambda: JWKSCacheEntry(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, algorithms=frozenset()),
-        lambda: JWKSCacheEntry(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, algorithms=frozenset({"none"})),
+        lambda: JWKSSource(issuer=" ", jwks_uri=_JWKS_URI, algorithms=frozenset({"EdDSA"})),
+        lambda: JWKSSource(issuer=_JWT_ISSUER, jwks_uri=" ", algorithms=frozenset({"EdDSA"})),
+        lambda: JWKSSource(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, algorithms=frozenset()),
+        lambda: JWKSSource(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, algorithms=frozenset({"none"})),
         lambda: CachedJWKSProvider(entries=(), fetcher=_RecordingJWKSFetcher()),
         lambda: CachedJWKSProvider(entries=(_jwks_entry(), _jwks_entry()), fetcher=_RecordingJWKSFetcher()),
         lambda: CachedJWKSProvider(
@@ -265,8 +265,8 @@ async def test_jwks_cold_load_uses_default_ttl_and_fresh_hit_does_no_fetch(
     assert fresh is cold
     assert isinstance(boundary, VerificationKey)
     assert fetcher.requests == [
-        JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, etag=None),
-        JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, etag='"generation-1"'),
+        JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, etag=None),
+        JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, etag='"generation-1"'),
     ]
 
 
@@ -354,7 +354,7 @@ async def test_jwks_independent_issuer_refreshes_proceed_concurrently(
     first = _verification_jwk(jwt_key_material, "EdDSA", "first")
     second = _verification_jwk(jwt_key_material, "ES256", "second")
 
-    def respond(request: JWKSFetchRequest) -> JWKSFetchResponse:
+    def respond(request: JWKSFetchTarget) -> JWKSFetchOutcome:
         return _jwks_response(first if request.issuer == _JWT_ISSUER else second, cache_control="max-age=60")
 
     fetcher = _BlockingJWKSFetcher(respond, respond, maximum_calls=2, issuers=(_JWT_ISSUER, second_issuer))
@@ -438,7 +438,7 @@ async def test_jwks_single_flight_and_cache_bounds(jwt_key_material: Mapping[str
         blocking_fetcher.release.set()
 
     policy = JWKSCachePolicy(maximum_keys=4, maximum_unknown_keys=64)
-    not_modified = JWKSFetchResponse(status_code=304, headers={"cache-control": "max-age=60"})
+    not_modified = JWKSFetchOutcome(status_code=304, headers={"cache-control": "max-age=60"})
     bounded_fetcher = _RecordingJWKSFetcher(response, not_modified)
     bounded_provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=bounded_fetcher, policy=policy)
     await bounded_provider.select_key(_JWT_ISSUER, _JWKS_URI, "known-0", "EdDSA", now=_JWT_NOW)
@@ -520,7 +520,7 @@ async def test_jwks_unknown_selection_negative_cache_is_per_generation_tuple(
     known = _verification_jwk(jwt_key_material, key_id="shared")
     fetcher = _RecordingJWKSFetcher(
         _jwks_response(known, cache_control="max-age=60", etag='"generation-1"'),
-        JWKSFetchResponse(status_code=304, headers={"cache-control": "max-age=60"}),
+        JWKSFetchOutcome(status_code=304, headers={"cache-control": "max-age=60"}),
     )
     provider = CachedJWKSProvider(entries=(_jwks_entry(algorithms=frozenset({"EdDSA", "ES256"})),), fetcher=fetcher)
 
@@ -545,7 +545,7 @@ async def test_jwks_expired_unknown_selection_is_cached_after_refresh(
     known = _verification_jwk(jwt_key_material, key_id="known")
     fetcher = _RecordingJWKSFetcher(
         _jwks_response(known, cache_control="max-age=30", etag='"generation-1"'),
-        JWKSFetchResponse(status_code=304, headers={"cache-control": "max-age=60"}),
+        JWKSFetchOutcome(status_code=304, headers={"cache-control": "max-age=60"}),
     )
     provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
 
@@ -598,7 +598,7 @@ async def test_jwks_generation_replacement_invalidates_unknown_key_negatives(
     formerly_unknown = _verification_jwk(jwt_key_material, key_id="absent")
     fetcher = _RecordingJWKSFetcher(
         _jwks_response(known, cache_control="max-age=30", etag='"generation-1"'),
-        JWKSFetchResponse(status_code=304, headers={"cache-control": "max-age=30"}),
+        JWKSFetchOutcome(status_code=304, headers={"cache-control": "max-age=30"}),
         _jwks_response(replacement, cache_control="max-age=30", etag='"generation-2"'),
         _jwks_response(replacement, formerly_unknown, cache_control="max-age=30", etag='"generation-3"'),
     )
@@ -625,7 +625,7 @@ async def test_jwks_unknown_key_negative_cache_is_bounded_lru(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
     known = _verification_jwk(jwt_key_material, key_id="known")
-    not_modified = JWKSFetchResponse(status_code=304, headers={"cache-control": "max-age=60"})
+    not_modified = JWKSFetchOutcome(status_code=304, headers={"cache-control": "max-age=60"})
     fetcher = _RecordingJWKSFetcher(
         _jwks_response(known, cache_control="max-age=60", etag='"generation-1"'), *(not_modified for _ in range(5))
     )
@@ -796,7 +796,7 @@ async def test_jwks_conditional_304_retains_snapshot_and_recomputes_freshness(
     jwk = _verification_jwk(jwt_key_material)
     fetcher = _RecordingJWKSFetcher(
         _jwks_response(jwk, cache_control="max-age=30", etag='"generation-1"'),
-        JWKSFetchResponse(status_code=304, body=b"", headers={"cache-control": "max-age=60"}),
+        JWKSFetchOutcome(status_code=304, body=b"", headers={"cache-control": "max-age=60"}),
     )
     provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
 
@@ -811,7 +811,7 @@ async def test_jwks_conditional_304_retains_snapshot_and_recomputes_freshness(
 
 
 async def test_jwks_304_without_a_live_snapshot_is_unavailable() -> None:
-    fetcher = _RecordingJWKSFetcher(JWKSFetchResponse(status_code=304, body=b"", headers={}))
+    fetcher = _RecordingJWKSFetcher(JWKSFetchOutcome(status_code=304, body=b"", headers={}))
     provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
 
     outcome = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
@@ -821,7 +821,7 @@ async def test_jwks_304_without_a_live_snapshot_is_unavailable() -> None:
 
 async def test_jwks_fetcher_returning_wrong_response_type_is_unavailable() -> None:
     class _WrongResponseFetcher:
-        async def fetch(self, _request: JWKSFetchRequest) -> object:
+        async def fetch(self, _request: JWKSFetchTarget) -> object:
             return object()
 
     provider = CachedJWKSProvider(
@@ -886,7 +886,7 @@ async def test_jwks_provider_closes_only_owned_fetchers(
         def __init__(self) -> None:
             self.closes = 0
 
-        async def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+        async def fetch(self, _request: JWKSFetchTarget) -> JWKSFetchOutcome:
             return _jwks_response(_verification_jwk(jwt_key_material))
 
         async def aclose(self) -> None:
@@ -906,8 +906,8 @@ async def test_jwks_provider_closes_owned_sync_fetcher_in_worker() -> None:
         def __init__(self) -> None:
             self.closes = 0
 
-        def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
-            return JWKSFetchResponse(status_code=200, body=b'{"keys":[]}')
+        def fetch(self, _request: JWKSFetchTarget) -> JWKSFetchOutcome:
+            return JWKSFetchOutcome(status_code=200, body=b'{"keys":[]}')
 
         def close(self) -> None:
             self.closes += 1
@@ -923,8 +923,8 @@ async def test_jwks_provider_closes_owned_sync_fetcher_in_worker() -> None:
 
 async def test_jwks_provider_accepts_owned_sync_fetcher_without_close() -> None:
     class SyncFetcher:
-        def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
-            return JWKSFetchResponse(status_code=200, body=b'{"keys":[]}')
+        def fetch(self, _request: JWKSFetchTarget) -> JWKSFetchOutcome:
+            return JWKSFetchOutcome(status_code=200, body=b'{"keys":[]}')
 
     provider = CachedJWKSProvider(
         entries=(_jwks_entry(),),
@@ -938,8 +938,8 @@ async def test_jwks_provider_accepts_owned_sync_fetcher_without_close() -> None:
 @pytest.mark.parametrize("close_mode", ["absent", "sync"])
 async def test_jwks_provider_accepts_owned_fetchers_without_async_close(close_mode: str) -> None:
     class Fetcher:
-        async def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
-            return JWKSFetchResponse(status_code=200, body=b'{"keys":[]}')
+        async def fetch(self, _request: JWKSFetchTarget) -> JWKSFetchOutcome:
+            return JWKSFetchOutcome(status_code=200, body=b'{"keys":[]}')
 
     class SyncCloseFetcher(Fetcher):
         def aclose(self) -> None:

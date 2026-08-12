@@ -42,6 +42,7 @@ from litestar_security.accounts._records import (
 from litestar_security.accounts._stores import LoginMethodStore
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
+from litestar_security.schema import WireStruct
 
 __all__ = (
     "AESGCMSecretProtector",
@@ -55,7 +56,7 @@ __all__ = (
     "SecretProtector",
     "SecretProtectorKey",
     "StepUpCredential",
-    "StepUpRecord",
+    "StepUpGrantState",
     "StepUpService",
     "StepUpStore",
     "TOTPMethod",
@@ -374,17 +375,20 @@ class RecoveryCodeGrant:
     codes: tuple[str, ...] = field(repr=False)
 
 
-@dataclass(frozen=True, slots=True)
-class StepUpCredential:
+class StepUpCredential(WireStruct, frozen=True, kw_only=True):
     """Reveal-once transport-bound step-up credential."""
 
-    token: str = field(repr=False)
+    token: str
     purpose: str
     expires_at: datetime
 
+    def __repr__(self) -> str:
+        """Redact the reveal-once credential."""
+        return f"{type(self).__name__}(token=<redacted>, purpose={self.purpose!r}, expires_at={self.expires_at!r})"
+
 
 @dataclass(frozen=True, slots=True)
-class StepUpRecord:
+class StepUpGrantState:
     """Digest-only one-time step-up state."""
 
     grant_digest: bytes = field(repr=False)
@@ -420,7 +424,7 @@ class StepUpRecord:
 class StepUpStore(Protocol):
     """Persist and atomically consume digest-only step-up grants."""
 
-    async def put(self, record: StepUpRecord) -> None:
+    async def put(self, record: StepUpGrantState) -> None:
         """Persist one unconsumed grant.
 
         Args:
@@ -437,7 +441,7 @@ class StepUpStore(Protocol):
         purpose: str,
         transport_digest: bytes,
         now: datetime,
-    ) -> StepUpRecord | None:
+    ) -> StepUpGrantState | None:
         """Atomically consume only an exact, current binding match.
 
         Args:
@@ -978,7 +982,7 @@ class StepUpService:
             token = urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
             expires_at = now + self.ttl
             await self.store.put(
-                StepUpRecord(
+                StepUpGrantState(
                     grant_digest=sha256(token.encode("ascii")).digest(),
                     transport_digest=sha256(transport_binding).digest(),
                     principal_id=principal_id,

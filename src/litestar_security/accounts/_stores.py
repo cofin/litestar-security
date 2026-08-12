@@ -13,8 +13,7 @@ from litestar_security.accounts._purpose_tokens import (
     TokenIssue,
 )
 from litestar_security.accounts._records import (
-    ConsumeOutcome,
-    LocalAccountRecord,
+    LocalAccountState,
     LoginMethod,
     PasswordChangeOutcome,
     PasswordCredentialState,
@@ -23,6 +22,7 @@ from litestar_security.accounts._records import (
     RegistrationOutcome,
     RevokeLoginMethodOutcome,
     SecurityEvent,
+    VerificationOutcome,
 )
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 
@@ -92,7 +92,7 @@ class RegistrationPolicy:
 class AccountLookup(Protocol[UserT]):
     """Resolve the minimal application account projection."""
 
-    async def find_for_login(self, normalized_identifier: str) -> "LocalAccountRecord[UserT] | None":
+    async def find_for_login(self, normalized_identifier: str) -> "LocalAccountState[UserT] | None":
         """Find an account through an already-normalized identifier.
 
         The caller normalizes before calling, so match the stored value exactly
@@ -106,7 +106,7 @@ class AccountLookup(Protocol[UserT]):
         """
         ...  # pragma: no cover
 
-    async def get_by_id(self, account_id: str) -> "LocalAccountRecord[UserT] | None":
+    async def get_by_id(self, account_id: str) -> "LocalAccountState[UserT] | None":
         """Resolve an account by its stable security identifier.
 
         Args:
@@ -281,7 +281,7 @@ class VerificationTokenStore(Protocol):
 
     async def consume_and_verify(
         self, token_id: str, digest: bytes, *, now: "datetime", event: SecurityEvent
-    ) -> ConsumeOutcome:
+    ) -> VerificationOutcome:
         """Consume a verification token and verify its account atomically.
 
         Marking the token used and marking the account verified must commit

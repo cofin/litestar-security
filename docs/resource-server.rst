@@ -155,7 +155,7 @@ workload-token boundary over it, and passes the resulting slot and mechanism to
    from litestar_security.providers.jwks import (
        CachedJWKSProvider,
        HttpxJWKSFetcher,
-       JWKSCacheEntry,
+       JWKSSource,
    )
    from litestar_security.providers.oauth import ProtectedResourceConfig
    from litestar_security.providers.oidc import ServiceTokenConfig
@@ -165,7 +165,7 @@ workload-token boundary over it, and passes the resulting slot and mechanism to
 
    provider = CachedJWKSProvider(
        entries=(
-           JWKSCacheEntry(
+           JWKSSource(
                issuer=ISSUER,
                jwks_uri=JWKS_URI,
                algorithms=frozenset({"ES256"}),

@@ -58,13 +58,12 @@ from litestar_security.authentication import InvalidCredentials, VerificationUna
 from litestar_security.context import AuthenticationEvidence
 
 __all__ = (
-    "AssertionRecordStatus",
     "AttestationTrustMapper",
     "AuthenticationVerification",
     "CloneRiskPolicy",
-    "InvalidWebAuthnResponseError",
+    "PasskeyAssertionStatus",
     "PasskeyCredential",
-    "PasskeyRecord",
+    "PasskeyMetadata",
     "PasskeyService",
     "PasskeyStore",
     "PyWebAuthnVerifier",
@@ -73,6 +72,7 @@ __all__ = (
     "WebAuthnChallenge",
     "WebAuthnChallengeStore",
     "WebAuthnOptions",
+    "WebAuthnVerificationError",
     "WebAuthnVerifier",
 )
 
@@ -97,7 +97,7 @@ class UserVerification(str, Enum):
     DISCOURAGED = "discouraged"
 
 
-class AssertionRecordStatus(str, Enum):
+class PasskeyAssertionStatus(str, Enum):
     """Atomic assertion-recording outcome."""
 
     RECORDED = "recorded"
@@ -112,7 +112,7 @@ class CloneRiskPolicy(str, Enum):
     AUDIT_ONLY = "audit_only"
 
 
-class InvalidWebAuthnResponseError(ValueError):
+class WebAuthnVerificationError(ValueError):
     """Sanitized dependency-boundary rejection."""
 
 
@@ -268,7 +268,7 @@ class PasskeyCredential:
 
 
 @dataclass(frozen=True, slots=True)
-class PasskeyRecord:
+class PasskeyMetadata:
     """Safe credential metadata for account-management responses."""
 
     credential_id: str
@@ -349,7 +349,7 @@ class PasskeyStore(Protocol):
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordStatus:
+    ) -> PasskeyAssertionStatus:
         """Atomically persist a verified assertion against an optimistic version.
 
         Args:
@@ -408,7 +408,7 @@ class WebAuthnVerifier(Protocol):
             Browser-compatible registration-options JSON.
 
         Raises:
-            InvalidWebAuthnResponseError: If the adapter cannot build valid options.
+            WebAuthnVerificationError: If the adapter cannot build valid options.
         """
         ...  # pragma: no cover
 
@@ -422,7 +422,7 @@ class WebAuthnVerifier(Protocol):
             Browser-compatible authentication-options JSON.
 
         Raises:
-            InvalidWebAuthnResponseError: If the adapter cannot build valid options.
+            WebAuthnVerificationError: If the adapter cannot build valid options.
         """
         ...  # pragma: no cover
 
@@ -436,7 +436,7 @@ class WebAuthnVerifier(Protocol):
             The decoded client challenge.
 
         Raises:
-            InvalidWebAuthnResponseError: If the response cannot be parsed safely.
+            WebAuthnVerificationError: If the response cannot be parsed safely.
         """
         ...  # pragma: no cover
 
@@ -450,7 +450,7 @@ class WebAuthnVerifier(Protocol):
             The decoded assertion challenge.
 
         Raises:
-            InvalidWebAuthnResponseError: If the response cannot be parsed safely.
+            WebAuthnVerificationError: If the response cannot be parsed safely.
         """
         ...  # pragma: no cover
 
@@ -464,7 +464,7 @@ class WebAuthnVerifier(Protocol):
             The decoded opaque credential identifier.
 
         Raises:
-            InvalidWebAuthnResponseError: If the response cannot be parsed safely.
+            WebAuthnVerificationError: If the response cannot be parsed safely.
         """
         ...  # pragma: no cover
 
@@ -478,7 +478,7 @@ class WebAuthnVerifier(Protocol):
             A dependency-neutral verified registration result.
 
         Raises:
-            InvalidWebAuthnResponseError: If any cryptographic or binding check fails.
+            WebAuthnVerificationError: If any cryptographic or binding check fails.
         """
         ...  # pragma: no cover
 
@@ -492,7 +492,7 @@ class WebAuthnVerifier(Protocol):
             A dependency-neutral verified assertion result.
 
         Raises:
-            InvalidWebAuthnResponseError: If any cryptographic or binding check fails.
+            WebAuthnVerificationError: If any cryptographic or binding check fails.
         """
         ...  # pragma: no cover
 
@@ -525,7 +525,7 @@ class PyWebAuthnVerifier:
             )
             return options_to_json(options)
         except Exception as exc:
-            raise InvalidWebAuthnResponseError from exc
+            raise WebAuthnVerificationError from exc
 
     def authentication_options(self, **kwargs: object) -> str:
         """Build authentication options with project-validated arguments."""
@@ -538,7 +538,7 @@ class PyWebAuthnVerifier:
             )
             return options_to_json(options)
         except Exception as exc:
-            raise InvalidWebAuthnResponseError from exc
+            raise WebAuthnVerificationError from exc
 
     def registration_challenge(self, response: str) -> bytes:
         """Extract registration client data through the pinned parser."""
@@ -546,7 +546,7 @@ class PyWebAuthnVerifier:
             parsed = parse_registration_credential_json(response)
             return parse_client_data_json(bytes(parsed.response.client_data_json)).challenge
         except Exception as exc:
-            raise InvalidWebAuthnResponseError from exc
+            raise WebAuthnVerificationError from exc
 
     def authentication_challenge(self, response: str) -> bytes:
         """Extract authentication client data through the pinned parser."""
@@ -554,14 +554,14 @@ class PyWebAuthnVerifier:
             parsed = parse_authentication_credential_json(response)
             return parse_client_data_json(bytes(parsed.response.client_data_json)).challenge
         except Exception as exc:
-            raise InvalidWebAuthnResponseError from exc
+            raise WebAuthnVerificationError from exc
 
     def credential_id(self, response: str) -> bytes:
         """Extract the raw assertion credential identifier."""
         try:
             return bytes(parse_authentication_credential_json(response).raw_id)
         except Exception as exc:
-            raise InvalidWebAuthnResponseError from exc
+            raise WebAuthnVerificationError from exc
 
     def verify_registration(self, **kwargs: object) -> RegistrationVerification:
         """Verify registration and project the dependency result."""
@@ -587,7 +587,7 @@ class PyWebAuthnVerifier:
                 pem_root_certs_bytes_by_fmt=root_certificates,
             )
         except Exception as exc:
-            raise InvalidWebAuthnResponseError from exc
+            raise WebAuthnVerificationError from exc
         return RegistrationVerification(
             credential_id=bytes(verified.credential_id),
             public_key=bytes(verified.credential_public_key),
@@ -617,7 +617,7 @@ class PyWebAuthnVerifier:
                 require_user_verification=cast("bool", kwargs["require_user_verification"]),
             )
         except Exception as exc:
-            raise InvalidWebAuthnResponseError from exc
+            raise WebAuthnVerificationError from exc
         return AuthenticationVerification(
             credential_id=bytes(verified.credential_id),
             sign_count=verified.new_sign_count,
@@ -807,7 +807,7 @@ class PasskeyService:
                 ),
             ):
                 return InvalidCredentials()
-        except InvalidWebAuthnResponseError:
+        except WebAuthnVerificationError:
             return InvalidCredentials()
         except Exception:  # noqa: BLE001 - sanitize application stores and dependency failures
             return VerificationUnavailable()
@@ -863,13 +863,13 @@ class PasskeyService:
                 clone_risk=clone_risk,
                 now=now,
             )
-            if result is AssertionRecordStatus.CONFLICT:
+            if result is PasskeyAssertionStatus.CONFLICT:
                 return InvalidCredentials()
-        except InvalidWebAuthnResponseError:
+        except WebAuthnVerificationError:
             return InvalidCredentials()
         except Exception:  # noqa: BLE001 - sanitize application stores and dependency failures
             return VerificationUnavailable()
-        if result is AssertionRecordStatus.CLONE_RISK:
+        if result is PasskeyAssertionStatus.CLONE_RISK:
             await self._emit_event(
                 operation=PASSKEY_ASSERT, outcome=OUTCOME_CLONE_RISK, account_id=account_id, occurred_at=now
             )
@@ -893,7 +893,7 @@ class PasskeyService:
             amr=("passkey",),
         )
 
-    async def list_credentials(self, account_id: str) -> tuple[PasskeyRecord, ...] | VerificationUnavailable:
+    async def list_credentials(self, account_id: str) -> tuple[PasskeyMetadata, ...] | VerificationUnavailable:
         """List safe credential metadata for one owner."""
         try:
             credentials = await self.store.list_credentials(account_id)
@@ -905,7 +905,7 @@ class PasskeyService:
 
     async def rename_credential(
         self, account_id: str, credential_id: bytes, display_name: str
-    ) -> PasskeyRecord | VerificationUnavailable | None:
+    ) -> PasskeyMetadata | VerificationUnavailable | None:
         """Rename one credential through its owner-checked store operation."""
         if not strict_context_text(display_name):
             return None
@@ -990,9 +990,9 @@ def _binding_digest(binding: bytes) -> bytes:
     return sha256(value).digest()
 
 
-def _credential_summary(credential: PasskeyCredential) -> PasskeyRecord:
+def _credential_summary(credential: PasskeyCredential) -> PasskeyMetadata:
     identifier = urlsafe_b64encode(credential.credential_id).rstrip(b"=").decode("ascii")
-    return PasskeyRecord(
+    return PasskeyMetadata(
         credential_id=identifier,
         display_name=credential.display_name,
         backup_eligible=credential.backup_eligible,

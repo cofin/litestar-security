@@ -18,7 +18,7 @@ from litestar_security.providers._internal import raise_config, safe_increment, 
 from litestar_security.providers.jwks._internal import empty_headers
 from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics
 
-__all__ = ("AsyncJWKSFetcher", "JWKSFetchRequest", "JWKSFetchResponse", "SyncJWKSFetcher", "normalize_fetcher")
+__all__ = ("AsyncJWKSFetcher", "JWKSFetchOutcome", "JWKSFetchTarget", "SyncJWKSFetcher", "normalize_fetcher")
 
 
 _DEFAULT_WORKER_TIMEOUT = 10.0
@@ -34,7 +34,7 @@ _MAXIMUM_HTTP_STATUS = 599
 
 
 @dataclass(frozen=True, slots=True)
-class JWKSFetchRequest:
+class JWKSFetchTarget:
     """One conditional request for an exact configured JWKS source."""
 
     issuer: str
@@ -43,7 +43,7 @@ class JWKSFetchRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class JWKSFetchResponse:
+class JWKSFetchOutcome:
     """Transport-neutral bounded response returned by a custom fetcher."""
 
     status_code: int
@@ -75,7 +75,7 @@ class JWKSFetchResponse:
 class AsyncJWKSFetcher(Protocol):
     """Async transport boundary for one exact configured JWKS source."""
 
-    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+    async def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
         """Return one finite-byte response without following redirects.
 
         Redirects are not followed, because a redirect could move key fetching to
@@ -108,7 +108,7 @@ class AsyncJWKSFetcher(Protocol):
 class SyncJWKSFetcher(Protocol):
     """Blocking transport boundary normalized once into a bounded worker."""
 
-    def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+    def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
         """Return one finite-byte response without following redirects.
 
         Redirects are not followed, because a redirect could move key fetching to
@@ -186,11 +186,11 @@ def normalize_fetcher(
             normalized_close = close_noop
 
         return _AsyncJWKSFetcher(
-            fetch_async=cast("Callable[[JWKSFetchRequest], Awaitable[JWKSFetchResponse]]", fetch_method),
+            fetch_async=cast("Callable[[JWKSFetchTarget], Awaitable[JWKSFetchOutcome]]", fetch_method),
             close_async=normalized_close,
         )
     return _WorkerJWKSFetcher(
-        fetch_sync=cast("Callable[[JWKSFetchRequest], JWKSFetchResponse]", fetch_method),
+        fetch_sync=cast("Callable[[JWKSFetchTarget], JWKSFetchOutcome]", fetch_method),
         limiter=limiter,
         timeout=float(timeout),
         metrics=metric_sink,
@@ -200,10 +200,10 @@ def normalize_fetcher(
 
 @dataclass(slots=True)
 class _AsyncJWKSFetcher:
-    fetch_async: Callable[[JWKSFetchRequest], Awaitable[JWKSFetchResponse]] = field(repr=False)
+    fetch_async: Callable[[JWKSFetchTarget], Awaitable[JWKSFetchOutcome]] = field(repr=False)
     close_async: Callable[[], Awaitable[None]] = field(repr=False)
 
-    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+    async def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
         """Delegate to the configured async transport."""
         return await self.fetch_async(request)
 
@@ -214,19 +214,19 @@ class _AsyncJWKSFetcher:
 
 @dataclass(slots=True)
 class _WorkerJWKSFetcher:
-    fetch_sync: Callable[[JWKSFetchRequest], JWKSFetchResponse] = field(repr=False)
+    fetch_sync: Callable[[JWKSFetchTarget], JWKSFetchOutcome] = field(repr=False)
     limiter: CapacityLimiter = field(repr=False)
     timeout: float = field(repr=False)
     metrics: SecurityMetrics = field(repr=False)
     source: object = field(repr=False)
 
-    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+    async def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
         """Execute one blocking fetch without blocking the event loop."""
         if self.limiter.borrowed_tokens >= self.limiter.total_tokens:
             safe_increment(self.metrics, "security.worker.saturation")
         queued_at = perf_counter()
 
-        def fetch_sync() -> JWKSFetchResponse:
+        def fetch_sync() -> JWKSFetchOutcome:
             started = perf_counter()
             safe_observe(self.metrics, "security.worker.wait", started - queued_at)
             try:

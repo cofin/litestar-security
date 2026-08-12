@@ -54,9 +54,9 @@ for the store contracts; it is not a production persistence implementation.
    * - ``StepUpStore``
      - :func:`~litestar_security.testing.assert_step_up_store_conformance`
      - ``InMemoryStepUpStore``
-   * - ``TokenVault``
-     - :func:`~litestar_security.testing.assert_token_vault_conformance`
-     - ``MemoryTokenVault`` with an AEAD protector
+   * - ``OAuthAccountStore``
+     - OAuth account-store conformance helpers
+     - ``MemoryOAuthAccountStore`` with an AEAD protector
    * - ``WebAuthnChallengeStore``
      - :func:`~litestar_security.testing.assert_webauthn_challenge_store_conformance`
      - ``InMemorySecurityBackend.challenges``
@@ -95,10 +95,10 @@ session mappings, one unrelated mapping, and the exact front-channel browser
 binding described by the helper docstring. This fixed scenario makes replay,
 ownership, binding, and contention results portable across backends.
 
-``InMemoryOAuthRevocationRetryStore`` is an encrypted retry-persistence
-reference, not a universal conformance scenario: the retry protocol deliberately
-does not expose stored payloads. It accepts an ``OAuthTransactionProtector`` and
-exposes only immutable, secret-free failure metadata.
+OAuth token retention and revocation-retry staging are part of the aggregate
+``OAuthAccountStore`` contract. Applications should test their implementation
+with ``assert_oauth_account_store_conformance`` rather than exposing separate
+token-vault or retry-store collaborators.
 
 Testing-only resolver and WebSocket lifetime references keep examples small:
 

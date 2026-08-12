@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from litestar_security.providers._internal import AddressResolver, public_address, raise_config, resolve_addresses
-from litestar_security.providers.jwks._fetching import JWKSFetchRequest, JWKSFetchResponse
+from litestar_security.providers.jwks._fetching import JWKSFetchOutcome, JWKSFetchTarget
 
 __all__ = ("HttpxJWKSFetcher",)
 
@@ -62,7 +62,7 @@ class HttpxJWKSFetcher:
             trust_env=False,
         )
 
-    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+    async def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
         """Return one bounded response without following redirects.
 
         Args:
@@ -84,7 +84,7 @@ class HttpxJWKSFetcher:
             headers["if-none-match"] = request.etag
         async with self._client.stream("GET", request.jwks_uri, headers=headers) as response:
             body = await self._read_bounded_body(response)
-            return JWKSFetchResponse(status_code=response.status_code, body=body, headers=dict(response.headers))
+            return JWKSFetchOutcome(status_code=response.status_code, body=body, headers=dict(response.headers))
 
     async def aclose(self) -> None:
         """Close the owned HTTP client idempotently.

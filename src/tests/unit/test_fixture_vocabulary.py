@@ -35,7 +35,6 @@ BACKEND_DERIVED_FIXTURES = {
     "step_up_store": "step_up",
     "oauth_account_store": "oauth_accounts",
     "oauth_transaction_store": "oauth_transactions",
-    "token_vault": "oauth_tokens",
     "connect_token_store": "websocket_connect_tokens",
 }
 

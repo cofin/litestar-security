@@ -63,7 +63,7 @@ from litestar_security.accounts import (
     LocalAuthSecrets,
     LocalCredentials,
     LocalMFAChallenge,
-    PasskeyRecord,
+    PasskeyMetadata,
     PasswordReauthenticationProof,
     ProtectedSecret,
     PurposeTokenCodec,
@@ -84,7 +84,7 @@ from litestar_security.accounts import (
     build_mfa_routes,
 )
 from litestar_security.accounts._mfa_login import MFARequired
-from litestar_security.accounts._records import LocalAccountRecord
+from litestar_security.accounts._records import LocalAccountState
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationMechanism,
@@ -544,7 +544,7 @@ class _RoutePasskeyService:
         if self.failure == "list":
             return VerificationUnavailable()
         return (
-            PasskeyRecord(
+            PasskeyMetadata(
                 credential_id="Y3JlZGVudGlhbA",
                 display_name="Laptop",
                 backup_eligible=True,
@@ -1604,7 +1604,7 @@ async def test_plugin_binds_login_mfa_before_local_route_caching_and_gates_passw
     assert local_auth.local_auth_service.mfa_login is local_auth.mfa_login
     assert local_auth.build_route_handlers() == ()
 
-    account = LocalAccountRecord(
+    account = LocalAccountState(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",

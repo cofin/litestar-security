@@ -17,12 +17,10 @@ from litestar_security.accounts._internal import aware_utc_time, strict_text, va
 from litestar_security.schema import WireStruct
 
 __all__ = (
-    "ConsumeOutcome",
-    "ConsumeStatus",
     "InvalidInvitation",
     "LifecycleAccepted",
     "LifecycleRejected",
-    "LocalAccountRecord",
+    "LocalAccountState",
     "LocalAuthMode",
     "LoginMethod",
     "NoOpSecurityEventSink",
@@ -42,6 +40,8 @@ __all__ = (
     "SecurityEvent",
     "SecurityEventSink",
     "TokenPurpose",
+    "VerificationOutcome",
+    "VerificationStatus",
     "normalize_identifier",
 )
 
@@ -120,7 +120,7 @@ class RegistrationStatus(str, Enum):
     INVALID_INVITATION = "invalid_invitation"
 
 
-class ConsumeStatus(str, Enum):
+class VerificationStatus(str, Enum):
     """Atomic purpose-token consumption outcomes."""
 
     CONSUMED = "consumed"
@@ -141,7 +141,7 @@ class PasswordResetStatus(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class LocalAccountRecord(Generic[UserT]):
+class LocalAccountState(Generic[UserT]):
     """Application-owned account projection needed by local authentication."""
 
     account_id: str
@@ -328,7 +328,7 @@ class RegistrationOutcome(Generic[UserT]):
     """Atomic registration outcome."""
 
     status: RegistrationStatus
-    account: LocalAccountRecord[UserT] | None = None
+    account: LocalAccountState[UserT] | None = None
 
     def __post_init__(self) -> None:
         """Require an account projection only for a created registration."""
@@ -338,16 +338,16 @@ class RegistrationOutcome(Generic[UserT]):
 
 
 @dataclass(frozen=True, slots=True)
-class ConsumeOutcome:
+class VerificationOutcome:
     """Atomic verification-token consumption outcome."""
 
-    status: ConsumeStatus
+    status: VerificationStatus
     account_id: str | None = None
     security_epoch: int | None = None
 
     def __post_init__(self) -> None:
         """Require account and epoch payload only for successful consumption."""
-        consumed = self.status is ConsumeStatus.CONSUMED
+        consumed = self.status is VerificationStatus.CONSUMED
         has_payload = self.account_id is not None and self.security_epoch is not None
         if consumed != has_payload or (
             not consumed and (self.account_id is not None or self.security_epoch is not None)

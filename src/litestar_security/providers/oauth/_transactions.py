@@ -63,6 +63,8 @@ class OAuthOperation(str, Enum):
     LOGIN = "login"
     LINK = "link"
     SCOPE_UPGRADE = "scope-upgrade"
+    REVALIDATE = "revalidate"
+    REAUTHENTICATE = "reauthenticate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +249,8 @@ class OAuthTransaction:
     session_binding: str | None = field(default=None, repr=False)
     security_epoch: int | None = None
     provider_account_id: str | None = None
+    step_up_purpose: str | None = None
+    maximum_authentication_age: int | None = None
     expires_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:
@@ -270,6 +274,15 @@ class OAuthTransaction:
                 and (self.security_epoch.__class__ is not int or self.security_epoch < 0)
             )
             or (self.provider_account_id is not None and not _strict_text(self.provider_account_id))
+            or (self.step_up_purpose is not None and not _strict_text(self.step_up_purpose))
+            or (
+                self.maximum_authentication_age is not None
+                and (
+                    self.maximum_authentication_age.__class__ is not int
+                    or self.maximum_authentication_age < 0
+                    or self.maximum_authentication_age > _MAXIMUM_COOKIE_AGE
+                )
+            )
             or not _aware_time(self.expires_at)
         ):
             message = "OAuth transaction is invalid"
@@ -320,22 +333,37 @@ class _StoredOAuthTransaction:
 class MemoryOAuthTransactionStore:
     """Atomic in-memory reference store with protected recoverable secrets."""
 
-    __slots__ = ("_lock", "_protector", "_records")
+    __slots__ = ("_capacity", "_clock", "_lock", "_protector", "_records")
 
-    def __init__(self, *, protector: OAuthTransactionProtector) -> None:
+    def __init__(
+        self,
+        *,
+        protector: OAuthTransactionProtector,
+        capacity: int = 1_024,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         """Initialize the reference store.
 
         Args:
             protector: Application-owned transaction secret protection.
+            capacity: Maximum number of live transactions retained.
+            clock: Aware time source used for bounded expiry cleanup.
 
         Raises:
             ImproperlyConfiguredException: If the protector contract is absent.
         """
         protector_value = cast("object", protector)
-        if not isinstance(protector_value, OAuthTransactionProtector):
+        if (
+            not isinstance(protector_value, OAuthTransactionProtector)
+            or capacity.__class__ is not int
+            or capacity < 1
+            or (clock is not None and not callable(clock))
+        ):
             message = "OAuth transaction protector must implement OAuthTransactionProtector"
             raise ImproperlyConfiguredException(detail=message)
         self._protector = protector
+        self._capacity = capacity
+        self._clock = clock
         self._records: dict[tuple[bytes, bytes, str], _StoredOAuthTransaction] = {}
         self._lock = Lock()
 
@@ -362,9 +390,20 @@ class MemoryOAuthTransactionStore:
         redacted = _replace_secrets(transaction, pkce_verifier=SecretStr("*"), nonce=None)
         key = (transaction.state_digest, transaction.binding_digest, transaction.provider)
         async with self._lock:
+            if self._clock is not None:
+                now = self._clock()
+                if not _aware_time(now):
+                    message = "OAuth transaction store clock must return aware time"
+                    raise ValueError(message)
+                expired = tuple(key for key, stored in self._records.items() if now >= stored.transaction.expires_at)
+                for expired_key in expired:
+                    del self._records[expired_key]
             if key in self._records:
                 message = "OAuth transaction already exists"
                 raise ValueError(message)
+            if len(self._records) >= self._capacity:
+                message = "OAuth transaction store capacity reached"
+                raise OverflowError(message)
             self._records[key] = _StoredOAuthTransaction(transaction=redacted, pkce_verifier=pkce_verifier, nonce=nonce)
 
     async def consume(
@@ -383,6 +422,9 @@ class MemoryOAuthTransactionStore:
         """
         key = (state_digest, binding_digest, provider)
         async with self._lock:
+            expired = tuple(key for key, value in self._records.items() if now >= value.transaction.expires_at)
+            for expired_key in expired:
+                del self._records[expired_key]
             stored = self._records.pop(key, None)
         if stored is None or now >= stored.transaction.expires_at:
             return None
@@ -526,6 +568,8 @@ class OAuthTransactionService:
         browser_binding: SecretStr | None = None,
         security_epoch: int | None = None,
         provider_account_id: str | None = None,
+        step_up_purpose: str | None = None,
+        maximum_authentication_age: int | None = None,
     ) -> OAuthTransactionStart:
         """Create and persist one independent browser transaction.
 
@@ -544,6 +588,8 @@ class OAuthTransactionService:
                 across concurrent transactions.
             security_epoch: Authoritative epoch bound by consumed step-up.
             provider_account_id: Provider link targeted by scope upgrade.
+            step_up_purpose: Purpose a successful provider reauthentication may issue.
+            maximum_authentication_age: Maximum signed provider authentication age in seconds.
 
         Returns:
             Browser-facing state, binding, challenge, nonce, and stored transaction.
@@ -584,6 +630,8 @@ class OAuthTransactionService:
                 session_binding=session_binding,
                 security_epoch=security_epoch,
                 provider_account_id=provider_account_id,
+                step_up_purpose=step_up_purpose,
+                maximum_authentication_age=maximum_authentication_age,
                 expires_at=now + self.lifetime,
             )
             await self.store.create(transaction)
@@ -777,6 +825,8 @@ def _replace_secrets(
         session_binding=transaction.session_binding,
         security_epoch=transaction.security_epoch,
         provider_account_id=transaction.provider_account_id,
+        step_up_purpose=transaction.step_up_purpose,
+        maximum_authentication_age=transaction.maximum_authentication_age,
         expires_at=transaction.expires_at,
     )
 

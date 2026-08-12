@@ -19,7 +19,7 @@ from litestar_security.authentication import (
 )
 from litestar_security.config import WorkerLimits
 from litestar_security.context import Principal
-from litestar_security.providers.iap import GoogleIAPClaims, GoogleIAPConfig
+from litestar_security.providers.iap import GoogleIAPClaims, GoogleIAPConfig, GoogleIAPExternalIdentity
 from litestar_security.providers.jwt import VerificationKey
 
 _NOW = datetime(2026, 7, 28, 20, tzinfo=timezone.utc)
@@ -141,6 +141,8 @@ def test_iap_slot_parses_only_one_ascii_assertion(
         {key: value for key, value in _claims().items() if key != "sub"},
         _claims(email=["wrong"]),
         _claims(azp=1),
+        _claims(exp=int((_NOW + timedelta(minutes=11, seconds=1)).timestamp())),
+        _claims(gcip={"sub": "external", "email_verified": "yes"}),
     ],
 )
 async def test_iap_rejects_invalid_claims(
@@ -208,6 +210,43 @@ async def test_iap_valid_assertion_uses_pinned_jwks_and_preserves_identity_evide
     assert token not in repr(outcome)
 
 
+async def test_iap_projects_typed_google_and_external_identity_claims(
+    iap_key_material: tuple[bytes, VerificationKey],
+) -> None:
+    private, key = iap_key_material
+    _, mechanism, _, _ = _runtime(key)
+    claims = _claims(
+        hd="example.com",
+        google={"access_levels": ["accessPolicies/1/accessLevels/staff"], "device_id": "device-1"},
+        gcip={
+            "sub": "external-subject",
+            "email": "external@example.com",
+            "email_verified": True,
+            "sign_in_provider": "google.com",
+            "tenant": "tenant-1",
+            "sign_in_attributes": {"department": "security"},
+        },
+    )
+
+    outcome = await mechanism.authenticator.authenticate(
+        _token(private, claims=claims), type("Connection", (), {"scope": {"headers": []}})()
+    )
+
+    assert isinstance(outcome, Authenticated)
+    assert outcome.claims.hosted_domain == "example.com"
+    assert outcome.claims.access_levels == ("accessPolicies/1/accessLevels/staff",)
+    assert outcome.claims.device_id == "device-1"
+    assert outcome.claims.external_identity == GoogleIAPExternalIdentity(
+        subject="external-subject",
+        email="external@example.com",
+        email_verified=True,
+        sign_in_provider="google.com",
+        tenant="tenant-1",
+        sign_in_attributes={"department": "security"},
+    )
+    assert outcome.claims.subject == "accounts.google.com:subject-1"
+
+
 async def test_iap_reuses_a_cached_verifier_with_the_shared_worker_limiter(
     iap_key_material: tuple[bytes, VerificationKey],
 ) -> None:
@@ -221,13 +260,39 @@ async def test_iap_reuses_a_cached_verifier_with_the_shared_worker_limiter(
     token = _token(private)
 
     first = await authenticator.authenticate(token, type("Connection", (), {"scope": {"headers": []}})())
-    cached = authenticator._verifiers["iap-key"]  # noqa: SLF001 - assert the internal cache contract
+    cached = authenticator._verifiers._entries[("iap-key", "ES256")][1]  # noqa: SLF001 - cache contract
     second = await authenticator.authenticate(token, type("Connection", (), {"scope": {"headers": []}})())
 
     assert isinstance(first, Authenticated)
     assert isinstance(second, Authenticated)
-    assert authenticator._verifiers["iap-key"] is cached  # noqa: SLF001 - assert cache reuse
+    assert authenticator._verifiers._entries[("iap-key", "ES256")][1] is cached  # noqa: SLF001 - cache reuse
     assert cached.limiter is config.worker_limits.crypto_limiter
+
+
+async def test_iap_replaces_same_kid_verifier_when_selected_key_rotates(
+    iap_key_material: tuple[bytes, VerificationKey],
+) -> None:
+    old_private, old_key = iap_key_material
+    new_private_key = ec.generate_private_key(ec.SECP256R1())
+    new_private = new_private_key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    )
+    new_public = new_private_key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    new_key = VerificationKey(key_id="iap-key", algorithm="ES256", key=new_public)
+    _, mechanism, jwks, _ = _runtime(old_key)
+
+    first = await mechanism.authenticator.authenticate(
+        _token(old_private), type("Connection", (), {"scope": {"headers": []}})()
+    )
+    jwks.outcome = new_key
+    second = await mechanism.authenticator.authenticate(
+        _token(new_private), type("Connection", (), {"scope": {"headers": []}})()
+    )
+
+    assert isinstance(first, Authenticated)
+    assert isinstance(second, Authenticated)
 
 
 async def test_iap_optional_evidence_claims_default_to_none(iap_key_material: tuple[bytes, VerificationKey]) -> None:

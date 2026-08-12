@@ -181,6 +181,25 @@ def test_local_auth_profiles_validate_only_structural_enabled_capabilities(local
             config.route_prefix = "/changed"  # type: ignore[misc]
 
 
+def test_session_profile_passes_explicit_consistent_read_resolver_to_native_auth() -> None:
+    store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES))
+
+    class Resolver:
+        async def resolve_user_auth_session(self, session_id: str, account_id: str, *, now: datetime) -> None:
+            del session_id, account_id, now
+
+    resolver = Resolver()
+    profile = accounts_module.LocalAuth.session(
+        accounts=store,
+        secrets=_local_auth_secrets(),
+        binding=accounts_module.SessionBindingConfig(pepper=b"p" * 32),
+        session_resolver=resolver,
+    )
+
+    assert profile.session_auth is not None
+    assert profile.session_auth.resolver is resolver
+
+
 @pytest.mark.parametrize(
     ("profile", "methods", "match"),
     [
@@ -464,7 +483,7 @@ def test_local_auth_rate_limit_pepper_is_derived_and_domain_separated() -> None:
 
 
 async def test_local_auth_service_graph_composes_existing_services_without_handler_logic() -> None:
-    account = accounts_module.LocalAccountRecord(
+    account = accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="user@example.com",
         display_name="User",

@@ -256,8 +256,8 @@ async def test_generated_registration_reset_and_password_handlers_cover_projecti
         verification=SimpleNamespace(
             resend=AsyncOutcome(accounts.LifecycleAccepted()),
             consume=AsyncOutcome(
-                accounts.ConsumeOutcome(accounts.ConsumeStatus.CONSUMED, "account-1", 1),
-                accounts.ConsumeOutcome(accounts.ConsumeStatus.INVALID),
+                accounts.VerificationOutcome(accounts.VerificationStatus.CONSUMED, "account-1", 1),
+                accounts.VerificationOutcome(accounts.VerificationStatus.INVALID),
             ),
         ),
         registration=SimpleNamespace(register=AsyncOutcome(accounts.LifecycleAccepted(), accounts.InvalidInvitation())),
@@ -367,10 +367,9 @@ def test_local_bearer_guard_uses_authentication_evidence() -> None:
     authenticated = SecurityContext(
         session=NullSessionHandle(), evidence=(AuthenticationEvidence("bearer", "local", now),)
     )
-    local_controllers.requires_local_bearer(cast("Any", SimpleNamespace(auth=authenticated)), cast("Any", None))
-
+    local_controllers.require_local_bearer(cast("Any", SimpleNamespace(auth=authenticated)), cast("Any", None))
     with pytest.raises(NotAuthorizedException, match="Authentication required"):
-        local_controllers.requires_local_bearer(
+        local_controllers.require_local_bearer(
             cast("Any", SimpleNamespace(auth=SecurityContext(session=NullSessionHandle()))), cast("Any", None)
         )
 

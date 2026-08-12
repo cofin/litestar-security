@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 from cryptography.hazmat.primitives import serialization
@@ -30,16 +31,14 @@ from litestar_security.providers.iap import GoogleIAPClaims, GoogleIAPConfig
 from litestar_security.providers.jwt import LocalKeyRing, SigningKey
 from litestar_security.providers.oauth import (
     OAuthAuthorization,
+    OAuthCallbackOutcome,
     OAuthConfig,
     OAuthLogout,
     OAuthOperation,
-    OAuthRouteStatus,
-    ProviderIdentity,
-    ProviderTokenSet,
-    SecretStr,
+    OAuthOperationSummary,
 )
 from litestar_security.providers.oidc import ServiceTokenConfig
-from litestar_security.testing import FakeOAuthProvider, InMemoryLocalAccountStore, InMemorySecurityBackend
+from litestar_security.testing import InMemoryLocalAccountStore, InMemorySecurityBackend
 from litestar_security.websocket import WebSocketSecurityConfig
 
 if TYPE_CHECKING:
@@ -116,17 +115,31 @@ class _ExampleOAuthService:
             ),
         )
 
-    async def callback(
+    async def complete_callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteStatus:
+    ) -> OAuthCallbackOutcome:
         del code, state, request
-        return OAuthRouteStatus(detail="Authenticated.", provider_account_id=f"{provider}-account")
+        return cast("OAuthCallbackOutcome", SimpleNamespace(operation=OAuthOperation.LOGIN, provider=provider))
 
-    async def unlink(self, **_kwargs: object) -> OAuthRouteStatus:
-        return OAuthRouteStatus(detail="Unlinked.")
+    async def establish_login(self, outcome: object, *, request: Request[Any, Any, Any]) -> OAuthOperationSummary:
+        del request
+        return OAuthOperationSummary(
+            detail="Authenticated.", provider_account_id=f"{cast('Any', outcome).provider}-account"
+        )
 
-    async def revoke(self, **_kwargs: object) -> OAuthRouteStatus:
-        return OAuthRouteStatus(detail="Revoked.")
+    async def revalidate(self, **kwargs: object) -> OAuthAuthorization:
+        return cast("OAuthAuthorization", await cast("Any", self.begin)(operation=OAuthOperation.REVALIDATE, **kwargs))
+
+    async def reauthenticate(self, **kwargs: object) -> OAuthAuthorization:
+        return cast(
+            "OAuthAuthorization", await cast("Any", self.begin)(operation=OAuthOperation.REAUTHENTICATE, **kwargs)
+        )
+
+    async def unlink(self, **_kwargs: object) -> OAuthOperationSummary:
+        return OAuthOperationSummary(detail="Unlinked.")
+
+    async def revoke(self, **_kwargs: object) -> OAuthOperationSummary:
+        return OAuthOperationSummary(detail="Revoked.")
 
     async def logout(self, **_kwargs: object) -> OAuthLogout:
         return OAuthLogout()
@@ -147,25 +160,7 @@ def build_oauth_config(mode: str) -> OAuthConfig:
     if provider_name is None:
         message = f"Unsupported OAuth example mode: {mode}"
         raise ValueError(message)
-    provider = FakeOAuthProvider(
-        name=provider_name,
-        tokens=ProviderTokenSet(
-            access_token=SecretStr("example-access"),
-            token_type="Bearer",  # noqa: S106 - standardized OAuth token type
-            scopes=frozenset({"openid", "profile", "email"}),
-            expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(hours=1),
-        ),
-        identity=ProviderIdentity(
-            provider=provider_name,
-            issuer=f"https://{provider_name}.example",
-            subject="example-subject",
-            display_name="Example User",
-            email="user@example.com",
-            email_verified=True,
-            raw_claims={},
-        ),
-    )
-    return OAuthConfig(oauth_service=_ExampleOAuthService(provider_name), providers=(provider,))
+    return OAuthConfig(oauth_service=_ExampleOAuthService(provider_name))
 
 
 def build_api_team_config() -> tuple[APIKeyConfig, ServiceTokenConfig]:

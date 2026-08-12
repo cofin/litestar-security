@@ -40,7 +40,7 @@ from litestar_security.accounts._operations import (
     PASSKEY_REMOVE,
     PASSWORD_VERIFY,
 )
-from litestar_security.accounts._passkeys import PasskeyRecord, PasskeyService, WebAuthnOptions
+from litestar_security.accounts._passkeys import PasskeyMetadata, PasskeyService, WebAuthnOptions
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
     PasswordReauthenticationProof,
@@ -49,13 +49,13 @@ from litestar_security.accounts._records import (
 )
 from litestar_security.accounts._stores import SecurityEpochStore
 from litestar_security.accounts.schemas import (
+    OperationMessage,
     PasskeyAuthenticationStart,
     PasskeyOptions,
     PasskeyRegistrationStart,
     PasskeySummary,
     PasskeyVerification,
     RecoveryCodes,
-    RouteStatus,
     StepUpAuthorization,
     StepUpGrant,
     StepUpVerification,
@@ -247,7 +247,7 @@ _MFA_BAD_REQUEST_RESPONSES = {
 
 _MFA_CONFLICT_RESPONSES = {
     **_MFA_BAD_REQUEST_RESPONSES,
-    HTTP_409_CONFLICT: ResponseSpec(RouteStatus, description="The change would remove the final login method."),
+    HTTP_409_CONFLICT: ResponseSpec(OperationMessage, description="The change would remove the final login method."),
 }
 
 
@@ -441,7 +441,7 @@ class _MFAController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[RouteStatus]:
+    ) -> Response[OperationMessage]:
         """Remove TOTP through exact step-up and final-method protection."""
         account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
@@ -575,7 +575,7 @@ class _PasskeyController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[RouteStatus]:
+    ) -> Response[OperationMessage]:
         """Verify and store one passkey registration."""
         account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys
@@ -589,7 +589,7 @@ class _PasskeyController(Controller):
         )
         if not hasattr(result, "credential_id"):
             _error(result)
-        return _response(RouteStatus(detail="Passkey registered."), HTTP_201_CREATED)
+        return _response(OperationMessage(detail="Passkey registered."), HTTP_201_CREATED)
 
     @post(
         "/passkeys/authentication/options",
@@ -671,7 +671,7 @@ class _PasskeyController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
-    ) -> Response[RouteStatus]:
+    ) -> Response[OperationMessage]:
         """Remove a passkey through exact step-up and final-method protection."""
         account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys
@@ -694,7 +694,7 @@ class _PasskeyController(Controller):
         try:
             raw_id = urlsafe_b64decode(credential_id + "=" * (-len(credential_id) % 4))
         except (ValueError, TypeError):
-            return _response(RouteStatus(detail="The request is invalid."), HTTP_400_BAD_REQUEST)
+            return _response(OperationMessage(detail="The request is invalid."), HTTP_400_BAD_REQUEST)
         result = await passkey_service.remove_credential(account_id, raw_id)
         return _removal_response(result)
 
@@ -855,7 +855,7 @@ def _options_response(
     return _response(PasskeyOptions(options=result.json, expires_at=result.expires_at, binding=binding))
 
 
-def _summary_response(summary: PasskeyRecord) -> PasskeySummary:
+def _summary_response(summary: PasskeyMetadata) -> PasskeySummary:
     return PasskeySummary(
         credential_id=summary.credential_id,
         display_name=summary.display_name,
@@ -867,11 +867,11 @@ def _summary_response(summary: PasskeyRecord) -> PasskeySummary:
     )
 
 
-def _removal_response(result: RevokeLoginMethodOutcome | VerificationUnavailable) -> Response[RouteStatus]:
+def _removal_response(result: RevokeLoginMethodOutcome | VerificationUnavailable) -> Response[OperationMessage]:
     if isinstance(result, VerificationUnavailable):
         _error(result)
     if result.status is RevokeLoginMethodStatus.REVOKED:
-        return _response(RouteStatus(detail="Login method removed."))
+        return _response(OperationMessage(detail="Login method removed."))
     if result.status is RevokeLoginMethodStatus.FINAL_METHOD:
-        return _response(RouteStatus(detail="At least one viable login method is required."), HTTP_409_CONFLICT)
-    return _response(RouteStatus(detail="The request is invalid."), HTTP_400_BAD_REQUEST)
+        return _response(OperationMessage(detail="At least one viable login method is required."), HTTP_409_CONFLICT)
+    return _response(OperationMessage(detail="The request is invalid."), HTTP_400_BAD_REQUEST)

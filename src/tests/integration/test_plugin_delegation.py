@@ -30,9 +30,9 @@ from litestar_security.context import Principal, SecurityContext
 from litestar_security.providers.jwks import (
     CachedJWKSProvider,
     InMemoryJWKSCache,
-    JWKSCacheEntry,
-    JWKSFetchRequest,
-    JWKSFetchResponse,
+    JWKSFetchOutcome,
+    JWKSFetchTarget,
+    JWKSSource,
 )
 from litestar_security.providers.oauth import ProtectedResourceConfig
 from litestar_security.providers.oidc import ServiceTokenConfig
@@ -49,10 +49,10 @@ class _CountingFetcher:
         self.document = document
         self.calls = 0
 
-    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+    async def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
         del request
         self.calls += 1
-        return JWKSFetchResponse(status_code=200, headers={"cache-control": "max-age=600"}, body=self.document)
+        return JWKSFetchOutcome(status_code=200, headers={"cache-control": "max-age=600"}, body=self.document)
 
 
 class _CompanionPlugin(InitPlugin):
@@ -144,7 +144,7 @@ def test_a_second_plugin_delegates_bearer_validation(workload_key: tuple[bytes, 
     private_pem, public_pem = workload_key
     fetcher = _CountingFetcher(_jwks_document(public_pem))
     provider = CachedJWKSProvider(
-        (JWKSCacheEntry(issuer=ISSUER, jwks_uri=JWKS_URI, algorithms=frozenset({"ES256"})),),
+        (JWKSSource(issuer=ISSUER, jwks_uri=JWKS_URI, algorithms=frozenset({"ES256"})),),
         fetcher,
         cache=InMemoryJWKSCache(),
     )
@@ -176,7 +176,7 @@ def test_a_second_plugin_delegates_bearer_validation(workload_key: tuple[bytes, 
 def test_the_configured_provider_is_reachable_from_the_built_application(workload_key: tuple[bytes, bytes]) -> None:
     _private_pem, public_pem = workload_key
     provider = CachedJWKSProvider(
-        (JWKSCacheEntry(issuer=ISSUER, jwks_uri=JWKS_URI, algorithms=frozenset({"ES256"})),),
+        (JWKSSource(issuer=ISSUER, jwks_uri=JWKS_URI, algorithms=frozenset({"ES256"})),),
         _CountingFetcher(_jwks_document(public_pem)),
     )
     config = _delegating_config(provider)
@@ -191,7 +191,7 @@ def test_the_configured_provider_is_reachable_from_the_built_application(workloa
 def test_a_conflicting_security_scheme_is_rejected_at_startup(workload_key: tuple[bytes, bytes]) -> None:
     _private_pem, public_pem = workload_key
     provider = CachedJWKSProvider(
-        (JWKSCacheEntry(issuer=ISSUER, jwks_uri=JWKS_URI, algorithms=frozenset({"ES256"})),),
+        (JWKSSource(issuer=ISSUER, jwks_uri=JWKS_URI, algorithms=frozenset({"ES256"})),),
         _CountingFetcher(_jwks_document(public_pem)),
     )
     slot, mechanism = ServiceTokenConfig(

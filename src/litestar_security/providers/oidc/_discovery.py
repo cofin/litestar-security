@@ -115,6 +115,7 @@ class OIDCMetadata:
     token_endpoint: str | None
     end_session_endpoint: str | None
     algorithms: frozenset[str]
+    revocation_endpoint: str | None = None
 
 
 class OIDCDiscoveryClient:
@@ -289,6 +290,11 @@ class OIDCDiscoveryClient:
                 )
             ),
             algorithms=frozenset(algorithms),
+            revocation_endpoint=optional_url_value(
+                await self._metadata_url(
+                    document, "revocation_endpoint", resolved, required=False, allowed_origins=oauth_origins
+                )
+            ),
         )
 
     async def _metadata_url(

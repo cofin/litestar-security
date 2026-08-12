@@ -89,6 +89,10 @@ Authorization guards compose separately:
 * ``requires_tenant``; and
 * ``requires_assurance`` for recent or stronger evidence.
 
+Compose predicates with ``requires_all_of``, ``requires_any_of``,
+``requires_one_of``, and ``requires_at_least``. These names are distinct from the
+unprefixed authentication-policy helpers, which compose mechanism names.
+
 The ``principal`` and ``security_context`` dependencies remain typed on public
 and protected routes. ``current_user`` is the explicit narrowing dependency
 that rejects anonymous and userless service principals.

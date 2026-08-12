@@ -17,13 +17,13 @@ __all__ = (
     "AssuranceTrait",
     "AuthorizationDecision",
     "AuthorizationPredicate",
-    "all_of",
-    "any_of",
-    "at_least",
-    "one_of",
+    "requires_all_of",
+    "requires_any_of",
     "requires_assurance",
+    "requires_at_least",
     "requires_authenticated",
     "requires_capability",
+    "requires_one_of",
     "requires_role",
     "requires_scope",
     "requires_team_role",
@@ -219,7 +219,7 @@ def requires_tenant(*, tenant_parameter: str = "tenant_id") -> AuthorizationPred
     return _TenantPredicate(tenant_parameter=_normalize_name(tenant_parameter, "Tenant path parameter"))
 
 
-def all_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
+def requires_all_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
     """Require every child predicate.
 
     Args:
@@ -231,7 +231,7 @@ def all_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
     return _composite("all_of", children, count=len(children))
 
 
-def any_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
+def requires_any_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
     """Require at least one child predicate.
 
     Args:
@@ -243,7 +243,7 @@ def any_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
     return _composite("any_of", children, count=1)
 
 
-def one_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
+def requires_one_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
     """Require exactly one child predicate.
 
     Args:
@@ -255,7 +255,7 @@ def one_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
     return _composite("one_of", children, count=1)
 
 
-def at_least(count: int, *children: AuthorizationPredicate) -> AuthorizationPredicate:
+def requires_at_least(count: int, *children: AuthorizationPredicate) -> AuthorizationPredicate:
     """Require at least ``count`` child predicates.
 
     Args:

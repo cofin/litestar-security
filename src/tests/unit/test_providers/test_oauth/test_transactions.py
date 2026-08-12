@@ -400,6 +400,26 @@ def test_reference_store_requires_protector_contract() -> None:
         MemoryOAuthTransactionStore(protector=cast("Any", object()))
 
 
+async def test_reference_store_cleans_expired_entries_and_rejects_capacity_growth() -> None:
+    current = [_NOW]
+    store = MemoryOAuthTransactionStore(protector=_Protector(), capacity=1, clock=lambda: current[0])
+    first = _transaction()
+    await store.create(first)
+
+    with pytest.raises(OverflowError, match="capacity"):
+        await store.create(replace(first, state_digest=b"x" * 32))
+
+    current[0] = first.expires_at
+    await store.create(replace(first, state_digest=b"y" * 32))
+
+
+async def test_reference_store_rejects_a_naive_cleanup_clock() -> None:
+    store = MemoryOAuthTransactionStore(protector=_Protector(), capacity=1, clock=lambda: _NOW.replace(tzinfo=None))
+
+    with pytest.raises(ValueError, match="clock must return aware time"):
+        await store.create(_transaction())
+
+
 def test_oauth_cookie_uses_dedicated_host_only_policy() -> None:
     cookie = oauth_binding_cookie(SecretStr("cookie-secret"))
 

@@ -19,10 +19,10 @@ from litestar_security.accounts import (
     LocalMFAChallenge,
     LocalSession,
     LocalSessionList,
-    RouteStatus,
+    OperationMessage,
     TokenPair,
 )
-from litestar_security.providers.oauth import OAuthRouteStatus
+from litestar_security.providers.oauth import OAuthOperationSummary
 from litestar_security.schema import WirePolicy, WireStruct
 
 if TYPE_CHECKING:
@@ -256,11 +256,13 @@ def test_a_union_arm_whose_members_belong_to_a_specification_is_left_alone() -> 
 
 
 def test_a_union_arm_carried_inside_a_response_is_still_renamed() -> None:
-    arms = Response[OAuthRouteStatus] | OAuthRouteStatus
+    arms = Response[OAuthOperationSummary] | OAuthOperationSummary
 
     @get("/logout", return_dto=union_wire_dto(arms, CAMEL))
-    async def logout(*, redirected: FromQuery[bool] = False) -> "Response[OAuthRouteStatus] | OAuthRouteStatus":
-        status = OAuthRouteStatus(detail="Logged out.", revoked_sessions=2)
+    async def logout(
+        *, redirected: FromQuery[bool] = False
+    ) -> "Response[OAuthOperationSummary] | OAuthOperationSummary":
+        status = OAuthOperationSummary(detail="Logged out.", revoked_sessions=2)
         return Response(status, status_code=200) if redirected else status
 
     with TestClient(app=_app(logout)) as client:
@@ -273,18 +275,18 @@ def test_a_union_arm_carried_inside_a_response_is_still_renamed() -> None:
 
 def test_a_union_cannot_narrow_a_request_body() -> None:
     @post("/login", dto=union_wire_dto(LocalAccount | LocalCredentials, SNAKE))
-    async def login(data: "LocalAccount | LocalCredentials") -> RouteStatus:
+    async def login(data: "LocalAccount | LocalCredentials") -> OperationMessage:
         del data
-        return RouteStatus(detail="ok")
+        return OperationMessage(detail="ok")
 
     with pytest.raises(ImproperlyConfiguredException, match="cannot be narrowed to a union"):
         _ = _app(login).openapi_schema
 
 
 def test_a_schema_that_omits_defaults_still_omits_them_after_renaming() -> None:
-    @get("/status", return_dto=wire_dto(OAuthRouteStatus, CAMEL))
-    async def status() -> OAuthRouteStatus:
-        return OAuthRouteStatus(detail="Linked.", provider_account_id="p1")
+    @get("/status", return_dto=wire_dto(OAuthOperationSummary, CAMEL))
+    async def status() -> OAuthOperationSummary:
+        return OAuthOperationSummary(detail="Linked.", provider_account_id="p1")
 
     with TestClient(app=_app(status)) as client:
         assert client.get("/status").json() == {"detail": "Linked.", "providerAccountId": "p1"}

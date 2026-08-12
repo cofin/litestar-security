@@ -19,8 +19,7 @@ from examples.support import (
     build_websocket_config,
     example_session_config,
 )
-from litestar_security import SecurityConfig, SecurityContext, SecurityPlugin, any_of, public, required
-from litestar_security.guards import requires_role
+from litestar_security import SecurityConfig, SecurityContext, SecurityPlugin, any_of, public, required, requires_role
 
 __all__ = ("EXAMPLE_MODES", "create_app")
 

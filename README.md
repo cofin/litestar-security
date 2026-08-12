@@ -51,7 +51,7 @@ guards can enforce application permissions:
 ```python
 from litestar import get
 
-from litestar_security import required, requires_team_role
+from litestar_security import requires_team_role, required
 
 
 @get(

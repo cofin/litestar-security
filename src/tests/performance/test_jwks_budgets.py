@@ -13,9 +13,9 @@ import pytest
 from litestar_security.authentication import InvalidCredentials
 from litestar_security.providers.jwks import (
     CachedJWKSProvider,
-    JWKSCacheEntry,
-    JWKSFetchRequest,
-    JWKSFetchResponse,
+    JWKSFetchOutcome,
+    JWKSFetchTarget,
+    JWKSSource,
     WorkerLimits,
 )
 from litestar_security.providers.jwt import JWTValidationConfig, VerificationKey, normalize_verifier
@@ -30,10 +30,10 @@ _CONCURRENCY = 100
 
 
 class _Fetcher:
-    def __init__(self, response: JWKSFetchResponse) -> None:
+    def __init__(self, response: JWKSFetchOutcome) -> None:
         self.response = response
 
-    async def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+    async def fetch(self, _request: JWKSFetchTarget) -> JWKSFetchOutcome:
         return self.response
 
 
@@ -62,9 +62,9 @@ def _verification_jwk(key_material: Mapping[str, tuple[bytes, bytes]]) -> dict[s
     return dict(cast("Mapping[str, object]", key.public_jwk))
 
 
-def _response(key_material: Mapping[str, tuple[bytes, bytes]]) -> JWKSFetchResponse:
+def _response(key_material: Mapping[str, tuple[bytes, bytes]]) -> JWKSFetchOutcome:
     body = json.dumps({"keys": [_verification_jwk(key_material)]}, separators=(",", ":")).encode()
-    return JWKSFetchResponse(
+    return JWKSFetchOutcome(
         status_code=200, body=body, headers={"content-type": "application/json", "cache-control": "max-age=300"}
     )
 
@@ -106,8 +106,7 @@ def test_cached_jwks_select_and_verification_benchmark(
     private_key, _public_key = jwt_key_material["EdDSA"]
     token = jwt.encode(_claims(), private_key, algorithm="EdDSA", headers={"typ": "at+jwt", "kid": "key-1"})
     provider = CachedJWKSProvider(
-        entries=(JWKSCacheEntry(_ISSUER, _JWKS_URI, frozenset({"EdDSA"})),),
-        fetcher=_Fetcher(_response(jwt_key_material)),
+        entries=(JWKSSource(_ISSUER, _JWKS_URI, frozenset({"EdDSA"})),), fetcher=_Fetcher(_response(jwt_key_material))
     )
     selected = asyncio_runner.run_until_complete(provider.select_key(_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_NOW))
     assert isinstance(selected, VerificationKey)

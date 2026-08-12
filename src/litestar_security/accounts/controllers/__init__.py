@@ -12,13 +12,13 @@ if TYPE_CHECKING:
     from litestar_security.accounts.controllers._local import (
         LOCAL_AUTH_TAGS,
         build_local_auth_routes,
-        requires_local_bearer,
+        require_local_bearer,
     )
     from litestar_security.accounts.controllers._mfa import build_mfa_routes
 
-__all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "build_mfa_routes", "requires_local_bearer")
+__all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "build_mfa_routes", "require_local_bearer")
 
-_LOCAL_EXPORTS = frozenset({"LOCAL_AUTH_TAGS", "build_local_auth_routes", "requires_local_bearer"})
+_LOCAL_EXPORTS = frozenset({"LOCAL_AUTH_TAGS", "build_local_auth_routes", "require_local_bearer"})
 
 
 def __getattr__(name: str) -> Any:  # noqa: ANN401 - module lazy-export hook is dynamically typed

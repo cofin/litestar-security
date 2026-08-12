@@ -111,12 +111,12 @@ _RETURNED_BODIES = {
     ("/auth/login", "post", "403"): "LocalMFAChallenge",
     ("/auth/token", "post", "200"): "TokenPair",
     ("/auth/token", "post", "403"): "LocalMFAChallenge",
-    ("/auth/mfa/totp/{method_id}/remove", "post", "200"): "RouteStatus",
-    ("/auth/mfa/totp/{method_id}/remove", "post", "409"): "RouteStatus",
-    ("/auth/passkeys/{credential_id}/remove", "post", "409"): "RouteStatus",
+    ("/auth/mfa/totp/{method_id}/remove", "post", "200"): "OperationMessage",
+    ("/auth/mfa/totp/{method_id}/remove", "post", "409"): "OperationMessage",
+    ("/auth/passkeys/{credential_id}/remove", "post", "409"): "OperationMessage",
     ("/auth/password/recovery", "post", "202"): "LifecycleAccepted",
     ("/auth/sessions", "get", "200"): "LocalSessionList",
-    ("/auth/oauth/{provider}/revoke", "post", "200"): "OAuthRouteStatus",
+    ("/auth/oauth/{provider}/revoke", "post", "200"): "OAuthOperationSummary",
 }
 
 

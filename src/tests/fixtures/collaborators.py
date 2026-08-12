@@ -5,7 +5,7 @@ Two kinds of thing live here.
 **Kit-backed builders.** Where ``litestar_security.testing`` already ships a
 double, the builder is a thin wrapper over it and adds only defaults. Where the
 kit ships a *production* adapter -- ``MemoryOAuthAccountStore``,
-``MemoryTokenVault``, ``MemoryOAuthTransactionStore``, ``AESGCMSecretProtector``,
+``MemoryOAuthTransactionStore``, ``AESGCMSecretProtector``,
 ``StoreRateLimiter`` -- the builder returns the real thing, so a test using it
 exercises real code rather than a double.
 
@@ -54,8 +54,8 @@ from litestar_security.providers.oauth import ProtectedOAuthSecret, ProviderIden
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
-    from litestar_security.providers.api_key import APIKeyClaims, APIKeyRecord
-    from litestar_security.providers.jwks import JWKSFetchRequest, JWKSFetchResponse
+    from litestar_security.providers.api_key import APIKeyClaims, APIKeyState
+    from litestar_security.providers.jwks import JWKSFetchOutcome, JWKSFetchTarget
 
 # A function-parameter default, so the dataclass-default rule in patterns.md does
 # not apply and no mutable-default suppression is needed.
@@ -76,7 +76,6 @@ BACKEND_STORE_ATTRIBUTES: tuple[str, ...] = (
     "mfa",
     "mfa_login",
     "oauth_accounts",
-    "oauth_tokens",
     "oauth_transactions",
     "passkeys",
     "step_up",
@@ -91,12 +90,12 @@ class MemoryAPIKeyStore:
     """Mutable atomic API-key store supporting runtime fault scripting."""
 
     def __init__(self) -> None:
-        self.records: dict[str, APIKeyRecord] = {}
+        self.records: dict[str, APIKeyState] = {}
         self._lock = asyncio.Lock()
         self.get_calls: list[str] = []
         self.fail_get = False
 
-    async def get(self, key_id: str) -> APIKeyRecord | None:
+    async def get(self, key_id: str) -> APIKeyState | None:
         """Return and record one lookup."""
         self.get_calls.append(key_id)
         if self.fail_get:
@@ -104,7 +103,7 @@ class MemoryAPIKeyStore:
             raise RuntimeError(msg)
         return self.records.get(key_id)
 
-    async def create(self, record: APIKeyRecord) -> None:
+    async def create(self, record: APIKeyState) -> None:
         """Create one unique record atomically."""
         async with self._lock:
             if record.key_id in self.records:
@@ -113,7 +112,7 @@ class MemoryAPIKeyStore:
             self.records[record.key_id] = record
 
     async def rotate(
-        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+        self, *, current_key_id: str, replacement: APIKeyState, overlap_until: datetime | None, now: datetime
     ) -> None:
         """Rotate one current record atomically."""
         async with self._lock:
@@ -211,21 +210,21 @@ class SyncMemoryAPIKeyStore:
     """Synchronous API-key store recording worker thread identities."""
 
     def __init__(self) -> None:
-        self.records: dict[str, APIKeyRecord] = {}
+        self.records: dict[str, APIKeyState] = {}
         self.thread_ids: list[int] = []
 
-    def get(self, key_id: str) -> APIKeyRecord | None:
+    def get(self, key_id: str) -> APIKeyState | None:
         """Return a record and capture the executing thread."""
         self.thread_ids.append(get_ident())
         return self.records.get(key_id)
 
-    def create(self, record: APIKeyRecord) -> None:
+    def create(self, record: APIKeyState) -> None:
         """Create a record and capture the executing thread."""
         self.thread_ids.append(get_ident())
         self.records[record.key_id] = record
 
     def rotate(
-        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+        self, *, current_key_id: str, replacement: APIKeyState, overlap_until: datetime | None, now: datetime
     ) -> None:
         """Rotate a record and capture the executing thread."""
         self.thread_ids.append(get_ident())
@@ -528,10 +527,10 @@ class RecordingJWKSFetcher:
     """
 
     responses: list[object] = field(default_factory=list)
-    requests: list[JWKSFetchRequest] = field(default_factory=list)
+    requests: list[JWKSFetchTarget] = field(default_factory=list)
     closes: int = 0
 
-    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+    async def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
         """Return the next scripted response.
 
         Args:
@@ -597,7 +596,7 @@ def _segment(value: Mapping[str, object]) -> str:
     return urlsafe_b64encode(encoded).rstrip(b"=").decode("ascii")
 
 
-def _next_response(responses: list[object], requests: list[JWKSFetchRequest], request: object) -> object:
+def _next_response(responses: list[object], requests: list[JWKSFetchTarget], request: object) -> object:
     requests.append(request)
     if not responses:
         message = "Unexpected JWKS fetch"

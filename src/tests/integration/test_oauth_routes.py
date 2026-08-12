@@ -1,5 +1,7 @@
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
@@ -31,20 +33,22 @@ from litestar_security.providers.oauth import (
     LinkedProviderAccount,
     MemoryOAuthAccountStore,
     MemoryOAuthTransactionStore,
-    MemoryTokenVault,
     OAuthAccountError,
     OAuthAccountService,
     OAuthAuthorization,
+    OAuthCallbackOutcome,
     OAuthConfig,
     OAuthLifecycleService,
     OAuthLink,
     OAuthLocalAuthTransport,
     OAuthLogout,
     OAuthOperation,
+    OAuthOperationSummary,
     OAuthProviderError,
     OAuthProviderRegistration,
+    OAuthReauthenticationOutcome,
     OAuthRedirectPolicy,
-    OAuthRouteStatus,
+    OAuthRevalidationOutcome,
     OAuthScopeUpgrade,
     OAuthStepUp,
     OAuthStepUpAuthorization,
@@ -53,6 +57,7 @@ from litestar_security.providers.oauth import (
     OIDCBackchannelLogout,
     OIDCLogoutIdentity,
     OIDCLogoutLifecycleService,
+    OIDCReauthenticationPolicy,
     ProtectedOAuthSecret,
     ProviderIdentity,
     ProviderTokenSet,
@@ -124,19 +129,42 @@ class RouteService:
             ),
         )
 
-    async def callback(
+    async def complete_callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteStatus:
+    ) -> object:
         del code, state, request
-        return OAuthRouteStatus(detail="Authenticated.", provider_account_id=f"{provider}-account")
+        return SimpleNamespace(operation=OAuthOperation.LOGIN, provider=provider)
 
-    async def unlink(self, **kwargs: object) -> OAuthRouteStatus:
-        del kwargs
-        return OAuthRouteStatus(detail="Unlinked.")
+    async def establish_login(self, outcome: object, *, request: Request[Any, Any, Any]) -> OAuthOperationSummary:
+        del request
+        return OAuthOperationSummary(
+            detail="Authenticated.", provider_account_id=f"{cast('Any', outcome).provider}-account"
+        )
 
-    async def revoke(self, **kwargs: object) -> OAuthRouteStatus:
+    async def revalidate(self, **kwargs: object) -> OAuthAuthorization:
+        provider = cast("str", kwargs["provider"])
+        return OAuthAuthorization(
+            url=f"https://issuer.example/authorize?provider={provider}",
+            binding_cookie=Cookie(
+                key="__Host-litestar-security-oauth",
+                value="binding",
+                path="/",
+                secure=True,
+                httponly=True,
+                samesite="lax",
+            ),
+        )
+
+    async def reauthenticate(self, **kwargs: object) -> OAuthAuthorization:
+        return await self.revalidate(**kwargs)
+
+    async def unlink(self, **kwargs: object) -> OAuthOperationSummary:
         del kwargs
-        return OAuthRouteStatus(detail="Revoked.")
+        return OAuthOperationSummary(detail="Unlinked.")
+
+    async def revoke(self, **kwargs: object) -> OAuthOperationSummary:
+        del kwargs
+        return OAuthOperationSummary(detail="Revoked.")
 
     async def logout(self, **kwargs: object) -> OAuthLogout:
         del kwargs
@@ -167,10 +195,10 @@ class LocalTransport:
         identity: ProviderIdentity,
         request: Request[Any, Any, Any],
         authenticated_at: datetime,
-    ) -> OAuthRouteStatus:
+    ) -> OAuthOperationSummary:
         del identity, request, authenticated_at
         self.established.append(account_id)
-        return OAuthRouteStatus(detail="Authenticated.", provider_account_id=account_id)
+        return OAuthOperationSummary(detail="Authenticated.", provider_account_id=account_id)
 
     async def logout(self, *, account_id: str, request: Request[Any, Any, Any]) -> None:
         del request
@@ -212,6 +240,7 @@ class StepUpAuthorizer:
     def __init__(self, *, epoch: int = 2) -> None:
         self.epoch = epoch
         self.purposes: list[str] = []
+        self.issued_purposes: list[str] = []
 
     async def authorize(
         self, *, grant: str, account_id: str, purpose: str, request: Request[Any, Any, Any]
@@ -227,6 +256,20 @@ class StepUpAuthorizer:
     def session_binding(self, request: Request[Any, Any, Any]) -> str:
         del request
         return "session-binding"
+
+    async def issue(self, *, purpose: str, **kwargs: object) -> StepUpCredential:
+        del kwargs
+        self.issued_purposes.append(purpose)
+        return StepUpCredential(
+            token="provider-step-up",  # noqa: S106 - fixed opaque test credential
+            purpose=purpose,
+            expires_at=NOW + timedelta(minutes=5),
+        )
+
+
+class ReauthenticationProvider(FakeOAuthProvider):
+    def build_reauthentication_url(self, start: object, *, max_age: int) -> str:
+        return f"{self.build_authorization_url(cast('Any', start))}&max_age={max_age}"
 
 
 class CallbackStepUpService:
@@ -325,7 +368,7 @@ class LogoutSessions:
 
 
 def oauth_config(*, register_routes: bool = True) -> OAuthConfig:
-    return OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), register_routes=register_routes)
+    return OAuthConfig(oauth_service=RouteService(), register_routes=register_routes)
 
 
 def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycle dependencies
@@ -334,14 +377,11 @@ def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycl
     store: MemoryOAuthAccountStore | None = None,
     step_up: StepUpAuthorizer | None = None,
     local: LocalTransport | None = None,
-    vault: MemoryTokenVault | None = None,
     rp_logout: bool = True,
+    retain_tokens: bool = False,
+    reauthentication: Mapping[str, OIDCReauthenticationPolicy] | None = None,
     clock: object = lambda: NOW,
 ) -> OAuthLifecycleService:
-    async def provision(identity: ProviderIdentity) -> str:
-        del identity
-        return "account-1"
-
     return OAuthLifecycleService(
         registrations=(
             OAuthProviderRegistration(
@@ -351,6 +391,8 @@ def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycl
                 expected_issuer="https://issuer.example",
                 end_session_endpoint="https://issuer.example/logout" if rp_logout else None,
                 post_logout_redirect_uri="https://app.example/logged-out" if rp_logout else None,
+                retain_tokens=retain_tokens,
+                reauthentication=reauthentication or {},
             ),
         ),
         transactions=OAuthTransactionService(
@@ -360,7 +402,7 @@ def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycl
                 callback_uris={"example": frozenset({"https://app.example/auth/oauth/example/callback"})}
             ),
         ),
-        accounts=OAuthAccountService(store=store or MemoryOAuthAccountStore(), vault=vault, provision=provision),
+        accounts=OAuthAccountService(store=store or MemoryOAuthAccountStore(), provision_unknown=True),
         local=local or LocalTransport(),
         step_up=step_up,
         clock=cast("Any", clock),
@@ -368,7 +410,7 @@ def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycl
 
 
 def oauth_app(*, openapi: bool, oauth_service: RouteService | None = None, authenticated: bool = True) -> Litestar:
-    config = OAuthConfig(oauth_service=oauth_service or RouteService(), providers=(Provider(),))
+    config = OAuthConfig(oauth_service=oauth_service or RouteService())
 
     def provide_principal() -> Principal[object]:
         return Principal(id="account-1") if authenticated else Principal[object].anonymous()
@@ -612,10 +654,6 @@ async def test_concrete_lifecycle_composes_login_transaction_provider_account_an
         ),
     )
 
-    async def provision(identity: ProviderIdentity) -> str:
-        assert identity.subject == "subject"
-        return "account-1"
-
     local_services = VerifiedLocalServices()
     local = OAuthLocalAuthTransport(local_auth_service=cast("Any", local_services), transport="session")
     service = OAuthLifecycleService(
@@ -634,13 +672,13 @@ async def test_concrete_lifecycle_composes_login_transaction_provider_account_an
                 callback_uris={"example": frozenset({"https://app.example/auth/oauth/example/callback"})}
             ),
         ),
-        accounts=OAuthAccountService(store=MemoryOAuthAccountStore(), provision=provision),
+        accounts=OAuthAccountService(store=MemoryOAuthAccountStore(), provision_unknown=True),
         local=local,
         step_up=StepUpAuthorizer(),
         clock=lambda: NOW,
     )
     app = Litestar(
-        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service, providers=(provider,)))],
+        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service))],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
         openapi_config=None,
     )
@@ -655,13 +693,41 @@ async def test_concrete_lifecycle_composes_login_transaction_provider_account_an
     assert provider.calls == ["authorize", "exchange", "identity"]
 
 
+async def test_custom_callback_completion_is_presentation_neutral_until_login_is_established() -> None:
+    provider = oauth_fake_provider()
+    local = LocalTransport()
+    service = lifecycle_service(provider=provider, local=local)
+    request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {"cookies": {}})())
+    start = await service.begin(
+        provider="example",
+        operation=OAuthOperation.LOGIN,
+        account_id=None,
+        provider_account_id=None,
+        return_to="/",
+        scopes=None,
+        step_up_grant=None,
+        request=request,
+    )
+    request.cookies["__Host-litestar-security-oauth"] = start.binding_cookie.value
+
+    outcome = await service.complete_callback(
+        provider="example", code="code", state=parse_qs(urlsplit(start.url).query)["state"][0], request=request
+    )
+
+    assert isinstance(outcome, OAuthCallbackOutcome)
+    assert (outcome.operation, outcome.return_to, outcome.provisioned) == (OAuthOperation.LOGIN, "/", True)
+    assert local.established == []
+    await service.establish_login(outcome, request=request)
+    assert local.established == ["account-1"]
+
+
 async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout() -> None:
     provider = FakeOAuthProvider(
         name="example",
         tokens=ProviderTokenSet(
             access_token=SecretStr("access"),
             token_type="Bearer",  # noqa: S106 - standardized OAuth token type
-            scopes=frozenset({"profile", "email"}),
+            scopes=frozenset({"profile"}),
             expires_at=NOW + timedelta(hours=1),
             id_token=SecretStr("header.payload.signature"),
         ),
@@ -675,11 +741,10 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
             raw_claims={"sub": "subject"},
         ),
     )
-    store = MemoryOAuthAccountStore(login_method_counts={"account-1": 1})
+    store = MemoryOAuthAccountStore(login_method_counts={"account-1": 1}, protector=Protector())
     step_up = StepUpAuthorizer()
     local = LocalTransport()
-    vault = MemoryTokenVault(provider="example", client_id="client", protector=Protector())
-    service = lifecycle_service(provider=provider, store=store, step_up=step_up, local=local, vault=vault)
+    service = lifecycle_service(provider=provider, store=store, step_up=step_up, local=local, retain_tokens=True)
     request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {"cookies": {}})())
 
     link_start = await service.begin(
@@ -696,8 +761,9 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
     linked = await service.callback(
         provider="example", code="code", state=parse_qs(urlsplit(link_start.url).query)["state"][0], request=request
     )
-    assert isinstance(linked, OAuthRouteStatus)
+    assert isinstance(linked, OAuthOperationSummary)
     provider_account_id = cast("str", linked.provider_account_id)
+    provider.tokens = replace(provider.tokens, scopes=frozenset({"profile", "email"}))
 
     scope_start = await service.begin(
         provider="example",
@@ -712,8 +778,23 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
     updated = await service.callback(
         provider="example", code="code", state=parse_qs(urlsplit(scope_start.url).query)["state"][0], request=request
     )
-    assert isinstance(updated, OAuthRouteStatus)
+    assert isinstance(updated, OAuthOperationSummary)
     assert updated.detail == "Scopes updated."
+    for target_id, requested in (
+        ("another-provider-account", frozenset({"calendar"})),
+        (provider_account_id, frozenset({"email"})),
+    ):
+        with pytest.raises(OAuthAccountError):
+            await service.begin(
+                provider="example",
+                operation=OAuthOperation.SCOPE_UPGRADE,
+                account_id="account-1",
+                provider_account_id=target_id,
+                return_to="/",
+                scopes=requested,
+                step_up_grant="grant",
+                request=request,
+            )
     logout = await service.logout(provider="example", account_id="account-1", request=request)
     assert logout.redirect_url is not None
     assert "post_logout_redirect_uri=https%3A%2F%2Fapp.example%2Flogged-out" in logout.redirect_url
@@ -733,6 +814,77 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
     ).detail == "Unlinked."
     assert local.logged_out == ["account-1"]
     assert step_up.purposes == ["oauth-link", "oauth-scope-upgrade", "oauth-provider-token-management", "oauth-unlink"]
+
+
+async def test_revalidation_never_issues_freshness_but_oidc_reauthentication_issues_exact_purpose() -> None:
+    provider = ReauthenticationProvider(
+        name="example",
+        tokens=ProviderTokenSet(
+            access_token=SecretStr("access"),
+            token_type="Bearer",  # noqa: S106 - standardized OAuth token type
+            scopes=frozenset({"profile"}),
+            expires_at=NOW + timedelta(hours=1),
+        ),
+        identity=ProviderIdentity(
+            provider="example",
+            issuer="https://issuer.example",
+            subject="subject",
+            display_name="User",
+            email=None,
+            email_verified=False,
+            raw_claims={"auth_time": int(NOW.timestamp()), "acr": "gold", "amr": ["pwd", "mfa"]},
+            acr="gold",
+            amr=("pwd", "mfa"),
+            authenticated_at=NOW,
+        ),
+    )
+    step_up = StepUpAuthorizer()
+    service = lifecycle_service(
+        provider=provider,
+        store=MemoryOAuthAccountStore(login_method_counts={"account-1": 1}),
+        step_up=step_up,
+        reauthentication={
+            "disable-mfa": OIDCReauthenticationPolicy(
+                max_age=0, acr_values=frozenset({"gold"}), amr_values=frozenset({"mfa"})
+            )
+        },
+    )
+    request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {"cookies": {}})())
+    link = await service.begin(
+        provider="example",
+        operation=OAuthOperation.LINK,
+        account_id="account-1",
+        provider_account_id=None,
+        return_to="/",
+        scopes=None,
+        step_up_grant="grant",
+        request=request,
+    )
+    request.cookies["__Host-litestar-security-oauth"] = link.binding_cookie.value
+    await service.complete_callback(
+        provider="example", code="code", state=parse_qs(urlsplit(link.url).query)["state"][0], request=request
+    )
+
+    revalidation = await service.revalidate(provider="example", account_id="account-1", return_to="/", request=request)
+    revalidated = await service.complete_callback(
+        provider="example", code="code", state=parse_qs(urlsplit(revalidation.url).query)["state"][0], request=request
+    )
+    assert isinstance(revalidated, OAuthRevalidationOutcome)
+    assert step_up.issued_purposes == []
+
+    reauthentication = await service.reauthenticate(
+        provider="example", purpose="disable-mfa", account_id="account-1", return_to="/", request=request
+    )
+    assert parse_qs(urlsplit(reauthentication.url).query)["max_age"] == ["0"]
+    reauthenticated = await service.complete_callback(
+        provider="example",
+        code="code",
+        state=parse_qs(urlsplit(reauthentication.url).query)["state"][0],
+        request=request,
+    )
+    assert isinstance(reauthenticated, OAuthReauthenticationOutcome)
+    assert reauthenticated.credential.purpose == "disable-mfa"
+    assert step_up.issued_purposes == ["disable-mfa"]
 
 
 async def test_lifecycle_and_local_transport_reject_invalid_or_unavailable_paths() -> None:
@@ -844,7 +996,7 @@ async def test_lifecycle_and_local_transport_reject_invalid_or_unavailable_paths
     assert token_calls == ["account-1"]
 
 
-async def test_lifecycle_rejects_scope_callback_without_target_and_unlinks_missing_target() -> None:
+async def test_lifecycle_rejects_scope_upgrade_without_an_owned_unsatisfied_target() -> None:
     provider = FakeOAuthProvider(
         name="example",
         tokens=ProviderTokenSet(
@@ -866,20 +1018,16 @@ async def test_lifecycle_rejects_scope_callback_without_target_and_unlinks_missi
     step_up = StepUpAuthorizer()
     service = lifecycle_service(provider=provider, step_up=step_up)
     request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {"cookies": {}})())
-    start = await service.begin(
-        provider="example",
-        operation=OAuthOperation.SCOPE_UPGRADE,
-        account_id="account-1",
-        provider_account_id=None,
-        return_to="/",
-        scopes=None,
-        step_up_grant="grant",
-        request=request,
-    )
-    request.cookies["__Host-litestar-security-oauth"] = start.binding_cookie.value
     with pytest.raises(OAuthAccountError):
-        await service.callback(
-            provider="example", code="code", state=parse_qs(urlsplit(start.url).query)["state"][0], request=request
+        await service.begin(
+            provider="example",
+            operation=OAuthOperation.SCOPE_UPGRADE,
+            account_id="account-1",
+            provider_account_id=None,
+            return_to="/",
+            scopes=frozenset({"email"}),
+            step_up_grant="grant",
+            request=request,
         )
 
     result = await service.unlink(
@@ -1057,7 +1205,7 @@ async def test_oidc_front_and_backchannel_logout_routes_delegate_verified_lifecy
     oidc_logout = OIDCLogoutLifecycleService(
         provider_issuers={"example": "https://issuer.example"}, consumer=consumer, sessions=sessions, clock=lambda: NOW
     )
-    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
     router = build_oauth_routes(config)
     assert set(router.dependencies) == {"oauth_service", "oidc_service"}
     app = Litestar(
@@ -1092,7 +1240,7 @@ async def test_frontchannel_logout_requires_ownership_binding_and_consumes_repla
         sessions=sessions,
         clock=lambda: NOW,
     )
-    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
     app = Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
@@ -1133,7 +1281,7 @@ async def test_frontchannel_logout_consumes_budget_and_rejects_bursts_with_retry
         rate_limits=guard,
         clock=lambda: NOW,
     )
-    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
     app = Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
@@ -1166,7 +1314,7 @@ async def test_frontchannel_logout_fails_closed_when_the_limiter_is_unavailable(
         rate_limits=RateLimitGuard(limiter=BrokenLimiter(), pepper=b"p" * 32),
         clock=lambda: NOW,
     )
-    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
     app = Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
@@ -1291,13 +1439,11 @@ async def test_oidc_logout_lifecycle_rejects_mismatches_unknown_provider_and_nai
 async def test_plugin_closes_lifecycle_owned_oauth_providers() -> None:
     events: list[str] = []
 
-    class ClosableProvider:
-        name = "example"
-
+    class ClosableService(RouteService):
         async def aclose(self) -> None:
             events.append("close")
 
-    config = OAuthConfig(oauth_service=RouteService(), providers=(ClosableProvider(),), register_routes=False)
+    config = OAuthConfig(oauth_service=ClosableService(), register_routes=False)
     plugin = SecurityPlugin[object](SecurityConfig[object](oauth=config))
     app_config = plugin.on_app_init(AppConfig())
     assert plugin.on_app_init(app_config).lifespan == app_config.lifespan
@@ -1310,13 +1456,11 @@ async def test_plugin_closes_lifecycle_owned_oauth_providers() -> None:
 
 
 async def test_plugin_reports_oauth_provider_shutdown_failure() -> None:
-    class BrokenProvider:
-        name = "example"
-
+    class BrokenService(RouteService):
         async def aclose(self) -> None:
             raise RuntimeError
 
-    config = OAuthConfig(oauth_service=RouteService(), providers=(BrokenProvider(),), register_routes=False)
+    config = OAuthConfig(oauth_service=BrokenService(), register_routes=False)
     app = Litestar(route_handlers=[], plugins=[SecurityPlugin[object](SecurityConfig[object](oauth=config))])
 
     with pytest.RaisesGroup(pytest.RaisesExc(ImproperlyConfiguredException, match="shutdown")):
@@ -1324,18 +1468,9 @@ async def test_plugin_reports_oauth_provider_shutdown_failure() -> None:
             pass
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"oauth_service": object()},
-        {"providers": ()},
-        {"providers": (Provider(), Provider())},
-        {"route_prefix": "auth"},
-        {"register_routes": 1},
-    ],
-)
+@pytest.mark.parametrize("kwargs", [{"oauth_service": object()}, {"route_prefix": "auth"}, {"register_routes": 1}])
 def test_oauth_config_rejects_invalid_startup(kwargs: dict[str, object]) -> None:
-    values: dict[str, object] = {"oauth_service": RouteService(), "providers": (Provider(),)}
+    values: dict[str, object] = {"oauth_service": RouteService()}
     values.update(kwargs)
 
     with pytest.raises(ImproperlyConfiguredException, match="OAuth"):
@@ -1350,7 +1485,7 @@ def test_oauth_config_rejects_mismatched_oidc_logout_providers() -> None:
         clock=lambda: NOW,
     )
     with pytest.raises(ImproperlyConfiguredException, match="OIDC logout providers"):
-        OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+        OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
 
 
 async def test_public_login_and_callback_have_binding_and_no_store_headers() -> None:
@@ -1429,7 +1564,7 @@ async def test_lifecycle_response_names_each_identifier_it_carries() -> None:
         sessions=LogoutSessions(),
         clock=lambda: NOW,
     )
-    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
     app = Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
@@ -1450,7 +1585,7 @@ async def test_backchannel_logout_form_rejects_unknown_members() -> None:
         sessions=LogoutSessions(),
         clock=lambda: NOW,
     )
-    config = OAuthConfig(oauth_service=RouteService(), providers=(Provider(),), oidc_service=oidc_logout)
+    config = OAuthConfig(oauth_service=RouteService(), oidc_service=oidc_logout)
     app = Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
@@ -1483,9 +1618,9 @@ class RaisingRouteService(RouteService):
         super().__init__()
         self.exception = exception
 
-    async def callback(
+    async def complete_callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteStatus:
+    ) -> object:
         del provider, code, state, request
         raise self.exception
 
@@ -1501,7 +1636,7 @@ def raising_oauth_app(exception: Exception, *, exception_handlers: Mapping[Any, 
     Returns:
         One application exposing only the generated OAuth route tree.
     """
-    config = OAuthConfig(oauth_service=RaisingRouteService(exception), providers=(Provider(),))
+    config = OAuthConfig(oauth_service=RaisingRouteService(exception))
     return Litestar(
         route_handlers=[build_oauth_routes(config)],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
@@ -1542,7 +1677,7 @@ async def test_empty_code_or_state_callback_classifies_as_unauthorized(empty: st
     provider = oauth_fake_provider()
     service = lifecycle_service(provider=provider)
     app = Litestar(
-        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service, providers=(provider,)))],
+        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service))],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
         openapi_config=None,
         debug=True,
@@ -1562,7 +1697,7 @@ async def test_empty_cookie_binding_on_login_behaves_as_absent() -> None:
     provider = oauth_fake_provider()
     service = lifecycle_service(provider=provider)
     app = Litestar(
-        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service, providers=(provider,)))],
+        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service))],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
         openapi_config=None,
         debug=True,
@@ -1580,7 +1715,7 @@ async def test_replayed_callback_state_classifies_as_unauthorized() -> None:
     provider = oauth_fake_provider()
     service = lifecycle_service(provider=provider)
     app = Litestar(
-        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service, providers=(provider,)))],
+        route_handlers=[build_oauth_routes(OAuthConfig(oauth_service=service))],
         dependencies={"principal": Provide(Principal.anonymous, sync_to_thread=False)},
         openapi_config=None,
         debug=True,

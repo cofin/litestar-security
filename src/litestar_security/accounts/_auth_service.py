@@ -23,7 +23,7 @@ from litestar_security.accounts._passwords import PasswordPolicyDecision
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
     LifecycleRejected,
-    LocalAccountRecord,
+    LocalAccountState,
     PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordReauthenticationProof,
@@ -228,11 +228,11 @@ class LocalAuthService(Generic[UserT]):
         account = await self.password_login.authenticate(
             credentials.identifier, credentials.password, client_key=client_key
         )
-        if not isinstance(account, LocalAccountRecord):
+        if not isinstance(account, LocalAccountState):
             return account
         mfa_login = self.mfa_login
         if mfa_login is not None:
-            return await mfa_login.issue(cast("LocalAccountRecord[object]", account), client_key=client_key)
+            return await mfa_login.issue(cast("LocalAccountState[object]", account), client_key=client_key)
         session_auth = self.session_auth
         if session_auth is None:
             return VerificationUnavailable()
@@ -258,11 +258,11 @@ class LocalAuthService(Generic[UserT]):
         account = await self.password_login.authenticate(
             credentials.identifier, credentials.password, client_key=client_key
         )
-        if not isinstance(account, LocalAccountRecord):
+        if not isinstance(account, LocalAccountState):
             return account
         mfa_login = self.mfa_login
         if mfa_login is not None:
-            return await mfa_login.issue(cast("LocalAccountRecord[object]", account), client_key=client_key)
+            return await mfa_login.issue(cast("LocalAccountState[object]", account), client_key=client_key)
         refresh_tokens = self.refresh_tokens
         if refresh_tokens is None:
             return VerificationUnavailable()

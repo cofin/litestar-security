@@ -143,7 +143,7 @@ class _CredentialCleanup:
 
     async def create(
         self, command: accounts_module.CreateSessionCommand, *, event: accounts_module.SecurityEvent
-    ) -> accounts_module.SessionRecord:
+    ) -> accounts_module.UserAuthSession:
         raise NotImplementedError
 
     async def create_family(
@@ -152,15 +152,15 @@ class _CredentialCleanup:
         del command, event
         return False
 
-    async def get(self, session_id: str) -> accounts_module.SessionRecord | None:
+    async def get(self, session_id: str) -> accounts_module.UserAuthSession | None:
         del session_id
         return None
 
-    async def list_for_account(self, account_id: str) -> list[accounts_module.SessionRecord]:
+    async def list_for_account(self, account_id: str) -> list[accounts_module.UserAuthSession]:
         del account_id
         return []
 
-    async def touch(self, session_id: str, *, now: datetime) -> accounts_module.SessionRecord | None:
+    async def touch(self, session_id: str, *, now: datetime) -> accounts_module.UserAuthSession | None:
         del session_id, now
         return None
 
@@ -194,7 +194,7 @@ class _CredentialCleanup:
         command: accounts_module.CreateSessionCommand,
         *,
         event: accounts_module.SecurityEvent,
-    ) -> accounts_module.SessionRecord | None:
+    ) -> accounts_module.UserAuthSession | None:
         self.rebinds.append((prior_session_id, command, event))
         if "rebind" in self.failures:
             raise OSError
@@ -245,9 +245,9 @@ class _LifecycleStore:
     def __init__(
         self,
         *,
-        account: accounts_module.LocalAccountRecord[object] | None = None,
+        account: accounts_module.LocalAccountState[object] | None = None,
         registration_status: accounts_module.RegistrationStatus = accounts_module.RegistrationStatus.CREATED,
-        consume_status: accounts_module.ConsumeStatus = accounts_module.ConsumeStatus.CONSUMED,
+        consume_status: accounts_module.VerificationStatus = accounts_module.VerificationStatus.CONSUMED,
         reset_status: accounts_module.PasswordResetStatus = accounts_module.PasswordResetStatus.RESET,
         fail: bool = False,
     ) -> None:
@@ -264,10 +264,10 @@ class _LifecycleStore:
         self.consumptions: list[tuple[str, bytes, datetime, accounts_module.SecurityEvent]] = []
         self.resets: list[tuple[str, bytes, str, datetime, accounts_module.SecurityEvent]] = []
 
-    async def find_for_login(self, _normalized_identifier: str) -> accounts_module.LocalAccountRecord[object] | None:
+    async def find_for_login(self, _normalized_identifier: str) -> accounts_module.LocalAccountState[object] | None:
         return self.account
 
-    async def get_by_id(self, _account_id: str) -> accounts_module.LocalAccountRecord[object] | None:
+    async def get_by_id(self, _account_id: str) -> accounts_module.LocalAccountState[object] | None:
         return self.account
 
     async def register(  # noqa: PLR0913
@@ -284,7 +284,7 @@ class _LifecycleStore:
         if self.fail:
             raise OSError
         account = (
-            accounts_module.LocalAccountRecord(
+            accounts_module.LocalAccountState(
                 account_id="account-1",
                 normalized_identifier="user@example.com",
                 display_name=None,
@@ -315,13 +315,13 @@ class _LifecycleStore:
 
     async def consume_and_verify(
         self, token_id: str, digest: bytes, *, now: datetime, event: accounts_module.SecurityEvent
-    ) -> accounts_module.ConsumeOutcome:
+    ) -> accounts_module.VerificationOutcome:
         self.consumptions.append((token_id, digest, now, event))
         if self.fail:
             raise OSError
-        if self.consume_status is accounts_module.ConsumeStatus.CONSUMED:
-            return accounts_module.ConsumeOutcome(self.consume_status, "account-1", 1)
-        return accounts_module.ConsumeOutcome(self.consume_status)
+        if self.consume_status is accounts_module.VerificationStatus.CONSUMED:
+            return accounts_module.VerificationOutcome(self.consume_status, "account-1", 1)
+        return accounts_module.VerificationOutcome(self.consume_status)
 
     async def consume_and_reset(
         self,
@@ -342,7 +342,7 @@ class _LifecycleStore:
 
 class _NativeSessionStore:
     def __init__(self) -> None:
-        self.account: accounts_module.LocalAccountRecord[object] | None = accounts_module.LocalAccountRecord(
+        self.account: accounts_module.LocalAccountState[object] | None = accounts_module.LocalAccountState(
             account_id="account-1",
             normalized_identifier="user@example.com",
             display_name="User",
@@ -352,7 +352,7 @@ class _NativeSessionStore:
             user=object(),
         )
         self.epoch: int | None = 1
-        self.records: dict[str, accounts_module.SessionRecord] = {}
+        self.records: dict[str, accounts_module.UserAuthSession] = {}
         self.commands: list[accounts_module.CreateSessionCommand] = []
         self.rebinds: list[tuple[str, accounts_module.CreateSessionCommand]] = []
         self.revocations: list[tuple[str, str]] = []
@@ -361,8 +361,8 @@ class _NativeSessionStore:
         self.mismatch_create = False
 
     @staticmethod
-    def record(command: accounts_module.CreateSessionCommand) -> accounts_module.SessionRecord:
-        return accounts_module.SessionRecord(
+    def record(command: accounts_module.CreateSessionCommand) -> accounts_module.UserAuthSession:
+        return accounts_module.UserAuthSession(
             session_id=command.session_id,
             binding_id=command.binding_id,
             binding_digest=command.binding_digest,
@@ -377,14 +377,14 @@ class _NativeSessionStore:
 
     async def create(
         self, command: accounts_module.CreateSessionCommand, *, event: accounts_module.SecurityEvent
-    ) -> accounts_module.SessionRecord:
+    ) -> accounts_module.UserAuthSession:
         del event
         if "create" in self.failures:
             raise OSError
         self.commands.append(command)
         record = self.record(command)
         if self.mismatch_create:
-            return accounts_module.SessionRecord(
+            return accounts_module.UserAuthSession(
                 session_id=record.session_id,
                 binding_id=record.binding_id,
                 binding_digest=b"x" * 32,
@@ -398,12 +398,12 @@ class _NativeSessionStore:
         self.records[record.session_id] = record
         return record
 
-    async def get(self, session_id: str) -> accounts_module.SessionRecord | None:
+    async def get(self, session_id: str) -> accounts_module.UserAuthSession | None:
         if "get" in self.failures:
             raise OSError
         return self.records.get(session_id)
 
-    async def get_by_id(self, account_id: str) -> accounts_module.LocalAccountRecord[object] | None:
+    async def get_by_id(self, account_id: str) -> accounts_module.LocalAccountState[object] | None:
         if "account" in self.failures:
             raise OSError
         return self.account if self.account is not None and self.account.account_id == account_id else None
@@ -413,19 +413,19 @@ class _NativeSessionStore:
             raise OSError
         return self.epoch if account_id == "account-1" else None
 
-    async def list_for_account(self, account_id: str) -> list[accounts_module.SessionRecord]:
+    async def list_for_account(self, account_id: str) -> list[accounts_module.UserAuthSession]:
         if "list" in self.failures:
             raise OSError
         return list(self.records.values()) if account_id == "account-1" else []
 
-    async def touch(self, session_id: str, *, now: datetime) -> accounts_module.SessionRecord | None:
+    async def touch(self, session_id: str, *, now: datetime) -> accounts_module.UserAuthSession | None:
         if "touch" in self.failures:
             raise OSError
         self.touches.append((session_id, now))
         record = self.records.get(session_id)
         if record is None:
             return None
-        touched = accounts_module.SessionRecord(
+        touched = accounts_module.UserAuthSession(
             session_id=record.session_id,
             binding_id=record.binding_id,
             binding_digest=record.binding_digest,
@@ -477,7 +477,7 @@ class _NativeSessionStore:
         command: accounts_module.CreateSessionCommand,
         *,
         event: accounts_module.SecurityEvent,
-    ) -> accounts_module.SessionRecord | None:
+    ) -> accounts_module.UserAuthSession | None:
         del event
         if "rebind" in self.failures or prior_session_id not in self.records:
             return None
@@ -540,7 +540,7 @@ def _copy_native_session(session: dict[str, object]) -> dict[str, object]:
 class _LocalAccessStore(_PasswordStore):
     def __init__(
         self,
-        account: accounts_module.LocalAccountRecord[object] | None,
+        account: accounts_module.LocalAccountState[object] | None,
         *,
         fail_lookup: bool = False,
         fail_password_read: bool = False,
@@ -555,13 +555,13 @@ class _LocalAccessStore(_PasswordStore):
         self.login_lookups: list[str] = []
         self.id_lookups: list[str] = []
 
-    async def find_for_login(self, normalized_identifier: str) -> accounts_module.LocalAccountRecord[object] | None:
+    async def find_for_login(self, normalized_identifier: str) -> accounts_module.LocalAccountState[object] | None:
         self.login_lookups.append(normalized_identifier)
         if self.fail_lookup:
             raise OSError
         return self.account
 
-    async def get_by_id(self, account_id: str) -> accounts_module.LocalAccountRecord[object] | None:
+    async def get_by_id(self, account_id: str) -> accounts_module.LocalAccountState[object] | None:
         self.id_lookups.append(account_id)
         if self.fail_lookup:
             raise OSError
@@ -575,8 +575,8 @@ class _LocalAccessStore(_PasswordStore):
 
 def _local_access_account(
     *, active: bool = True, verified: bool = True, security_epoch: int = 3
-) -> accounts_module.LocalAccountRecord[object]:
-    return accounts_module.LocalAccountRecord(
+) -> accounts_module.LocalAccountState[object]:
+    return accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Local Person",
@@ -631,10 +631,10 @@ class InvalidAssuranceVerifier:
 
 
 class PasswordLogin:
-    def __init__(self, account: accounts_module.LocalAccountRecord[object]) -> None:
+    def __init__(self, account: accounts_module.LocalAccountState[object]) -> None:
         self.account = account
 
-    async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccountRecord[object]:
+    async def authenticate(self, *_args: object, **_kwargs: object) -> accounts_module.LocalAccountState[object]:
         return self.account
 
 
@@ -643,7 +643,7 @@ class RefreshTokens:
         self,
         *,
         issued_at: datetime | None = None,
-        account: accounts_module.LocalAccountRecord[object] | None = None,
+        account: accounts_module.LocalAccountState[object] | None = None,
         response: accounts_module.TokenPair | None = None,
         clock_failure: bool = False,
     ) -> None:
@@ -1015,7 +1015,7 @@ def _refresh_service(
     accounts_module.RefreshTokenService[object],
     _AtomicRefreshStore,
     _LocalAccessStore,
-    accounts_module.LocalAccountRecord[object],
+    accounts_module.LocalAccountState[object],
 ]:
     account = _local_access_account()
     accounts = _LocalAccessStore(account)
@@ -1377,7 +1377,7 @@ class _PasskeyStore:
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> accounts_module.AssertionRecordStatus:
+    ) -> accounts_module.PasskeyAssertionStatus:
         del now
         credential = self.credentials.get(credential_id)
         if self.fail:
@@ -1387,7 +1387,7 @@ class _PasskeyStore:
             or credential.version != expected_version
             or credential.backup_eligible != backup_eligible
         ):
-            return accounts_module.AssertionRecordStatus.CONFLICT
+            return accounts_module.PasskeyAssertionStatus.CONFLICT
         self.credentials[credential_id] = replace(
             credential,
             sign_count=sign_count,
@@ -1397,8 +1397,8 @@ class _PasskeyStore:
             last_used_at=_JWT_NOW,
         )
         if clone_risk:
-            return accounts_module.AssertionRecordStatus.CLONE_RISK
-        return accounts_module.AssertionRecordStatus.RECORDED
+            return accounts_module.PasskeyAssertionStatus.CLONE_RISK
+        return accounts_module.PasskeyAssertionStatus.RECORDED
 
     async def list_credentials(self, account_id: str) -> tuple[accounts_module.PasskeyCredential, ...]:
         if self.fail:
@@ -1461,7 +1461,7 @@ class _WebAuthnVerifier:
     def verify_registration(self, **kwargs: object) -> accounts_module.RegistrationVerification:
         del kwargs
         if self.failure is not None:
-            raise accounts_module.InvalidWebAuthnResponseError
+            raise accounts_module.WebAuthnVerificationError
         return accounts_module.RegistrationVerification(
             credential_id=self.expected_credential_id,
             public_key=b"public-key",
@@ -1477,7 +1477,7 @@ class _WebAuthnVerifier:
     def verify_authentication(self, **kwargs: object) -> accounts_module.AuthenticationVerification:
         self.current_sign_counts.append(kwargs.get("current_sign_count"))
         if self.failure is not None:
-            raise accounts_module.InvalidWebAuthnResponseError
+            raise accounts_module.WebAuthnVerificationError
         return accounts_module.AuthenticationVerification(
             credential_id=self.expected_credential_id,
             sign_count=self.sign_count,
@@ -1532,9 +1532,9 @@ def _stored_passkey(
 
 class _StepUpStore:
     def __init__(self) -> None:
-        self.records: dict[bytes, accounts_module.StepUpRecord] = {}
+        self.records: dict[bytes, accounts_module.StepUpGrantState] = {}
 
-    async def put(self, record: accounts_module.StepUpRecord) -> None:
+    async def put(self, record: accounts_module.StepUpGrantState) -> None:
         self.records[record.grant_digest] = record
 
     async def consume(  # noqa: PLR0913 - mirrors the exact atomic StepUpStore contract
@@ -1546,7 +1546,7 @@ class _StepUpStore:
         purpose: str,
         transport_digest: bytes,
         now: datetime,
-    ) -> accounts_module.StepUpRecord | None:
+    ) -> accounts_module.StepUpGrantState | None:
         record = self.records.pop(grant_digest, None)
         if (
             record is None
@@ -1628,8 +1628,8 @@ class _ChallengeStore:
 WebAuthnChallengeStore = _ChallengeStore
 
 
-def lifecycle_account(*, active: bool = True, verified: bool = False) -> accounts_module.LocalAccountRecord[object]:
-    return accounts_module.LocalAccountRecord(
+def lifecycle_account(*, active: bool = True, verified: bool = False) -> accounts_module.LocalAccountState[object]:
+    return accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -1726,7 +1726,7 @@ class RejectingTOTPAdvanceStore(MFAStore):
 
 
 class FailingStepUpStore(StepUpStore):
-    async def put(self, record: accounts_module.StepUpRecord) -> None:
+    async def put(self, record: accounts_module.StepUpGrantState) -> None:
         del record
         raise OSError
 
@@ -1774,9 +1774,9 @@ class MismatchedAttestation(TrustedAttestation):
 
 
 class ConflictingPasskeyStore(PasskeyStore):
-    async def record_assertion(self, *args: object, **kwargs: object) -> accounts_module.AssertionRecordStatus:
+    async def record_assertion(self, *args: object, **kwargs: object) -> accounts_module.PasskeyAssertionStatus:
         del args, kwargs
-        return accounts_module.AssertionRecordStatus.CONFLICT
+        return accounts_module.PasskeyAssertionStatus.CONFLICT
 
 
 class SlowWebAuthnVerifier(WebAuthnVerifier):

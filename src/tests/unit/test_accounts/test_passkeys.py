@@ -112,7 +112,7 @@ def test_py_webauthn_adapter_builds_exact_options_and_sanitizes_malformed_json()
     assert json.loads(registration)["attestation"] == "none"
     assert json.loads(authentication)["userVerification"] == "required"
     for operation in (verifier.registration_challenge, verifier.authentication_challenge, verifier.credential_id):
-        with pytest.raises(accounts_module.InvalidWebAuthnResponseError):
+        with pytest.raises(accounts_module.WebAuthnVerificationError):
             operation("{}")
 
 
@@ -379,13 +379,13 @@ def test_pywebauthn_adapter_projects_pinned_dependency_results(monkeypatch: pyte
     assert authentication.sign_count == 2
 
     monkeypatch.setattr(passkeys_module, "options_to_json", lambda _options: 1 / 0)
-    with pytest.raises(accounts_module.InvalidWebAuthnResponseError):
+    with pytest.raises(accounts_module.WebAuthnVerificationError):
         adapter.registration_options(**options_kwargs)
-    with pytest.raises(accounts_module.InvalidWebAuthnResponseError):
+    with pytest.raises(accounts_module.WebAuthnVerificationError):
         adapter.authentication_options(**options_kwargs)
     monkeypatch.setattr(passkeys_module, "verify_registration_response", lambda **_kwargs: 1 / 0)
     monkeypatch.setattr(passkeys_module, "verify_authentication_response", lambda **_kwargs: 1 / 0)
-    with pytest.raises(accounts_module.InvalidWebAuthnResponseError):
+    with pytest.raises(accounts_module.WebAuthnVerificationError):
         adapter.verify_registration(
             response="{}",
             challenge=b"challenge",
@@ -394,7 +394,7 @@ def test_pywebauthn_adapter_projects_pinned_dependency_results(monkeypatch: pyte
             require_user_verification=True,
             algorithms=(-7,),
         )
-    with pytest.raises(accounts_module.InvalidWebAuthnResponseError):
+    with pytest.raises(accounts_module.WebAuthnVerificationError):
         adapter.verify_authentication(
             response="{}",
             challenge=b"challenge",
@@ -435,7 +435,7 @@ async def test_passkey_worker_timeout_cancels_the_request_boundary() -> None:
 
 
 async def test_local_auth_passkey_login_selects_only_configured_transport() -> None:
-    account = accounts_module.LocalAccountRecord(
+    account = accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="person@example.com",
         display_name="Person",
@@ -670,5 +670,5 @@ async def test_testing_stores_cover_expiry_update_and_clone_risk_outcomes() -> N
             clone_risk=True,
             now=now,
         )
-        is accounts_module.AssertionRecordStatus.CLONE_RISK
+        is accounts_module.PasskeyAssertionStatus.CLONE_RISK
     )

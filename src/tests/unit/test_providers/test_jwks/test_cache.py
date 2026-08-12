@@ -16,11 +16,11 @@ from litestar_security.providers.jwks import (
     InMemoryJWKSCache,
     JWKSCache,
     JWKSCacheCoordinator,
-    JWKSCacheEntry,
     JWKSCachePolicy,
-    JWKSFetchRequest,
-    JWKSFetchResponse,
+    JWKSFetchOutcome,
+    JWKSFetchTarget,
     JWKSSnapshot,
+    JWKSSource,
 )
 from litestar_security.providers.jwt import VerificationKey
 
@@ -36,10 +36,10 @@ class _CountingFetcher:
         self.document = document
         self.calls = 0
 
-    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+    async def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
         del request
         self.calls += 1
-        return JWKSFetchResponse(status_code=200, headers={"cache-control": "max-age=600"}, body=self.document)
+        return JWKSFetchOutcome(status_code=200, headers={"cache-control": "max-age=600"}, body=self.document)
 
 
 @pytest.fixture
@@ -50,8 +50,8 @@ def jwks_document(jwt_key_material: Mapping[str, tuple[bytes, bytes]]) -> bytes:
     return json.dumps({"keys": [public_jwk]}).encode()
 
 
-def _entry() -> JWKSCacheEntry:
-    return JWKSCacheEntry(issuer=ISSUER, jwks_uri=JWKS_URI, algorithms=frozenset({"RS256"}))
+def _entry() -> JWKSSource:
+    return JWKSSource(issuer=ISSUER, jwks_uri=JWKS_URI, algorithms=frozenset({"RS256"}))
 
 
 def _snapshot(*, generation: int = 1, keys: Mapping[tuple[str, str], VerificationKey] | None = None) -> JWKSSnapshot:
@@ -148,7 +148,7 @@ async def test_two_providers_sharing_a_cache_collapse_a_cold_refresh(jwks_docume
             self.started = asyncio.Event()
             self.release = asyncio.Event()
 
-        async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+        async def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
             self.started.set()
             await self.release.wait()
             return await super().fetch(request)

@@ -9,9 +9,10 @@ here formats an error beyond the message it is handed.
 
 import ipaddress
 import socket
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
-from typing import NoReturn, TypeAlias
+from typing import Generic, NoReturn, TypeAlias, TypeVar
 
 from anyio import getaddrinfo
 from litestar.exceptions import ImproperlyConfiguredException
@@ -22,6 +23,36 @@ __all__ = ("AddressResolver", "JSONValue", "public_address", "resolve_addresses"
 
 JSONValue: TypeAlias = bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"] | None
 AddressResolver: TypeAlias = Callable[[str, int], Awaitable[Sequence[str]]]
+VerifierT = TypeVar("VerifierT")
+
+
+class DynamicVerifierCache(Generic[VerifierT]):
+    """Bounded LRU of prepared verifiers keyed by route and exact key material."""
+
+    __slots__ = ("_entries", "_maximum")
+
+    def __init__(self, maximum: int = 128) -> None:
+        self._entries: OrderedDict[tuple[str, str], tuple[bytes, VerifierT]] = OrderedDict()
+        self._maximum = maximum
+
+    def get_or_create(self, route: tuple[str, str], material: bytes, factory: Callable[[], VerifierT]) -> VerifierT:
+        """Return a verifier for the exact selected key and refresh LRU position."""
+        cached = self._entries.get(route)
+        if cached is not None and cached[0] == material:
+            self._entries.move_to_end(route)
+            return cached[1]
+        verifier = factory()
+        self._entries[route] = (material, verifier)
+        self._entries.move_to_end(route)
+        while len(self._entries) > self._maximum:
+            self._entries.popitem(last=False)
+        return verifier
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __getitem__(self, route: tuple[str, str]) -> VerifierT:
+        return self._entries[route][1]
 
 
 def public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:

@@ -9,7 +9,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 ROOT = Path(__file__).parents[1]
-EXPECTED_VERSION = "0.3.0"
+EXPECTED_VERSION = "0.4.0"
 SUPPORTED_PYTHONS = ("3.10", "3.11", "3.12", "3.13", "3.14")
 DIRECT_DEPENDENCIES = frozenset({"argon2-cffi", "httpx", "litestar", "pyotp", "pyjwt", "webauthn"})
 FORBIDDEN_DEPENDENCIES = frozenset({"advanced-alchemy", "litestar-mcp", "sqlalchemy", "sqlspec"})
@@ -39,7 +39,7 @@ for module in walk_packages(litestar_security.__path__, "litestar_security."):
         importlib.import_module(module.name)
 
 assert "pytest" not in sys.modules
-assert litestar_security.__version__ == "0.3.0"
+assert litestar_security.__version__ == "0.4.0"
 assert files("litestar_security").joinpath("py.typed").is_file()
 assert StoreConformanceFactories is not None
 assert assert_security_backend_conformance is not None
@@ -58,7 +58,7 @@ async def protected(principal: NamedDependency[Principal[object]]) -> dict[str, 
 
 app = Litestar(
     route_handlers=[protected],
-    openapi_config=OpenAPIConfig(title="Release smoke", version="0.3.0"),
+    openapi_config=OpenAPIConfig(title="Release smoke", version="0.4.0"),
     plugins=[SecurityPlugin(SecurityConfig(api_key=api_key))],
 )
 with TestClient(app) as client:
@@ -160,7 +160,7 @@ def smoke_wheel(
     python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if lower_bound:
         run("uv", "pip", "install", "--python", str(python), "litestar==2.24.0")
-    run("uv", "pip", "install", "--python", str(python), str(wheel))
+    run("uv", "pip", "install", "--python", str(python), f"{wheel}[all]")
     run(str(python), "-I", "-c", SMOKE_SCRIPT, cwd=workspace, env=clean_environment)
     cli = environment / ("Scripts/litestar.exe" if os.name == "nt" else "bin/litestar")
     result = run(str(cli), "security", "--version", cwd=workspace, env=clean_environment)

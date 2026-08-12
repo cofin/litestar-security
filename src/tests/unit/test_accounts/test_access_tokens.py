@@ -266,7 +266,7 @@ async def test_token_login_fails_closed_when_refresh_issuance_clock_is_unavailab
     ],
 )
 async def test_local_bearer_identity_resolution_checks_account_and_exact_epoch(
-    account: accounts_module.LocalAccountRecord[object] | None,
+    account: accounts_module.LocalAccountState[object] | None,
     fail_lookup: bool,  # noqa: FBT001
     fail_epoch: bool,  # noqa: FBT001
     epoch: int,
@@ -430,7 +430,7 @@ def test_local_access_token_issuer_rejects_invalid_configuration(kwargs: dict[st
 )
 async def test_local_access_token_issuer_maps_invalid_and_unavailable_composition(  # noqa: PLR0913 - one composition matrix per parametrized case
     *,
-    account: accounts_module.LocalAccountRecord[object],
+    account: accounts_module.LocalAccountState[object],
     signer: _AccessSigner,
     clock: Callable[[], datetime],
     token_ids: Callable[[], str],

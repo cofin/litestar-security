@@ -70,7 +70,8 @@ jobs:
         run: |
           uv build --wheel --out-dir /tmp/litestar-security-dist
           uv venv --python "$PYTHON_VERSION" /tmp/litestar-security-wheel
-          uv pip install --python /tmp/litestar-security-wheel/bin/python /tmp/litestar-security-dist/*.whl
+          wheels=(/tmp/litestar-security-dist/*.whl)
+          uv pip install --python /tmp/litestar-security-wheel/bin/python "${wheels[0]}[all]"
           cd /tmp
           /tmp/litestar-security-wheel/bin/python -I - <<'PY'
           from importlib.resources import files

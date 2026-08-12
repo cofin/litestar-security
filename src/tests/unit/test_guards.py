@@ -9,6 +9,8 @@ from typing import Any, cast
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, PermissionDeniedException
 
+import litestar_security
+import litestar_security.guards as guards_module
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -19,18 +21,18 @@ from litestar_security.context import (
 from litestar_security.guards import (
     AssuranceRequirement,
     AssuranceTrait,
-    one_of,
+    requires_all_of,
+    requires_any_of,
     requires_assurance,
+    requires_at_least,
     requires_authenticated,
     requires_capability,
+    requires_one_of,
     requires_role,
     requires_scope,
     requires_team_role,
     requires_tenant,
 )
-from litestar_security.guards import all_of as guards_all_of
-from litestar_security.guards import any_of as guards_any_of
-from litestar_security.guards import at_least as guards_at_least
 
 _DUPLICATE_GUARD = requires_authenticated()
 
@@ -263,7 +265,7 @@ def test_authorization_base_guard_truth_table(case: str, allowed: bool) -> None:
         requires_capability("reports.export"),
         requires_team_role(team_parameter="team_id", roles={"owner"}),
         requires_tenant(tenant_parameter="tenant_id"),
-        guards_any_of(requires_scope("reports:read"), requires_role("admin")),
+        requires_any_of(requires_scope("reports:read"), requires_role("admin")),
     ],
 )
 def test_authorization_base_guards_map_anonymous_denial_to_generic_401(guard: object) -> None:
@@ -275,10 +277,10 @@ def test_authorization_base_guards_map_anonymous_denial_to_generic_401(guard: ob
 
 @pytest.mark.parametrize(
     ("operator", "mask", "allowed"),
-    [(guards_all_of, mask, mask == 0b111) for mask in range(8)]
-    + [(guards_any_of, mask, mask != 0) for mask in range(8)]
-    + [(one_of, mask, mask.bit_count() == 1) for mask in range(8)]
-    + [(lambda *children: guards_at_least(2, *children), mask, mask.bit_count() >= 2) for mask in range(8)],
+    [(requires_all_of, mask, mask == 0b111) for mask in range(8)]
+    + [(requires_any_of, mask, mask != 0) for mask in range(8)]
+    + [(requires_one_of, mask, mask.bit_count() == 1) for mask in range(8)]
+    + [(lambda *children: requires_at_least(2, *children), mask, mask.bit_count() >= 2) for mask in range(8)],
 )
 def test_authorization_combinator_truth_tables(
     operator: object,
@@ -300,12 +302,12 @@ def test_authorization_combinator_truth_tables(
 @pytest.mark.parametrize(
     ("factory", "match"),
     [
-        (guards_all_of, "at least one"),
-        (guards_any_of, "at least one"),
-        (one_of, "at least one"),
-        (partial(guards_at_least, 0, requires_authenticated()), "between 1 and 1"),
-        (partial(guards_at_least, 2, requires_authenticated()), "between 1 and 1"),
-        (partial(guards_all_of, _DUPLICATE_GUARD, _DUPLICATE_GUARD), "duplicate child"),
+        (requires_all_of, "at least one"),
+        (requires_any_of, "at least one"),
+        (requires_one_of, "at least one"),
+        (partial(requires_at_least, 0, requires_authenticated()), "between 1 and 1"),
+        (partial(requires_at_least, 2, requires_authenticated()), "between 1 and 1"),
+        (partial(requires_all_of, _DUPLICATE_GUARD, _DUPLICATE_GUARD), "duplicate child"),
         (partial(requires_scope, " "), "must not be blank"),
         (partial(requires_team_role, team_parameter="team_id", roles=set()), "at least one role"),
     ],
@@ -316,7 +318,7 @@ def test_authorization_guard_construction_rejects_invalid_expressions(factory: o
 
 
 def test_authorization_guards_are_frozen_hashable_and_expose_stable_denial() -> None:
-    guard = guards_all_of(requires_scope("reports:read"), requires_role("admin"))
+    guard = requires_all_of(requires_scope("reports:read"), requires_role("admin"))
     connection = _guard_connection(authorization=AuthorizationSnapshot(scopes={"reports:read"}))
 
     decision = guard.decide(connection)
@@ -341,3 +343,47 @@ def test_authorization_guards_do_not_call_application_resolvers_or_adapters() ->
     requires_scope("reports:read")(connection, object())  # type: ignore[arg-type]
 
     assert calls == 0
+
+
+def test_requires_guard_exports_and_clean_break() -> None:
+    """Verify requires_* guards are exported and the previous spellings are removed."""
+    assert litestar_security.requires_all_of is requires_all_of
+    assert litestar_security.requires_any_of is requires_any_of
+    assert litestar_security.requires_at_least is requires_at_least
+    assert litestar_security.requires_one_of is requires_one_of
+    assert litestar_security.requires_authenticated is requires_authenticated
+    assert litestar_security.requires_assurance is requires_assurance
+    assert litestar_security.requires_scope is requires_scope
+    assert litestar_security.requires_role is requires_role
+    assert litestar_security.requires_capability is requires_capability
+    assert litestar_security.requires_team_role is requires_team_role
+    assert litestar_security.requires_tenant is requires_tenant
+
+    for name in ("requires_all_of", "requires_any_of", "requires_at_least", "requires_one_of"):
+        assert getattr(guards_module, name).__name__ == name
+
+    for name in ("all_of", "any_of", "at_least", "one_of"):
+        assert not hasattr(guards_module, name)
+        assert name not in guards_module.__all__
+
+    for name in (
+        "guard_all_of",
+        "guard_any_of",
+        "guard_at_least",
+        "guard_one_of",
+        "require_authenticated",
+        "require_assurance",
+        "require_scope",
+        "require_role",
+        "require_capability",
+        "require_team_role",
+        "require_tenant",
+        "require_all_of",
+        "require_any_of",
+        "require_at_least",
+        "require_one_of",
+    ):
+        assert not hasattr(litestar_security, name)
+        assert name not in litestar_security.__all__
+        assert not hasattr(guards_module, name)
+        assert name not in guards_module.__all__

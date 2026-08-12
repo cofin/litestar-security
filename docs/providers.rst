@@ -21,15 +21,15 @@ OAuth transaction and token protection
 
 The in-memory OAuth references require an ``OAuthTransactionProtector`` so
 that the PKCE verifier, nonce, and refreshable provider tokens are not kept as
-plaintext. The first-party AES-256-GCM protector supplies that port to both
-stores:
+plaintext. The first-party AES-256-GCM protector supplies that port to the
+transaction store and aggregate account store:
 
 .. code-block:: python
 
    from litestar_security.providers.oauth import (
        AESGCMOAuthTransactionProtector,
+       MemoryOAuthAccountStore,
        MemoryOAuthTransactionStore,
-       MemoryTokenVault,
        OAuthTransactionProtectorKey,
    )
 
@@ -47,7 +47,7 @@ stores:
        ),
    )
    transactions = MemoryOAuthTransactionStore(protector=protector)
-   token_vault = MemoryTokenVault(
+   accounts = MemoryOAuthAccountStore(
        provider="github",
        client_id="github-client-id",
        protector=protector,
@@ -63,6 +63,31 @@ An application may instead supply its own protector. Run
 :func:`~litestar_security.testing.assert_oauth_transaction_protector_conformance`
 against a fresh instance factory to verify the public protection contract.
 
+``OAuthAccountStore`` is the durable application boundary for provisioning,
+exact identity linking, grants, retained tokens, refresh compare-and-swap, and
+revocation retry staging. Implement each operation as one database transaction;
+the library ships no ORM or database-specific adapter.
+
+Provider confirmation
+~~~~~~~~~~~~~~~~~~~~~
+
+``POST /auth/oauth/{provider}/revalidate`` confirms that the browser still
+controls the exact identity linked to the local account. It does not assert
+fresh authentication and cannot issue a step-up credential.
+
+``POST /auth/oauth/{provider}/reauthenticate/{purpose}`` is available only for
+providers implementing ``OAuthReauthenticationProvider`` and purposes present
+in that provider's ``OIDCReauthenticationPolicy`` mapping. OIDC reauthentication
+uses ``max_age`` (zero forces authentication), requires signed ``auth_time``,
+and checks the configured ACR and AMR requirements before issuing a one-use,
+purpose-bound ``StepUpCredential``. GitHub account selection is not fresh
+authentication and therefore cannot provide this capability.
+
+Use ``discover_oidc_provider()`` or ``discover_google_oidc_provider()`` when the
+application owns shared ``OIDCDiscoveryClient`` and ``JWKSProvider`` resources.
+The returned provider owns only its OAuth HTTP client; closing it does not close
+the shared discovery or JWKS resources.
+
 Team authorization
 ------------------
 
@@ -73,7 +98,7 @@ check the team named by the route:
 
    from litestar import get
 
-   from litestar_security import required, requires_team_role
+   from litestar_security import requires_team_role, required
 
 
    @get(

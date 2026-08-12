@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
+from anyio import Event
 
 from litestar_security.providers.oauth import (
     GitHubOAuthProvider,
@@ -112,6 +113,25 @@ async def test_github_refetches_profile_and_verified_email_each_login() -> None:
     assert first.email == "octocat@example.com"
     assert first.email_verified is True
     assert calls == ["/user", "/user/emails", "/user", "/user/emails"]
+
+
+async def test_github_fetches_profile_and_verified_email_concurrently() -> None:
+    both_started = Event()
+    started: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        started.append(request.url.path)
+        if len(started) == 2:
+            both_started.set()
+        await both_started.wait()
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"id": 7, "login": "user"})
+        return httpx.Response(200, json=[{"email": "user@example.com", "verified": True, "primary": True}])
+
+    identity = await provider(handler).resolve_identity(tokens(), transaction=transaction(), now=NOW)
+
+    assert set(started) == {"/user", "/user/emails"}
+    assert identity.email == "user@example.com"
 
 
 async def test_github_never_uses_unverified_email() -> None:

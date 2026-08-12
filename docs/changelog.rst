@@ -1,6 +1,75 @@
 Changelog
 =========
 
+0.4.0
+-----
+
+Changed (breaking)
+~~~~~~~~~~~~~~~~~~
+
+* Public records, transport shapes, and verifier protocols now use semantic
+  names. The release renames ``LocalAccountRecord`` to ``LocalAccountState``,
+  ``SessionRecord`` to ``UserAuthSession``, ``StepUpRecord`` to
+  ``StepUpGrantState``, ``PasskeyRecord`` to ``PasskeyMetadata``,
+  ``APIKeyRecord`` to ``APIKeyState``, ``WebSocketConnectTokenRecord`` to
+  ``WebSocketConnectAuthorization``, ``AssertionRecordStatus`` to
+  ``PasskeyAssertionStatus``, and ``InvalidWebAuthnResponseError`` to
+  ``WebAuthnVerificationError``.
+* The remaining protocol and wire names change from ``RequestAuthenticator``
+  to ``CredentialVerifier``, ``JWKSFetchRequest``/``JWKSFetchResponse`` to
+  ``JWKSFetchTarget``/``JWKSFetchOutcome``, ``OAuthHTTPRequest`` to
+  ``OAuthRequestObservation``, ``RouteStatus`` to ``OperationMessage``,
+  ``OAuthRouteStatus`` to ``OAuthOperationSummary``,
+  ``ConsumeStatus``/``ConsumeOutcome`` to
+  ``VerificationStatus``/``VerificationOutcome``, and ``JWKSCacheEntry`` to
+  ``JWKSSource``. No compatibility aliases are provided; generated clients and
+  stored OpenAPI fixtures must be regenerated.
+* ``OAuthRouteService`` is replaced by the presentation-neutral
+  ``OAuthLifecycle`` protocol. Custom controllers call ``begin()``,
+  ``complete_callback()``, ``establish_login()``, unlink, revoke, logout,
+  operations. The concrete ``OAuthLifecycleService.callback()`` remains the
+  generated-route adapter.
+* OAuth persistence is one atomic ``OAuthAccountStore`` aggregate. Provider
+  identities are globally unique by provider, issuer, and subject, one account
+  can link at most one identity for a provider, scope upgrades confirm the
+  callback identity exactly, and unlink is provider-bound. Split token-vault,
+  login-resolution, and revocation-retry store APIs are removed.
+* Authorization guard factories consistently use the ``requires_*`` prefix:
+  for example, ``require_scope`` becomes ``requires_scope`` and
+  ``require_all_of`` becomes ``requires_all_of``. The singular spellings are
+  removed without aliases.
+
+Added
+~~~~~
+
+* ``ResolvedUserAuthSession`` and ``UserAuthSessionResolver`` let session and
+  hybrid profiles perform one consistent authoritative session/account read.
+  A configured resolver never falls back after an invalid result or outage;
+  applications may omit it to retain the composed three-read path.
+* Remote-key authentication uses a shared 128-entry LRU of prepared verifiers.
+  A selected key change replaces cached material even when ``kid`` and
+  algorithm are unchanged.
+* Google IAP assertions enforce the ten-minute maximum lifetime plus twice the
+  configured skew. ``GoogleIAPClaims`` now exposes hosted domain, access
+  levels, device ID, and a validated immutable ``GoogleIAPExternalIdentity``
+  instead of arbitrary nested claims. IAP authenticates only the WebSocket
+  upgrade; long-lived sockets still require evidence-expiry and authorization
+  refresh supervision.
+* ``MemoryOAuthTransactionStore`` performs bounded expiry cleanup and defaults
+  to a maximum of 1,024 live transactions, rejecting new state at capacity.
+* OAuth provider confirmation is split into two explicit operations.
+  ``REVALIDATE`` confirms possession of the exact linked identity and never
+  produces freshness evidence. Capability-gated OIDC ``REAUTHENTICATE`` uses
+  ``max_age``, requires signed ``auth_time``, enforces configured ACR/AMR,
+  account epoch and browser/session bindings, and returns one purpose-bound
+  ``StepUpCredential``. Generated routes expose ``/revalidate`` and
+  ``/reauthenticate/{purpose}`` under each provider.
+* ``discover_oidc_provider()`` and ``discover_google_oidc_provider()`` compose
+  generic or Google OIDC providers from application-owned shared discovery and
+  JWKS resources. GitHub profile and verified-email requests now run
+  concurrently through the provider's bounded async HTTP client.
+
+
 0.3.0
 -----
 

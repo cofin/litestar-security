@@ -9,18 +9,15 @@ from anyio import Event, create_task_group, fail_after
 
 import litestar_security.testing as testing_module
 from litestar_security.accounts import AESGCMSecretProtector, SecretProtectorKey
-from litestar_security.providers.api_key import APIKeyRecord, APIKeyStore
+from litestar_security.providers.api_key import APIKeyState, APIKeyStore
 from litestar_security.providers.oauth import (
     AESGCMOAuthTransactionProtector,
     MemoryOAuthAccountStore,
     MemoryOAuthTransactionStore,
-    MemoryTokenVault,
     OAuthTransaction,
     OAuthTransactionProtectorKey,
     OIDCLogoutIdentity,
     ProtectedOAuthSecret,
-    ProviderTokenSet,
-    SecretStr,
     UnlinkOutcome,
     UnlinkStatus,
 )
@@ -36,10 +33,9 @@ from litestar_security.testing import (
     assert_oauth_transaction_store_conformance,
     assert_oidc_session_logout_store_conformance,
     assert_security_backend_conformance,
-    assert_token_vault_conformance,
     assert_websocket_connect_token_store_conformance,
 )
-from litestar_security.websocket import WebSocketConnectTokenRecord
+from litestar_security.websocket import WebSocketConnectAuthorization
 
 _NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
 _CONFORMANCE_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -88,19 +84,19 @@ class _WrongOAuthVersionProtector(_ConformanceTransactionProtector):
 class _YieldingConnectTokenStore:
     """Deliberately non-atomic consume implementation for the conformance self-test."""
 
-    records: dict[str, WebSocketConnectTokenRecord] = field(default_factory=dict[str, WebSocketConnectTokenRecord])
+    records: dict[str, WebSocketConnectAuthorization] = field(default_factory=dict[str, WebSocketConnectAuthorization])
     release: Event = field(default_factory=Event)
     starters: int = 0
     first_record_id: str | None = None
 
-    async def create(self, record: WebSocketConnectTokenRecord) -> None:
+    async def create(self, record: WebSocketConnectAuthorization) -> None:
         if self.first_record_id is None:
             self.first_record_id = record.connect_token_id
         self.records[record.connect_token_id] = record
 
     async def consume(
         self, *, connect_token_id: str, digest: bytes, now: datetime
-    ) -> WebSocketConnectTokenRecord | None:
+    ) -> WebSocketConnectAuthorization | None:
         record = self.records.get(connect_token_id)
         if record is None or record.digest != digest or record.expires_at <= now:
             return None
@@ -170,7 +166,7 @@ class _BrokenWebSocketConnectTokenStore(InMemoryWebSocketConnectTokenStore):
 
     async def consume(
         self, *, connect_token_id: str, digest: bytes, now: datetime
-    ) -> WebSocketConnectTokenRecord | None:
+    ) -> WebSocketConnectAuthorization | None:
         record = await super().consume(connect_token_id=connect_token_id, digest=digest, now=now)
         if record is not None:
             return record
@@ -186,7 +182,7 @@ class _ConfigurableConnectTokenStore(InMemoryWebSocketConnectTokenStore):
 
     async def consume(
         self, *, connect_token_id: str, digest: bytes, now: datetime
-    ) -> WebSocketConnectTokenRecord | None:
+    ) -> WebSocketConnectAuthorization | None:
         record = self._records.get(connect_token_id)  # pyright: ignore[reportPrivateUsage] - deliberate test corruption
         if record is not None and self.failure == "digest" and record.digest != digest:
             return record
@@ -255,87 +251,14 @@ class _BrokenOIDCFrontchannelReplayStore(testing_module.InMemoryOIDCSessionLogou
         return 2 if result is None and binding == "conformance-browser-binding" else result
 
 
-class _BrokenTokenVault(MemoryTokenVault):
-    """Report stale compare-and-swap attempts as successful."""
-
-    def __init__(self, *, provider: str, client_id: str, protector: testing_module.OAuthTransactionProtector) -> None:
-        super().__init__(provider=provider, client_id=client_id, protector=protector)
-        self.replaced = False
-
-    async def replace(
-        self, provider_account_id: str, *, expected_version: int, tokens: ProviderTokenSet, now: datetime
-    ) -> bool:
-        if not self.replaced:
-            self.replaced = await super().replace(
-                provider_account_id, expected_version=expected_version, tokens=tokens, now=now
-            )
-            return self.replaced
-        return True
-
-
-class _BrokenTokenVaultFirstVersion(MemoryTokenVault):
-    """Report a non-initial version for the first write."""
-
-    async def put(self, provider_account_id: str, tokens: ProviderTokenSet, *, now: datetime):  # type: ignore[no-untyped-def]  # deliberately corrupts the reference result
-        return replace(await super().put(provider_account_id, tokens, now=now), version=2)
-
-
-class _BrokenTokenVaultRoundTrip(MemoryTokenVault):
-    """Drop every retrieved token set."""
-
-    async def get_for_refresh(self, provider_account_id: str, *, now: datetime):  # type: ignore[no-untyped-def]  # deliberately violates the vault port
-        stored = await super().get_for_refresh(provider_account_id, now=now)
-        return replace(stored, reference=replace(stored.reference, version=99)) if stored is not None else stored
-
-
-class _BrokenTokenVaultCurrentCAS(MemoryTokenVault):
-    """Reject a current compare-and-swap."""
-
-    async def replace(
-        self, provider_account_id: str, *, expected_version: int, tokens: ProviderTokenSet, now: datetime
-    ) -> bool:
-        del provider_account_id, expected_version, tokens, now
-        return False
-
-
-class _BrokenTokenVaultCASState(MemoryTokenVault):
-    """Claim a successful replacement without writing it."""
-
-    async def replace(
-        self, provider_account_id: str, *, expected_version: int, tokens: ProviderTokenSet, now: datetime
-    ) -> bool:
-        del provider_account_id, expected_version, tokens, now
-        return True
-
-
-class _BrokenTokenVaultStaleState(MemoryTokenVault):
-    """Let a stale compare-and-swap overwrite the current token set."""
-
-    async def replace(
-        self, provider_account_id: str, *, expected_version: int, tokens: ProviderTokenSet, now: datetime
-    ) -> bool:
-        current = await super().get_for_refresh(provider_account_id, now=now)
-        if expected_version == 1 and current is not None and current.reference.version == 2:
-            await super().replace(provider_account_id, expected_version=2, tokens=tokens, now=now)
-            return False
-        return await super().replace(provider_account_id, expected_version=expected_version, tokens=tokens, now=now)
-
-
-class _BrokenTokenVaultDelete(MemoryTokenVault):
-    """Retain tokens after deletion."""
-
-    async def delete(self, provider_account_id: str) -> None:
-        del provider_account_id
-
-
 class _BrokenOAuthAccountStore(MemoryOAuthAccountStore):
     """Report the final identity as removable without changing the underlying link."""
 
-    async def unlink_identity(
-        self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
+    async def unlink(
+        self, account_id: str, provider: str, provider_account_id: str, *, require_remaining: bool, now: datetime
     ) -> UnlinkOutcome:
-        result = await super().unlink_identity(
-            account_id, provider_account_id, require_remaining=require_remaining, now=now
+        result = await super().unlink(
+            account_id, provider, provider_account_id, require_remaining=require_remaining, now=now
         )
         if result.status is UnlinkStatus.FINAL_METHOD:
             return UnlinkOutcome(UnlinkStatus.UNLINKED, provider_account_id)
@@ -345,11 +268,11 @@ class _BrokenOAuthAccountStore(MemoryOAuthAccountStore):
 class _BrokenOAuthOwnershipStore(MemoryOAuthAccountStore):
     """Claim another account owns a provider link."""
 
-    async def unlink_identity(
-        self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
+    async def unlink(
+        self, account_id: str, provider: str, provider_account_id: str, *, require_remaining: bool, now: datetime
     ) -> UnlinkOutcome:
-        result = await super().unlink_identity(
-            account_id, provider_account_id, require_remaining=require_remaining, now=now
+        result = await super().unlink(
+            account_id, provider, provider_account_id, require_remaining=require_remaining, now=now
         )
         return UnlinkOutcome(UnlinkStatus.UNLINKED, provider_account_id) if account_id == "other-account" else result
 
@@ -357,11 +280,11 @@ class _BrokenOAuthOwnershipStore(MemoryOAuthAccountStore):
 class _BrokenOAuthPreservationStore(MemoryOAuthAccountStore):
     """Delete a final provider link while reporting final-method protection."""
 
-    async def unlink_identity(
-        self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
+    async def unlink(
+        self, account_id: str, provider: str, provider_account_id: str, *, require_remaining: bool, now: datetime
     ) -> UnlinkOutcome:
-        result = await super().unlink_identity(
-            account_id, provider_account_id, require_remaining=require_remaining, now=now
+        result = await super().unlink(
+            account_id, provider, provider_account_id, require_remaining=require_remaining, now=now
         )
         if result.status is UnlinkStatus.FINAL_METHOD:
             linked = self._links.pop(provider_account_id)  # pyright: ignore[reportPrivateUsage] - deliberately violates preservation
@@ -372,11 +295,11 @@ class _BrokenOAuthPreservationStore(MemoryOAuthAccountStore):
 class _BrokenOAuthAtomicUnlinkStore(MemoryOAuthAccountStore):
     """Report every post-unlink contender as a winner."""
 
-    async def unlink_identity(
-        self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
+    async def unlink(
+        self, account_id: str, provider: str, provider_account_id: str, *, require_remaining: bool, now: datetime
     ) -> UnlinkOutcome:
-        result = await super().unlink_identity(
-            account_id, provider_account_id, require_remaining=require_remaining, now=now
+        result = await super().unlink(
+            account_id, provider, provider_account_id, require_remaining=require_remaining, now=now
         )
         if account_id == "conformance-account" and result.status is UnlinkStatus.NOT_FOUND:
             return UnlinkOutcome(UnlinkStatus.UNLINKED, provider_account_id)
@@ -385,19 +308,19 @@ class _BrokenOAuthAtomicUnlinkStore(MemoryOAuthAccountStore):
 
 @dataclass
 class _ControlledStore:
-    records: dict[str, APIKeyRecord]
+    records: dict[str, APIKeyState]
     persist_successor: bool = True
     revoke_current: bool = True
     rotated: bool = False
 
-    async def get(self, key_id: str) -> APIKeyRecord | None:
+    async def get(self, key_id: str) -> APIKeyState | None:
         return self.records.get(key_id)
 
-    async def create(self, record: APIKeyRecord) -> None:
+    async def create(self, record: APIKeyState) -> None:
         self.records[record.key_id] = record
 
     async def rotate(
-        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+        self, *, current_key_id: str, replacement: APIKeyState, overlap_until: datetime | None, now: datetime
     ) -> None:
         if self.rotated:
             raise ValueError
@@ -466,16 +389,16 @@ async def test_oauth_transaction_protector_conformance_names_the_remaining_invar
 async def test_api_key_conformance_names_a_non_atomic_rotation_invariant() -> None:
     @dataclass
     class BrokenStore:
-        records: dict[str, APIKeyRecord]
+        records: dict[str, APIKeyState]
 
-        async def get(self, key_id: str) -> APIKeyRecord | None:
+        async def get(self, key_id: str) -> APIKeyState | None:
             return self.records.get(key_id)
 
-        async def create(self, record: APIKeyRecord) -> None:
+        async def create(self, record: APIKeyState) -> None:
             self.records[record.key_id] = record
 
         async def rotate(
-            self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+            self, *, current_key_id: str, replacement: APIKeyState, overlap_until: datetime | None, now: datetime
         ) -> None:
             del current_key_id, overlap_until, now
             self.records[replacement.key_id] = replacement
@@ -536,7 +459,7 @@ async def test_oauth_account_conformance_rejects_final_identity_removal() -> Non
     [
         (_BrokenOAuthOwnershipStore, r"ownership invariant"),
         (_BrokenOAuthPreservationStore, r"ownership preservation invariant"),
-        (_BrokenOAuthAtomicUnlinkStore, r"unlink_identity atomicity invariant"),
+        (_BrokenOAuthAtomicUnlinkStore, r"unlink atomicity invariant"),
     ],
 )
 async def test_oauth_account_conformance_names_each_remaining_invariant(
@@ -645,105 +568,6 @@ async def test_oidc_reference_frontchannel_handles_missing_and_already_revoked_m
     )
 
 
-def _token_vault() -> MemoryTokenVault:
-    return MemoryTokenVault(
-        provider="conformance-provider", client_id="conformance-client", protector=_ConformanceTransactionProtector()
-    )
-
-
-async def test_token_vault_conformance_accepts_the_reference_vault() -> None:
-    await assert_token_vault_conformance(_token_vault)
-
-
-async def test_token_vault_conformance_rejects_stale_cas_success() -> None:
-    with pytest.raises(AssertionError, match=r"TokenVault\.replace stale-CAS invariant"):
-        await assert_token_vault_conformance(
-            lambda: _BrokenTokenVault(
-                provider="conformance-provider",
-                client_id="conformance-client",
-                protector=_ConformanceTransactionProtector(),
-            )
-        )
-
-
-@pytest.mark.parametrize(
-    ("factory", "invariant"),
-    [
-        (
-            lambda: _BrokenTokenVaultFirstVersion(
-                provider="conformance-provider",
-                client_id="conformance-client",
-                protector=_ConformanceTransactionProtector(),
-            ),
-            r"TokenVault\.put version invariant",
-        ),
-        (
-            lambda: _BrokenTokenVaultRoundTrip(
-                provider="conformance-provider",
-                client_id="conformance-client",
-                protector=_ConformanceTransactionProtector(),
-            ),
-            r"TokenVault\.get_for_refresh round-trip invariant",
-        ),
-        (
-            lambda: _BrokenTokenVaultCurrentCAS(
-                provider="conformance-provider",
-                client_id="conformance-client",
-                protector=_ConformanceTransactionProtector(),
-            ),
-            r"TokenVault\.replace CAS invariant",
-        ),
-        (
-            lambda: _BrokenTokenVaultCASState(
-                provider="conformance-provider",
-                client_id="conformance-client",
-                protector=_ConformanceTransactionProtector(),
-            ),
-            r"TokenVault\.replace state invariant",
-        ),
-        (
-            lambda: _BrokenTokenVaultStaleState(
-                provider="conformance-provider",
-                client_id="conformance-client",
-                protector=_ConformanceTransactionProtector(),
-            ),
-            r"TokenVault\.replace stale-CAS state invariant",
-        ),
-        (
-            lambda: _BrokenTokenVaultDelete(
-                provider="conformance-provider",
-                client_id="conformance-client",
-                protector=_ConformanceTransactionProtector(),
-            ),
-            r"TokenVault\.delete invariant",
-        ),
-    ],
-)
-async def test_token_vault_conformance_names_each_remaining_invariant(
-    factory: Callable[[], MemoryTokenVault], invariant: str
-) -> None:
-    with pytest.raises(AssertionError, match=invariant):
-        await assert_token_vault_conformance(factory)
-
-
-async def test_token_vault_conformance_rejects_factory_state_leakage() -> None:
-    shared = _token_vault()
-    await shared.put(
-        "conformance-provider-account",
-        ProviderTokenSet(
-            access_token=SecretStr("access"),
-            token_type="Bearer",  # noqa: S106 - OAuth bearer scheme, not a secret
-            scopes=frozenset(),
-            expires_at=_CONFORMANCE_NOW + timedelta(minutes=5),
-            refresh_token=SecretStr("refresh"),
-        ),
-        now=_CONFORMANCE_NOW,
-    )
-
-    with pytest.raises(AssertionError, match=r"TokenVault factory isolation invariant"):
-        await assert_token_vault_conformance(lambda: shared)
-
-
 async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # noqa: C901 - one complete dispatch matrix
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -766,9 +590,6 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
 
     def step_up_store() -> testing_module.InMemoryStepUpStore:
         return testing_module.InMemoryStepUpStore()
-
-    def token_vault() -> MemoryTokenVault:
-        return _token_vault()
 
     def oauth_accounts() -> MemoryOAuthAccountStore:
         return MemoryOAuthAccountStore()
@@ -814,7 +635,6 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
         ("assert_secret_protector_conformance", "secret_protector"),
         ("assert_session_registry_conformance", "session_registry"),
         ("assert_step_up_store_conformance", "step_up_store"),
-        ("assert_token_vault_conformance", "token_vault"),
         ("assert_webauthn_challenge_store_conformance", "webauthn_challenge_store"),
         ("assert_websocket_connect_token_store_conformance", "websocket_connect_token_store"),
     ):
@@ -835,7 +655,6 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
             secret_protector=secret_protector,
             session_registry=sessions,
             step_up_store=step_up_store,
-            token_vault=token_vault,
             webauthn_challenge_store=webauthn_challenges,
             websocket_connect_token_store=websocket_connect_tokens,
         )
@@ -855,7 +674,6 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
         "secret_protector",
         "session_registry",
         "step_up_store",
-        "token_vault",
         "webauthn_challenge_store",
         "websocket_connect_token_store",
     ]
@@ -899,7 +717,7 @@ async def test_conformance_detects_shared_factory_state() -> None:
 
 
 async def test_conformance_detects_non_isolated_factory_storage() -> None:
-    shared_records: dict[str, APIKeyRecord] = {}
+    shared_records: dict[str, APIKeyState] = {}
 
     with pytest.raises(AssertionError, match="create/get isolation invariant"):
         await assert_api_key_store_conformance(lambda: _ControlledStore(shared_records))

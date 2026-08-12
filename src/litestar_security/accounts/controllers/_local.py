@@ -33,8 +33,6 @@ from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa_login import MFARequired
 from litestar_security.accounts._rate_limits import RateLimited
 from litestar_security.accounts._records import (
-    ConsumeOutcome,
-    ConsumeStatus,
     LifecycleAccepted,
     LifecycleRejected,
     LocalAuthMode,
@@ -43,6 +41,8 @@ from litestar_security.accounts._records import (
     PasswordResetOutcome,
     PasswordResetStatus,
     RegistrationMode,
+    VerificationOutcome,
+    VerificationStatus,
 )
 from litestar_security.accounts._refresh_tokens import TokenPair
 from litestar_security.accounts.schemas import (
@@ -58,7 +58,7 @@ from litestar_security.accounts.schemas import (
     LocalSession,
     LocalSessionList,
     LocalToken,
-    RouteStatus,
+    OperationMessage,
 )
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import Principal, SecurityContext
@@ -67,7 +67,7 @@ from litestar_security.schema import WirePolicy
 if TYPE_CHECKING:
     from litestar_security.accounts._profiles import LocalAuthConfig
 
-__all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "requires_local_bearer")
+__all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "require_local_bearer")
 
 
 _SESSIONS_TAG = ROUTE_TAGS["local.sessions"].name
@@ -81,7 +81,7 @@ LOCAL_AUTH_TAGS: tuple[Tag, ...] = tuple(tag for key, tag in ROUTE_TAGS.items() 
 
 
 # Every status below is raised, so the body is the one exception handling
-# renders. RouteStatus stays on the statuses these handlers return.
+# renders. OperationMessage stays on the statuses these handlers return.
 _LOCAL_BAD_REQUEST_RESPONSES = {
     HTTP_400_BAD_REQUEST: raised_denial("The lifecycle request is invalid."),
     HTTP_429_TOO_MANY_REQUESTS: raised_denial("The operation exceeded its rate limit."),
@@ -118,7 +118,7 @@ _LOCAL_TOKEN_MFA_LOGIN_RESPONSES = {
 _LOCAL_REAUTHENTICATION_RESPONSES = {**_LOCAL_BAD_REQUEST_RESPONSES, **_LOCAL_AUTH_REQUIRED_RESPONSES}
 
 
-def requires_local_bearer(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler) -> None:
+def require_local_bearer(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler) -> None:
     """Require bearer evidence produced by the configured local JWT slot.
 
     Args:
@@ -189,7 +189,7 @@ def build_local_auth_routes(config: "LocalAuthConfig[Any]", wire: "WirePolicy | 
     )
 
 
-def _route_response(content: RouteStatus, *, status_code: int) -> Response[RouteStatus]:
+def _route_response(content: OperationMessage, *, status_code: int) -> Response[OperationMessage]:
     return Response(content=content, status_code=status_code)
 
 
@@ -270,7 +270,7 @@ class _LocalSessionController(Controller):
         self,
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[RouteStatus]:
+    ) -> Response[OperationMessage]:
         """Revoke the caller's current session and clear browser authentication."""
         session_auth = local_auth_service.session_auth
         if session_auth is None:
@@ -278,7 +278,7 @@ class _LocalSessionController(Controller):
         result = await session_auth.logout(request)
         if isinstance(result, VerificationUnavailable):
             _route_error(result)
-        return _route_response(RouteStatus(detail="Logged out."), status_code=HTTP_200_OK)
+        return _route_response(OperationMessage(detail="Logged out."), status_code=HTTP_200_OK)
 
     @get(
         "/sessions",
@@ -348,7 +348,7 @@ class _LocalSessionController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[RouteStatus]:
+    ) -> Response[OperationMessage]:
         """Revoke one session qualified by caller ownership."""
         account_id = _principal_account_id(principal)
         session_auth = local_auth_service.session_auth
@@ -357,7 +357,7 @@ class _LocalSessionController(Controller):
         result = await session_auth.revoke_session(request, account_id, session_id)
         if isinstance(result, VerificationUnavailable):
             _route_error(result)
-        return _route_response(RouteStatus(detail="Session revoked."), status_code=HTTP_200_OK)
+        return _route_response(OperationMessage(detail="Session revoked."), status_code=HTTP_200_OK)
 
 
 class _LocalSessionMFAController(Controller):
@@ -475,7 +475,7 @@ class _LocalTokenController(Controller):
         ),
         response_description="The token family was revoked.",
         status_code=HTTP_200_OK,
-        guards=(requires_local_bearer,),
+        guards=(require_local_bearer,),
         responses=_LOCAL_AUTH_REQUIRED_RESPONSES,
         auth=required("bearer"),
     )
@@ -484,7 +484,7 @@ class _LocalTokenController(Controller):
         data: JSONBody[LocalToken],
         principal: NamedDependency[Principal[Any]],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[RouteStatus]:
+    ) -> Response[OperationMessage]:
         """Revoke the authenticated caller's presented local refresh family."""
         account_id = _principal_account_id(principal)
         refresh_tokens = local_auth_service.refresh_tokens
@@ -493,7 +493,7 @@ class _LocalTokenController(Controller):
         result = await refresh_tokens.revoke_for_account(account_id, data.token)
         if isinstance(result, VerificationUnavailable):
             _route_error(result)
-        return _route_response(RouteStatus(detail="Token revoked."), status_code=HTTP_200_OK)
+        return _route_response(OperationMessage(detail="Token revoked."), status_code=HTTP_200_OK)
 
 
 class _LocalTokenMFAController(Controller):
@@ -589,13 +589,13 @@ class _LocalLifecycleController(Controller):
         data: JSONBody[LocalPasswordReset],
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[RouteStatus]:
+    ) -> Response[OperationMessage]:
         """Consume one recovery token and replace its account password."""
         result = await local_auth_service.recovery.reset(
             data.token, data.password, client_key=local_auth_service.client_key_for(request)
         )
         if isinstance(result, PasswordResetOutcome) and result.status is PasswordResetStatus.RESET:
-            return _route_response(RouteStatus(detail="Password reset complete."), status_code=HTTP_200_OK)
+            return _route_response(OperationMessage(detail="Password reset complete."), status_code=HTTP_200_OK)
         _route_error(result)
 
     @post(
@@ -644,13 +644,13 @@ class _LocalLifecycleController(Controller):
         data: JSONBody[LocalToken],
         request: Request[Any, Any, Any],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[RouteStatus]:
+    ) -> Response[OperationMessage]:
         """Consume one account-verification token."""
         result = await local_auth_service.verification.consume(
             data.token, client_key=local_auth_service.client_key_for(request)
         )
-        if isinstance(result, ConsumeOutcome) and result.status is ConsumeStatus.CONSUMED:
-            return _route_response(RouteStatus(detail="Account verified."), status_code=HTTP_200_OK)
+        if isinstance(result, VerificationOutcome) and result.status is VerificationStatus.CONSUMED:
+            return _route_response(OperationMessage(detail="Account verified."), status_code=HTTP_200_OK)
         _route_error(result)
 
 
@@ -758,7 +758,7 @@ class _LocalSessionPasswordController(Controller):
         request: Request[Any, Any, Any],
         principal: NamedDependency[Principal[Any]],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[RouteStatus]:
+    ) -> Response[OperationMessage]:
         """Change the session caller's password and rebind its session."""
         account_id = _principal_account_id(principal)
         if account_id is None:
@@ -782,7 +782,7 @@ class _LocalTokenPasswordController(Controller):
         ),
         response_description="The password was replaced.",
         status_code=HTTP_200_OK,
-        guards=(requires_local_bearer,),
+        guards=(require_local_bearer,),
         responses=_LOCAL_REAUTHENTICATION_RESPONSES,
         auth=required("bearer"),
     )
@@ -791,7 +791,7 @@ class _LocalTokenPasswordController(Controller):
         data: JSONBody[LocalPasswordChange],
         principal: NamedDependency[Principal[Any]],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[RouteStatus]:
+    ) -> Response[OperationMessage]:
         """Change the local bearer caller's password."""
         account_id = _principal_account_id(principal)
         if account_id is None:
@@ -817,7 +817,7 @@ class _LocalTokenOnlyPasswordController(Controller):
         ),
         response_description="The password was replaced.",
         status_code=HTTP_200_OK,
-        guards=(requires_local_bearer,),
+        guards=(require_local_bearer,),
         responses=_LOCAL_REAUTHENTICATION_RESPONSES,
         auth=required("bearer"),
     )
@@ -826,7 +826,7 @@ class _LocalTokenOnlyPasswordController(Controller):
         data: JSONBody[LocalPasswordChange],
         principal: NamedDependency[Principal[Any]],
         local_auth_service: NamedDependency[SkipValidation[LocalAuthService[Any]]],
-    ) -> Response[RouteStatus]:
+    ) -> Response[OperationMessage]:
         """Change the local bearer caller's password."""
         account_id = _principal_account_id(principal)
         if account_id is None:
@@ -835,9 +835,9 @@ class _LocalTokenOnlyPasswordController(Controller):
         return _password_change_response(result)
 
 
-def _password_change_response(result: object) -> Response[RouteStatus]:
+def _password_change_response(result: object) -> Response[OperationMessage]:
     if isinstance(result, PasswordChangeOutcome) and result.status is PasswordChangeStatus.CHANGED:
-        return _route_response(RouteStatus(detail="Password changed."), status_code=HTTP_200_OK)
+        return _route_response(OperationMessage(detail="Password changed."), status_code=HTTP_200_OK)
     if isinstance(result, InvalidCredentials):
         _route_error(result)
     _route_error(result)
