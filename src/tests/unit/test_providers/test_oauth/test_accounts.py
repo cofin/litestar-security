@@ -11,18 +11,14 @@ from litestar.exceptions import ImproperlyConfiguredException
 from litestar_security.providers import oauth as oauth_module
 from litestar_security.providers.oauth import (
     AccountLinkError,
-    InMemoryOAuthRevocationRetryStore,
     InvalidProviderGrantError,
     LinkedProviderAccount,
     MemoryOAuthAccountStore,
-    MemoryTokenVault,
     OAuthAccountError,
     OAuthAccountService,
     OAuthAccountStore,
     OAuthLinkProof,
-    OAuthLoginResolution,
     OAuthOperation,
-    OAuthRevocationFailure,
     OAuthTransaction,
     OAuthTransactionStart,
     ProtectedOAuthSecret,
@@ -31,8 +27,6 @@ from litestar_security.providers.oauth import (
     ProviderTokenReference,
     ProviderTokenSet,
     SecretStr,
-    StoredProviderTokens,
-    TokenVault,
     UnlinkOutcome,
     UnlinkStatus,
 )
@@ -77,64 +71,6 @@ class BoundRecordingProtector:
             message = "associated data did not match"
             raise ValueError(message)
         return protected.ciphertext[len(prefix) :][::-1]
-
-
-@dataclass
-class FaultProtector:
-    active_key_version: str = "v1"
-    decoded: bytes | None = None
-    fail_protect: bool = False
-
-    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedOAuthSecret:
-        del associated_data
-        if self.fail_protect:
-            raise RuntimeError
-        return ProtectedOAuthSecret(ciphertext=secret, key_version=self.active_key_version)
-
-    async def unprotect(self, protected: ProtectedOAuthSecret, *, associated_data: bytes) -> bytes:
-        del protected, associated_data
-        return self.decoded if self.decoded is not None else b"not-json"
-
-
-class RefreshRaceVault:
-    def __init__(self, *, second_missing: bool) -> None:
-        self.second_missing = second_missing
-        self.reads = 0
-        self.stored = StoredProviderTokens(
-            reference=ProviderTokenReference("provider-account", 1, frozenset({"profile"}), NOW), tokens=tokens()
-        )
-
-    async def put(self, provider_account_id: str, value: ProviderTokenSet, *, now: datetime) -> ProviderTokenReference:
-        del provider_account_id, value, now
-        return self.stored.reference
-
-    async def get_for_refresh(self, provider_account_id: str, *, now: datetime) -> StoredProviderTokens | None:
-        del provider_account_id, now
-        self.reads += 1
-        return None if self.second_missing and self.reads == 2 else self.stored
-
-    async def replace(
-        self, provider_account_id: str, *, expected_version: int, tokens: ProviderTokenSet, now: datetime
-    ) -> bool:
-        del provider_account_id, expected_version, tokens, now
-        return False
-
-    async def delete(self, provider_account_id: str) -> None:
-        del provider_account_id
-
-
-class RevocationRetries:
-    def __init__(self) -> None:
-        self.scheduled: list[tuple[OAuthRevocationFailure, ProviderTokenSet]] = []
-
-    async def schedule(self, failure: OAuthRevocationFailure, value: ProviderTokenSet) -> None:
-        self.scheduled.append((failure, value))
-
-
-class BrokenRevocationRetries:
-    async def schedule(self, failure: OAuthRevocationFailure, value: ProviderTokenSet) -> None:
-        del failure, value
-        raise RuntimeError
 
 
 def identity(*, subject: str = "subject") -> ProviderIdentity:
@@ -194,15 +130,12 @@ def transaction() -> OAuthTransaction:
 
 def test_oauth_account_lifecycle_public_contracts_import() -> None:
     assert OAuthAccountStore.__name__ == "OAuthAccountStore"
-    assert TokenVault.__name__ == "TokenVault"
     assert OAuthAccountService.__name__ == "OAuthAccountService"
     assert OAuthLinkProof.__name__ == "OAuthLinkProof"
-    assert OAuthLoginResolution.__name__ == "OAuthLoginResolution"
     assert LinkedProviderAccount.__name__ == "LinkedProviderAccount"
     assert UnlinkOutcome.__name__ == "UnlinkOutcome"
     assert ProviderTokenReference.__name__ == "ProviderTokenReference"
     assert MemoryOAuthAccountStore.__name__ == "MemoryOAuthAccountStore"
-    assert MemoryTokenVault.__name__ == "MemoryTokenVault"
     with pytest.raises(AttributeError, match="has no attribute"):
         getattr(oauth_module, "missing")  # noqa: B009 - explicitly exercise the module lazy-export hook
 
@@ -226,19 +159,6 @@ def test_memory_account_store_rejects_invalid_method_counts(counts: dict[str, in
         MemoryOAuthAccountStore(login_method_counts=counts)
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"provider": "", "client_id": "client", "protector": ReversingProtector()},
-        {"provider": "provider", "client_id": "", "protector": ReversingProtector()},
-        {"provider": "provider", "client_id": "client", "protector": object()},
-    ],
-)
-def test_memory_token_vault_rejects_invalid_configuration(kwargs: dict[str, object]) -> None:
-    with pytest.raises(ImproperlyConfiguredException, match="token vault configuration"):
-        MemoryTokenVault(**kwargs)  # type: ignore[arg-type]
-
-
 @pytest.mark.parametrize("kwargs", [{"store": object()}, {"store": MemoryOAuthAccountStore(), "provision_unknown": 1}])
 def test_account_service_rejects_invalid_ports(kwargs: dict[str, object]) -> None:
     with pytest.raises(ImproperlyConfiguredException, match="account service configuration"):
@@ -247,38 +167,37 @@ def test_account_service_rejects_invalid_ports(kwargs: dict[str, object]) -> Non
 
 async def test_exact_lookup_cross_account_link_and_atomic_final_unlink() -> None:
     store = MemoryOAuthAccountStore(login_method_counts={"account-1": 1, "account-2": 1})
-    linked = await store.link_identity("account-1", identity(), grant(), now=NOW)
+    linked = await store.link("account-1", identity(), grant(), tokens(), retain_tokens=False, now=NOW)
 
-    assert (await store.resolve_login(identity())).linked == linked
-    assert (await store.resolve_login(identity(subject="other"))).linked is None
+    assert await store.resolve_provider_account("account-1", "example") == linked
     with pytest.raises(AccountLinkError):
-        await store.link_identity("account-2", identity(), grant(), now=NOW)
-    updated = await store.link_identity("account-1", identity(), grant("email"), now=NOW)
+        await store.link("account-2", identity(), grant(), tokens(), retain_tokens=False, now=NOW)
+    updated = await store.link("account-1", identity(), grant("email"), tokens(), retain_tokens=False, now=NOW)
     assert updated.grant.scopes == frozenset({"email"})
     assert (
-        await store.unlink_identity("account-2", linked.provider_account_id, require_remaining=True, now=NOW)
+        await store.unlink("account-2", "example", linked.provider_account_id, require_remaining=True, now=NOW)
     ).status is UnlinkStatus.NOT_FOUND
 
     assert (
-        await store.unlink_identity("account-1", linked.provider_account_id, require_remaining=True, now=NOW)
+        await store.unlink("account-1", "example", linked.provider_account_id, require_remaining=True, now=NOW)
     ).status is UnlinkStatus.UNLINKED
 
     only_provider = MemoryOAuthAccountStore()
-    final = await only_provider.link_identity("account-1", identity(), grant(), now=NOW)
-    result = await only_provider.unlink_identity(
-        "account-1", final.provider_account_id, require_remaining=True, now=NOW
+    final = await only_provider.link("account-1", identity(), grant(), tokens(), retain_tokens=False, now=NOW)
+    result = await only_provider.unlink(
+        "account-1", "example", final.provider_account_id, require_remaining=True, now=NOW
     )
     assert result.status is UnlinkStatus.FINAL_METHOD
-    assert (await only_provider.resolve_login(identity())).linked == final
+    assert await only_provider.resolve_provider_account("account-1", "example") == final
 
 
 async def test_simultaneous_oauth_unlink_has_one_atomic_winner() -> None:
     store = MemoryOAuthAccountStore(login_method_counts={"account-1": 2})
-    linked = await store.link_identity("account-1", identity(), grant(), now=NOW)
+    linked = await store.link("account-1", identity(), grant(), tokens(), retain_tokens=False, now=NOW)
 
     results = await asyncio.gather(
-        store.unlink_identity("account-1", linked.provider_account_id, require_remaining=True, now=NOW),
-        store.unlink_identity("account-1", linked.provider_account_id, require_remaining=True, now=NOW),
+        store.unlink("account-1", "example", linked.provider_account_id, require_remaining=True, now=NOW),
+        store.unlink("account-1", "example", linked.provider_account_id, require_remaining=True, now=NOW),
     )
 
     assert {result.status for result in results} == {UnlinkStatus.UNLINKED, UnlinkStatus.NOT_FOUND}
@@ -289,26 +208,20 @@ async def test_account_store_rejects_invalid_inputs_and_missing_grant_target() -
     naive = NOW.replace(tzinfo=None)
 
     with pytest.raises(OAuthAccountError):
-        await store.resolve_login(object())  # type: ignore[arg-type]
+        await store.link("", identity(), grant(), tokens(), retain_tokens=False, now=NOW)
     with pytest.raises(OAuthAccountError):
-        await store.link_identity("", identity(), grant(), now=NOW)
+        await store.unlink("account", "example", "", require_remaining=True, now=NOW)
     with pytest.raises(OAuthAccountError):
-        await store.unlink_identity("account", "", require_remaining=True, now=NOW)
-    with pytest.raises(OAuthAccountError):
-        await store.apply_grant("account", "missing", grant(), now=NOW)
-    with pytest.raises(OAuthAccountError):
-        await store.apply_grant("account", "missing", grant(), now=naive)
+        await store.upgrade("account", "missing", identity(), grant(), tokens(), retain_tokens=False, now=naive)
     with pytest.raises(OAuthAccountError):
         await store.resolve_provider_account("", "example")
 
 
 async def test_account_store_rejects_ambiguous_provider_account_resolution() -> None:
     store = MemoryOAuthAccountStore(login_method_counts={"account-1": 2})
-    await store.link_identity("account-1", identity(subject="one"), grant(), now=NOW)
-    await store.link_identity("account-1", identity(subject="two"), grant(), now=NOW)
-
-    with pytest.raises(OAuthAccountError):
-        await store.resolve_provider_account("account-1", "example")
+    await store.link("account-1", identity(subject="one"), grant(), tokens(), retain_tokens=False, now=NOW)
+    with pytest.raises(AccountLinkError):
+        await store.link("account-1", identity(subject="two"), grant(), tokens(), retain_tokens=False, now=NOW)
 
 
 async def test_unknown_login_requires_explicit_provision_and_no_vault_discards_tokens() -> None:
@@ -367,67 +280,6 @@ async def test_link_rejects_stale_or_wrong_step_up(invalid_proof: OAuthLinkProof
 
     with pytest.raises(OAuthAccountError):
         await service.link(invalid_proof, identity(), grant(), tokens(), now=NOW)
-
-
-async def test_encrypted_vault_round_trip_version_and_cas() -> None:
-    protector = ReversingProtector()
-    vault = MemoryTokenVault(provider="example", client_id="client", protector=protector)
-
-    reference = await vault.put("provider-account", tokens(), now=NOW)
-    stored = await vault.get_for_refresh("provider-account", now=NOW)
-
-    assert reference.version == 1
-    assert stored is not None
-    assert stored.tokens.access_token.get_secret_value() == "access"
-    assert b"access" not in (protector.last_ciphertext or b"")
-    assert b"example" in (protector.associated_data or b"")
-    assert "access" not in repr(reference)
-    assert "access" not in repr(stored)
-    assert await vault.replace("provider-account", expected_version=1, tokens=tokens(access="rotated"), now=NOW)
-    assert not await vault.replace("provider-account", expected_version=1, tokens=tokens(access="lost-race"), now=NOW)
-    rotated = await vault.get_for_refresh("provider-account", now=NOW)
-    assert rotated is not None
-    assert rotated.reference.version == 2
-    assert rotated.tokens.access_token.get_secret_value() == "rotated"
-    await vault.delete("provider-account")
-    assert await vault.get_for_refresh("provider-account", now=NOW) is None
-
-
-async def test_vault_rejects_invalid_inputs_and_classifies_protector_failures() -> None:
-    vault = MemoryTokenVault(provider="example", client_id="client", protector=ReversingProtector())
-    naive = NOW.replace(tzinfo=None)
-
-    with pytest.raises(OAuthAccountError):
-        await vault.put("", tokens(), now=NOW)
-    with pytest.raises(OAuthAccountError):
-        await vault.put("provider-account", object(), now=NOW)  # type: ignore[arg-type]
-    with pytest.raises(OAuthAccountError):
-        await vault.get_for_refresh("", now=NOW)
-    with pytest.raises(OAuthAccountError):
-        await vault.get_for_refresh("provider-account", now=naive)
-    with pytest.raises(OAuthAccountError):
-        await vault.replace("provider-account", expected_version=0, tokens=tokens(), now=NOW)
-    with pytest.raises(OAuthAccountError):
-        await vault.delete("")
-
-    failing = MemoryTokenVault(provider="example", client_id="client", protector=FaultProtector(fail_protect=True))
-    with pytest.raises(OAuthAccountError) as captured:
-        await failing.put("provider-account", tokens(), now=NOW)
-    assert captured.value.code == "oauth_vault_unavailable"
-
-
-@pytest.mark.parametrize(
-    "decoded",
-    [b"[]", b'{"access_token":"a","token_type":"Bearer","scopes":"profile","expires_at":"2026-07-28T18:00:00+00:00"}'],
-)
-async def test_vault_rejects_authenticated_corrupt_payloads(decoded: bytes) -> None:
-    protector = FaultProtector(decoded=decoded)
-    vault = MemoryTokenVault(provider="example", client_id="client", protector=protector)
-    await vault.put("provider-account", tokens(), now=NOW)
-
-    with pytest.raises(OAuthAccountError) as captured:
-        await vault.get_for_refresh("provider-account", now=NOW)
-    assert captured.value.code == "oauth_vault_unavailable"
 
 
 def test_scope_upgrade_requests_only_allowlisted_missing_scopes() -> None:
@@ -546,53 +398,6 @@ async def test_revoke_attempts_every_token_and_schedules_secret_retry_before_loc
     assert captured.value.code == "oauth_revocation_pending"
     assert provider.revocations == ["refresh_token", "access_token"]
     assert await store.get_tokens(linked.provider_account_id, now=NOW) is None
-
-
-async def test_in_memory_revocation_retry_store_encrypts_secret_material_and_replaces_metadata() -> None:
-    protector = BoundRecordingProtector()
-    retries = InMemoryOAuthRevocationRetryStore(protector)
-    first = OAuthRevocationFailure("provider-account", frozenset({"access_token"}), NOW)
-    second = OAuthRevocationFailure("provider-account", frozenset({"refresh_token"}), NOW + timedelta(minutes=1))
-
-    await retries.schedule(first, tokens(access="access-secret", refresh="refresh-secret"))
-
-    assert protector.last_ciphertext is not None
-    assert b"access-secret" not in protector.last_ciphertext
-    assert b"refresh-secret" not in protector.last_ciphertext
-    assert b"access-secret" not in repr(retries.failures).encode()
-    assert b"refresh-secret" not in repr(retries.failures).encode()
-    with pytest.raises(ValueError, match="associated data"):
-        await protector.unprotect(
-            ProtectedOAuthSecret(ciphertext=protector.last_ciphertext, key_version=protector.active_key_version),
-            associated_data=b"altered-associated-data",
-        )
-
-    await retries.schedule(second, tokens(access="new-access", refresh="new-refresh"))
-
-    assert dict(retries.failures) == {"provider-account": second}
-    with pytest.raises(TypeError):
-        retries.failures["other-account"] = first  # type: ignore[index]  # proves inspection is immutable
-
-
-async def test_revocation_retry_store_rejects_invalid_input_and_retains_metadata_on_encryption_failure() -> None:
-    with pytest.raises(ImproperlyConfiguredException, match="retry store configuration"):
-        InMemoryOAuthRevocationRetryStore(object())  # type: ignore[arg-type]
-
-    protector = FaultProtector()
-    retries = InMemoryOAuthRevocationRetryStore(protector)
-    original = OAuthRevocationFailure("provider-account", frozenset({"access_token"}), NOW)
-    replacement = OAuthRevocationFailure("provider-account", frozenset({"refresh_token"}), NOW + timedelta(minutes=1))
-    await retries.schedule(original, tokens())
-
-    with pytest.raises(OAuthAccountError):
-        await retries.schedule(replacement, object())  # type: ignore[arg-type]
-
-    protector.fail_protect = True
-    with pytest.raises(OAuthAccountError) as captured:
-        await retries.schedule(replacement, tokens())
-
-    assert captured.value.code == "oauth_vault_unavailable"
-    assert dict(retries.failures) == {"provider-account": original}
 
 
 async def test_public_oauth_conformance_fakes_record_calls_and_http() -> None:

@@ -75,10 +75,8 @@ from litestar_security.authentication import AuthorizationResolution, IdentityRe
 from litestar_security.context import AuthorizationSnapshot, CredentialRestrictions, Principal
 from litestar_security.providers.api_key import APIKeyState, APIKeyStore
 from litestar_security.providers.oauth import (
-    InMemoryOAuthRevocationRetryStore,
     MemoryOAuthAccountStore,
     MemoryOAuthTransactionStore,
-    MemoryTokenVault,
     OAuthAccountStore,
     OAuthOperation,
     OAuthTransaction,
@@ -92,7 +90,6 @@ from litestar_security.providers.oauth import (
     ProviderIdentity,
     ProviderTokenSet,
     SecretStr,
-    TokenVault,
     UnlinkStatus,
 )
 from litestar_security.websocket import (
@@ -112,7 +109,6 @@ __all__ = (
     "InMemoryLocalAccountStore",
     "InMemoryMFALoginChallengeStore",
     "InMemoryMFAStore",
-    "InMemoryOAuthRevocationRetryStore",
     "InMemoryOIDCSessionLogoutStore",
     "InMemoryPasskeyStore",
     "InMemorySecurityBackend",
@@ -122,7 +118,6 @@ __all__ = (
     "InMemoryWebSocketRevocationSource",
     "MemoryOAuthAccountStore",
     "MemoryOAuthTransactionStore",
-    "MemoryTokenVault",
     "OAuthRequestObservation",
     "StaticAuthorizationResolver",
     "StaticAuthorizationSnapshotRefresher",
@@ -143,7 +138,6 @@ __all__ = (
     "assert_security_backend_conformance",
     "assert_session_registry_conformance",
     "assert_step_up_store_conformance",
-    "assert_token_vault_conformance",
     "assert_webauthn_challenge_store_conformance",
     "assert_websocket_connect_token_store_conformance",
 )
@@ -1078,7 +1072,6 @@ class InMemorySecurityBackend:
         "mfa",
         "mfa_login",
         "oauth_accounts",
-        "oauth_tokens",
         "oauth_transactions",
         "oidc_session_logout",
         "passkeys",
@@ -1145,7 +1138,6 @@ class InMemorySecurityBackend:
         self.step_up = InMemoryStepUpStore()
         self.oauth_accounts = MemoryOAuthAccountStore()
         self.oauth_transactions = MemoryOAuthTransactionStore(protector=selected_protector)
-        self.oauth_tokens = MemoryTokenVault(provider="test", client_id="test-client", protector=selected_protector)
         self.oidc_session_logout = InMemoryOIDCSessionLogoutStore(
             session_mappings=(), frontchannel_bindings={}, clock=self.clock
         )
@@ -1248,7 +1240,6 @@ class StoreConformanceFactories:
     secret_protector: Callable[[], SecretProtector] | None = None
     session_registry: Callable[[], SessionRegistry] | None = None
     step_up_store: Callable[[], StepUpStore] | None = None
-    token_vault: Callable[[], TokenVault] | None = None
     webauthn_challenge_store: Callable[[], WebAuthnChallengeStore] | None = None
     websocket_connect_token_store: Callable[[], WebSocketConnectTokenStore] | None = None
 
@@ -2904,51 +2895,6 @@ async def assert_step_up_store_conformance(factory: Callable[[], StepUpStore]) -
             raise AssertionError(message)
 
 
-async def assert_token_vault_conformance(factory: Callable[[], TokenVault]) -> None:
-    """Assert isolated encrypted provider-token storage and optimistic replacement.
-
-    Args:
-        factory: Isolated zero-argument token vault factory.
-
-    Returns:
-        None when token round-trips, compare-and-swap, and deletion obey the public protocol.
-
-    Raises:
-        AssertionError: If factory state leaks or token versioning and replacement are incorrect.
-    """
-    provider_account_id = "conformance-provider-account"
-    original = _conformance_provider_tokens("original")
-    replacement = _conformance_provider_tokens("replacement")
-    vault = factory()
-    if await factory().get_for_refresh(provider_account_id, now=_DEFAULT_NOW) is not None:
-        message = "TokenVault factory isolation invariant: a fresh factory must not retain another vault's tokens"
-        raise AssertionError(message)
-    reference = await vault.put(provider_account_id, original, now=_DEFAULT_NOW)
-    if reference.version != 1:
-        raise AssertionError("TokenVault.put version invariant: a first write must return version one")
-    stored = await vault.get_for_refresh(provider_account_id, now=_DEFAULT_NOW)
-    if stored is None or stored.reference != reference or stored.tokens != original:
-        message = "TokenVault.get_for_refresh round-trip invariant: the exact stored token set must round-trip"
-        raise AssertionError(message)
-    if not await vault.replace(provider_account_id, expected_version=1, tokens=replacement, now=_DEFAULT_NOW):
-        raise AssertionError("TokenVault.replace CAS invariant: a current version must replace exactly once")
-    replaced = await vault.get_for_refresh(provider_account_id, now=_DEFAULT_NOW)
-    expected_replacement_version = 2
-    if replaced is None or replaced.reference.version != expected_replacement_version or replaced.tokens != replacement:
-        message = "TokenVault.replace state invariant: a successful CAS must persist exactly one new version"
-        raise AssertionError(message)
-    if await vault.replace(provider_account_id, expected_version=1, tokens=original, now=_DEFAULT_NOW):
-        message = "TokenVault.replace stale-CAS invariant: a stale version must return False without overwriting"
-        raise AssertionError(message)
-    current = await vault.get_for_refresh(provider_account_id, now=_DEFAULT_NOW)
-    if current != replaced:
-        message = "TokenVault.replace stale-CAS state invariant: a rejected CAS must not overwrite the token set"
-        raise AssertionError(message)
-    await vault.delete(provider_account_id)
-    if await vault.get_for_refresh(provider_account_id, now=_DEFAULT_NOW) is not None:
-        raise AssertionError("TokenVault.delete invariant: deleted tokens must not be returned for refresh")
-
-
 async def assert_oauth_account_store_conformance(factory: Callable[[], OAuthAccountStore]) -> None:
     """Assert final-method protection and atomic OAuth identity unlinking.
 
@@ -2963,28 +2909,45 @@ async def assert_oauth_account_store_conformance(factory: Callable[[], OAuthAcco
     """
     store = factory()
     identity = _conformance_provider_identity("first")
-    first = await store.link_identity("conformance-account", identity, _conformance_provider_grant(), now=_DEFAULT_NOW)
-    wrong_owner = await store.unlink_identity(
-        "other-account", first.provider_account_id, require_remaining=True, now=_DEFAULT_NOW
+    first = await store.link(
+        "conformance-account",
+        identity,
+        _conformance_provider_grant(),
+        _conformance_provider_tokens("first"),
+        retain_tokens=False,
+        now=_DEFAULT_NOW,
+    )
+    wrong_owner = await store.unlink(
+        "other-account", first.provider, first.provider_account_id, require_remaining=True, now=_DEFAULT_NOW
     )
     if wrong_owner.status is not UnlinkStatus.NOT_FOUND:
         raise AssertionError("OAuthAccountStore ownership invariant: another account must receive NOT_FOUND")
-    final = await store.unlink_identity(
-        "conformance-account", first.provider_account_id, require_remaining=True, now=_DEFAULT_NOW
+    final = await store.unlink(
+        "conformance-account", first.provider, first.provider_account_id, require_remaining=True, now=_DEFAULT_NOW
     )
     if final.status is not UnlinkStatus.FINAL_METHOD:
         raise AssertionError("OAuthAccountStore final-method invariant: the last identity must return FINAL_METHOD")
     preserved = await store.resolve_provider_account("conformance-account", first.provider)
     if preserved != first:
         raise AssertionError("OAuthAccountStore ownership preservation invariant: rejected unlink must not mutate")
-    second = await store.link_identity(
-        "conformance-account", _conformance_provider_identity("second"), _conformance_provider_grant(), now=_DEFAULT_NOW
+    second_identity = replace(_conformance_provider_identity("second"), provider="second-provider")
+    second = await store.link(
+        "conformance-account",
+        second_identity,
+        _conformance_provider_grant(),
+        _conformance_provider_tokens("second"),
+        retain_tokens=False,
+        now=_DEFAULT_NOW,
     )
 
     async def unlink() -> UnlinkStatus:
         return (
-            await store.unlink_identity(
-                "conformance-account", second.provider_account_id, require_remaining=True, now=_DEFAULT_NOW
+            await store.unlink(
+                "conformance-account",
+                second.provider,
+                second.provider_account_id,
+                require_remaining=True,
+                now=_DEFAULT_NOW,
             )
         ).status
 
@@ -2994,7 +2957,7 @@ async def assert_oauth_account_store_conformance(factory: Callable[[], OAuthAcco
         group.start_soon(_append_result, unlink, statuses)
     if statuses.count(UnlinkStatus.UNLINKED) != 1 or statuses.count(UnlinkStatus.NOT_FOUND) != 1:
         raise AssertionError(
-            "OAuthAccountStore.unlink_identity atomicity invariant: contenders must return UNLINKED and NOT_FOUND"
+            "OAuthAccountStore.unlink atomicity invariant: contenders must return UNLINKED and NOT_FOUND"
         )
 
 
@@ -3083,8 +3046,6 @@ async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit
         await assert_session_registry_conformance(factories.session_registry)
     if factories.step_up_store is not None:
         await assert_step_up_store_conformance(factories.step_up_store)
-    if factories.token_vault is not None:
-        await assert_token_vault_conformance(factories.token_vault)
     if factories.webauthn_challenge_store is not None:
         await assert_webauthn_challenge_store_conformance(factories.webauthn_challenge_store)
     if factories.websocket_connect_token_store is not None:

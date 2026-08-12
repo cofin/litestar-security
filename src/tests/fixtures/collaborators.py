@@ -5,7 +5,7 @@ Two kinds of thing live here.
 **Kit-backed builders.** Where ``litestar_security.testing`` already ships a
 double, the builder is a thin wrapper over it and adds only defaults. Where the
 kit ships a *production* adapter -- ``MemoryOAuthAccountStore``,
-``MemoryTokenVault``, ``MemoryOAuthTransactionStore``, ``AESGCMSecretProtector``,
+``MemoryOAuthTransactionStore``, ``AESGCMSecretProtector``,
 ``StoreRateLimiter`` -- the builder returns the real thing, so a test using it
 exercises real code rather than a double.
 
@@ -76,7 +76,6 @@ BACKEND_STORE_ATTRIBUTES: tuple[str, ...] = (
     "mfa",
     "mfa_login",
     "oauth_accounts",
-    "oauth_tokens",
     "oauth_transactions",
     "passkeys",
     "step_up",

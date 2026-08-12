@@ -24,22 +24,17 @@ from litestar_security.providers.oauth._transactions import OAuthTransactionProt
 
 __all__ = (
     "AccountLinkError",
-    "InMemoryOAuthRevocationRetryStore",
     "InvalidProviderGrantError",
     "LinkedProviderAccount",
     "MemoryOAuthAccountStore",
-    "MemoryTokenVault",
     "OAuthAccountError",
     "OAuthAccountService",
     "OAuthAccountStore",
     "OAuthLinkProof",
     "OAuthLoginOutcome",
-    "OAuthLoginResolution",
     "OAuthRevocationFailure",
-    "OAuthRevocationRetryStore",
     "ProviderTokenReference",
     "StoredProviderTokens",
-    "TokenVault",
     "UnlinkOutcome",
     "UnlinkStatus",
 )
@@ -77,13 +72,6 @@ class LinkedProviderAccount:
         ):
             message = "Linked provider account is invalid"
             raise ValueError(message)
-
-
-@dataclass(frozen=True, slots=True)
-class OAuthLoginResolution:
-    """Exact provider-identity lookup result; absence never implies email matching."""
-
-    linked: LinkedProviderAccount | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,15 +145,6 @@ class OAuthRevocationFailure:
     occurred_at: datetime
 
 
-@runtime_checkable
-class OAuthRevocationRetryStore(Protocol):
-    """Application-owned encrypted persistence for failed upstream revocation."""
-
-    async def schedule(self, failure: OAuthRevocationFailure, tokens: ProviderTokenSet) -> None:
-        """Persist encrypted retry material before the active vault is deleted."""
-        ...  # pragma: no cover
-
-
 @dataclass(frozen=True, slots=True)
 class OAuthLinkProof:
     """Consumed purpose-bound proof tied to account and security epoch."""
@@ -200,10 +179,6 @@ class OAuthLinkProof:
 @runtime_checkable
 class OAuthAccountStore(Protocol):
     """Atomic behavior-oriented provider account persistence boundary."""
-
-    async def resolve_login(self, identity: ProviderIdentity) -> OAuthLoginResolution:
-        """Resolve only the exact provider, issuer, and subject identity."""
-        ...  # pragma: no cover
 
     async def login(  # noqa: PLR0913 - aggregate mutation inputs remain explicit
         self,
@@ -275,47 +250,6 @@ class OAuthAccountStore(Protocol):
         """Resolve one account-owned provider link without crossing ownership."""
         ...  # pragma: no cover
 
-    async def link_identity(
-        self, account_id: str, identity: ProviderIdentity, grant: ProviderGrant, *, now: datetime
-    ) -> LinkedProviderAccount:
-        """Atomically link or reject a cross-account identity."""
-        ...  # pragma: no cover
-
-    async def unlink_identity(
-        self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
-    ) -> UnlinkOutcome:
-        """Atomically remove identity, login method, and grant."""
-        ...  # pragma: no cover
-
-    async def apply_grant(
-        self, account_id: str, provider_account_id: str, grant: ProviderGrant, *, now: datetime
-    ) -> LinkedProviderAccount:
-        """Atomically replace scopes only for an account-owned provider link."""
-        ...  # pragma: no cover
-
-
-@runtime_checkable
-class TokenVault(Protocol):
-    """Encrypted optimistic provider-token persistence boundary."""
-
-    async def put(self, provider_account_id: str, tokens: ProviderTokenSet, *, now: datetime) -> ProviderTokenReference:
-        """Encrypt and store a token set."""
-        ...  # pragma: no cover
-
-    async def get_for_refresh(self, provider_account_id: str, *, now: datetime) -> StoredProviderTokens | None:
-        """Decrypt a token set only for refresh."""
-        ...  # pragma: no cover
-
-    async def replace(
-        self, provider_account_id: str, *, expected_version: int, tokens: ProviderTokenSet, now: datetime
-    ) -> bool:
-        """Replace tokens only at the expected version."""
-        ...  # pragma: no cover
-
-    async def delete(self, provider_account_id: str) -> None:
-        """Delete retained provider credentials."""
-        ...  # pragma: no cover
-
 
 class OAuthAccountError(RuntimeError):
     """Stable secret-free account lifecycle failure."""
@@ -360,11 +294,11 @@ class MemoryOAuthAccountStore:
         self._lock = Lock()
         self._next_account = 1
         self._vault = (
-            MemoryTokenVault(provider=provider, client_id=client_id, protector=protector)
+            _MemoryTokenVault(provider=provider, client_id=client_id, protector=protector)
             if protector is not None
             else None
         )
-        self._retry_store = InMemoryOAuthRevocationRetryStore(protector) if protector is not None else None
+        self._retry_store = _MemoryOAuthRevocationRetryStore(protector) if protector is not None else None
 
     async def login(  # noqa: PLR0913 - aggregate mutation inputs remain explicit
         self,
@@ -479,13 +413,6 @@ class MemoryOAuthAccountStore:
         await self._retry_store.schedule(failure, tokens)
         return await self.discard_tokens(failure.provider_account_id, expected_version=expected_version)
 
-    async def resolve_login(self, identity: ProviderIdentity) -> OAuthLoginResolution:
-        """Resolve one exact provider identity."""
-        key = _identity_key(identity)
-        async with self._lock:
-            provider_account_id = self._identity_index.get(key)
-            return OAuthLoginResolution(None if provider_account_id is None else self._links[provider_account_id])
-
     async def resolve_provider_account(self, account_id: str, provider: str) -> LinkedProviderAccount | None:
         """Resolve one exact account-owned provider link."""
         if not _strict_text(account_id) or not _strict_text(provider):
@@ -569,55 +496,6 @@ class MemoryOAuthAccountStore:
             self._links[provider_account_id] = updated
             return updated
 
-    async def link_identity(
-        self, account_id: str, identity: ProviderIdentity, grant: ProviderGrant, *, now: datetime
-    ) -> LinkedProviderAccount:
-        """Atomically create one provider login method and grant."""
-        if not _strict_text(account_id) or not _aware(now):
-            raise OAuthAccountError
-        key = _identity_key(identity)
-        async with self._lock:
-            existing_id = self._identity_index.get(key)
-            if existing_id is not None:
-                existing = self._links[existing_id]
-                if existing.account_id != account_id:
-                    raise AccountLinkError
-                updated = replace(existing, grant=grant)
-                self._links[existing_id] = updated
-                return updated
-            digest = sha256("\0".join(key).encode()).hexdigest()
-            linked = LinkedProviderAccount(
-                provider_account_id=f"oauth_{digest}",
-                account_id=account_id,
-                provider=identity.provider,
-                issuer=identity.issuer,
-                subject=identity.subject,
-                grant=grant,
-                linked_at=now,
-            )
-            self._identity_index[key] = linked.provider_account_id
-            self._links[linked.provider_account_id] = linked
-            self._method_counts[account_id] = self._method_counts.get(account_id, 0) + 1
-            return linked
-
-    async def unlink_identity(
-        self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
-    ) -> UnlinkOutcome:
-        """Atomically remove provider identity, method, and grant."""
-        if not _strict_text(account_id) or not _strict_text(provider_account_id) or not _aware(now):
-            raise OAuthAccountError
-        async with self._lock:
-            linked = self._links.get(provider_account_id)
-            if linked is None or linked.account_id != account_id:
-                return UnlinkOutcome(UnlinkStatus.NOT_FOUND)
-            count = self._method_counts.get(account_id, 0)
-            if require_remaining and count <= 1:
-                return UnlinkOutcome(UnlinkStatus.FINAL_METHOD)
-            del self._links[provider_account_id]
-            del self._identity_index[(linked.provider, linked.issuer, linked.subject)]
-            self._method_counts[account_id] = max(0, count - 1)
-            return UnlinkOutcome(UnlinkStatus.UNLINKED, provider_account_id)
-
     async def unlink(
         self, account_id: str, provider: str, provider_account_id: str, *, require_remaining: bool, now: datetime
     ) -> UnlinkOutcome:
@@ -638,20 +516,6 @@ class MemoryOAuthAccountStore:
             self._method_counts[account_id] = max(0, count - 1)
             return UnlinkOutcome(UnlinkStatus.UNLINKED, provider_account_id)
 
-    async def apply_grant(
-        self, account_id: str, provider_account_id: str, grant: ProviderGrant, *, now: datetime
-    ) -> LinkedProviderAccount:
-        """Atomically replace a provider grant."""
-        if not _strict_text(account_id) or not _aware(now):
-            raise OAuthAccountError
-        async with self._lock:
-            linked = self._links.get(provider_account_id)
-            if linked is None or linked.account_id != account_id:
-                raise OAuthAccountError
-            updated = replace(linked, grant=grant)
-            self._links[provider_account_id] = updated
-            return updated
-
 
 @dataclass(slots=True)
 class _VaultRecord:
@@ -659,7 +523,7 @@ class _VaultRecord:
     reference: ProviderTokenReference
 
 
-class MemoryTokenVault:
+class _MemoryTokenVault:
     """Encrypted in-memory reference vault with optimistic versioning."""
 
     __slots__ = ("_lock", "_protector", "_records", "client_id", "provider")
@@ -760,7 +624,7 @@ class _OAuthRevocationRetryRecord:
     protected: ProtectedOAuthSecret = field(repr=False)
 
 
-class InMemoryOAuthRevocationRetryStore:
+class _MemoryOAuthRevocationRetryStore:
     """Lock-protected encrypted reference persistence for OAuth revocation retries."""
 
     __slots__ = ("_lock", "_protector", "_records")

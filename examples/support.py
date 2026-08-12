@@ -119,9 +119,7 @@ class _ExampleOAuthService:
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
     ) -> OAuthCallbackOutcome:
         del code, state, request
-        return cast(
-            "OAuthCallbackOutcome", SimpleNamespace(operation=OAuthOperation.LOGIN, provider=provider)
-        )
+        return cast("OAuthCallbackOutcome", SimpleNamespace(operation=OAuthOperation.LOGIN, provider=provider))
 
     async def establish_login(self, outcome: object, *, request: Request[Any, Any, Any]) -> OAuthOperationSummary:
         del request

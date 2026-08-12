@@ -38,7 +38,7 @@ _ATOMIC_METHODS = {
     WebAuthnChallengeStore: ("consume",),
     PasskeyStore: ("record_assertion",),
     OAuthTransactionStore: ("consume",),
-    OAuthAccountStore: ("unlink_identity",),
+    OAuthAccountStore: ("login", "link", "upgrade", "unlink", "stage_revocation_retry"),
     APIKeyStore: ("rotate",),
     StepUpStore: ("consume",),
     WebSocketConnectTokenStore: ("consume",),

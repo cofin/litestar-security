@@ -88,6 +88,8 @@ REMOVED_PUBLIC_NAMES: frozenset[str] = frozenset({
     "JWKSFetchResponse",
     "LocalAccountRecord",
     "OAuthHTTPRequest",
+    "OAuthLoginResolution",
+    "OAuthRevocationRetryStore",
     "OAuthRouteService",
     "OAuthRouteStatus",
     "PasskeyRecord",
@@ -95,6 +97,7 @@ REMOVED_PUBLIC_NAMES: frozenset[str] = frozenset({
     "RouteStatus",
     "SessionRecord",
     "StepUpRecord",
+    "TokenVault",
     "WebSocketConnectTokenRecord",
 })
 FORBIDDEN_CLASS_SUFFIXES: tuple[str, ...] = ("Record", "Request", "Response", "Result")

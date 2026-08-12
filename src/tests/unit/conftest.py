@@ -106,12 +106,6 @@ def oauth_transaction_store(security_backend: InMemorySecurityBackend) -> object
 
 
 @pytest.fixture
-def token_vault(security_backend: InMemorySecurityBackend) -> object:
-    """Return the backend's token vault, which rotates stored tokens under compare-and-swap."""
-    return security_backend.oauth_tokens
-
-
-@pytest.fixture
 def connect_token_store(security_backend: InMemorySecurityBackend) -> object:
     """Return the backend's WebSocket connect-token store, whose tickets are consumed once."""
     return security_backend.websocket_connect_tokens
