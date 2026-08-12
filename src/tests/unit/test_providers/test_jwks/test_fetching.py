@@ -17,9 +17,9 @@ from litestar_security.authentication import InvalidCredentials, VerificationUna
 from litestar_security.providers.jwks import (
     AsyncJWKSFetcher,
     CachedJWKSProvider,
-    JWKSCacheEntry,
-    JWKSFetchRequest,
-    JWKSFetchResponse,
+    JWKSFetchOutcome,
+    JWKSFetchTarget,
+    JWKSSource,
     NoOpSecurityMetrics,
     SecurityMetrics,
     SyncJWKSFetcher,
@@ -74,7 +74,7 @@ def test_jwks_worker_limits_reject_invalid_capacity(kwargs: dict[str, object]) -
 
 
 async def test_jwks_fetcher_normalization_selects_async_or_bounded_sync_once() -> None:
-    response = JWKSFetchResponse(status_code=200, body=b'{"keys":[]}')
+    response = JWKSFetchOutcome(status_code=200, body=b'{"keys":[]}')
     metrics: list[str] = []
 
     class Metrics:
@@ -86,14 +86,14 @@ async def test_jwks_fetcher_normalization_selects_async_or_bounded_sync_once() -
             del name, value, attributes
 
     class AsyncFetcher:
-        async def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+        async def fetch(self, _request: JWKSFetchTarget) -> JWKSFetchOutcome:
             return response
 
     class SyncFetcher:
-        def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+        def fetch(self, _request: JWKSFetchTarget) -> JWKSFetchOutcome:
             return response
 
-    request = JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
+    request = JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
     async_fetcher = AsyncFetcher()
     normalized_async = normalize_fetcher(async_fetcher, limiter=CapacityLimiter(1))
     normalized_sync = normalize_fetcher(SyncFetcher(), limiter=CapacityLimiter(2), metrics=Metrics())
@@ -113,8 +113,8 @@ async def test_jwks_async_fetcher_normalization_exposes_async_close(close_mode: 
     closes: list[str] = []
 
     class Fetcher:
-        async def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
-            return JWKSFetchResponse(status_code=200)
+        async def fetch(self, _request: JWKSFetchTarget) -> JWKSFetchOutcome:
+            return JWKSFetchOutcome(status_code=200)
 
     class SyncCloseFetcher(Fetcher):
         def aclose(self) -> None:
@@ -152,16 +152,16 @@ def test_jwks_fetcher_normalization_rejects_invalid_configuration() -> None:
 async def test_jwks_sync_fetcher_is_bounded_without_blocking_the_event_loop() -> None:
     started = ThreadEvent()
     release = ThreadEvent()
-    calls: list[JWKSFetchResponse] = []
+    calls: list[JWKSFetchOutcome] = []
 
     class SyncFetcher:
-        def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+        def fetch(self, _request: JWKSFetchTarget) -> JWKSFetchOutcome:
             started.set()
             release.wait(timeout=1)
-            return JWKSFetchResponse(status_code=200, body=b'{"keys":[]}')
+            return JWKSFetchOutcome(status_code=200, body=b'{"keys":[]}')
 
     normalized = normalize_fetcher(SyncFetcher(), limiter=CapacityLimiter(1))
-    request = JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
+    request = JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
 
     async def fetch() -> None:
         calls.append(await normalized.fetch(request))
@@ -381,7 +381,7 @@ async def test_jwks_sync_fetcher_timeout_maps_to_unavailable(
     release = ThreadEvent()
 
     class SyncFetcher:
-        def fetch(self, _request: JWKSFetchRequest) -> JWKSFetchResponse:
+        def fetch(self, _request: JWKSFetchTarget) -> JWKSFetchOutcome:
             release.wait(timeout=1)
             return _jwks_response(_verification_jwk(jwt_key_material))
 
@@ -414,7 +414,7 @@ def _jwt_config(
 
 
 def _RecordingJWKSFetcher(  # noqa: N802 - constructor-shaped adapter over the shared collaborator
-    *responses: JWKSFetchResponse | Exception | Callable[[JWKSFetchRequest], JWKSFetchResponse],
+    *responses: JWKSFetchOutcome | Exception | Callable[[JWKSFetchTarget], JWKSFetchOutcome],
 ) -> RecordingJWKSFetcher:
     return RecordingJWKSFetcher(list(responses))
 
@@ -436,16 +436,16 @@ def _jwks_response(
     body: bytes | None = None,
     cache_control: str | None = None,
     etag: str | None = None,
-) -> JWKSFetchResponse:
+) -> JWKSFetchOutcome:
     headers: dict[str, str] = {"content-type": "application/json"}
     if cache_control is not None:
         headers["cache-control"] = cache_control
     if etag is not None:
         headers["etag"] = etag
-    return JWKSFetchResponse(status_code=status_code, body=_jwks_body(*keys) if body is None else body, headers=headers)
+    return JWKSFetchOutcome(status_code=status_code, body=_jwks_body(*keys) if body is None else body, headers=headers)
 
 
 def _jwks_entry(
     issuer: str = _JWT_ISSUER, jwks_uri: str = _JWKS_URI, algorithms: frozenset[str] = frozenset({"EdDSA"})
-) -> JWKSCacheEntry:
-    return JWKSCacheEntry(issuer=issuer, jwks_uri=jwks_uri, algorithms=algorithms)
+) -> JWKSSource:
+    return JWKSSource(issuer=issuer, jwks_uri=jwks_uri, algorithms=algorithms)

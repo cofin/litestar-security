@@ -21,14 +21,14 @@ from litestar_security.accounts._passwords import PasswordHasher, PasswordPolicy
 from litestar_security.accounts._purpose_tokens import PurposeTokenCodec, PurposeTokenDelivery, RegistrationCommand
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, validate_rate_limits
 from litestar_security.accounts._records import (
-    ConsumeOutcome,
-    ConsumeStatus,
     InvalidInvitation,
     LifecycleAccepted,
     LifecycleRejected,
     RegistrationMode,
     RegistrationStatus,
     TokenPurpose,
+    VerificationOutcome,
+    VerificationStatus,
     lifecycle_event,
     normalize_identifier,
 )
@@ -295,7 +295,7 @@ class VerificationTokenService(Generic[UserT]):
 
     async def consume(
         self, token: object, *, now: datetime | None = None, client_key: str | None = None
-    ) -> "ConsumeOutcome | RateLimited | VerificationUnavailable":
+    ) -> "VerificationOutcome | RateLimited | VerificationUnavailable":
         """Verify purpose locally and delegate single-use mutation atomically.
 
         The budget is keyed on the client bucket only: the route consumes a
@@ -319,7 +319,7 @@ class VerificationTokenService(Generic[UserT]):
                 return limited
         proof = self.tokens.proof(token, expected_purpose=TokenPurpose.VERIFICATION)
         if proof is None:
-            return ConsumeOutcome(ConsumeStatus.INVALID)
+            return VerificationOutcome(VerificationStatus.INVALID)
         try:
             occurred_at = aware_utc_time(self.clock() if now is None else now)
             return await self.store.consume_and_verify(

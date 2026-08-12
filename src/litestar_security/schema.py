@@ -120,7 +120,7 @@ class RouteError(WireStruct, frozen=True, forbid_unknown_fields=False):
     carries one, as a list of ``{message, key, source}`` entries, so ``extra``
     is a member clients see in practice rather than a theoretical one.
 
-    Distinguish this from :class:`~litestar_security.accounts.RouteStatus`,
+    Distinguish this from :class:`~litestar_security.accounts.OperationMessage`,
     which is the body a handler *returns* - the 200 confirmations and the 409
     conflict. The two are separate schemas because the distinction that decides
     the shape is raised-versus-returned, not error-versus-success.

@@ -6,7 +6,7 @@ import httpx
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException
 
-from litestar_security.providers.jwks import HttpxJWKSFetcher, JWKSFetchRequest, JWKSFetchResponse
+from litestar_security.providers.jwks import HttpxJWKSFetcher, JWKSFetchOutcome, JWKSFetchTarget
 from litestar_security.providers.jwks import _httpx as jwks_httpx
 from tests.fixtures.collaborators import ChunkedByteStream as _ChunkedOIDCStream
 from tests.fixtures.collaborators import RecordingMockTransport as _RecordingMockTransport
@@ -40,7 +40,7 @@ async def test_httpx_jwks_fetcher_rejects_non_absolute_https_uri_before_resoluti
     fetcher = HttpxJWKSFetcher(transport=transport, resolver=resolver)
 
     with pytest.raises(jwks_httpx._FetchGuardError):  # noqa: SLF001 - assert the private transport boundary failure
-        await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=uri))
+        await fetcher.fetch(JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri=uri))
 
     assert transport.requests == []
     await fetcher.aclose()
@@ -55,7 +55,7 @@ async def test_httpx_jwks_fetcher_rejects_encoded_response_before_decoding() -> 
     fetcher = HttpxJWKSFetcher(transport=_RecordingMockTransport(lambda _request: response), resolver=resolver)
 
     with pytest.raises(jwks_httpx._FetchGuardError):  # noqa: SLF001 - assert the private transport boundary failure
-        await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI))
+        await fetcher.fetch(JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI))
 
     assert stream.was_iterated is False
     await fetcher.aclose()
@@ -75,9 +75,9 @@ async def test_httpx_jwks_fetcher_sends_if_none_match_returns_unfollowed_redirec
     transport = _RecordingMockTransport(handler)
     fetcher = HttpxJWKSFetcher(transport=transport, resolver=resolver)
 
-    response = await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, etag='"v1"'))
+    response = await fetcher.fetch(JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI, etag='"v1"'))
 
-    assert response == JWKSFetchResponse(status_code=304, body=b"", headers={"etag": '"v1"'})
+    assert response == JWKSFetchOutcome(status_code=304, body=b"", headers={"etag": '"v1"'})
     await fetcher.aclose()
     await fetcher.aclose()
     assert transport.was_closed is True
@@ -94,7 +94,7 @@ async def test_httpx_jwks_fetcher_returns_redirect_verbatim_without_following_lo
     )
     fetcher = HttpxJWKSFetcher(transport=transport, resolver=resolver)
 
-    response = await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI))
+    response = await fetcher.fetch(JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI))
 
     assert response.status_code == 301
     assert response.headers["location"] == "https://private.example/jwks.json"
@@ -122,7 +122,7 @@ async def test_httpx_jwks_fetcher_checks_byte_ceiling_before_extending(monkeypat
     )
 
     with pytest.raises(jwks_httpx._FetchGuardError):  # noqa: SLF001 - assert the private transport boundary failure
-        await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI))
+        await fetcher.fetch(JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI))
 
     await fetcher.aclose()
 
@@ -133,7 +133,7 @@ async def test_httpx_jwks_fetcher_enforces_ssrf_boundary_unless_private_hosts_ar
     async def private_resolver(_host: str, _port: int) -> tuple[str, ...]:
         return ("127.0.0.1",)
 
-    request = JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
+    request = JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
     denied = HttpxJWKSFetcher(
         transport=_RecordingMockTransport(lambda _request: httpx.Response(200)), resolver=private_resolver
     )
@@ -163,7 +163,7 @@ async def test_httpx_jwks_fetcher_maps_resolution_failures_and_rejects_invalid_d
     async def malformed_resolver(_host: str, _port: int) -> tuple[str, ...]:
         return ("not-an-ip",)
 
-    request = JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
+    request = JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
     fetchers = tuple(
         HttpxJWKSFetcher(transport=_RecordingMockTransport(lambda _request: httpx.Response(200)), resolver=resolver)
         for resolver in (failed_resolver, empty_resolver, malformed_resolver)
@@ -187,7 +187,7 @@ async def test_httpx_jwks_fetcher_accepts_a_public_literal_without_dns() -> None
         resolver=fail_resolution,
     )
 
-    response = await fetcher.fetch(JWKSFetchRequest(issuer=_JWT_ISSUER, jwks_uri="https://93.184.216.34/jwks.json"))
+    response = await fetcher.fetch(JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri="https://93.184.216.34/jwks.json"))
 
     assert response.status_code == 200
     await fetcher.aclose()

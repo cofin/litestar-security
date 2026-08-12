@@ -86,7 +86,7 @@ def test_account_capabilities_are_runtime_structural(protocol: type[object], met
 
 def test_local_account_commands_and_results_are_secret_safe() -> None:
     now = datetime(2026, 7, 26, 23, tzinfo=timezone.utc)
-    account = accounts_module.LocalAccountRecord(
+    account = accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="user@example.com",
         display_name="User",
@@ -137,7 +137,7 @@ def test_local_account_commands_and_results_are_secret_safe() -> None:
         accounts_module.PasswordChangeOutcome(accounts_module.PasswordChangeStatus.CHANGED, security_epoch=2),
         accounts_module.RevokeLoginMethodOutcome(accounts_module.RevokeLoginMethodStatus.REVOKED),
         accounts_module.RegistrationOutcome(accounts_module.RegistrationStatus.CREATED, account),
-        accounts_module.ConsumeOutcome(accounts_module.ConsumeStatus.CONSUMED, account.account_id, 1),
+        accounts_module.VerificationOutcome(accounts_module.VerificationStatus.CONSUMED, account.account_id, 1),
         accounts_module.PasswordResetOutcome(accounts_module.PasswordResetStatus.RESET, account.account_id, 2),
         accounts_module.RegistrationPolicy.disabled(),
         accounts_module.SessionBindingConfig(pepper=b"p" * 32),
@@ -150,7 +150,7 @@ def test_local_account_commands_and_results_are_secret_safe() -> None:
             expires_at=now + timedelta(hours=1),
         ),
         accounts_module.SessionBindingProof(binding_id=_BINDING_ID, digest=binding_digest),
-        accounts_module.SessionRecord(
+        accounts_module.UserAuthSession(
             session_id=_SESSION_ID,
             binding_id=_BINDING_ID,
             binding_digest=binding_digest,
@@ -206,7 +206,7 @@ def test_local_account_commands_and_results_are_secret_safe() -> None:
 
 
 def test_atomic_results_reject_contradictory_status_payloads() -> None:
-    account: accounts_module.LocalAccountRecord[object] = accounts_module.LocalAccountRecord(
+    account: accounts_module.LocalAccountState[object] = accounts_module.LocalAccountState(
         account_id="account-1",
         normalized_identifier="user@example.com",
         display_name=None,
@@ -219,8 +219,8 @@ def test_atomic_results_reject_contradictory_status_payloads() -> None:
         partial(accounts_module.PasswordChangeOutcome, accounts_module.PasswordChangeStatus.CONFLICT, 2),
         partial(accounts_module.RegistrationOutcome, accounts_module.RegistrationStatus.CREATED),
         partial(accounts_module.RegistrationOutcome, accounts_module.RegistrationStatus.DUPLICATE, account),
-        partial(accounts_module.ConsumeOutcome, accounts_module.ConsumeStatus.CONSUMED),
-        partial(accounts_module.ConsumeOutcome, accounts_module.ConsumeStatus.INVALID, account.account_id, 1),
+        partial(accounts_module.VerificationOutcome, accounts_module.VerificationStatus.CONSUMED),
+        partial(accounts_module.VerificationOutcome, accounts_module.VerificationStatus.INVALID, account.account_id, 1),
         partial(accounts_module.PasswordResetOutcome, accounts_module.PasswordResetStatus.RESET),
         partial(
             accounts_module.PasswordResetOutcome, accounts_module.PasswordResetStatus.INVALID, account.account_id, 1
@@ -244,7 +244,7 @@ def test_atomic_results_reject_contradictory_status_payloads() -> None:
 
     assert accounts_module.PasswordChangeOutcome(accounts_module.PasswordChangeStatus.CONFLICT).security_epoch is None
     assert accounts_module.RegistrationOutcome(accounts_module.RegistrationStatus.DUPLICATE).account is None
-    assert accounts_module.ConsumeOutcome(accounts_module.ConsumeStatus.INVALID).account_id is None
+    assert accounts_module.VerificationOutcome(accounts_module.VerificationStatus.INVALID).account_id is None
     assert accounts_module.PasswordResetOutcome(accounts_module.PasswordResetStatus.EXPIRED).account_id is None
     assert (
         accounts_module.RefreshRotationOutcome(
@@ -261,7 +261,7 @@ def test_atomic_results_reject_contradictory_status_payloads() -> None:
 def test_account_password_session_and_refresh_contracts_share_one_strict_epoch_domain(epoch: object) -> None:
     now = _ACCOUNT_NOW
     factories = (
-        lambda: accounts_module.LocalAccountRecord(
+        lambda: accounts_module.LocalAccountState(
             account_id="account-1",
             normalized_identifier="user@example.com",
             display_name=None,
@@ -276,7 +276,7 @@ def test_account_password_session_and_refresh_contracts_share_one_strict_epoch_d
         lambda: accounts_module.SessionAuthentication(
             _SESSION_ID, _BINDING_ID, "account-1", epoch, now, now + timedelta(hours=1)
         ),
-        lambda: accounts_module.SessionRecord(
+        lambda: accounts_module.UserAuthSession(
             _SESSION_ID, _BINDING_ID, b"d" * 32, "account-1", epoch, now, now, now, now + timedelta(hours=1)
         ),
         lambda: accounts_module.CreateSessionCommand(
@@ -319,7 +319,7 @@ def test_local_account_requires_exact_boolean_state(field_name: str, value: obje
     values[field_name] = value
 
     with pytest.raises(ValueError, match="Local account"):
-        accounts_module.LocalAccountRecord(**values)  # type: ignore[arg-type]
+        accounts_module.LocalAccountState(**values)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(("field_name", "value"), [("active", 1), ("verified", "false")])

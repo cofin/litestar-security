@@ -28,8 +28,8 @@ from litestar_security.websocket._lifecycle import websocket_policy_fingerprint
 __all__ = (
     "InMemoryWebSocketConnectTokenStore",
     "IssuedWebSocketConnectToken",
+    "WebSocketConnectAuthorization",
     "WebSocketConnectTokenIssuer",
-    "WebSocketConnectTokenRecord",
     "WebSocketConnectTokenService",
     "WebSocketConnectTokenStore",
     "WebSocketConnectTokenUnavailableError",
@@ -49,7 +49,7 @@ _DIGEST_BYTES = sha256().digest_size
 
 
 @dataclass(frozen=True, slots=True)
-class WebSocketConnectTokenRecord:
+class WebSocketConnectAuthorization:
     """Storage-safe one-time connect token binding containing no recoverable value."""
 
     connect_token_id: str
@@ -115,13 +115,13 @@ class IssuedWebSocketConnectToken:
 class WebSocketConnectTokenStore(Protocol):
     """Application-owned atomic persistence port for one-time connect tokens."""
 
-    async def create(self, record: WebSocketConnectTokenRecord) -> None:
+    async def create(self, record: WebSocketConnectAuthorization) -> None:
         """Persist one new digest-only record, rejecting duplicate IDs."""
         ...  # pragma: no cover
 
     async def consume(
         self, *, connect_token_id: str, digest: bytes, now: datetime
-    ) -> WebSocketConnectTokenRecord | None:
+    ) -> WebSocketConnectAuthorization | None:
         """Atomically return and delete one matching unexpired record."""
         ...  # pragma: no cover
 
@@ -134,17 +134,17 @@ class WebSocketConnectTokenUnavailableError(RuntimeError):
 class InMemoryWebSocketConnectTokenStore:
     """Deterministic concurrency-safe connect token store for tests and examples."""
 
-    _records: dict[str, WebSocketConnectTokenRecord] = field(
-        default_factory=dict[str, WebSocketConnectTokenRecord], init=False, repr=False
+    _records: dict[str, WebSocketConnectAuthorization] = field(
+        default_factory=dict[str, WebSocketConnectAuthorization], init=False, repr=False
     )
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     @property
-    def records(self) -> tuple[WebSocketConnectTokenRecord, ...]:
+    def records(self) -> tuple[WebSocketConnectAuthorization, ...]:
         """Return a stable snapshot of digest-only records."""
         return tuple(self._records.values())
 
-    async def create(self, record: WebSocketConnectTokenRecord) -> None:
+    async def create(self, record: WebSocketConnectAuthorization) -> None:
         """Persist one record while rejecting duplicate public IDs."""
         async with self._lock:
             if record.connect_token_id in self._records:
@@ -154,7 +154,7 @@ class InMemoryWebSocketConnectTokenStore:
 
     async def consume(
         self, *, connect_token_id: str, digest: bytes, now: datetime
-    ) -> WebSocketConnectTokenRecord | None:
+    ) -> WebSocketConnectAuthorization | None:
         """Atomically return and delete one matching unexpired record."""
         current = aware_utc(now)
         async with self._lock:
@@ -210,7 +210,7 @@ class WebSocketConnectTokenService:
         connect_token_id = _encode_connect_token_segment(self._entropy(_CONNECT_TOKEN_ID_BYTES))
         secret = _encode_connect_token_segment(self._entropy(_CONNECT_TOKEN_SECRET_BYTES))
         selected_restrictions = restrictions if restrictions is not None else CredentialRestrictions()
-        record = WebSocketConnectTokenRecord(
+        record = WebSocketConnectAuthorization(
             connect_token_id=connect_token_id,
             digest=_connect_token_digest(connect_token_id, secret),
             subject_id=cast("str", principal.id),
@@ -235,7 +235,7 @@ class WebSocketConnectTokenService:
         origin: str,
         policy_fingerprint: str,
         current_security_epoch: Callable[[str], Awaitable[int | None]],
-    ) -> WebSocketConnectTokenRecord | None:
+    ) -> WebSocketConnectAuthorization | None:
         """Atomically consume a connect token before authoritative epoch and route checks."""
         proof = _connect_token_proof(value)
         if proof is None:

@@ -336,6 +336,7 @@ async def test_aggregate_link_scope_upgrade_and_unlink_apply_token_policy() -> N
     upgraded = await service.apply_scope_upgrade(
         proof("oauth-scope-upgrade"),
         linked.provider_account_id,
+        identity(),
         grant("email"),
         tokens(access="upgraded"),
         required_scopes=frozenset({"email"}),
@@ -524,7 +525,9 @@ async def test_refresh_without_retention_or_refresh_token_and_revoke_cleanup() -
     await service.revoke(linked.provider_account_id, provider, now=NOW)
     assert provider.revocations == ["access_token"]
 
-    await store.upgrade("account-1", linked.provider_account_id, grant(), tokens(), retain_tokens=True, now=NOW)
+    await store.upgrade(
+        "account-1", linked.provider_account_id, identity(), grant(), tokens(), retain_tokens=True, now=NOW
+    )
     await service.revoke(linked.provider_account_id, provider, now=NOW)
     assert provider.revocations == ["access_token", "refresh_token", "access_token"]
     assert await store.get_tokens(linked.provider_account_id, now=NOW) is None

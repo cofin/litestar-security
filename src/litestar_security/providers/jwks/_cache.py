@@ -18,14 +18,7 @@ from litestar_security.providers._internal import raise_config
 from litestar_security.providers.jwks._internal import strict_value
 from litestar_security.providers.jwt import VerificationKey
 
-__all__ = (
-    "InMemoryJWKSCache",
-    "JWKSCache",
-    "JWKSCacheCoordinator",
-    "JWKSCacheEntry",
-    "JWKSCachePolicy",
-    "JWKSSnapshot",
-)
+__all__ = ("InMemoryJWKSCache", "JWKSCache", "JWKSCacheCoordinator", "JWKSCachePolicy", "JWKSSnapshot", "JWKSSource")
 
 
 SelectionKey: TypeAlias = tuple[str, str]
@@ -57,7 +50,7 @@ _SUPPORTED_REMOTE_ALGORITHMS = frozenset({"EdDSA", "ES256", "RS256"})
 
 
 @dataclass(frozen=True, slots=True)
-class JWKSCacheEntry:
+class JWKSSource:
     """One exact configured issuer and JWKS source."""
 
     issuer: str

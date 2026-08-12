@@ -252,7 +252,7 @@ def test_mfa_value_and_service_configuration_rejects_invalid_contracts() -> None
     with pytest.raises(ValueError, match="Recovery-code digest"):
         accounts_module.RecoveryCodeDigest("a1", "v1", b"short")
     with pytest.raises(ValueError, match="Step-up record"):
-        accounts_module.StepUpRecord(
+        accounts_module.StepUpGrantState(
             grant_digest=b"short",
             transport_digest=b"t" * 32,
             principal_id="a1",
@@ -702,7 +702,7 @@ async def test_public_conformance_helpers_execute_factor_atomicity_matrix() -> N
             clone_risk=False,
             now=now,
         )
-        is accounts_module.AssertionRecordStatus.CONFLICT
+        is accounts_module.PasskeyAssertionStatus.CONFLICT
     )
     assert len(await passkey_store.list_credentials("account-1")) == 1
     assert await passkey_store.rename_credential("other", credential.credential_id, "No") is None

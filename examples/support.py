@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 from cryptography.hazmat.primitives import serialization
@@ -30,10 +31,11 @@ from litestar_security.providers.iap import GoogleIAPClaims, GoogleIAPConfig
 from litestar_security.providers.jwt import LocalKeyRing, SigningKey
 from litestar_security.providers.oauth import (
     OAuthAuthorization,
+    OAuthCallbackOutcome,
     OAuthConfig,
     OAuthLogout,
     OAuthOperation,
-    OAuthRouteStatus,
+    OAuthOperationSummary,
 )
 from litestar_security.providers.oidc import ServiceTokenConfig
 from litestar_security.testing import InMemoryLocalAccountStore, InMemorySecurityBackend
@@ -113,17 +115,25 @@ class _ExampleOAuthService:
             ),
         )
 
-    async def callback(
+    async def complete_callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteStatus:
+    ) -> OAuthCallbackOutcome:
         del code, state, request
-        return OAuthRouteStatus(detail="Authenticated.", provider_account_id=f"{provider}-account")
+        return cast(
+            "OAuthCallbackOutcome", SimpleNamespace(operation=OAuthOperation.LOGIN, provider=provider)
+        )
 
-    async def unlink(self, **_kwargs: object) -> OAuthRouteStatus:
-        return OAuthRouteStatus(detail="Unlinked.")
+    async def establish_login(self, outcome: object, *, request: Request[Any, Any, Any]) -> OAuthOperationSummary:
+        del request
+        return OAuthOperationSummary(
+            detail="Authenticated.", provider_account_id=f"{cast('Any', outcome).provider}-account"
+        )
 
-    async def revoke(self, **_kwargs: object) -> OAuthRouteStatus:
-        return OAuthRouteStatus(detail="Revoked.")
+    async def unlink(self, **_kwargs: object) -> OAuthOperationSummary:
+        return OAuthOperationSummary(detail="Unlinked.")
+
+    async def revoke(self, **_kwargs: object) -> OAuthOperationSummary:
+        return OAuthOperationSummary(detail="Revoked.")
 
     async def logout(self, **_kwargs: object) -> OAuthLogout:
         return OAuthLogout()

@@ -298,13 +298,13 @@ Configure each trusted ``(issuer, jwks_uri)`` pair explicitly:
    from litestar_security import SecurityConfig, SecurityPlugin
    from litestar_security.config import SecurityMetrics, WorkerLimits
    from litestar_security.providers import CachedJWKSProvider, HttpxJWKSFetcher
-   from litestar_security.providers import JWKSCacheEntry, JWKSCachePolicy
+   from litestar_security.providers import JWKSSource, JWKSCachePolicy
 
 
    def create_remote_app(workers: WorkerLimits, metrics: SecurityMetrics) -> Litestar:
        provider = CachedJWKSProvider(
            entries=(
-               JWKSCacheEntry(
+               JWKSSource(
                    issuer="https://id.example.com/realms/production",
                    jwks_uri="https://id.example.com/realms/production/protocol/openid-connect/certs",
                    algorithms=frozenset({"EdDSA", "RS256"}),

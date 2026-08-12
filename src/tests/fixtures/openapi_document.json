@@ -268,7 +268,7 @@
         "title": "OAuthLink",
         "type": "object"
       },
-      "OAuthRouteStatus": {
+      "OAuthOperationSummary": {
         "properties": {
           "account_id": {
             "oneOf": [
@@ -307,7 +307,7 @@
         "required": [
           "detail"
         ],
-        "title": "OAuthRouteStatus",
+        "title": "OAuthOperationSummary",
         "type": "object"
       },
       "OAuthScopeUpgrade": {
@@ -359,6 +359,19 @@
           "logout_token"
         ],
         "title": "OIDCBackchannelLogout",
+        "type": "object"
+      },
+      "OperationMessage": {
+        "properties": {
+          "detail": {
+            "description": "A human-readable outcome that never names an account.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "OperationMessage",
         "type": "object"
       },
       "PasskeyAuthenticationStart": {
@@ -548,19 +561,6 @@
           "status_code"
         ],
         "title": "RouteError",
-        "type": "object"
-      },
-      "RouteStatus": {
-        "properties": {
-          "detail": {
-            "description": "A human-readable outcome that never names an account.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "detail"
-        ],
-        "title": "RouteStatus",
         "type": "object"
       },
       "StepUpAuthorization": {
@@ -811,7 +811,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/OperationMessage"
                 }
               }
             },
@@ -1187,7 +1187,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/OperationMessage"
                 }
               }
             },
@@ -1233,7 +1233,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/OperationMessage"
                 }
               }
             },
@@ -1308,7 +1308,7 @@
                 "schema": {
                   "oneOf": [
                     {
-                      "$ref": "#/components/schemas/OAuthRouteStatus"
+                      "$ref": "#/components/schemas/OAuthOperationSummary"
                     },
                     {}
                   ]
@@ -1512,7 +1512,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/OAuthOperationSummary"
                 }
               }
             },
@@ -1699,7 +1699,7 @@
                   "oneOf": [
                     {},
                     {
-                      "$ref": "#/components/schemas/OAuthRouteStatus"
+                      "$ref": "#/components/schemas/OAuthOperationSummary"
                     }
                   ]
                 }
@@ -1799,7 +1799,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/OAuthOperationSummary"
                 }
               }
             },
@@ -1996,7 +1996,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/OAuthOperationSummary"
                 }
               }
             },
@@ -2101,7 +2101,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OAuthRouteStatus"
+                  "$ref": "#/components/schemas/OAuthOperationSummary"
                 }
               }
             },
@@ -2658,7 +2658,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/OperationMessage"
                 }
               }
             },
@@ -2766,7 +2766,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/OperationMessage"
                 }
               }
             },
@@ -2812,7 +2812,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/OperationMessage"
                 }
               }
             },
@@ -2873,7 +2873,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/OperationMessage"
                 }
               }
             },
@@ -3049,7 +3049,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/OperationMessage"
                 }
               }
             },
@@ -3278,7 +3278,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/OperationMessage"
                 }
               }
             },
@@ -3574,7 +3574,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/OperationMessage"
                 }
               }
             },
@@ -3768,7 +3768,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/OperationMessage"
                 }
               }
             },
@@ -3962,7 +3962,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStatus"
+                  "$ref": "#/components/schemas/OperationMessage"
                 }
               }
             },

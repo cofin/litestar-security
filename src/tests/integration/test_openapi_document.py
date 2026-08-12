@@ -33,6 +33,7 @@ import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -65,7 +66,8 @@ from litestar_security.providers.oauth import (
     OAuthAuthorization,
     OAuthConfig,
     OAuthLogout,
-    OAuthRouteStatus,
+    OAuthOperation,
+    OAuthOperationSummary,
     OIDCLogoutIdentity,
     OIDCLogoutLifecycleService,
 )
@@ -92,7 +94,7 @@ class _Provider:
     name = "example"
 
 
-class _OAuthRouteService:
+class _OAuthLifecycle:
     """Route-shaped OAuth service: the document depends on signatures, not behavior."""
 
     provider_names = frozenset({"example"})
@@ -104,17 +106,21 @@ class _OAuthRouteService:
             binding_cookie=Cookie(key="__Host-litestar-security-oauth", value="binding", path="/"),
         )
 
-    async def callback(self, **kwargs: object) -> OAuthRouteStatus:
+    async def complete_callback(self, **kwargs: object) -> object:
         del kwargs
-        return OAuthRouteStatus(detail="Authenticated.")
+        return SimpleNamespace(operation=OAuthOperation.LOGIN)
 
-    async def unlink(self, **kwargs: object) -> OAuthRouteStatus:
-        del kwargs
-        return OAuthRouteStatus(detail="Unlinked.")
+    async def establish_login(self, outcome: object, **kwargs: object) -> OAuthOperationSummary:
+        del outcome, kwargs
+        return OAuthOperationSummary(detail="Authenticated.")
 
-    async def revoke(self, **kwargs: object) -> OAuthRouteStatus:
+    async def unlink(self, **kwargs: object) -> OAuthOperationSummary:
         del kwargs
-        return OAuthRouteStatus(detail="Revoked.")
+        return OAuthOperationSummary(detail="Unlinked.")
+
+    async def revoke(self, **kwargs: object) -> OAuthOperationSummary:
+        del kwargs
+        return OAuthOperationSummary(detail="Revoked.")
 
     async def logout(self, **kwargs: object) -> OAuthLogout:
         del kwargs
@@ -200,7 +206,7 @@ def build_documented_app(  # noqa: PLR0913 - one variation point per configurabl
         docs=docs if passkey_docs is None else passkey_docs,
     )
     oauth = OAuthConfig(
-        oauth_service=cast("Any", _OAuthRouteService()),
+        oauth_service=cast("Any", _OAuthLifecycle()),
         oidc_service=OIDCLogoutLifecycleService(
             provider_issuers={"example": "https://issuer.example"},
             consumer=cast("Any", _LogoutTokenConsumer()),

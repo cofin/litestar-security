@@ -56,19 +56,21 @@ from litestar_security.context import AuthenticationEvidence, Principal
 if TYPE_CHECKING:
     from litestar.types import Scope
 
-    from litestar_security.accounts._records import LocalAccountRecord
+    from litestar_security.accounts._records import LocalAccountState
 
 __all__ = (
     "CreateSessionCommand",
     "NativeSessionAuth",
     "NativeSessionStore",
+    "ResolvedUserAuthSession",
     "SessionAuthentication",
     "SessionBindingConfig",
     "SessionBindingProof",
     "SessionRebindPlan",
-    "SessionRecord",
     "SessionRegistry",
     "SessionSummary",
+    "UserAuthSession",
+    "UserAuthSessionResolver",
 )
 
 
@@ -218,7 +220,7 @@ class SessionBindingProof:
 
 
 @dataclass(frozen=True, slots=True)
-class SessionRecord:
+class UserAuthSession:
     """Application-owned authenticated-session registry projection."""
 
     session_id: str
@@ -369,7 +371,7 @@ class SessionSummary:
 class SessionRegistry(Protocol):
     """Atomic authenticated-session inventory and revocation boundary."""
 
-    async def create(self, command: CreateSessionCommand, *, event: "SecurityEvent") -> SessionRecord:
+    async def create(self, command: CreateSessionCommand, *, event: "SecurityEvent") -> UserAuthSession:
         """Create a registry record with its durable event.
 
         Args:
@@ -382,7 +384,7 @@ class SessionRegistry(Protocol):
         """
         ...  # pragma: no cover
 
-    async def get(self, session_id: str) -> SessionRecord | None:
+    async def get(self, session_id: str) -> UserAuthSession | None:
         """Load one current session record.
 
         Args:
@@ -393,7 +395,7 @@ class SessionRegistry(Protocol):
         """
         ...  # pragma: no cover
 
-    async def list_for_account(self, account_id: str) -> "Sequence[SessionRecord]":
+    async def list_for_account(self, account_id: str) -> "Sequence[UserAuthSession]":
         """List safe session metadata for one account.
 
         Args:
@@ -404,7 +406,7 @@ class SessionRegistry(Protocol):
         """
         ...  # pragma: no cover
 
-    async def touch(self, session_id: str, *, now: "datetime") -> SessionRecord | None:
+    async def touch(self, session_id: str, *, now: "datetime") -> UserAuthSession | None:
         """Apply the implementation's bounded last-seen write policy.
 
         Called on every authenticated request, so throttling the write is the
@@ -465,7 +467,7 @@ class SessionRegistry(Protocol):
 
     async def rebind(
         self, prior_session_id: str, command: CreateSessionCommand, *, event: "SecurityEvent"
-    ) -> SessionRecord | None:
+    ) -> UserAuthSession | None:
         """Revoke a prior record and create its replacement atomically.
 
         Both halves commit together. A window in which neither or both sessions
@@ -483,11 +485,45 @@ class SessionRegistry(Protocol):
         ...  # pragma: no cover
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedUserAuthSession(Generic[UserT]):
+    """One consistent session and account read produced by an application store."""
+
+    session: UserAuthSession
+    account: "LocalAccountState[UserT]"
+
+
+@runtime_checkable
+class UserAuthSessionResolver(Protocol[UserT]):
+    """Resolve the complete authoritative session state in one consistent read."""
+
+    async def resolve_user_auth_session(
+        self, session_id: str, account_id: str, *, now: datetime
+    ) -> "ResolvedUserAuthSession[UserT] | None":
+        """Load a session and its account from one consistent snapshot.
+
+        Implementations must bind both returned values to the requested identifiers
+        and must not return stale account epoch or activation state.
+
+        Args:
+            session_id: Session identifier presented by the client.
+            account_id: Account identifier embedded in the session payload.
+            now: Authoritative UTC time for expiry-aware storage queries.
+
+        Returns:
+            The consistent session and account state, or ``None`` for invalid credentials.
+
+        Raises:
+            Exception: When authoritative storage is unavailable.
+        """
+        ...  # pragma: no cover
+
+
 @runtime_checkable
 class NativeSessionStore(SessionRegistry, Protocol[UserT]):
     """Combined account, epoch, and session capabilities for native authentication."""
 
-    async def get_by_id(self, account_id: str) -> "LocalAccountRecord[UserT] | None":
+    async def get_by_id(self, account_id: str) -> "LocalAccountState[UserT] | None":
         """Load one local account projection.
 
         Args:
@@ -516,6 +552,7 @@ class NativeSessionAuth(Generic[UserT]):
 
     accounts: NativeSessionStore[UserT] = field(repr=False)
     binding: SessionBindingConfig = field(repr=False)
+    resolver: UserAuthSessionResolver[UserT] | None = field(default=None, repr=False)
     clock: "Callable[[], datetime]" = field(default=lambda: datetime.now(timezone.utc), repr=False, compare=False)
     entropy: "Callable[[int], bytes]" = field(default=token_bytes, repr=False, compare=False)
     event_ids: "Callable[[], str]" = field(default=lambda: encode_random(token_bytes(16)), repr=False, compare=False)
@@ -526,6 +563,9 @@ class NativeSessionAuth(Generic[UserT]):
     def __post_init__(self) -> None:
         """Validate the combined account, epoch, registry, and customization ports."""
         _validate_native_session_store(self.accounts)
+        if self.resolver is not None and not callable(getattr(self.resolver, "resolve_user_auth_session", None)):
+            msg = "Native session resolver must implement resolve_user_auth_session"
+            raise ImproperlyConfiguredException(detail=msg)
         if self.binding.__class__ is not SessionBindingConfig:
             msg = "Native session binding must be SessionBindingConfig"
             raise ImproperlyConfiguredException(detail=msg)
@@ -563,7 +603,7 @@ class NativeSessionAuth(Generic[UserT]):
 
     async def authenticate(
         self, credential: "_SessionCredential", connection: ASGIConnection[Any, Any, Any, Any]
-    ) -> Authenticated["LocalAccountRecord[UserT]"] | InvalidCredentials | VerificationUnavailable:
+    ) -> Authenticated["LocalAccountState[UserT]"] | InvalidCredentials | VerificationUnavailable:
         """Verify registry, binding, account, and exact epoch state.
 
         Args:
@@ -580,9 +620,17 @@ class NativeSessionAuth(Generic[UserT]):
         authentication = credential.authentication
         try:
             now = aware_utc_time(self.clock())
-            record = await self.accounts.get(authentication.session_id)
-            account = await self.accounts.get_by_id(authentication.account_id)
-            current_epoch = await self.accounts.current_epoch(authentication.account_id)
+            if self.resolver is None:
+                record = await self.accounts.get(authentication.session_id)
+                account = await self.accounts.get_by_id(authentication.account_id)
+                current_epoch = await self.accounts.current_epoch(authentication.account_id)
+            else:
+                resolved = await self.resolver.resolve_user_auth_session(
+                    authentication.session_id, authentication.account_id, now=now
+                )
+                record = resolved.session if resolved is not None else None
+                account = resolved.account if resolved is not None else None
+                current_epoch = account.security_epoch if account is not None else None
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
         if (
@@ -616,7 +664,7 @@ class NativeSessionAuth(Generic[UserT]):
             ),
         )
 
-    async def resolve(self, claims: "LocalAccountRecord[UserT]") -> Principal[UserT]:
+    async def resolve(self, claims: "LocalAccountState[UserT]") -> Principal[UserT]:
         """Resolve an already validated local account without another store call.
 
         Args:
@@ -630,7 +678,7 @@ class NativeSessionAuth(Generic[UserT]):
     async def establish(
         self,
         connection: ASGIConnection[Any, Any, Any, Any],
-        account: "LocalAccountRecord[UserT]",
+        account: "LocalAccountState[UserT]",
         *,
         evidence: AuthenticationEvidence | None = None,
         display_metadata: Mapping[str, str] = _EMPTY_DISPLAY_METADATA,
@@ -831,7 +879,7 @@ class NativeSessionAuth(Generic[UserT]):
     def prepare_password_rebind(
         self,
         connection: ASGIConnection[Any, Any, Any, Any],
-        account: "LocalAccountRecord[UserT]",
+        account: "LocalAccountState[UserT]",
         *,
         now: datetime | None = None,
     ) -> SessionRebindPlan | VerificationUnavailable:
@@ -1046,13 +1094,13 @@ class NativeSessionAuth(Generic[UserT]):
         cls,
         authentication: SessionAuthentication,
         binding: SessionBindingProof,
-        record: SessionRecord,
+        record: UserAuthSession,
         *,
-        account: "LocalAccountRecord[UserT]",
+        account: "LocalAccountState[UserT]",
         current_epoch: object,
         now: datetime,
     ) -> bool:
-        if record.__class__ is not SessionRecord or not cls._valid_login_account(account):
+        if record.__class__ is not UserAuthSession or not cls._valid_login_account(account):
             return False
         return (
             compare_digest(binding.binding_id.encode("ascii"), record.binding_id.encode("ascii"))
@@ -1070,9 +1118,9 @@ class NativeSessionAuth(Generic[UserT]):
         )
 
     @staticmethod
-    def _record_matches_command(record: SessionRecord, command: CreateSessionCommand) -> bool:
+    def _record_matches_command(record: UserAuthSession, command: CreateSessionCommand) -> bool:
         return (
-            record.__class__ is SessionRecord
+            record.__class__ is UserAuthSession
             and record.session_id == command.session_id
             and record.binding_id == command.binding_id
             and compare_digest(record.binding_digest, command.binding_digest)

@@ -20,7 +20,7 @@ from litestar_security.accounts._operations import (
 from litestar_security.accounts._passwords import PasswordHasher
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
-    LocalAccountRecord,
+    LocalAccountState,
     NoOpSecurityEventSink,
     PasswordReauthenticationProof,
     PasswordVerificationStatus,
@@ -223,7 +223,7 @@ class PasswordLoginService(Generic[UserT]):
 
     async def authenticate(
         self, identifier: str, password: str, *, now: datetime | None = None, client_key: str | None = None
-    ) -> LocalAccountRecord[UserT] | RateLimited | InvalidCredentials | VerificationUnavailable:
+    ) -> LocalAccountState[UserT] | RateLimited | InvalidCredentials | VerificationUnavailable:
         """Return an active verified account after limiting, lookup, and constant password work.
 
         The limiter runs before the store lookup and before Argon2, so a denied
@@ -272,7 +272,7 @@ class PasswordLoginService(Generic[UserT]):
 
     async def _find_account(
         self, normalized_identifier: str, *, unavailable: bool
-    ) -> "tuple[LocalAccountRecord[UserT] | None, bool]":
+    ) -> "tuple[LocalAccountState[UserT] | None, bool]":
         if unavailable or not normalized_identifier:
             return None, unavailable
         try:

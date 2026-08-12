@@ -137,9 +137,9 @@ def test_a_documented_returned_body_is_the_one_the_route_sends(documents: dict[s
     link = paths["/auth/oauth/{provider}/links/{provider_account_id}/unlink"]["post"]["responses"]["200"]
     arms = logout["content"]["application/json"]["schema"]["oneOf"]
 
-    assert any(arm.get("$ref", "").endswith("/OAuthRouteStatus") for arm in arms)
-    assert link["content"]["application/json"]["schema"]["$ref"].endswith("/OAuthRouteStatus")
-    assert "providerAccountId" in _members(documents["camel"], "OAuthRouteStatus")
+    assert any(arm.get("$ref", "").endswith("/OAuthOperationSummary") for arm in arms)
+    assert link["content"]["application/json"]["schema"]["$ref"].endswith("/OAuthOperationSummary")
+    assert "providerAccountId" in _members(documents["camel"], "OAuthOperationSummary")
 
 
 def test_a_documented_raised_body_still_describes_what_litestar_sends(documents: dict[str, dict[str, Any]]) -> None:

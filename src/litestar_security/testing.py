@@ -17,18 +17,16 @@ import httpx
 from anyio import Event, Lock, create_task_group
 
 from litestar_security.accounts import (
-    AssertionRecordStatus,
-    ConsumeOutcome,
-    ConsumeStatus,
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
     LocalAccountCapabilities,
-    LocalAccountRecord,
+    LocalAccountState,
     LoginMethod,
     MFALoginChallenge,
     MFALoginChallengeStore,
     MFAStore,
     NotificationCommand,
+    PasskeyAssertionStatus,
     PasskeyCredential,
     PasskeyStore,
     PasswordChangeOutcome,
@@ -59,21 +57,23 @@ from litestar_security.accounts import (
     RotateRefreshCommand,
     SecretProtector,
     SecurityEvent,
-    SessionRecord,
     SessionRegistry,
-    StepUpRecord,
+    StepUpGrantState,
     StepUpStore,
     TokenIssue,
     TokenPurpose,
     TOTPMethod,
     TOTPPolicy,
+    UserAuthSession,
     UserVerification,
+    VerificationOutcome,
+    VerificationStatus,
     WebAuthnChallenge,
     WebAuthnChallengeStore,
 )
 from litestar_security.authentication import AuthorizationResolution, IdentityResolution
 from litestar_security.context import AuthorizationSnapshot, CredentialRestrictions, Principal
-from litestar_security.providers.api_key import APIKeyRecord, APIKeyStore
+from litestar_security.providers.api_key import APIKeyState, APIKeyStore
 from litestar_security.providers.oauth import (
     InMemoryOAuthRevocationRetryStore,
     MemoryOAuthAccountStore,
@@ -98,7 +98,7 @@ from litestar_security.providers.oauth import (
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,
     WebSocketBinding,
-    WebSocketConnectTokenRecord,
+    WebSocketConnectAuthorization,
     WebSocketConnectTokenStore,
 )
 
@@ -123,7 +123,7 @@ __all__ = (
     "MemoryOAuthAccountStore",
     "MemoryOAuthTransactionStore",
     "MemoryTokenVault",
-    "OAuthHTTPRequest",
+    "OAuthRequestObservation",
     "StaticAuthorizationResolver",
     "StaticAuthorizationSnapshotRefresher",
     "StaticIdentityResolver",
@@ -160,7 +160,7 @@ def _default_identifier(namespace: str, sequence: int) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class OAuthHTTPRequest:
+class OAuthRequestObservation:
     """Secret-free projection of one provider HTTP request."""
 
     method: str
@@ -179,12 +179,12 @@ class FakeOAuthHTTPTransport(httpx.AsyncBaseTransport):
             responses: Provider responses to return.
         """
         self.responses = list(responses)
-        self.requests: list[OAuthHTTPRequest] = []
+        self.requests: list[OAuthRequestObservation] = []
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Record one request and return the next response."""
         self.requests.append(
-            OAuthHTTPRequest(
+            OAuthRequestObservation(
                 method=request.method,
                 url=str(request.url),
                 header_names=frozenset(name.lower() for name in request.headers if name.lower() != "authorization"),
@@ -445,22 +445,22 @@ class InMemoryAPIKeyStore:
         Args:
             observe: Async operation callback owned by the aggregate backend.
         """
-        self._records: dict[str, APIKeyRecord] = {}
+        self._records: dict[str, APIKeyState] = {}
         self._lock = Lock()
         self._observe = observe
 
     @property
-    def records(self) -> tuple[APIKeyRecord, ...]:
+    def records(self) -> tuple[APIKeyState, ...]:
         """Return a stable immutable record snapshot."""
         return tuple(self._records[key_id] for key_id in sorted(self._records))
 
-    async def get(self, key_id: str) -> APIKeyRecord | None:
+    async def get(self, key_id: str) -> APIKeyState | None:
         """Return one digest-only record."""
         await self._observe("api_key.get", {"key_id": key_id})
         async with self._lock:
             return self._records.get(key_id)
 
-    async def create(self, record: APIKeyRecord) -> None:
+    async def create(self, record: APIKeyState) -> None:
         """Atomically create one unique digest-only record."""
         await self._observe("api_key.create", {"key_id": record.key_id})
         async with self._lock:
@@ -470,7 +470,7 @@ class InMemoryAPIKeyStore:
             self._records[record.key_id] = record
 
     async def rotate(
-        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+        self, *, current_key_id: str, replacement: APIKeyState, overlap_until: datetime | None, now: datetime
     ) -> None:
         """Atomically replace one current record with one successor."""
         await self._observe(
@@ -546,13 +546,13 @@ class InMemoryLocalAccountStore:
         entropy: "Callable[[int], bytes]",
     ) -> None:
         """Initialize isolated state with aggregate deterministic sources."""
-        self._accounts: dict[str, LocalAccountRecord[object]] = {}
+        self._accounts: dict[str, LocalAccountState[object]] = {}
         self._password_hashes: dict[str, str] = {}
         self._login_methods: dict[str, dict[str, LoginMethod]] = {}
         self._purpose_attempts: dict[str, int] = {}
         self._purpose_tokens: dict[str, TokenIssue] = {}
         self._used_purpose_tokens: set[str] = set()
-        self._sessions: dict[str, SessionRecord] = {}
+        self._sessions: dict[str, UserAuthSession] = {}
         self._refresh_tokens: dict[str, _InMemoryRefreshState] = {}
         self._clock = clock
         self._identifiers = identifiers
@@ -560,7 +560,7 @@ class InMemoryLocalAccountStore:
         self._lock = Lock()
         self._observe = observe
 
-    async def find_for_login(self, normalized_identifier: str) -> LocalAccountRecord[object] | None:
+    async def find_for_login(self, normalized_identifier: str) -> LocalAccountState[object] | None:
         """Find one account through its normalized identifier."""
         async with self._lock:
             return next(
@@ -572,7 +572,7 @@ class InMemoryLocalAccountStore:
                 None,
             )
 
-    async def get_by_id(self, account_id: str) -> LocalAccountRecord[object] | None:
+    async def get_by_id(self, account_id: str) -> LocalAccountState[object] | None:
         """Return one account by its stable identifier."""
         async with self._lock:
             return self._accounts.get(account_id)
@@ -686,7 +686,7 @@ class InMemoryLocalAccountStore:
             if account_id in self._accounts:
                 message = "In-memory account identifier collision"
                 raise ValueError(message)
-            account = LocalAccountRecord(
+            account = LocalAccountState(
                 account_id=account_id,
                 normalized_identifier=command.normalized_identifier,
                 display_name=command.display_name,
@@ -723,28 +723,30 @@ class InMemoryLocalAccountStore:
 
     async def consume_and_verify(
         self, token_id: str, digest: bytes, *, now: datetime, event: SecurityEvent
-    ) -> ConsumeOutcome:
+    ) -> VerificationOutcome:
         """Consume one verification token and mark its account verified."""
         del event
         await self._observe("accounts.consume_and_verify", {"token_id": token_id})
         async with self._lock:
             issue = self._purpose_tokens.get(token_id)
             if issue is None or issue.purpose is not TokenPurpose.VERIFICATION:
-                status = ConsumeStatus.USED if token_id in self._used_purpose_tokens else ConsumeStatus.INVALID
-                return ConsumeOutcome(status)
+                status = (
+                    VerificationStatus.USED if token_id in self._used_purpose_tokens else VerificationStatus.INVALID
+                )
+                return VerificationOutcome(status)
             if not compare_digest(issue.digest, digest):
                 self._record_failed_purpose_proof_locked(issue)
-                return ConsumeOutcome(ConsumeStatus.INVALID)
+                return VerificationOutcome(VerificationStatus.INVALID)
             if issue.expires_at <= now:
-                return ConsumeOutcome(ConsumeStatus.EXPIRED)
+                return VerificationOutcome(VerificationStatus.EXPIRED)
             account = self._accounts.get(issue.account_id)
             if account is None:
-                return ConsumeOutcome(ConsumeStatus.INVALID)
+                return VerificationOutcome(VerificationStatus.INVALID)
             del self._purpose_tokens[token_id]
             self._purpose_attempts.pop(token_id, None)
             self._used_purpose_tokens.add(token_id)
             self._accounts[account.account_id] = replace(account, verified=True)
-            return ConsumeOutcome(ConsumeStatus.CONSUMED, account.account_id, account.security_epoch)
+            return VerificationOutcome(VerificationStatus.CONSUMED, account.account_id, account.security_epoch)
 
     async def consume_and_reset(
         self, token_id: str, digest: bytes, new_password_hash: str, *, now: datetime, event: SecurityEvent
@@ -775,7 +777,7 @@ class InMemoryLocalAccountStore:
             self._accounts[account.account_id] = replace(account, security_epoch=next_epoch)
             return PasswordResetOutcome(PasswordResetStatus.RESET, account.account_id, next_epoch)
 
-    async def create(self, command: CreateSessionCommand, *, event: SecurityEvent) -> SessionRecord:
+    async def create(self, command: CreateSessionCommand, *, event: SecurityEvent) -> UserAuthSession:
         """Create one native session record."""
         del event
         await self._observe(
@@ -785,7 +787,7 @@ class InMemoryLocalAccountStore:
             if command.session_id in self._sessions:
                 message = "In-memory session identifier collision"
                 raise ValueError(message)
-            record = SessionRecord(
+            record = UserAuthSession(
                 session_id=command.session_id,
                 binding_id=command.binding_id,
                 binding_digest=command.binding_digest,
@@ -800,13 +802,13 @@ class InMemoryLocalAccountStore:
             self._sessions[record.session_id] = record
             return record
 
-    async def get(self, session_id: str) -> SessionRecord | None:
+    async def get(self, session_id: str) -> UserAuthSession | None:
         """Return one currently stored native session."""
         async with self._lock:
             record = self._sessions.get(session_id)
             return record if record is not None and record.expires_at > self._clock() else None
 
-    async def list_for_account(self, account_id: str) -> tuple[SessionRecord, ...]:
+    async def list_for_account(self, account_id: str) -> tuple[UserAuthSession, ...]:
         """Return the account's current native-session records."""
         async with self._lock:
             current = self._clock()
@@ -816,7 +818,7 @@ class InMemoryLocalAccountStore:
                 if record.account_id == account_id and record.expires_at > current
             )
 
-    async def touch(self, session_id: str, *, now: datetime) -> SessionRecord | None:
+    async def touch(self, session_id: str, *, now: datetime) -> UserAuthSession | None:
         """Advance one session's last-seen time."""
         await self._observe("accounts.touch_session", {"session_id": session_id})
         async with self._lock:
@@ -862,7 +864,7 @@ class InMemoryLocalAccountStore:
 
     async def rebind(
         self, prior_session_id: str, command: CreateSessionCommand, *, event: SecurityEvent
-    ) -> SessionRecord | None:
+    ) -> UserAuthSession | None:
         """Replace one existing session with a successor atomically."""
         del event
         await self._observe(
@@ -875,7 +877,7 @@ class InMemoryLocalAccountStore:
                 message = "In-memory session identifier collision"
                 raise ValueError(message)
             del self._sessions[prior_session_id]
-            record = SessionRecord(
+            record = UserAuthSession(
                 session_id=command.session_id,
                 binding_id=command.binding_id,
                 binding_digest=command.binding_digest,
@@ -1318,7 +1320,7 @@ async def assert_api_key_store_conformance(factory: Callable[[], APIKeyStore]) -
         message = "APIKeyStore.create/get isolation invariant: created records must be exact and factory-local"
         raise AssertionError(message)
 
-    async def rotate(replacement: APIKeyRecord) -> bool:
+    async def rotate(replacement: APIKeyState) -> bool:
         return await _won_unless_raised(
             lambda: store.rotate(
                 current_key_id=current.key_id,
@@ -1336,7 +1338,7 @@ async def assert_api_key_store_conformance(factory: Callable[[], APIKeyStore]) -
             f"(observed {winners})"
         )
         raise AssertionError(message)
-    persisted_records: list[APIKeyRecord | None] = []
+    persisted_records: list[APIKeyState | None] = []
     for replacement in replacements:
         persisted_records.append(  # noqa: PERF401 - sequential awaited protocol calls
             await store.get(replacement.key_id)
@@ -1432,7 +1434,7 @@ async def _assert_local_account_factory_isolation(
 
 async def _assert_registration_scenarios(
     store: _ConformanceLocalAccountStore,
-) -> tuple[PurposeTokenDelivery, LocalAccountRecord[object]]:
+) -> tuple[PurposeTokenDelivery, LocalAccountState[object]]:
     command = _conformance_registration_command("atomic-registration@example.com")
     outcomes: list[RegistrationOutcome[object]] = []
 
@@ -1494,7 +1496,7 @@ async def _assert_registration_scenarios(
         raise AssertionError(message) from exc
     if (
         duplicate.status is not RegistrationStatus.DUPLICATE
-        or duplicate_probe.status is not ConsumeStatus.INVALID
+        or duplicate_probe.status is not VerificationStatus.INVALID
         or after_duplicate.status is not RegistrationStatus.CREATED
         or after_duplicate.account is None
     ):
@@ -1506,7 +1508,7 @@ async def _assert_registration_scenarios(
     return verification, after_duplicate.account
 
 
-async def _assert_password_cas(store: _ConformanceLocalAccountStore, account: LocalAccountRecord[object]) -> None:
+async def _assert_password_cas(store: _ConformanceLocalAccountStore, account: LocalAccountState[object]) -> None:
     account_before = await store.get_by_id(account.account_id)
     password_state = await store.get_password_state(account.account_id)
     if account_before is None or password_state is None:  # pragma: no cover - account was just registered
@@ -1556,9 +1558,7 @@ async def _assert_password_cas(store: _ConformanceLocalAccountStore, account: Lo
         raise AssertionError(message)
 
 
-async def _assert_password_epoch_bump(
-    store: _ConformanceLocalAccountStore, account: LocalAccountRecord[object]
-) -> None:
+async def _assert_password_epoch_bump(store: _ConformanceLocalAccountStore, account: LocalAccountState[object]) -> None:
     password_state = await store.get_password_state(account.account_id)
     if password_state is None:  # pragma: no cover - preceding CAS guarantees it
         message = "PasswordCredentialStore.get_password_state invariant: password state must remain readable"
@@ -1608,7 +1608,7 @@ async def _assert_password_epoch_bump(
 
 
 async def _assert_verification_scenarios(
-    store: _ConformanceLocalAccountStore, verification: PurposeTokenDelivery, account: LocalAccountRecord[object]
+    store: _ConformanceLocalAccountStore, verification: PurposeTokenDelivery, account: LocalAccountState[object]
 ) -> None:
     consumed = await store.consume_and_verify(
         verification.issue.token_id,
@@ -1624,13 +1624,13 @@ async def _assert_verification_scenarios(
     )
     stored_account = await store.get_by_id(account.account_id)
     if (
-        consumed.status is not ConsumeStatus.CONSUMED
+        consumed.status is not VerificationStatus.CONSUMED
         or consumed.account_id != account.account_id
         or consumed.security_epoch != account.security_epoch
         or stored_account is None
         or not stored_account.verified
         or stored_account.security_epoch != account.security_epoch
-        or replay.status is ConsumeStatus.CONSUMED
+        or replay.status is VerificationStatus.CONSUMED
     ):
         message = (
             "VerificationTokenStore.consume_and_verify replay invariant: a verification token must be consumed once"
@@ -1650,7 +1650,7 @@ async def _assert_verification_expiry(store: _ConformanceLocalAccountStore) -> N
         event=_conformance_event("consume-expired-verification"),
     )
     stored = await store.get_by_id(account.account_id)
-    if result.status is not ConsumeStatus.EXPIRED or stored is None or stored.verified:
+    if result.status is not VerificationStatus.EXPIRED or stored is None or stored.verified:
         message = "VerificationTokenStore.consume_and_verify expiry invariant: expired tokens must not verify accounts"
         raise AssertionError(message)
 
@@ -1676,8 +1676,8 @@ async def _assert_verification_attempt_exhaustion(store: _ConformanceLocalAccoun
     )
     stored = await store.get_by_id(account.account_id)
     if (
-        any(result.status is not ConsumeStatus.INVALID for result in invalid_results)
-        or valid_after_burn.status is not ConsumeStatus.USED
+        any(result.status is not VerificationStatus.INVALID for result in invalid_results)
+        or valid_after_burn.status is not VerificationStatus.USED
         or stored is None
         or stored.verified
     ):
@@ -1688,7 +1688,7 @@ async def _assert_verification_attempt_exhaustion(store: _ConformanceLocalAccoun
         raise AssertionError(message)
 
 
-async def _assert_recovery_epoch(store: _ConformanceLocalAccountStore, account: LocalAccountRecord[object]) -> None:
+async def _assert_recovery_epoch(store: _ConformanceLocalAccountStore, account: LocalAccountState[object]) -> None:
     delivery = _conformance_token_delivery(TokenPurpose.RECOVERY, marker=6)
     epoch = await store.current_epoch(account.account_id)
     if epoch is None:  # pragma: no cover - account was just registered
@@ -1731,7 +1731,7 @@ async def _assert_recovery_epoch(store: _ConformanceLocalAccountStore, account: 
         raise AssertionError(message)
 
 
-async def _assert_recovery_expiry(store: _ConformanceLocalAccountStore, account: LocalAccountRecord[object]) -> None:
+async def _assert_recovery_expiry(store: _ConformanceLocalAccountStore, account: LocalAccountState[object]) -> None:
     delivery = _conformance_token_delivery(TokenPurpose.RECOVERY, marker=7)
     epoch = await store.current_epoch(account.account_id)
     state_before = await store.get_password_state(account.account_id)
@@ -1756,7 +1756,7 @@ async def _assert_recovery_expiry(store: _ConformanceLocalAccountStore, account:
 
 
 async def _assert_recovery_attempt_exhaustion(
-    store: _ConformanceLocalAccountStore, account: LocalAccountRecord[object]
+    store: _ConformanceLocalAccountStore, account: LocalAccountState[object]
 ) -> None:
     delivery = _conformance_token_delivery(TokenPurpose.RECOVERY, marker=8, maximum_attempts=2)
     epoch = await store.current_epoch(account.account_id)
@@ -1797,7 +1797,7 @@ async def _assert_recovery_attempt_exhaustion(
         raise AssertionError(message)
 
 
-async def _assert_final_login_method(store: _ConformanceLocalAccountStore, account: LocalAccountRecord[object]) -> None:
+async def _assert_final_login_method(store: _ConformanceLocalAccountStore, account: LocalAccountState[object]) -> None:
     other_account = await _conformance_register_account(store, "login-method-owner@example.com")
     method = LoginMethod("conformance-password", "password", _DEFAULT_NOW)
     await store.register_login_method(account.account_id, method, event=_conformance_event("register-login-method"))
@@ -1874,7 +1874,7 @@ async def assert_session_registry_conformance(  # noqa: C901, PLR0915 - one publ
         _conformance_session_command(marker=marker, account_id=command.account_id, now=now) for marker in (3, 4)
     )
 
-    results: list[tuple[CreateSessionCommand, SessionRecord | None]] = []
+    results: list[tuple[CreateSessionCommand, UserAuthSession | None]] = []
 
     def contender(replacement: CreateSessionCommand) -> Callable[[], Awaitable[bool]]:
         async def attempt() -> bool:
@@ -2051,7 +2051,7 @@ async def assert_refresh_family_store_conformance(factory: Callable[[], _Conform
 
 
 async def _assert_refresh_rotation_atomicity(
-    store: _ConformanceRefreshFamilyStore, account: LocalAccountRecord[object]
+    store: _ConformanceRefreshFamilyStore, account: LocalAccountState[object]
 ) -> None:
     command = _conformance_refresh_family_command(account, marker=3)
     if not await store.create_family(command, event=_conformance_event("create-atomic-refresh")):
@@ -2133,7 +2133,7 @@ async def _assert_refresh_rotation_atomicity(
 
 
 async def _assert_refresh_rotation_commit(
-    store: _ConformanceRefreshFamilyStore, account: LocalAccountRecord[object]
+    store: _ConformanceRefreshFamilyStore, account: LocalAccountState[object]
 ) -> None:
     command = _conformance_refresh_family_command(account, marker=6)
     if not await store.create_family(command, event=_conformance_event("create-commit-refresh")):
@@ -2170,7 +2170,7 @@ async def _assert_refresh_rotation_commit(
 
 
 async def _assert_refresh_late_rotation_rejection(
-    store: _ConformanceRefreshFamilyStore, account: LocalAccountRecord[object]
+    store: _ConformanceRefreshFamilyStore, account: LocalAccountState[object]
 ) -> None:
     expiry_command = _conformance_refresh_family_command(account, marker=10)
     if not await store.create_family(expiry_command, event=_conformance_event("create-late-expiry-refresh")):
@@ -2256,7 +2256,7 @@ async def _assert_refresh_late_rotation_rejection(
 
 
 async def _assert_refresh_replay_and_idempotency(
-    store: _ConformanceRefreshFamilyStore, account: LocalAccountRecord[object]
+    store: _ConformanceRefreshFamilyStore, account: LocalAccountState[object]
 ) -> None:
     command = _conformance_refresh_family_command(account, marker=8)
     if not await store.create_family(command, event=_conformance_event("create-replay-refresh")):
@@ -2302,7 +2302,7 @@ async def _assert_refresh_replay_and_idempotency(
         raise AssertionError(message)
 
 
-async def _assert_refresh_ownership(store: _ConformanceRefreshFamilyStore, account: LocalAccountRecord[object]) -> None:
+async def _assert_refresh_ownership(store: _ConformanceRefreshFamilyStore, account: LocalAccountState[object]) -> None:
     command = _conformance_refresh_family_command(account, marker=11)
     if not await store.create_family(command, event=_conformance_event("create-owned-refresh")):
         message = (
@@ -2656,7 +2656,7 @@ async def assert_websocket_connect_token_store_conformance(factory: Callable[[],
     winner = _conformance_connect_token_record("ampqampqampqampqampqag", b"w" * 32)
     await store.create(winner)
 
-    async def consume() -> WebSocketConnectTokenRecord | None:
+    async def consume() -> WebSocketConnectAuthorization | None:
         return await store.consume(connect_token_id=winner.connect_token_id, digest=winner.digest, now=_DEFAULT_NOW)
 
     if await _single_winner((lambda: _presence(consume()), lambda: _presence(consume()))) != 1:
@@ -2698,7 +2698,7 @@ async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) 
     ):
         raise AssertionError("PasskeyStore setup invariant: a fresh credential must be added")
 
-    async def record() -> AssertionRecordStatus:
+    async def record() -> PasskeyAssertionStatus:
         return await store.record_assertion(
             credential.credential_id,
             expected_version=0,
@@ -2709,11 +2709,11 @@ async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) 
             now=_DEFAULT_NOW,
         )
 
-    outcomes: list[AssertionRecordStatus] = []
+    outcomes: list[PasskeyAssertionStatus] = []
     async with create_task_group() as group:
         group.start_soon(_append_result, record, outcomes)
         group.start_soon(_append_result, record, outcomes)
-    if outcomes.count(AssertionRecordStatus.RECORDED) != 1 or outcomes.count(AssertionRecordStatus.CONFLICT) != 1:
+    if outcomes.count(PasskeyAssertionStatus.RECORDED) != 1 or outcomes.count(PasskeyAssertionStatus.CONFLICT) != 1:
         raise AssertionError(
             "PasskeyStore.record_assertion atomicity invariant: contenders must return RECORDED and CONFLICT"
         )
@@ -2737,7 +2737,7 @@ async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) 
             clone_risk=True,
             now=_DEFAULT_NOW,
         )
-        is not AssertionRecordStatus.CLONE_RISK
+        is not PasskeyAssertionStatus.CLONE_RISK
     ):
         raise AssertionError(
             "PasskeyStore.record_assertion clone-risk invariant: a clone-risk assertion must return CLONE_RISK"
@@ -2867,7 +2867,7 @@ async def assert_step_up_store_conformance(factory: Callable[[], StepUpStore]) -
     store = factory()
     await store.put(record)
 
-    async def consume() -> StepUpRecord | None:
+    async def consume() -> StepUpGrantState | None:
         return await store.consume(
             record.grant_digest,
             principal_id=record.principal_id,
@@ -3091,8 +3091,8 @@ async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit
         await assert_websocket_connect_token_store_conformance(factories.websocket_connect_token_store)
 
 
-def _conformance_api_key_record(key_id: str) -> APIKeyRecord:
-    return APIKeyRecord(key_id=key_id, subject_id="conformance-subject", digest=b"d" * 32)
+def _conformance_api_key_record(key_id: str) -> APIKeyState:
+    return APIKeyState(key_id=key_id, subject_id="conformance-subject", digest=b"d" * 32)
 
 
 def _conformance_session_command(
@@ -3118,9 +3118,9 @@ def _conformance_session_command(
     )
 
 
-def _conformance_session_record(command: CreateSessionCommand) -> SessionRecord:
+def _conformance_session_record(command: CreateSessionCommand) -> UserAuthSession:
     """Return the exact stored projection required by one session creation command."""
-    return SessionRecord(
+    return UserAuthSession(
         session_id=command.session_id,
         binding_id=command.binding_id,
         binding_digest=command.binding_digest,
@@ -3135,7 +3135,7 @@ def _conformance_session_record(command: CreateSessionCommand) -> SessionRecord:
 
 
 def _conformance_refresh_family_command(
-    account: LocalAccountRecord[object],
+    account: LocalAccountState[object],
     *,
     marker: int,
     expires_at: datetime | None = None,
@@ -3213,7 +3213,7 @@ def _conformance_identifier(prefix: str | None, marker: int) -> str:
 
 async def _conformance_register_account(
     store: RegistrationStore[object], normalized_identifier: str, *, verification: PurposeTokenDelivery | None = None
-) -> LocalAccountRecord[object]:
+) -> LocalAccountState[object]:
     """Register one password account required by several local-account scenarios."""
     result = await store.register(
         _conformance_registration_command(normalized_identifier),
@@ -3310,9 +3310,9 @@ def _conformance_oauth_transaction(digest: bytes, *, expires_at: datetime | None
 
 def _conformance_connect_token_record(
     connect_token_id: str, digest: bytes, *, expires_at: datetime | None = None
-) -> WebSocketConnectTokenRecord:
+) -> WebSocketConnectAuthorization:
     """Build one fixed valid WebSocket connect-token record."""
-    return WebSocketConnectTokenRecord(
+    return WebSocketConnectAuthorization(
         connect_token_id=connect_token_id,
         digest=digest,
         subject_id="conformance-subject",
@@ -3384,9 +3384,9 @@ def _conformance_oidc_logout_identity(token_id: str) -> OIDCLogoutIdentity:
     )
 
 
-def _conformance_step_up_record() -> StepUpRecord:
+def _conformance_step_up_record() -> StepUpGrantState:
     """Build one fixed exact-binding step-up grant."""
-    return StepUpRecord(
+    return StepUpGrantState(
         grant_digest=b"g" * 32,
         transport_digest=b"t" * 32,
         principal_id="conformance-principal",
@@ -3816,7 +3816,7 @@ class InMemoryPasskeyStore:
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordStatus:
+    ) -> PasskeyAssertionStatus:
         """Atomically record one verified assertion.
 
         Args:
@@ -3838,7 +3838,7 @@ class InMemoryPasskeyStore:
                 or credential.version != expected_version
                 or credential.backup_eligible != backup_eligible
             ):
-                return AssertionRecordStatus.CONFLICT
+                return PasskeyAssertionStatus.CONFLICT
             self.credentials[credential_id] = replace(
                 credential,
                 sign_count=sign_count,
@@ -3847,7 +3847,7 @@ class InMemoryPasskeyStore:
                 last_used_at=now,
                 version=credential.version + 1,
             )
-            return AssertionRecordStatus.CLONE_RISK if clone_risk else AssertionRecordStatus.RECORDED
+            return PasskeyAssertionStatus.CLONE_RISK if clone_risk else PasskeyAssertionStatus.RECORDED
 
     async def list_credentials(self, account_id: str) -> tuple[PasskeyCredential, ...]:
         """List an account's credentials.
@@ -3935,9 +3935,9 @@ class InMemoryStepUpStore:
     def __init__(self) -> None:
         """Initialize isolated mutable state."""
         self._lock = Lock()
-        self.grants: dict[bytes, StepUpRecord] = {}
+        self.grants: dict[bytes, StepUpGrantState] = {}
 
-    async def put(self, record: StepUpRecord) -> None:
+    async def put(self, record: StepUpGrantState) -> None:
         """Store one grant record.
 
         Args:
@@ -3955,7 +3955,7 @@ class InMemoryStepUpStore:
         purpose: str,
         transport_digest: bytes,
         now: datetime,
-    ) -> StepUpRecord | None:
+    ) -> StepUpGrantState | None:
         """Atomically burn and return one exact current grant.
 
         Args:

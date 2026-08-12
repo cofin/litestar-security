@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
@@ -41,10 +42,10 @@ from litestar_security.providers.oauth import (
     OAuthLocalAuthTransport,
     OAuthLogout,
     OAuthOperation,
+    OAuthOperationSummary,
     OAuthProviderError,
     OAuthProviderRegistration,
     OAuthRedirectPolicy,
-    OAuthRouteStatus,
     OAuthScopeUpgrade,
     OAuthStepUp,
     OAuthStepUpAuthorization,
@@ -124,19 +125,25 @@ class RouteService:
             ),
         )
 
-    async def callback(
+    async def complete_callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteStatus:
+    ) -> object:
         del code, state, request
-        return OAuthRouteStatus(detail="Authenticated.", provider_account_id=f"{provider}-account")
+        return SimpleNamespace(operation=OAuthOperation.LOGIN, provider=provider)
 
-    async def unlink(self, **kwargs: object) -> OAuthRouteStatus:
-        del kwargs
-        return OAuthRouteStatus(detail="Unlinked.")
+    async def establish_login(self, outcome: object, *, request: Request[Any, Any, Any]) -> OAuthOperationSummary:
+        del request
+        return OAuthOperationSummary(
+            detail="Authenticated.", provider_account_id=f"{cast('Any', outcome).provider}-account"
+        )
 
-    async def revoke(self, **kwargs: object) -> OAuthRouteStatus:
+    async def unlink(self, **kwargs: object) -> OAuthOperationSummary:
         del kwargs
-        return OAuthRouteStatus(detail="Revoked.")
+        return OAuthOperationSummary(detail="Unlinked.")
+
+    async def revoke(self, **kwargs: object) -> OAuthOperationSummary:
+        del kwargs
+        return OAuthOperationSummary(detail="Revoked.")
 
     async def logout(self, **kwargs: object) -> OAuthLogout:
         del kwargs
@@ -167,10 +174,10 @@ class LocalTransport:
         identity: ProviderIdentity,
         request: Request[Any, Any, Any],
         authenticated_at: datetime,
-    ) -> OAuthRouteStatus:
+    ) -> OAuthOperationSummary:
         del identity, request, authenticated_at
         self.established.append(account_id)
-        return OAuthRouteStatus(detail="Authenticated.", provider_account_id=account_id)
+        return OAuthOperationSummary(detail="Authenticated.", provider_account_id=account_id)
 
     async def logout(self, *, account_id: str, request: Request[Any, Any, Any]) -> None:
         del request
@@ -716,7 +723,7 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
     linked = await service.callback(
         provider="example", code="code", state=parse_qs(urlsplit(link_start.url).query)["state"][0], request=request
     )
-    assert isinstance(linked, OAuthRouteStatus)
+    assert isinstance(linked, OAuthOperationSummary)
     provider_account_id = cast("str", linked.provider_account_id)
 
     scope_start = await service.begin(
@@ -732,7 +739,7 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
     updated = await service.callback(
         provider="example", code="code", state=parse_qs(urlsplit(scope_start.url).query)["state"][0], request=request
     )
-    assert isinstance(updated, OAuthRouteStatus)
+    assert isinstance(updated, OAuthOperationSummary)
     assert updated.detail == "Scopes updated."
     logout = await service.logout(provider="example", account_id="account-1", request=request)
     assert logout.redirect_url is not None
@@ -1490,9 +1497,9 @@ class RaisingRouteService(RouteService):
         super().__init__()
         self.exception = exception
 
-    async def callback(
+    async def complete_callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthRouteStatus:
+    ) -> object:
         del provider, code, state, request
         raise self.exception
 

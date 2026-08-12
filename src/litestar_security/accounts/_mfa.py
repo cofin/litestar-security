@@ -55,7 +55,7 @@ __all__ = (
     "SecretProtector",
     "SecretProtectorKey",
     "StepUpCredential",
-    "StepUpRecord",
+    "StepUpGrantState",
     "StepUpService",
     "StepUpStore",
     "TOTPMethod",
@@ -384,7 +384,7 @@ class StepUpCredential:
 
 
 @dataclass(frozen=True, slots=True)
-class StepUpRecord:
+class StepUpGrantState:
     """Digest-only one-time step-up state."""
 
     grant_digest: bytes = field(repr=False)
@@ -420,7 +420,7 @@ class StepUpRecord:
 class StepUpStore(Protocol):
     """Persist and atomically consume digest-only step-up grants."""
 
-    async def put(self, record: StepUpRecord) -> None:
+    async def put(self, record: StepUpGrantState) -> None:
         """Persist one unconsumed grant.
 
         Args:
@@ -437,7 +437,7 @@ class StepUpStore(Protocol):
         purpose: str,
         transport_digest: bytes,
         now: datetime,
-    ) -> StepUpRecord | None:
+    ) -> StepUpGrantState | None:
         """Atomically consume only an exact, current binding match.
 
         Args:
@@ -978,7 +978,7 @@ class StepUpService:
             token = urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
             expires_at = now + self.ttl
             await self.store.put(
-                StepUpRecord(
+                StepUpGrantState(
                     grant_digest=sha256(token.encode("ascii")).digest(),
                     transport_digest=sha256(transport_binding).digest(),
                     principal_id=principal_id,

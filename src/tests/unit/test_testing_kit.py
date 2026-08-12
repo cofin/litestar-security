@@ -9,7 +9,7 @@ from anyio import Event, create_task_group, fail_after
 
 import litestar_security.testing as testing_module
 from litestar_security.accounts import AESGCMSecretProtector, SecretProtectorKey
-from litestar_security.providers.api_key import APIKeyRecord, APIKeyStore
+from litestar_security.providers.api_key import APIKeyState, APIKeyStore
 from litestar_security.providers.oauth import (
     AESGCMOAuthTransactionProtector,
     MemoryOAuthAccountStore,
@@ -39,7 +39,7 @@ from litestar_security.testing import (
     assert_token_vault_conformance,
     assert_websocket_connect_token_store_conformance,
 )
-from litestar_security.websocket import WebSocketConnectTokenRecord
+from litestar_security.websocket import WebSocketConnectAuthorization
 
 _NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
 _CONFORMANCE_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -88,19 +88,19 @@ class _WrongOAuthVersionProtector(_ConformanceTransactionProtector):
 class _YieldingConnectTokenStore:
     """Deliberately non-atomic consume implementation for the conformance self-test."""
 
-    records: dict[str, WebSocketConnectTokenRecord] = field(default_factory=dict[str, WebSocketConnectTokenRecord])
+    records: dict[str, WebSocketConnectAuthorization] = field(default_factory=dict[str, WebSocketConnectAuthorization])
     release: Event = field(default_factory=Event)
     starters: int = 0
     first_record_id: str | None = None
 
-    async def create(self, record: WebSocketConnectTokenRecord) -> None:
+    async def create(self, record: WebSocketConnectAuthorization) -> None:
         if self.first_record_id is None:
             self.first_record_id = record.connect_token_id
         self.records[record.connect_token_id] = record
 
     async def consume(
         self, *, connect_token_id: str, digest: bytes, now: datetime
-    ) -> WebSocketConnectTokenRecord | None:
+    ) -> WebSocketConnectAuthorization | None:
         record = self.records.get(connect_token_id)
         if record is None or record.digest != digest or record.expires_at <= now:
             return None
@@ -170,7 +170,7 @@ class _BrokenWebSocketConnectTokenStore(InMemoryWebSocketConnectTokenStore):
 
     async def consume(
         self, *, connect_token_id: str, digest: bytes, now: datetime
-    ) -> WebSocketConnectTokenRecord | None:
+    ) -> WebSocketConnectAuthorization | None:
         record = await super().consume(connect_token_id=connect_token_id, digest=digest, now=now)
         if record is not None:
             return record
@@ -186,7 +186,7 @@ class _ConfigurableConnectTokenStore(InMemoryWebSocketConnectTokenStore):
 
     async def consume(
         self, *, connect_token_id: str, digest: bytes, now: datetime
-    ) -> WebSocketConnectTokenRecord | None:
+    ) -> WebSocketConnectAuthorization | None:
         record = self._records.get(connect_token_id)  # pyright: ignore[reportPrivateUsage] - deliberate test corruption
         if record is not None and self.failure == "digest" and record.digest != digest:
             return record
@@ -385,19 +385,19 @@ class _BrokenOAuthAtomicUnlinkStore(MemoryOAuthAccountStore):
 
 @dataclass
 class _ControlledStore:
-    records: dict[str, APIKeyRecord]
+    records: dict[str, APIKeyState]
     persist_successor: bool = True
     revoke_current: bool = True
     rotated: bool = False
 
-    async def get(self, key_id: str) -> APIKeyRecord | None:
+    async def get(self, key_id: str) -> APIKeyState | None:
         return self.records.get(key_id)
 
-    async def create(self, record: APIKeyRecord) -> None:
+    async def create(self, record: APIKeyState) -> None:
         self.records[record.key_id] = record
 
     async def rotate(
-        self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+        self, *, current_key_id: str, replacement: APIKeyState, overlap_until: datetime | None, now: datetime
     ) -> None:
         if self.rotated:
             raise ValueError
@@ -466,16 +466,16 @@ async def test_oauth_transaction_protector_conformance_names_the_remaining_invar
 async def test_api_key_conformance_names_a_non_atomic_rotation_invariant() -> None:
     @dataclass
     class BrokenStore:
-        records: dict[str, APIKeyRecord]
+        records: dict[str, APIKeyState]
 
-        async def get(self, key_id: str) -> APIKeyRecord | None:
+        async def get(self, key_id: str) -> APIKeyState | None:
             return self.records.get(key_id)
 
-        async def create(self, record: APIKeyRecord) -> None:
+        async def create(self, record: APIKeyState) -> None:
             self.records[record.key_id] = record
 
         async def rotate(
-            self, *, current_key_id: str, replacement: APIKeyRecord, overlap_until: datetime | None, now: datetime
+            self, *, current_key_id: str, replacement: APIKeyState, overlap_until: datetime | None, now: datetime
         ) -> None:
             del current_key_id, overlap_until, now
             self.records[replacement.key_id] = replacement
@@ -899,7 +899,7 @@ async def test_conformance_detects_shared_factory_state() -> None:
 
 
 async def test_conformance_detects_non_isolated_factory_storage() -> None:
-    shared_records: dict[str, APIKeyRecord] = {}
+    shared_records: dict[str, APIKeyState] = {}
 
     with pytest.raises(AssertionError, match="create/get isolation invariant"):
         await assert_api_key_store_conformance(lambda: _ControlledStore(shared_records))

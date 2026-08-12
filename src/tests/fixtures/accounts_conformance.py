@@ -9,16 +9,14 @@ from anyio.lowlevel import checkpoint
 
 import litestar_security.testing as testing_module
 from litestar_security.accounts import (
-    AssertionRecordStatus,
-    ConsumeOutcome,
-    ConsumeStatus,
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
     LocalAccountCapabilities,
-    LocalAccountRecord,
+    LocalAccountState,
     LoginMethod,
     MFALoginChallenge,
     NotificationCommand,
+    PasskeyAssertionStatus,
     PasskeyCredential,
     PasswordChangeOutcome,
     PasswordChangeStatus,
@@ -44,11 +42,13 @@ from litestar_security.accounts import (
     RevokeLoginMethodStatus,
     RotateRefreshCommand,
     SecurityEvent,
-    SessionRecord,
     SessionRegistry,
-    StepUpRecord,
+    StepUpGrantState,
     TokenIssue,
     TOTPMethod,
+    UserAuthSession,
+    VerificationOutcome,
+    VerificationStatus,
     WebAuthnChallenge,
 )
 
@@ -347,7 +347,7 @@ class _BrokenStepUpStore(testing_module.InMemoryStepUpStore):
         purpose: str,
         transport_digest: bytes,
         now: datetime,
-    ) -> StepUpRecord | None:
+    ) -> StepUpGrantState | None:
         record = self.grants.get(grant_digest)
         if record is None:
             return None
@@ -375,11 +375,11 @@ class _BrokenStepUpStore(testing_module.InMemoryStepUpStore):
 class _YieldingStepUpStore:
     """Deliberately yield between reading and burning a step-up grant."""
 
-    grants: dict[bytes, StepUpRecord] = field(default_factory=dict[bytes, StepUpRecord])
+    grants: dict[bytes, StepUpGrantState] = field(default_factory=dict[bytes, StepUpGrantState])
     release: Event = field(default_factory=Event)
     contenders: int = 0
 
-    async def put(self, record: StepUpRecord) -> None:
+    async def put(self, record: StepUpGrantState) -> None:
         self.grants[record.grant_digest] = record
 
     async def consume(  # noqa: PLR0913 - mirrors the exact atomic public protocol
@@ -391,7 +391,7 @@ class _YieldingStepUpStore:
         purpose: str,
         transport_digest: bytes,
         now: datetime,
-    ) -> StepUpRecord | None:
+    ) -> StepUpGrantState | None:
         record = self.grants.get(grant_digest)
         if (
             record is None
@@ -414,7 +414,7 @@ class _ReplayStepUpStore(testing_module.InMemoryStepUpStore):
     """Return an already-consumed grant after the atomic contention probe."""
 
     calls: int = 0
-    consumed: StepUpRecord | None = None
+    consumed: StepUpGrantState | None = None
 
     async def consume(  # noqa: PLR0913 - mirrors the exact atomic public protocol
         self,
@@ -425,7 +425,7 @@ class _ReplayStepUpStore(testing_module.InMemoryStepUpStore):
         purpose: str,
         transport_digest: bytes,
         now: datetime,
-    ) -> StepUpRecord | None:
+    ) -> StepUpGrantState | None:
         self.calls += 1
         if self.calls > 2:
             return self.consumed
@@ -491,7 +491,7 @@ class _BrokenPasskeyStore(testing_module.InMemoryPasskeyStore):
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordStatus:
+    ) -> PasskeyAssertionStatus:
         result = await super().record_assertion(
             credential_id,
             expected_version=expected_version,
@@ -521,7 +521,7 @@ class _BrokenPasskeyCloneResultStore(testing_module.InMemoryPasskeyStore):
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordStatus:
+    ) -> PasskeyAssertionStatus:
         result = await super().record_assertion(
             credential_id,
             expected_version=expected_version,
@@ -531,7 +531,7 @@ class _BrokenPasskeyCloneResultStore(testing_module.InMemoryPasskeyStore):
             clone_risk=clone_risk,
             now=now,
         )
-        return AssertionRecordStatus.RECORDED if clone_risk else result
+        return PasskeyAssertionStatus.RECORDED if clone_risk else result
 
 
 class _BrokenPasskeyCloneStateStore(testing_module.InMemoryPasskeyStore):
@@ -547,7 +547,7 @@ class _BrokenPasskeyCloneStateStore(testing_module.InMemoryPasskeyStore):
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordStatus:
+    ) -> PasskeyAssertionStatus:
         result = await super().record_assertion(
             credential_id,
             expected_version=expected_version,
@@ -585,7 +585,7 @@ class _NonAtomicPasskeyResultStore(testing_module.InMemoryPasskeyStore):
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> AssertionRecordStatus:
+    ) -> PasskeyAssertionStatus:
         result = await super().record_assertion(
             credential_id,
             expected_version=expected_version,
@@ -595,8 +595,8 @@ class _NonAtomicPasskeyResultStore(testing_module.InMemoryPasskeyStore):
             clone_risk=clone_risk,
             now=now,
         )
-        if not clone_risk and result is AssertionRecordStatus.CONFLICT:
-            return AssertionRecordStatus.RECORDED
+        if not clone_risk and result is PasskeyAssertionStatus.CONFLICT:
+            return PasskeyAssertionStatus.RECORDED
         return result
 
 
@@ -631,10 +631,10 @@ class _BrokenAccountStore:
     _cas_attempts: int = 0
     _bump_attempts: int = 0
 
-    async def find_for_login(self, normalized_identifier: str) -> LocalAccountRecord[object] | None:
+    async def find_for_login(self, normalized_identifier: str) -> LocalAccountState[object] | None:
         return await self.delegate.find_for_login(normalized_identifier)
 
-    async def get_by_id(self, account_id: str) -> LocalAccountRecord[object] | None:
+    async def get_by_id(self, account_id: str) -> LocalAccountState[object] | None:
         return await self.delegate.get_by_id(account_id)
 
     async def current_epoch(self, account_id: str) -> int | None:
@@ -711,22 +711,22 @@ class _BrokenAccountStore:
 
     async def consume_and_verify(
         self, token_id: str, digest: bytes, *, now: datetime, event: SecurityEvent
-    ) -> ConsumeOutcome:
+    ) -> VerificationOutcome:
         result = await self.delegate.consume_and_verify(token_id, digest, now=now, event=event)
-        if result.status is ConsumeStatus.CONSUMED:
+        if result.status is VerificationStatus.CONSUMED:
             self._consumed_verifications.add(token_id)
-        elif result.status is ConsumeStatus.INVALID:
+        elif result.status is VerificationStatus.INVALID:
             self._invalid_verifications.add(token_id)
-        if not self.verification_rejects_expired and result.status is ConsumeStatus.EXPIRED:
-            return ConsumeOutcome(ConsumeStatus.CONSUMED, "expired-account", 1)
+        if not self.verification_rejects_expired and result.status is VerificationStatus.EXPIRED:
+            return VerificationOutcome(VerificationStatus.CONSUMED, "expired-account", 1)
         if (
             not self.verification_burns_attempts
-            and result.status is ConsumeStatus.USED
+            and result.status is VerificationStatus.USED
             and token_id in self._invalid_verifications
         ):
-            return ConsumeOutcome(ConsumeStatus.CONSUMED, "burned-account", 1)
+            return VerificationOutcome(VerificationStatus.CONSUMED, "burned-account", 1)
         if not self.verification_is_single_use and token_id in self._consumed_verifications:
-            return ConsumeOutcome(ConsumeStatus.CONSUMED, "replayed-account", 1)
+            return VerificationOutcome(VerificationStatus.CONSUMED, "replayed-account", 1)
         return result
 
     async def issue(self, issue: TokenIssue, notification: NotificationCommand, *, event: SecurityEvent) -> None:
@@ -878,9 +878,9 @@ class _BrokenSessionStore:
     corrupt_created_record: bool = True
     returns_expired_record: bool = True
     rebind_returns_exact: bool = True
-    expired_record: SessionRecord | None = None
+    expired_record: UserAuthSession | None = None
 
-    async def create(self, command: CreateSessionCommand, *, event: SecurityEvent) -> SessionRecord:
+    async def create(self, command: CreateSessionCommand, *, event: SecurityEvent) -> UserAuthSession:
         record = await self.delegate.create(command, event=event)
         if record.expires_at <= _CONFORMANCE_NOW:
             self.expired_record = record
@@ -888,7 +888,7 @@ class _BrokenSessionStore:
             return replace(record, display_metadata={"corrupt": "true"})
         return record
 
-    async def get(self, session_id: str) -> SessionRecord | None:
+    async def get(self, session_id: str) -> UserAuthSession | None:
         if (
             not self.returns_expired_record
             and self.expired_record is not None
@@ -897,10 +897,10 @@ class _BrokenSessionStore:
             return self.expired_record
         return await self.delegate.get(session_id)
 
-    async def list_for_account(self, account_id: str) -> tuple[SessionRecord, ...]:
+    async def list_for_account(self, account_id: str) -> tuple[UserAuthSession, ...]:
         return tuple(await self.delegate.list_for_account(account_id))
 
-    async def touch(self, session_id: str, *, now: datetime) -> SessionRecord | None:
+    async def touch(self, session_id: str, *, now: datetime) -> UserAuthSession | None:
         return await self.delegate.touch(session_id, now=now)
 
     async def revoke_session_for_account(self, account_id: str, session_id: str, *, event: SecurityEvent) -> bool:
@@ -918,7 +918,7 @@ class _BrokenSessionStore:
 
     async def rebind(
         self, prior_session_id: str, command: CreateSessionCommand, *, event: SecurityEvent
-    ) -> SessionRecord | None:
+    ) -> UserAuthSession | None:
         result = await self.delegate.rebind(prior_session_id, command, event=event)
         if not self.rebind_is_atomic and result is None:
             return await self.delegate.create(command, event=event)
@@ -939,7 +939,7 @@ class _YieldingSessionStore(_BrokenSessionStore):
 
     async def rebind(
         self, prior_session_id: str, command: CreateSessionCommand, *, event: SecurityEvent
-    ) -> SessionRecord | None:
+    ) -> UserAuthSession | None:
         snapshot = await self.delegate.get(prior_session_id)
         if snapshot is None:
             return None

@@ -320,22 +320,37 @@ class _StoredOAuthTransaction:
 class MemoryOAuthTransactionStore:
     """Atomic in-memory reference store with protected recoverable secrets."""
 
-    __slots__ = ("_lock", "_protector", "_records")
+    __slots__ = ("_capacity", "_clock", "_lock", "_protector", "_records")
 
-    def __init__(self, *, protector: OAuthTransactionProtector) -> None:
+    def __init__(
+        self,
+        *,
+        protector: OAuthTransactionProtector,
+        capacity: int = 1_024,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         """Initialize the reference store.
 
         Args:
             protector: Application-owned transaction secret protection.
+            capacity: Maximum number of live transactions retained.
+            clock: Aware time source used for bounded expiry cleanup.
 
         Raises:
             ImproperlyConfiguredException: If the protector contract is absent.
         """
         protector_value = cast("object", protector)
-        if not isinstance(protector_value, OAuthTransactionProtector):
+        if (
+            not isinstance(protector_value, OAuthTransactionProtector)
+            or capacity.__class__ is not int
+            or capacity < 1
+            or (clock is not None and not callable(clock))
+        ):
             message = "OAuth transaction protector must implement OAuthTransactionProtector"
             raise ImproperlyConfiguredException(detail=message)
         self._protector = protector
+        self._capacity = capacity
+        self._clock = clock
         self._records: dict[tuple[bytes, bytes, str], _StoredOAuthTransaction] = {}
         self._lock = Lock()
 
@@ -362,9 +377,20 @@ class MemoryOAuthTransactionStore:
         redacted = _replace_secrets(transaction, pkce_verifier=SecretStr("*"), nonce=None)
         key = (transaction.state_digest, transaction.binding_digest, transaction.provider)
         async with self._lock:
+            if self._clock is not None:
+                now = self._clock()
+                if not _aware_time(now):
+                    message = "OAuth transaction store clock must return aware time"
+                    raise ValueError(message)
+                expired = tuple(key for key, stored in self._records.items() if now >= stored.transaction.expires_at)
+                for expired_key in expired:
+                    del self._records[expired_key]
             if key in self._records:
                 message = "OAuth transaction already exists"
                 raise ValueError(message)
+            if len(self._records) >= self._capacity:
+                message = "OAuth transaction store capacity reached"
+                raise OverflowError(message)
             self._records[key] = _StoredOAuthTransaction(transaction=redacted, pkce_verifier=pkce_verifier, nonce=nonce)
 
     async def consume(
@@ -383,6 +409,9 @@ class MemoryOAuthTransactionStore:
         """
         key = (state_digest, binding_digest, provider)
         async with self._lock:
+            expired = tuple(key for key, value in self._records.items() if now >= value.transaction.expires_at)
+            for expired_key in expired:
+                del self._records[expired_key]
             stored = self._records.pop(key, None)
         if stored is None or now >= stored.transaction.expires_at:
             return None

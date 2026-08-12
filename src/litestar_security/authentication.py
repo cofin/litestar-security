@@ -39,7 +39,7 @@ from litestar_security.context import (
 from litestar_security.websocket import (
     WebSocketBinding,
     WebSocketCloseCoordinator,
-    WebSocketConnectTokenRecord,
+    WebSocketConnectAuthorization,
     WebSocketConnectTokenService,
     WebSocketConnectTokenUnavailableError,
     WebSocketHandshake,
@@ -60,13 +60,13 @@ __all__ = (
     "AuthorizationResolver",
     "CredentialExtraction",
     "CredentialSlot",
+    "CredentialVerifier",
     "IdentityResolution",
     "IdentityResolver",
     "InvalidCredentials",
     "MechanismRequirement",
     "NoCredentials",
     "PresentedCredential",
-    "RequestAuthenticator",
     "VerificationUnavailable",
     "all_of",
     "any_of",
@@ -399,7 +399,7 @@ class CredentialSlot(Protocol[_CredentialT]):
         ...  # pragma: no cover
 
 
-class RequestAuthenticator(Protocol[_RequestCredentialT_contra, _ClaimsT]):
+class CredentialVerifier(Protocol[_RequestCredentialT_contra, _ClaimsT]):
     """Async credential verification boundary."""
 
     name: str
@@ -470,7 +470,7 @@ class AuthorizationResolver(Protocol[_UserT]):
 class AuthenticationMechanism(Generic[CredentialT, ClaimsT, UserT]):
     """Pair one slot authenticator with its identity resolver."""
 
-    authenticator: RequestAuthenticator[CredentialT, ClaimsT]
+    authenticator: CredentialVerifier[CredentialT, ClaimsT]
     resolver: IdentityResolver[ClaimsT, UserT]
     scheme_name: str | None = None
     security_scheme: SecurityScheme | None = field(default=None, hash=False)
@@ -887,7 +887,7 @@ class SecurityMiddleware(Generic[UserT]):
 
     async def _merge_connect_token(
         self,
-        connect_token: WebSocketConnectTokenRecord,
+        connect_token: WebSocketConnectAuthorization,
         *,
         principal: Principal[UserT],
         context: SecurityContext,

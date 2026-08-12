@@ -18,7 +18,7 @@ from litestar_security.accounts.schemas._local import (
     LocalSession,
     LocalSessionList,
     LocalToken,
-    RouteStatus,
+    OperationMessage,
 )
 from litestar_security.accounts.schemas._mfa import (
     PasskeyAuthenticationStart,
@@ -48,13 +48,13 @@ __all__ = (
     "LocalSession",
     "LocalSessionList",
     "LocalToken",
+    "OperationMessage",
     "PasskeyAuthenticationStart",
     "PasskeyOptions",
     "PasskeyRegistrationStart",
     "PasskeySummary",
     "PasskeyVerification",
     "RecoveryCodes",
-    "RouteStatus",
     "StepUpAuthorization",
     "StepUpGrant",
     "StepUpVerification",

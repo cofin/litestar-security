@@ -77,6 +77,28 @@ PRIVATE_RUNTIME_NAMES: tuple[str, ...] = (
     "_AuthenticationEvaluator",
 )
 
+REMOVED_PUBLIC_NAMES: frozenset[str] = frozenset({
+    "APIKeyRecord",
+    "AssertionRecordStatus",
+    "ConsumeOutcome",
+    "ConsumeStatus",
+    "InvalidWebAuthnResponseError",
+    "JWKSCacheEntry",
+    "JWKSFetchRequest",
+    "JWKSFetchResponse",
+    "LocalAccountRecord",
+    "OAuthHTTPRequest",
+    "OAuthRouteService",
+    "OAuthRouteStatus",
+    "PasskeyRecord",
+    "RequestAuthenticator",
+    "RouteStatus",
+    "SessionRecord",
+    "StepUpRecord",
+    "WebSocketConnectTokenRecord",
+})
+FORBIDDEN_CLASS_SUFFIXES: tuple[str, ...] = ("Record", "Request", "Response", "Result")
+
 
 def _public_classes() -> tuple[tuple[str, type], ...]:
     """Collect every class the public modules export.
@@ -177,6 +199,17 @@ def test_public_exports_are_sorted(module_name: str) -> None:
 
     expected = tuple(sorted(module.__all__, key=lambda name: (not name.isupper(), name[0].islower(), name)))
     assert module.__all__ == expected, f"{module_name}.__all__ must be sorted"
+
+
+@pytest.mark.parametrize("module_name", MODULES)
+def test_public_exports_contain_no_removed_or_generic_record_names(module_name: str) -> None:
+    module = importlib.import_module(module_name)
+
+    for name in module.__all__:
+        assert name not in REMOVED_PUBLIC_NAMES, f"{module_name} still exports removed name {name}"
+        value = getattr(module, name)
+        if isinstance(value, type):
+            assert not name.endswith(FORBIDDEN_CLASS_SUFFIXES), f"{module_name} exports generic class name {name}"
 
 
 def test_private_runtime_names_are_not_exported() -> None:

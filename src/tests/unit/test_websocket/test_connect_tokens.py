@@ -20,8 +20,8 @@ from litestar_security.context import CredentialRestrictions, NullSessionHandle,
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,
     IssuedWebSocketConnectToken,
+    WebSocketConnectAuthorization,
     WebSocketConnectTokenIssuer,
-    WebSocketConnectTokenRecord,
     WebSocketConnectTokenService,
     issue_websocket_connect_token,
 )
@@ -33,7 +33,7 @@ def _connection(*, headers: tuple[tuple[bytes, bytes], ...] = (), query_string: 
     return SimpleNamespace(scope={"headers": list(headers), "query_string": query_string})
 
 
-def _connect_token_record(**changes: object) -> WebSocketConnectTokenRecord:
+def _connect_token_record(**changes: object) -> WebSocketConnectAuthorization:
     values = {
         "connect_token_id": "aWlpaWlpaWlpaWlpaWlpaQ",
         "digest": b"d" * 32,
@@ -47,7 +47,7 @@ def _connect_token_record(**changes: object) -> WebSocketConnectTokenRecord:
         "expires_at": _NOW + timedelta(seconds=30),
         **changes,
     }
-    return WebSocketConnectTokenRecord(**values)  # type: ignore[arg-type]
+    return WebSocketConnectAuthorization(**values)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -127,7 +127,7 @@ async def test_websocket_connect_token_service_rejects_anonymous_invalid_and_una
     )
 
     class BrokenStore:
-        async def create(self, record: WebSocketConnectTokenRecord) -> None:
+        async def create(self, record: WebSocketConnectAuthorization) -> None:
             del record
 
         async def consume(self, **kwargs: object) -> None:

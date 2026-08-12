@@ -20,7 +20,7 @@ __all__ = (
     "LocalSession",
     "LocalSessionList",
     "LocalToken",
-    "RouteStatus",
+    "OperationMessage",
 )
 
 _IDENTIFIER = msgspec.Meta(description="The account identifier, normally an email address.")
@@ -167,7 +167,7 @@ class LocalAccount(WireStruct, frozen=True):
     display_name: Annotated[str | None, _DISPLAY_NAME] = None
 
 
-class RouteStatus(WireStruct, frozen=True):
+class OperationMessage(WireStruct, frozen=True):
     """Stable generated-route status body, shared by every route in the tree."""
 
     detail: Annotated[str, msgspec.Meta(description="A human-readable outcome that never names an account.")]

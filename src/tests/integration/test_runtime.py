@@ -35,11 +35,9 @@ from litestar.testing import AsyncTestClient, TestClient
 
 from litestar_security import MFAConfig, SecurityConfig, SecurityPlugin, authentication
 from litestar_security.accounts import (
-    ConsumeOutcome,
-    ConsumeStatus,
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
-    LocalAccountRecord,
+    LocalAccountState,
     LocalAuth,
     LocalAuthSecrets,
     LoginMethod,
@@ -70,9 +68,11 @@ from litestar_security.accounts import (
     RotateRefreshCommand,
     SecurityEvent,
     SessionBindingConfig,
-    SessionRecord,
     TokenIssue,
     TokenPurpose,
+    UserAuthSession,
+    VerificationOutcome,
+    VerificationStatus,
 )
 from litestar_security.authentication import (
     Authenticated,
@@ -117,8 +117,8 @@ from litestar_security.providers.jwt import (
 from litestar_security.testing import InMemoryMFALoginChallengeStore, InMemoryMFAStore
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,
+    WebSocketConnectAuthorization,
     WebSocketConnectTokenIssuer,
-    WebSocketConnectTokenRecord,
     WebSocketConnectTokenService,
     WebSocketSecurityConfig,
     websocket_policy_fingerprint,
@@ -690,8 +690,8 @@ def test_composite_bearer_runs_through_the_complete_litestar_runtime() -> None:
     assert unavailable.status_code == HTTP_503_SERVICE_UNAVAILABLE
 
 
-def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccountRecord[object]]:  # noqa: C901
-    account = LocalAccountRecord(
+def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccountState[object]]:  # noqa: C901
+    account = LocalAccountState(
         account_id="account-1",
         normalized_identifier="user@example.com",
         display_name="User",
@@ -700,11 +700,11 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccountRecord[object
         security_epoch=1,
         user=object(),
     )
-    records: dict[str, SessionRecord] = {}
+    records: dict[str, UserAuthSession] = {}
     state = SimpleNamespace(epoch=1, fail_epoch=False, fail_lookup=False, touches=0)
 
-    async def create(command: CreateSessionCommand, **_kwargs: object) -> SessionRecord:
-        record = SessionRecord(
+    async def create(command: CreateSessionCommand, **_kwargs: object) -> UserAuthSession:
+        record = UserAuthSession(
             session_id=command.session_id,
             binding_id=command.binding_id,
             binding_digest=command.binding_digest,
@@ -719,10 +719,10 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccountRecord[object
         records[record.session_id] = record
         return record
 
-    async def get_session(session_id: str) -> SessionRecord | None:
+    async def get_session(session_id: str) -> UserAuthSession | None:
         return records.get(session_id)
 
-    async def get_account(account_id: str) -> LocalAccountRecord[object] | None:
+    async def get_account(account_id: str) -> LocalAccountState[object] | None:
         if state.fail_lookup:
             raise OSError
         return account if account_id == account.account_id else None
@@ -732,15 +732,15 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccountRecord[object
             raise OSError
         return cast("int", state.epoch) if account_id == account.account_id else None
 
-    async def list_for_account(account_id: str) -> list[SessionRecord]:
+    async def list_for_account(account_id: str) -> list[UserAuthSession]:
         return [record for record in records.values() if record.account_id == account_id]
 
-    async def touch(session_id: str, **kwargs: object) -> SessionRecord | None:
+    async def touch(session_id: str, **kwargs: object) -> UserAuthSession | None:
         record = records.get(session_id)
         if record is None:
             return None
         state.touches += 1
-        touched = SessionRecord(
+        touched = UserAuthSession(
             session_id=record.session_id,
             binding_id=record.binding_id,
             binding_digest=record.binding_digest,
@@ -774,7 +774,7 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccountRecord[object
             del records[key]
         return len(matches)
 
-    async def rebind(prior_session_id: str, command: CreateSessionCommand, **kwargs: object) -> SessionRecord | None:
+    async def rebind(prior_session_id: str, command: CreateSessionCommand, **kwargs: object) -> UserAuthSession | None:
         if prior_session_id not in records:
             return None
         del records[prior_session_id]
@@ -876,21 +876,21 @@ class _RouteRefreshState:
 
 @dataclass(slots=True)
 class _GeneratedRouteAccounts:
-    account: LocalAccountRecord[object] | None = None
+    account: LocalAccountState[object] | None = None
     password_hash: str | None = None
-    sessions: dict[str, SessionRecord] = field(default_factory=dict)
+    sessions: dict[str, UserAuthSession] = field(default_factory=dict)
     purpose_tokens: dict[str, TokenIssue] = field(default_factory=dict)
     refresh_tokens: dict[str, _RouteRefreshState] = field(default_factory=dict)
     verification_token: str | None = None
     recovery_token: str | None = None
     absent_probes: int = 0
 
-    async def find_for_login(self, normalized_identifier: str) -> LocalAccountRecord[object] | None:
+    async def find_for_login(self, normalized_identifier: str) -> LocalAccountState[object] | None:
         if self.account is None or self.account.normalized_identifier != normalized_identifier:
             return None
         return self.account
 
-    async def get_by_id(self, account_id: str) -> LocalAccountRecord[object] | None:
+    async def get_by_id(self, account_id: str) -> LocalAccountState[object] | None:
         return self.account if self.account is not None and self.account.account_id == account_id else None
 
     async def current_epoch(self, account_id: str) -> int | None:
@@ -931,7 +931,7 @@ class _GeneratedRouteAccounts:
     ) -> RegistrationOutcome[object]:
         if self.account is not None:
             return RegistrationOutcome(RegistrationStatus.DUPLICATE)
-        self.account = LocalAccountRecord(
+        self.account = LocalAccountState(
             account_id="account-1",
             normalized_identifier=cast("Any", command).normalized_identifier,
             display_name=cast("Any", command).display_name,
@@ -956,12 +956,12 @@ class _GeneratedRouteAccounts:
     async def issue_absent(self) -> None:
         self.absent_probes += 1
 
-    async def consume_and_verify(self, token_id: str, digest: bytes, **_kwargs: object) -> ConsumeOutcome:
+    async def consume_and_verify(self, token_id: str, digest: bytes, **_kwargs: object) -> VerificationOutcome:
         issue = self.purpose_tokens.pop(token_id, None)
         if issue is None or issue.digest != digest or self.account is None:
-            return ConsumeOutcome(ConsumeStatus.INVALID)
+            return VerificationOutcome(VerificationStatus.INVALID)
         self.account = replace(self.account, verified=True)
-        return ConsumeOutcome(ConsumeStatus.CONSUMED, self.account.account_id, self.account.security_epoch)
+        return VerificationOutcome(VerificationStatus.CONSUMED, self.account.account_id, self.account.security_epoch)
 
     async def consume_and_reset(
         self, token_id: str, digest: bytes, new_password_hash: str, **_kwargs: object
@@ -979,8 +979,8 @@ class _GeneratedRouteAccounts:
     async def revoke_login_method(self, *_args: object, **_kwargs: object) -> object:
         return object()
 
-    async def create(self, command: CreateSessionCommand, **_kwargs: object) -> SessionRecord:
-        record = SessionRecord(
+    async def create(self, command: CreateSessionCommand, **_kwargs: object) -> UserAuthSession:
+        record = UserAuthSession(
             session_id=command.session_id,
             binding_id=command.binding_id,
             binding_digest=command.binding_digest,
@@ -995,13 +995,13 @@ class _GeneratedRouteAccounts:
         self.sessions[record.session_id] = record
         return record
 
-    async def get(self, session_id: str) -> SessionRecord | None:
+    async def get(self, session_id: str) -> UserAuthSession | None:
         return self.sessions.get(session_id)
 
-    async def list_for_account(self, account_id: str) -> list[SessionRecord]:
+    async def list_for_account(self, account_id: str) -> list[UserAuthSession]:
         return [record for record in self.sessions.values() if record.account_id == account_id]
 
-    async def touch(self, session_id: str, *, now: datetime) -> SessionRecord | None:
+    async def touch(self, session_id: str, *, now: datetime) -> UserAuthSession | None:
         record = self.sessions.get(session_id)
         if record is None:
             return None
@@ -1032,7 +1032,7 @@ class _GeneratedRouteAccounts:
 
     async def rebind(
         self, prior_session_id: str, command: CreateSessionCommand, **kwargs: object
-    ) -> SessionRecord | None:
+    ) -> UserAuthSession | None:
         if prior_session_id not in self.sessions:
             return None
         del self.sessions[prior_session_id]
@@ -1128,7 +1128,7 @@ def _mfa_at_login_config(*, required: bool = True) -> MFAConfig:
 def _verified_route_accounts(password: str) -> _GeneratedRouteAccounts:
     """Return a direct, verified account suitable for password-login journeys."""
     return _GeneratedRouteAccounts(
-        account=LocalAccountRecord(
+        account=LocalAccountState(
             account_id="account-1",
             normalized_identifier="user@example.com",
             display_name="User",
@@ -1968,8 +1968,8 @@ async def test_websocket_handler_authorization_exceptions_map_to_4403(error: Exc
     assert messages == [{"type": "websocket.close", "code": 4403, "reason": "authorization_denied"}]
 
 
-def _runtime_connect_token_record() -> WebSocketConnectTokenRecord:
-    return WebSocketConnectTokenRecord(
+def _runtime_connect_token_record() -> WebSocketConnectAuthorization:
+    return WebSocketConnectAuthorization(
         connect_token_id="aWlpaWlpaWlpaWlpaWlpaQ",  # noqa: S106 - a public record identifier, not a secret
         digest=b"d" * 32,
         subject_id="subject-1",

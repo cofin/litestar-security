@@ -15,7 +15,7 @@ from litestar_security.providers.api_key import (
     APIKeyCodec,
     APIKeyConfig,
     APIKeyProof,
-    APIKeyRecord,
+    APIKeyState,
     APIKeyStore,
     IssuedAPIKey,
 )
@@ -42,7 +42,7 @@ def _codec(
     )
 
 
-def _record(**overrides: object) -> APIKeyRecord:
+def _record(**overrides: object) -> APIKeyState:
     values: dict[str, object] = {
         "key_id": _KEY_ID,
         "subject_id": "subject-1",
@@ -53,7 +53,7 @@ def _record(**overrides: object) -> APIKeyRecord:
         "overlap_until": None,
     }
     values.update(overrides)
-    return APIKeyRecord(**values)  # type: ignore[arg-type]
+    return APIKeyState(**values)  # type: ignore[arg-type]
 
 
 def test_issue_has_exact_canonical_shape_and_storage_safe_record() -> None:
@@ -208,7 +208,7 @@ def test_matches_injects_constant_time_comparator() -> None:
     ],
 )
 def test_record_validity_has_strict_expiry_and_inclusive_overlap(
-    record: APIKeyRecord, now: datetime, expected: int
+    record: APIKeyState, now: datetime, expected: int
 ) -> None:
     assert record.is_valid_at(now) is bool(expected)
 

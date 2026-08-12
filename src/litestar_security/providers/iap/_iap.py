@@ -1,9 +1,10 @@
 """Authoritative verification of Google IAP signed assertions."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Generic, TypeVar, cast
+from types import MappingProxyType
+from typing import Any, Generic, Literal, TypeVar, cast
 
 from litestar.connection import ASGIConnection
 from litestar.exceptions import ImproperlyConfiguredException
@@ -23,6 +24,7 @@ from litestar_security.authentication import (
 )
 from litestar_security.config import WorkerLimits
 from litestar_security.context import AuthenticationEvidence
+from litestar_security.providers._internal import DynamicVerifierCache
 from litestar_security.providers.jwks import JWKSProvider
 from litestar_security.providers.jwt import (
     JWTClaims,
@@ -32,7 +34,7 @@ from litestar_security.providers.jwt import (
     parse_unverified_jwt_route,
 )
 
-__all__ = ("GoogleIAPClaims", "GoogleIAPConfig")
+__all__ = ("GoogleIAPClaims", "GoogleIAPConfig", "GoogleIAPExternalIdentity")
 
 
 UserT = TypeVar("UserT")
@@ -41,6 +43,22 @@ _IAP_ISSUER = "https://cloud.google.com/iap"
 _IAP_JWKS_URI = "https://www.gstatic.com/iap/verify/public_key-jwk"
 _IAP_HEADER = "X-Goog-IAP-JWT-Assertion"
 _MAXIMUM_ASSERTION_BYTES = 16_384
+_MAXIMUM_ASSERTION_LIFETIME = timedelta(minutes=10)
+_MAXIMUM_SIGN_IN_ATTRIBUTES = 32
+_MAXIMUM_SIGN_IN_ATTRIBUTE_LENGTH = 1_024
+_MAXIMUM_ACCESS_LEVELS = 64
+
+
+@dataclass(frozen=True, slots=True)
+class GoogleIAPExternalIdentity:
+    """Validated external Identity Platform identity nested in an IAP assertion."""
+
+    subject: str
+    email: str | None = None
+    email_verified: bool | None = None
+    sign_in_provider: str | None = None
+    tenant: str | None = None
+    sign_in_attributes: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +68,10 @@ class GoogleIAPClaims:
     subject: str
     email: str | None = None
     authorized_party: str | None = None
+    hosted_domain: str | None = None
+    access_levels: tuple[str, ...] = ()
+    device_id: str | None = None
+    external_identity: GoogleIAPExternalIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,8 +173,8 @@ class _GoogleIAPAuthenticator(Generic[UserT]):
     name: str = field(default="google-iap", init=False)
     slot: str = field(default="google-iap", init=False)
     participates_by_default: bool = True
-    _verifiers: dict[str, PyJWTVerifier] = field(
-        default_factory=dict[str, PyJWTVerifier], init=False, repr=False, compare=False
+    _verifiers: DynamicVerifierCache[PyJWTVerifier] = field(
+        default_factory=DynamicVerifierCache[PyJWTVerifier], init=False, repr=False, compare=False
     )
 
     async def authenticate(  # noqa: PLR0911 - every trust failure retains its structured security outcome
@@ -184,9 +206,10 @@ class _GoogleIAPAuthenticator(Generic[UserT]):
             return selection
         if not isinstance(selection, VerificationKey):
             return VerificationUnavailable()
-        verifier = self._verifiers.get(key_id)
-        if verifier is None:
-            verifier = PyJWTVerifier(
+        verifier = self._verifiers.get_or_create(
+            (key_id, "ES256"),
+            selection.key,
+            lambda: PyJWTVerifier(
                 config=self.validation,
                 key=selection.key,
                 mechanism_name=self.name,
@@ -194,20 +217,39 @@ class _GoogleIAPAuthenticator(Generic[UserT]):
                 maximum_token_bytes=_MAXIMUM_ASSERTION_BYTES,
                 limiter=self.config.worker_limits.crypto_limiter,
                 worker_timeout=self.config.worker_limits.timeout,
-            )
-            self._verifiers[key_id] = verifier
+            ),
+        )
         outcome = await verifier.verify(credential, now=now)
         if not isinstance(outcome, Authenticated):
             return outcome
         claims = outcome.claims
+        if claims.expires_at - claims.issued_at > _MAXIMUM_ASSERTION_LIFETIME + (self.config.clock_skew * 2):
+            return InvalidCredentials()
         subject = claims.subject
         email = _optional_claim(claims, "email")
         authorized_party = _optional_claim(claims, "azp")
-        if subject is None or email is False or authorized_party is False:
+        hosted_domain = _optional_claim(claims, "hd")
+        google = _google_claims(claims.raw.get("google"))
+        external_identity = _external_identity(claims.raw.get("gcip"))
+        if (
+            subject is None
+            or email is False
+            or authorized_party is False
+            or hosted_domain is False
+            or google is None
+            or external_identity is False
+        ):
             return InvalidCredentials()
+        access_levels, device_id = google
         return Authenticated(
             claims=GoogleIAPClaims(
-                subject=subject, email=cast("str | None", email), authorized_party=cast("str | None", authorized_party)
+                subject=subject,
+                email=cast("str | None", email),
+                authorized_party=cast("str | None", authorized_party),
+                hosted_domain=cast("str | None", hosted_domain),
+                access_levels=access_levels,
+                device_id=device_id,
+                external_identity=external_identity,
             ),
             evidence=AuthenticationEvidence(
                 mechanism=self.name,
@@ -218,6 +260,79 @@ class _GoogleIAPAuthenticator(Generic[UserT]):
                 traits=frozenset({"federated"}),
             ),
         )
+
+
+def _google_claims(value: object) -> tuple[tuple[str, ...], str | None] | None:
+    if value is None:
+        return (), None
+    if not isinstance(value, Mapping):
+        return None
+    claims = cast("Mapping[str, object]", value)
+    access_levels = claims.get("access_levels", [])
+    device_id = claims.get("device_id")
+    typed_access_levels = cast("Sequence[object]", access_levels)
+    if (
+        not isinstance(access_levels, Sequence)
+        or isinstance(access_levels, (str, bytes))
+        or len(typed_access_levels) > _MAXIMUM_ACCESS_LEVELS
+        or any(
+            not isinstance(item, str) or not item or len(item) > _MAXIMUM_SIGN_IN_ATTRIBUTE_LENGTH
+            for item in typed_access_levels
+        )
+        or (
+            device_id is not None
+            and (not isinstance(device_id, str) or not device_id or len(device_id) > _MAXIMUM_SIGN_IN_ATTRIBUTE_LENGTH)
+        )
+    ):
+        return None
+    return tuple(cast("Sequence[str]", access_levels)), device_id
+
+
+def _external_identity(value: object) -> GoogleIAPExternalIdentity | Literal[False] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        return False
+    claims = cast("Mapping[str, object]", value)
+    subject = claims.get("sub")
+    email = claims.get("email")
+    email_verified = claims.get("email_verified")
+    provider = claims.get("sign_in_provider")
+    tenant = claims.get("tenant")
+    attributes = claims.get("sign_in_attributes", {})
+    typed_attributes = cast("Mapping[object, object]", attributes)
+    optional_text = (email, provider, tenant)
+    if (
+        not isinstance(subject, str)
+        or not subject
+        or len(subject) > _MAXIMUM_SIGN_IN_ATTRIBUTE_LENGTH
+        or any(
+            item is not None
+            and (not isinstance(item, str) or not item or len(item) > _MAXIMUM_SIGN_IN_ATTRIBUTE_LENGTH)
+            for item in optional_text
+        )
+        or (email_verified is not None and email_verified.__class__ is not bool)
+        or not isinstance(attributes, Mapping)
+        or len(typed_attributes) > _MAXIMUM_SIGN_IN_ATTRIBUTES
+        or any(
+            not isinstance(key, str)
+            or not key
+            or not isinstance(item, str)
+            or len(key) > _MAXIMUM_SIGN_IN_ATTRIBUTE_LENGTH
+            or len(item) > _MAXIMUM_SIGN_IN_ATTRIBUTE_LENGTH
+            for key, item in typed_attributes.items()
+        )
+    ):
+        return False
+    typed_email_verified = email_verified if isinstance(email_verified, bool) else None
+    return GoogleIAPExternalIdentity(
+        subject=subject,
+        email=cast("str | None", email),
+        email_verified=typed_email_verified,
+        sign_in_provider=cast("str | None", provider),
+        tenant=cast("str | None", tenant),
+        sign_in_attributes=MappingProxyType(dict(cast("Mapping[str, str]", attributes))),
+    )
 
 
 def _optional_claim(claims: JWTClaims, name: str) -> str | bool | None:

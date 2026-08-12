@@ -215,7 +215,10 @@ def _oauth_kwargs() -> "dict[str, Any]":
         async def begin(self, **kwargs: object) -> None:
             del kwargs
 
-        async def callback(self, **kwargs: object) -> None:
+        async def complete_callback(self, **kwargs: object) -> None:
+            del kwargs
+
+        async def establish_login(self, **kwargs: object) -> None:
             del kwargs
 
         async def unlink(self, **kwargs: object) -> None:

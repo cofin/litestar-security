@@ -239,6 +239,7 @@ class OAuthAccountStore(Protocol):
         self,
         account_id: str,
         provider_account_id: str,
+        identity: ProviderIdentity,
         grant: ProviderGrant,
         tokens: ProviderTokenSet,
         *,
@@ -249,7 +250,7 @@ class OAuthAccountStore(Protocol):
         ...  # pragma: no cover
 
     async def unlink(
-        self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
+        self, account_id: str, provider: str, provider_account_id: str, *, require_remaining: bool, now: datetime
     ) -> UnlinkOutcome:
         """Atomically remove the link, grant, and retained tokens while preserving another method."""
         ...  # pragma: no cover
@@ -521,6 +522,11 @@ class MemoryOAuthAccountStore:
                     raise AccountLinkError
                 linked = replace(existing, grant=grant)
             else:
+                if any(
+                    link.account_id == account_id and link.provider == identity.provider
+                    for link in self._links.values()
+                ):
+                    raise AccountLinkError
                 digest = sha256("\0".join(key).encode()).hexdigest()
                 linked = LinkedProviderAccount(
                     provider_account_id=f"oauth_{digest}",
@@ -542,6 +548,7 @@ class MemoryOAuthAccountStore:
         self,
         account_id: str,
         provider_account_id: str,
+        identity: ProviderIdentity,
         grant: ProviderGrant,
         tokens: ProviderTokenSet,
         *,
@@ -551,7 +558,11 @@ class MemoryOAuthAccountStore:
         """Commit one grant and the exchanged token policy together."""
         async with self._lock:
             linked = self._links.get(provider_account_id)
-            if linked is None or linked.account_id != account_id:
+            if (
+                linked is None
+                or linked.account_id != account_id
+                or _identity_key(identity) != (linked.provider, linked.issuer, linked.subject)
+            ):
                 raise OAuthAccountError
             updated = replace(linked, grant=grant)
             await self._retain_or_discard(provider_account_id, tokens, retain_tokens=retain_tokens, now=now)
@@ -608,14 +619,14 @@ class MemoryOAuthAccountStore:
             return UnlinkOutcome(UnlinkStatus.UNLINKED, provider_account_id)
 
     async def unlink(
-        self, account_id: str, provider_account_id: str, *, require_remaining: bool, now: datetime
+        self, account_id: str, provider: str, provider_account_id: str, *, require_remaining: bool, now: datetime
     ) -> UnlinkOutcome:
         """Remove one owned link and all retained credentials under the aggregate lock."""
         if not _strict_text(account_id) or not _strict_text(provider_account_id) or not _aware(now):
             raise OAuthAccountError
         async with self._lock:
             linked = self._links.get(provider_account_id)
-            if linked is None or linked.account_id != account_id:
+            if linked is None or linked.account_id != account_id or linked.provider != provider:
                 return UnlinkOutcome(UnlinkStatus.NOT_FOUND)
             count = self._method_counts.get(account_id, 0)
             if require_remaining and count <= 1:
@@ -873,11 +884,13 @@ class OAuthAccountService:
             raise OAuthAccountError
         return await self.store.link(proof.account_id, identity, grant, tokens, retain_tokens=retain_tokens, now=now)
 
-    async def unlink(self, proof: OAuthLinkProof, provider_account_id: str, *, now: datetime) -> UnlinkOutcome:
+    async def unlink(
+        self, proof: OAuthLinkProof, provider: str, provider_account_id: str, *, now: datetime
+    ) -> UnlinkOutcome:
         """Atomically preserve a remaining login method, then discard tokens."""
         if not proof.valid_for("oauth-unlink"):
             raise OAuthAccountError
-        return await self.store.unlink(proof.account_id, provider_account_id, require_remaining=True, now=now)
+        return await self.store.unlink(proof.account_id, provider, provider_account_id, require_remaining=True, now=now)
 
     @staticmethod
     def missing_scopes(
@@ -892,6 +905,7 @@ class OAuthAccountService:
         self,
         proof: OAuthLinkProof,
         provider_account_id: str,
+        identity: ProviderIdentity,
         grant: ProviderGrant,
         tokens: ProviderTokenSet,
         *,
@@ -903,7 +917,7 @@ class OAuthAccountService:
         if not proof.valid_for("oauth-scope-upgrade") or not required_scopes.issubset(grant.scopes):
             raise OAuthAccountError
         return await self.store.upgrade(
-            proof.account_id, provider_account_id, grant, tokens, retain_tokens=retain_tokens, now=now
+            proof.account_id, provider_account_id, identity, grant, tokens, retain_tokens=retain_tokens, now=now
         )
 
     async def refresh(self, provider_account_id: str, provider: OAuthProvider, *, now: datetime) -> ProviderTokenSet:

@@ -636,7 +636,7 @@ async def test_refresh_rotate_sanitizes_invalid_and_unavailable_composition(  # 
         accounts.get_by_id = get_by_id  # type: ignore[method-assign]
     elif mode == "account_failure":
 
-        async def get_by_id(_account_id: str) -> accounts_module.LocalAccountRecord[object] | None:
+        async def get_by_id(_account_id: str) -> accounts_module.LocalAccountState[object] | None:
             raise OSError
 
         accounts.get_by_id = get_by_id  # type: ignore[method-assign]

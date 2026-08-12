@@ -13,7 +13,7 @@ from litestar_security.accounts import LocalAccount, TokenPair
 from litestar_security.authentication import VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
 from litestar_security.providers.oauth._provider import ProviderIdentity
-from litestar_security.providers.oauth._routes import OAuthRouteStatus
+from litestar_security.providers.oauth._routes import OAuthOperationSummary
 
 __all__ = ("OAuthLocalAuthTransport",)
 
@@ -66,7 +66,7 @@ class OAuthLocalAuthTransport:
         identity: ProviderIdentity,
         request: Request[Any, Any, Any],
         authenticated_at: datetime,
-    ) -> OAuthRouteStatus | Response[Any]:
+    ) -> OAuthOperationSummary | Response[Any]:
         """Establish the selected local transport with normalized OAuth evidence."""
         result = await self.local_auth_service.verified_login(
             request,
@@ -83,7 +83,7 @@ class OAuthLocalAuthTransport:
             ),
         )
         if isinstance(result, LocalAccount):
-            return OAuthRouteStatus(detail="Authenticated.", account_id=account_id)
+            return OAuthOperationSummary(detail="Authenticated.", account_id=account_id)
         if isinstance(result, TokenPair):
             return Response(content=result, status_code=HTTP_200_OK)
         if isinstance(result, VerificationUnavailable):

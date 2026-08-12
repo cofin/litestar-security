@@ -8,7 +8,6 @@ from anyio import create_task_group
 
 import litestar_security.testing as testing_module
 from litestar_security.accounts import (
-    ConsumeStatus,
     CreateRefreshFamilyCommand,
     CreateSessionCommand,
     LocalAccountCapabilities,
@@ -29,13 +28,14 @@ from litestar_security.accounts import (
     RevokeLoginMethodStatus,
     RotateRefreshCommand,
     SecurityEvent,
-    StepUpRecord,
+    StepUpGrantState,
     TokenIssue,
     TokenPurpose,
     UserVerification,
+    VerificationStatus,
     WebAuthnChallenge,
 )
-from litestar_security.providers.api_key import APIKeyRecord
+from litestar_security.providers.api_key import APIKeyState
 from litestar_security.providers.oauth import OAuthOperation, OAuthTransaction, SecretStr
 from litestar_security.testing import InMemorySecurityBackend
 
@@ -48,8 +48,8 @@ _SESSION_ID = "c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M"
 _SECOND_SESSION_ID = "bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4"
 
 
-def _record(key_id: str) -> APIKeyRecord:
-    return APIKeyRecord(key_id=key_id, subject_id="subject-1", digest=b"d" * 32)
+def _record(key_id: str) -> APIKeyState:
+    return APIKeyState(key_id=key_id, subject_id="subject-1", digest=b"d" * 32)
 
 
 def _event(operation: str = "test") -> SecurityEvent:
@@ -183,10 +183,10 @@ async def test_local_account_store_rejects_registration_verification_token_colli
 
 @pytest.mark.parametrize(
     ("purpose", "result_status"),
-    [(TokenPurpose.VERIFICATION, ConsumeStatus.USED), (TokenPurpose.RECOVERY, PasswordResetStatus.USED)],
+    [(TokenPurpose.VERIFICATION, VerificationStatus.USED), (TokenPurpose.RECOVERY, PasswordResetStatus.USED)],
 )
 async def test_local_account_store_burns_purpose_tokens_after_failed_attempt_limit(
-    purpose: TokenPurpose, result_status: ConsumeStatus | PasswordResetStatus
+    purpose: TokenPurpose, result_status: VerificationStatus | PasswordResetStatus
 ) -> None:
     backend = InMemorySecurityBackend(clock=lambda: _NOW)
     account_id = await _register(backend)
@@ -363,7 +363,7 @@ async def test_in_memory_one_time_challenge_stores_burn_invalid_presentations() 
     await backend.mfa_login.put(mfa)
     assert await backend.mfa_login.consume(b"m" * 32, account_id="other", security_epoch=1, now=_NOW) is None
 
-    step_up = StepUpRecord(
+    step_up = StepUpGrantState(
         grant_digest=b"g" * 32,
         transport_digest=b"t" * 32,
         principal_id="account-1",
@@ -528,10 +528,10 @@ async def test_local_account_store_preserves_purpose_token_terminal_outcomes() -
     replayed = await backend.accounts.consume_and_verify(
         verification.token_id, verification.digest, now=_NOW, event=_event()
     )
-    assert missing.status is ConsumeStatus.INVALID
-    assert expired_result.status is ConsumeStatus.EXPIRED
-    assert consumed.status is ConsumeStatus.CONSUMED
-    assert replayed.status is ConsumeStatus.USED
+    assert missing.status is VerificationStatus.INVALID
+    assert expired_result.status is VerificationStatus.EXPIRED
+    assert consumed.status is VerificationStatus.CONSUMED
+    assert replayed.status is VerificationStatus.USED
 
     recovery = TokenIssue(
         token_id="recovery_aWlpaWlpaWlpaWlpaWlpaQ",  # noqa: S106 - non-secret lookup ID
@@ -589,7 +589,7 @@ async def test_local_account_store_preserves_purpose_token_terminal_outcomes() -
         await backend.accounts.consume_and_verify(
             orphaned_verification.token_id, orphaned_verification.digest, now=_NOW, event=_event()
         )
-    ).status is ConsumeStatus.INVALID
+    ).status is VerificationStatus.INVALID
 
 
 async def test_local_account_store_updates_and_revokes_owned_sessions() -> None:
@@ -689,7 +689,7 @@ async def test_in_memory_api_key_store_has_one_atomic_rotation_winner() -> None:
     await backend.api_keys.create(current)
     outcomes: list[str] = []
 
-    async def rotate(replacement: APIKeyRecord) -> None:
+    async def rotate(replacement: APIKeyState) -> None:
         try:
             await backend.api_keys.rotate(
                 current_key_id=current.key_id,
@@ -777,7 +777,7 @@ def test_in_memory_backend_rejects_invalid_source_results() -> None:
 
 async def test_in_memory_api_key_store_covers_duplicates_bounded_overlap_and_revoke() -> None:
     backend = InMemorySecurityBackend()
-    current = APIKeyRecord(
+    current = APIKeyState(
         key_id="a2tra2tra2tra2tr", subject_id="subject-1", digest=b"d" * 32, expires_at=_NOW + timedelta(seconds=10)
     )
     replacement = _record("ZmZmZmZmZmZmZmZm")

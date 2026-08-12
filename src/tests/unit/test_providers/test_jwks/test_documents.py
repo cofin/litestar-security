@@ -14,10 +14,10 @@ from litestar.exceptions import ImproperlyConfiguredException
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.providers.jwks import (
     CachedJWKSProvider,
-    JWKSCacheEntry,
     JWKSCachePolicy,
-    JWKSFetchRequest,
-    JWKSFetchResponse,
+    JWKSFetchOutcome,
+    JWKSFetchTarget,
+    JWKSSource,
 )
 from litestar_security.providers.jwks import _documents as jwks_documents
 from litestar_security.providers.jwt import VerificationKey
@@ -33,7 +33,7 @@ _JWKS_URI = f"{_JWT_ISSUER}/.well-known/jwks.json"
 
 
 def _RecordingJWKSFetcher(  # noqa: N802 - constructor-shaped adapter over the shared collaborator
-    *responses: JWKSFetchResponse | Exception | Callable[[JWKSFetchRequest], JWKSFetchResponse],
+    *responses: JWKSFetchOutcome | Exception | Callable[[JWKSFetchTarget], JWKSFetchOutcome],
 ) -> RecordingJWKSFetcher:
     return RecordingJWKSFetcher(list(responses))
 
@@ -65,19 +65,19 @@ def _jwks_response(
     body: bytes | None = None,
     cache_control: str | None = None,
     etag: str | None = None,
-) -> JWKSFetchResponse:
+) -> JWKSFetchOutcome:
     headers: dict[str, str] = {"content-type": "application/json"}
     if cache_control is not None:
         headers["cache-control"] = cache_control
     if etag is not None:
         headers["etag"] = etag
-    return JWKSFetchResponse(status_code=status_code, body=_jwks_body(*keys) if body is None else body, headers=headers)
+    return JWKSFetchOutcome(status_code=status_code, body=_jwks_body(*keys) if body is None else body, headers=headers)
 
 
 def _jwks_entry(
     issuer: str = _JWT_ISSUER, jwks_uri: str = _JWKS_URI, algorithms: frozenset[str] = frozenset({"EdDSA"})
-) -> JWKSCacheEntry:
-    return JWKSCacheEntry(issuer=issuer, jwks_uri=jwks_uri, algorithms=algorithms)
+) -> JWKSSource:
+    return JWKSSource(issuer=issuer, jwks_uri=jwks_uri, algorithms=algorithms)
 
 
 async def test_jwks_atomic_replacement_exposes_new_and_removes_old_keys(
@@ -114,13 +114,13 @@ async def test_jwks_atomic_replacement_exposes_new_and_removes_old_keys(
     ids=["fetch", "http-5xx", "http-4xx", "parse", "partial-key-parse"],
 )
 async def test_jwks_failed_refresh_does_not_mutate_live_snapshot(
-    failure: JWKSFetchResponse | Exception, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+    failure: JWKSFetchOutcome | Exception, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
 ) -> None:
     jwk = _verification_jwk(jwt_key_material)
     fetcher = _RecordingJWKSFetcher(
         _jwks_response(jwk, cache_control="max-age=30", etag='"generation-1"'),
         failure,
-        JWKSFetchResponse(status_code=304, body=b"", headers={"cache-control": "max-age=60"}),
+        JWKSFetchOutcome(status_code=304, body=b"", headers={"cache-control": "max-age=60"}),
     )
     provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher)
     original = await provider.select_key(_JWT_ISSUER, _JWKS_URI, "key-1", "EdDSA", now=_JWT_NOW)
@@ -299,7 +299,7 @@ async def test_jwks_entries_isolate_same_kid_by_issuer_uri_and_algorithm(
     first = _verification_jwk(jwt_key_material, "EdDSA", "shared")
     second = _verification_jwk(jwt_key_material, "ES256", "shared")
 
-    def respond(request: JWKSFetchRequest) -> JWKSFetchResponse:
+    def respond(request: JWKSFetchTarget) -> JWKSFetchOutcome:
         return _jwks_response(first if request.issuer == _JWT_ISSUER else second, cache_control="max-age=60")
 
     fetcher = _RecordingJWKSFetcher(respond, respond)
@@ -357,7 +357,7 @@ async def test_jwks_warmup_is_explicit_complete_and_failure_aware(
 ) -> None:
     second_issuer = "https://issuer-two.example"
     second_uri = f"{second_issuer}/jwks"
-    first_response: JWKSFetchResponse | Exception = (
+    first_response: JWKSFetchOutcome | Exception = (
         OSError("warmup unavailable")
         if failure
         else _jwks_response(_verification_jwk(jwt_key_material, "EdDSA", "first"))

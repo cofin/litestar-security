@@ -35,7 +35,7 @@ from litestar_security.authentication import (
 )
 from litestar_security.config import ExternalCSRF, SecurityConfig
 from litestar_security.context import AuthenticationEvidence, Principal
-from litestar_security.providers.jwks import JWKSCacheEntry, JWKSFetchRequest, JWKSFetchResponse
+from litestar_security.providers.jwks import JWKSFetchOutcome, JWKSFetchTarget, JWKSSource
 from litestar_security.providers.jwt import JWTValidationConfig, PyJWTVerifier, VerificationKey
 from litestar_security.providers.oidc import DiscoveryPolicy, OIDCDiscoveryClient, OIDCMetadata
 
@@ -251,12 +251,12 @@ async def _discover_and_close(client: OIDCDiscoveryClient, issuer: str = _OIDC_I
 
 class _RecordingJWKSFetcher:
     def __init__(
-        self, *responses: JWKSFetchResponse | Exception | Callable[[JWKSFetchRequest], JWKSFetchResponse]
+        self, *responses: JWKSFetchOutcome | Exception | Callable[[JWKSFetchTarget], JWKSFetchOutcome]
     ) -> None:
         self.responses = list(responses)
-        self.requests: list[JWKSFetchRequest] = []
+        self.requests: list[JWKSFetchTarget] = []
 
-    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+    async def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
         self.requests.append(request)
         if not self.responses:
             message = "Unexpected JWKS fetch"
@@ -270,7 +270,7 @@ class _RecordingJWKSFetcher:
 class _BlockingJWKSFetcher:
     def __init__(
         self,
-        *responses: JWKSFetchResponse | Exception | Callable[[JWKSFetchRequest], JWKSFetchResponse],
+        *responses: JWKSFetchOutcome | Exception | Callable[[JWKSFetchTarget], JWKSFetchOutcome],
         immediate_calls: int = 0,
         maximum_calls: int = 1,
         issuers: tuple[str, ...] = (),
@@ -278,7 +278,7 @@ class _BlockingJWKSFetcher:
         self.responses = responses
         self.immediate_calls = immediate_calls
         self.maximum_calls = maximum_calls
-        self.requests: list[JWKSFetchRequest] = []
+        self.requests: list[JWKSFetchTarget] = []
         self.started = Event()
         self.started_by_issuer = {issuer: Event() for issuer in issuers}
         self.release = Event()
@@ -286,7 +286,7 @@ class _BlockingJWKSFetcher:
         self.active = 0
         self.cancelled = 0
 
-    async def fetch(self, request: JWKSFetchRequest) -> JWKSFetchResponse:
+    async def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
         self.requests.append(request)
         call_number = len(self.requests)
         if call_number > self.maximum_calls:
@@ -339,19 +339,19 @@ def _jwks_response(
     body: bytes | None = None,
     cache_control: str | None = None,
     etag: str | None = None,
-) -> JWKSFetchResponse:
+) -> JWKSFetchOutcome:
     headers: dict[str, str] = {"content-type": "application/json"}
     if cache_control is not None:
         headers["cache-control"] = cache_control
     if etag is not None:
         headers["etag"] = etag
-    return JWKSFetchResponse(status_code=status_code, body=_jwks_body(*keys) if body is None else body, headers=headers)
+    return JWKSFetchOutcome(status_code=status_code, body=_jwks_body(*keys) if body is None else body, headers=headers)
 
 
 def _jwks_entry(
     issuer: str = _JWT_ISSUER, jwks_uri: str = _JWKS_URI, algorithms: frozenset[str] = frozenset({"EdDSA"})
-) -> JWKSCacheEntry:
-    return JWKSCacheEntry(issuer=issuer, jwks_uri=jwks_uri, algorithms=algorithms)
+) -> JWKSSource:
+    return JWKSSource(issuer=issuer, jwks_uri=jwks_uri, algorithms=algorithms)
 
 
 def _mechanism(

@@ -21,16 +21,16 @@ from litestar_security.providers.jwks._cache import (
     InMemoryJWKSCache,
     JWKSCache,
     JWKSCacheCoordinator,
-    JWKSCacheEntry,
     JWKSCachePolicy,
     JWKSSnapshot,
+    JWKSSource,
     freshness,
 )
 from litestar_security.providers.jwks._documents import parse_document
 from litestar_security.providers.jwks._fetching import (
     AsyncJWKSFetcher,
-    JWKSFetchRequest,
-    JWKSFetchResponse,
+    JWKSFetchOutcome,
+    JWKSFetchTarget,
     SyncJWKSFetcher,
     normalize_fetcher,
 )
@@ -103,7 +103,7 @@ class CachedJWKSProvider:
 
     def __init__(  # noqa: PLR0913 - provider assembly keeps ownership, workers, policy, and metrics explicit
         self,
-        entries: Sequence[JWKSCacheEntry],
+        entries: Sequence[JWKSSource],
         fetcher: AsyncJWKSFetcher | SyncJWKSFetcher,
         *,
         policy: JWKSCachePolicy | None = None,
@@ -117,9 +117,9 @@ class CachedJWKSProvider:
         for entry in entries:
             entry_value: object = entry
             if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
-                entry_value, JWKSCacheEntry
+                entry_value, JWKSSource
             ):
-                raise_config("JWKS provider entries must be JWKSCacheEntry values")
+                raise_config("JWKS provider entries must be JWKSSource values")
             key = (entry_value.issuer, entry_value.jwks_uri)
             if key in states:
                 raise_config("Duplicate JWKS provider entry")
@@ -370,7 +370,7 @@ class CachedJWKSProvider:
 
     async def _fetch_snapshot(self, state: "_EntryState", now: datetime) -> "JWKSSnapshot | VerificationUnavailable":
         current = self._snapshot(state)
-        request = JWKSFetchRequest(
+        request = JWKSFetchTarget(
             issuer=state.config.issuer, jwks_uri=state.config.jwks_uri, etag=None if current is None else current.etag
         )
         try:
@@ -379,7 +379,7 @@ class CachedJWKSProvider:
                 response_value = cast("object", await self._fetcher.fetch(request))
             finally:
                 self._observe("security.jwks.fetch_duration", perf_counter() - fetch_started)
-            if not isinstance(response_value, JWKSFetchResponse):
+            if not isinstance(response_value, JWKSFetchOutcome):
                 return _UNAVAILABLE
             response = response_value
             if response.status_code == HTTP_304_NOT_MODIFIED:
@@ -470,7 +470,7 @@ class _Refresh:
 
 @dataclass(slots=True)
 class _EntryState:
-    config: JWKSCacheEntry
+    config: JWKSSource
     coordination: JWKSCacheCoordinator = field(init=False)
 
     @property

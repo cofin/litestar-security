@@ -47,13 +47,13 @@ from litestar_security.accounts import (
     LocalSession,
     LocalSessionList,
     LocalToken,
+    OperationMessage,
     PasskeyAuthenticationStart,
     PasskeyOptions,
     PasskeyRegistrationStart,
     PasskeySummary,
     PasskeyVerification,
     RecoveryCodes,
-    RouteStatus,
     StepUpAuthorization,
     StepUpGrant,
     StepUpVerification,
@@ -65,7 +65,7 @@ from litestar_security.providers.oauth import (
     OAuthAuthorization,
     OAuthLink,
     OAuthLogout,
-    OAuthRouteStatus,
+    OAuthOperationSummary,
     OAuthScopeUpgrade,
     OAuthStepUp,
     OIDCBackchannelLogout,
@@ -191,8 +191,8 @@ class RecoveryCodesFactory(MsgspecFactory[RecoveryCodes]):
 
 
 @register_fixture(name="route_status_factory")
-class RouteStatusFactory(MsgspecFactory[RouteStatus]):
-    __model__ = RouteStatus
+class OperationMessageFactory(MsgspecFactory[OperationMessage]):
+    __model__ = OperationMessage
     __random_seed__ = SEED
 
 
@@ -251,8 +251,8 @@ class OAuthLogoutFactory(MsgspecFactory[OAuthLogout]):
 
 
 @register_fixture(name="oauth_route_status_factory")
-class OAuthRouteStatusFactory(MsgspecFactory[OAuthRouteStatus]):
-    __model__ = OAuthRouteStatus
+class OAuthOperationSummaryFactory(MsgspecFactory[OAuthOperationSummary]):
+    __model__ = OAuthOperationSummary
     __random_seed__ = SEED
 
 

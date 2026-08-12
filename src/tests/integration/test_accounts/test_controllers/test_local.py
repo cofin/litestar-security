@@ -256,8 +256,8 @@ async def test_generated_registration_reset_and_password_handlers_cover_projecti
         verification=SimpleNamespace(
             resend=AsyncOutcome(accounts.LifecycleAccepted()),
             consume=AsyncOutcome(
-                accounts.ConsumeOutcome(accounts.ConsumeStatus.CONSUMED, "account-1", 1),
-                accounts.ConsumeOutcome(accounts.ConsumeStatus.INVALID),
+                accounts.VerificationOutcome(accounts.VerificationStatus.CONSUMED, "account-1", 1),
+                accounts.VerificationOutcome(accounts.VerificationStatus.INVALID),
             ),
         ),
         registration=SimpleNamespace(register=AsyncOutcome(accounts.LifecycleAccepted(), accounts.InvalidInvitation())),

@@ -18,6 +18,7 @@ from litestar_security.authentication import (
 )
 from litestar_security.config import WorkerLimits
 from litestar_security.context import AuthenticationEvidence, CredentialRestrictions, Principal
+from litestar_security.providers._internal import DynamicVerifierCache
 from litestar_security.providers.jwks import JWKSProvider
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
@@ -100,8 +101,8 @@ class ServiceTokenConfig:
 class _ServiceJWTVerifier:
     owner: ServiceTokenConfig
     config: JWTValidationConfig
-    _verifiers: dict[tuple[str, str], PyJWTVerifier] = field(
-        default_factory=dict[tuple[str, str], PyJWTVerifier], init=False, repr=False, compare=False
+    _verifiers: DynamicVerifierCache[PyJWTVerifier] = field(
+        default_factory=DynamicVerifierCache[PyJWTVerifier], init=False, repr=False, compare=False
     )
 
     async def verify(  # noqa: PLR0911 - preserve structured trust outcomes at every verifier boundary
@@ -125,9 +126,10 @@ class _ServiceJWTVerifier:
         if not isinstance(selection, VerificationKey):
             return VerificationUnavailable()
         cache_key = (key_id, algorithm)
-        verifier = self._verifiers.get(cache_key)
-        if verifier is None:
-            verifier = PyJWTVerifier(
+        verifier = self._verifiers.get_or_create(
+            cache_key,
+            selection.key,
+            lambda: PyJWTVerifier(
                 config=replace(self.config, algorithms=frozenset({algorithm})),
                 key=selection.key,
                 mechanism_name="service-jwt",
@@ -135,8 +137,8 @@ class _ServiceJWTVerifier:
                 maximum_token_bytes=_MAXIMUM_TOKEN_BYTES,
                 limiter=self.owner.worker_limits.crypto_limiter,
                 worker_timeout=self.owner.worker_limits.timeout,
-            )
-            self._verifiers[cache_key] = verifier
+            ),
+        )
         outcome = await verifier.verify(token, now=now)
         if not isinstance(outcome, Authenticated):
             return outcome
