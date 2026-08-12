@@ -1,5 +1,6 @@
 """Generic OAuth provider contracts and hardened async HTTP boundary."""
 
+import asyncio
 import ipaddress
 import json
 import math
@@ -707,8 +708,9 @@ class GitHubOAuthProvider:
             or not _GITHUB_REQUIRED_SCOPES.issubset(tokens.scopes)
         ):
             _raise_provider()
-        profile = await self._api_json("/user", tokens.access_token)
-        emails = await self._api_json("/user/emails", tokens.access_token)
+        profile, emails = await asyncio.gather(
+            self._api_json("/user", tokens.access_token), self._api_json("/user/emails", tokens.access_token)
+        )
         if not isinstance(profile, Mapping) or not isinstance(emails, list):
             _raise_provider()
         profile_document = cast("Mapping[str, object]", profile)
