@@ -608,13 +608,23 @@ class OAuthLifecycleService:
     ) -> OAuthAuthorization:
         """Consume required step-up and create one bound authorization transaction."""
         registration = self._registration(provider)
+        requested_scopes = registration.default_scopes | (scopes or frozenset())
+        if operation is OAuthOperation.SCOPE_UPGRADE:
+            if account_id is None or provider_account_id is None or not scopes:
+                raise OAuthAccountError
+            linked = await self.accounts.store.resolve_provider_account(account_id, provider)
+            if linked is None or linked.provider_account_id != provider_account_id:
+                raise OAuthAccountError
+            missing_scopes = scopes.difference(linked.grant.scopes)
+            if not missing_scopes:
+                raise OAuthAccountError
+            requested_scopes |= linked.grant.scopes
         authorization: OAuthStepUpAuthorization | None = None
         if operation is not OAuthOperation.LOGIN:
             if account_id is None or step_up_grant is None:
                 raise NotAuthorizedException(detail="Fresh step-up authentication required")
             purpose = "oauth-link" if operation is OAuthOperation.LINK else "oauth-scope-upgrade"
             authorization = await self._authorize(step_up_grant, account_id, purpose, request)
-        requested_scopes = registration.default_scopes | (scopes or frozenset())
         cookie_value = request.cookies.get(OAUTH_BINDING_COOKIE_NAME)
         existing_binding = SecretStr(cookie_value) if cookie_value else None
         start = await self.transactions.start(

@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -689,7 +690,7 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
         tokens=ProviderTokenSet(
             access_token=SecretStr("access"),
             token_type="Bearer",  # noqa: S106 - standardized OAuth token type
-            scopes=frozenset({"profile", "email"}),
+            scopes=frozenset({"profile"}),
             expires_at=NOW + timedelta(hours=1),
             id_token=SecretStr("header.payload.signature"),
         ),
@@ -725,6 +726,7 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
     )
     assert isinstance(linked, OAuthOperationSummary)
     provider_account_id = cast("str", linked.provider_account_id)
+    provider.tokens = replace(provider.tokens, scopes=frozenset({"profile", "email"}))
 
     scope_start = await service.begin(
         provider="example",
@@ -741,6 +743,21 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
     )
     assert isinstance(updated, OAuthOperationSummary)
     assert updated.detail == "Scopes updated."
+    for target_id, requested in (
+        ("another-provider-account", frozenset({"calendar"})),
+        (provider_account_id, frozenset({"email"})),
+    ):
+        with pytest.raises(OAuthAccountError):
+            await service.begin(
+                provider="example",
+                operation=OAuthOperation.SCOPE_UPGRADE,
+                account_id="account-1",
+                provider_account_id=target_id,
+                return_to="/",
+                scopes=requested,
+                step_up_grant="grant",
+                request=request,
+            )
     logout = await service.logout(provider="example", account_id="account-1", request=request)
     assert logout.redirect_url is not None
     assert "post_logout_redirect_uri=https%3A%2F%2Fapp.example%2Flogged-out" in logout.redirect_url
@@ -871,7 +888,7 @@ async def test_lifecycle_and_local_transport_reject_invalid_or_unavailable_paths
     assert token_calls == ["account-1"]
 
 
-async def test_lifecycle_rejects_scope_callback_without_target_and_unlinks_missing_target() -> None:
+async def test_lifecycle_rejects_scope_upgrade_without_an_owned_unsatisfied_target() -> None:
     provider = FakeOAuthProvider(
         name="example",
         tokens=ProviderTokenSet(
@@ -893,20 +910,16 @@ async def test_lifecycle_rejects_scope_callback_without_target_and_unlinks_missi
     step_up = StepUpAuthorizer()
     service = lifecycle_service(provider=provider, step_up=step_up)
     request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {"cookies": {}})())
-    start = await service.begin(
-        provider="example",
-        operation=OAuthOperation.SCOPE_UPGRADE,
-        account_id="account-1",
-        provider_account_id=None,
-        return_to="/",
-        scopes=None,
-        step_up_grant="grant",
-        request=request,
-    )
-    request.cookies["__Host-litestar-security-oauth"] = start.binding_cookie.value
     with pytest.raises(OAuthAccountError):
-        await service.callback(
-            provider="example", code="code", state=parse_qs(urlsplit(start.url).query)["state"][0], request=request
+        await service.begin(
+            provider="example",
+            operation=OAuthOperation.SCOPE_UPGRADE,
+            account_id="account-1",
+            provider_account_id=None,
+            return_to="/",
+            scopes=frozenset({"email"}),
+            step_up_grant="grant",
+            request=request,
         )
 
     result = await service.unlink(
