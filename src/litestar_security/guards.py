@@ -17,17 +17,17 @@ __all__ = (
     "AssuranceTrait",
     "AuthorizationDecision",
     "AuthorizationPredicate",
-    "require_all_of",
-    "require_any_of",
-    "require_assurance",
-    "require_at_least",
-    "require_authenticated",
-    "require_capability",
-    "require_one_of",
-    "require_role",
-    "require_scope",
-    "require_team_role",
-    "require_tenant",
+    "requires_all_of",
+    "requires_any_of",
+    "requires_assurance",
+    "requires_at_least",
+    "requires_authenticated",
+    "requires_capability",
+    "requires_one_of",
+    "requires_role",
+    "requires_scope",
+    "requires_team_role",
+    "requires_tenant",
 )
 
 
@@ -105,7 +105,7 @@ class AuthorizationPredicate:
         raise NotImplementedError  # pragma: no cover
 
 
-def require_authenticated() -> AuthorizationPredicate:
+def requires_authenticated() -> AuthorizationPredicate:
     """Require any authenticated principal.
 
     Returns:
@@ -114,7 +114,7 @@ def require_authenticated() -> AuthorizationPredicate:
     return _AuthenticatedPredicate()
 
 
-def require_assurance(
+def requires_assurance(
     *,
     methods: Collection[str] = (),
     traits: Collection[AssuranceTrait] = (),
@@ -146,7 +146,7 @@ def require_assurance(
     )
 
 
-def require_scope(scope: str) -> AuthorizationPredicate:
+def requires_scope(scope: str) -> AuthorizationPredicate:
     """Require one scope from the immutable authorization snapshot.
 
     Args:
@@ -158,7 +158,7 @@ def require_scope(scope: str) -> AuthorizationPredicate:
     return _GrantPredicate(kind="scope", value=_normalize_name(scope, "Scope"))
 
 
-def require_role(role: str) -> AuthorizationPredicate:
+def requires_role(role: str) -> AuthorizationPredicate:
     """Require one role from the immutable authorization snapshot.
 
     Args:
@@ -170,7 +170,7 @@ def require_role(role: str) -> AuthorizationPredicate:
     return _GrantPredicate(kind="role", value=_normalize_name(role, "Role"))
 
 
-def require_capability(capability: str) -> AuthorizationPredicate:
+def requires_capability(capability: str) -> AuthorizationPredicate:
     """Require one capability from the immutable authorization snapshot.
 
     Args:
@@ -182,7 +182,7 @@ def require_capability(capability: str) -> AuthorizationPredicate:
     return _GrantPredicate(kind="capability", value=_normalize_name(capability, "Capability"))
 
 
-def require_team_role(*, team_parameter: str = "team_id", roles: Collection[str]) -> AuthorizationPredicate:
+def requires_team_role(*, team_parameter: str = "team_id", roles: Collection[str]) -> AuthorizationPredicate:
     """Require one allowed role for the team selected by a parsed path parameter.
 
     The team is read from the parsed path parameter rather than the request body,
@@ -207,7 +207,7 @@ def require_team_role(*, team_parameter: str = "team_id", roles: Collection[str]
     )
 
 
-def require_tenant(*, tenant_parameter: str = "tenant_id") -> AuthorizationPredicate:
+def requires_tenant(*, tenant_parameter: str = "tenant_id") -> AuthorizationPredicate:
     """Require membership in the tenant selected by a parsed path parameter.
 
     Args:
@@ -219,7 +219,7 @@ def require_tenant(*, tenant_parameter: str = "tenant_id") -> AuthorizationPredi
     return _TenantPredicate(tenant_parameter=_normalize_name(tenant_parameter, "Tenant path parameter"))
 
 
-def require_all_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
+def requires_all_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
     """Require every child predicate.
 
     Args:
@@ -231,7 +231,7 @@ def require_all_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
     return _composite("all_of", children, count=len(children))
 
 
-def require_any_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
+def requires_any_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
     """Require at least one child predicate.
 
     Args:
@@ -243,7 +243,7 @@ def require_any_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
     return _composite("any_of", children, count=1)
 
 
-def require_one_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
+def requires_one_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
     """Require exactly one child predicate.
 
     Args:
@@ -255,7 +255,7 @@ def require_one_of(*children: AuthorizationPredicate) -> AuthorizationPredicate:
     return _composite("one_of", children, count=1)
 
 
-def require_at_least(count: int, *children: AuthorizationPredicate) -> AuthorizationPredicate:
+def requires_at_least(count: int, *children: AuthorizationPredicate) -> AuthorizationPredicate:
     """Require at least ``count`` child predicates.
 
     Args:

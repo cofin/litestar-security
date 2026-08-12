@@ -63,6 +63,8 @@ class OAuthOperation(str, Enum):
     LOGIN = "login"
     LINK = "link"
     SCOPE_UPGRADE = "scope-upgrade"
+    REVALIDATE = "revalidate"
+    REAUTHENTICATE = "reauthenticate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +249,8 @@ class OAuthTransaction:
     session_binding: str | None = field(default=None, repr=False)
     security_epoch: int | None = None
     provider_account_id: str | None = None
+    step_up_purpose: str | None = None
+    maximum_authentication_age: int | None = None
     expires_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:
@@ -270,6 +274,15 @@ class OAuthTransaction:
                 and (self.security_epoch.__class__ is not int or self.security_epoch < 0)
             )
             or (self.provider_account_id is not None and not _strict_text(self.provider_account_id))
+            or (self.step_up_purpose is not None and not _strict_text(self.step_up_purpose))
+            or (
+                self.maximum_authentication_age is not None
+                and (
+                    self.maximum_authentication_age.__class__ is not int
+                    or self.maximum_authentication_age < 0
+                    or self.maximum_authentication_age > _MAXIMUM_COOKIE_AGE
+                )
+            )
             or not _aware_time(self.expires_at)
         ):
             message = "OAuth transaction is invalid"
@@ -555,6 +568,8 @@ class OAuthTransactionService:
         browser_binding: SecretStr | None = None,
         security_epoch: int | None = None,
         provider_account_id: str | None = None,
+        step_up_purpose: str | None = None,
+        maximum_authentication_age: int | None = None,
     ) -> OAuthTransactionStart:
         """Create and persist one independent browser transaction.
 
@@ -573,6 +588,8 @@ class OAuthTransactionService:
                 across concurrent transactions.
             security_epoch: Authoritative epoch bound by consumed step-up.
             provider_account_id: Provider link targeted by scope upgrade.
+            step_up_purpose: Purpose a successful provider reauthentication may issue.
+            maximum_authentication_age: Maximum signed provider authentication age in seconds.
 
         Returns:
             Browser-facing state, binding, challenge, nonce, and stored transaction.
@@ -613,6 +630,8 @@ class OAuthTransactionService:
                 session_binding=session_binding,
                 security_epoch=security_epoch,
                 provider_account_id=provider_account_id,
+                step_up_purpose=step_up_purpose,
+                maximum_authentication_age=maximum_authentication_age,
                 expires_at=now + self.lifetime,
             )
             await self.store.create(transaction)
@@ -806,6 +825,8 @@ def _replace_secrets(
         session_binding=transaction.session_binding,
         security_epoch=transaction.security_epoch,
         provider_account_id=transaction.provider_account_id,
+        step_up_purpose=transaction.step_up_purpose,
+        maximum_authentication_age=transaction.maximum_authentication_age,
         expires_at=transaction.expires_at,
     )
 

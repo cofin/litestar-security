@@ -68,6 +68,26 @@ exact identity linking, grants, retained tokens, refresh compare-and-swap, and
 revocation retry staging. Implement each operation as one database transaction;
 the library ships no ORM or database-specific adapter.
 
+Provider confirmation
+~~~~~~~~~~~~~~~~~~~~~
+
+``POST /auth/oauth/{provider}/revalidate`` confirms that the browser still
+controls the exact identity linked to the local account. It does not assert
+fresh authentication and cannot issue a step-up credential.
+
+``POST /auth/oauth/{provider}/reauthenticate/{purpose}`` is available only for
+providers implementing ``OAuthReauthenticationProvider`` and purposes present
+in that provider's ``OIDCReauthenticationPolicy`` mapping. OIDC reauthentication
+uses ``max_age`` (zero forces authentication), requires signed ``auth_time``,
+and checks the configured ACR and AMR requirements before issuing a one-use,
+purpose-bound ``StepUpCredential``. GitHub account selection is not fresh
+authentication and therefore cannot provide this capability.
+
+Use ``discover_oidc_provider()`` or ``discover_google_oidc_provider()`` when the
+application owns shared ``OIDCDiscoveryClient`` and ``JWKSProvider`` resources.
+The returned provider owns only its OAuth HTTP client; closing it does not close
+the shared discovery or JWKS resources.
+
 Team authorization
 ------------------
 
@@ -78,13 +98,13 @@ check the team named by the route:
 
    from litestar import get
 
-   from litestar_security import require_team_role, required
+   from litestar_security import requires_team_role, required
 
 
    @get(
        "/teams/{team_id:str}",
        auth=required(),
-       guards=[require_team_role(team_parameter="team_id", roles={"owner"})],
+       guards=[requires_team_role(team_parameter="team_id", roles={"owner"})],
    )
    async def team_settings(team_id: str) -> dict[str, str]:
        return {"team_id": team_id}

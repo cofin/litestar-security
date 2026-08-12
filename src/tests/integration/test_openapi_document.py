@@ -114,6 +114,12 @@ class _OAuthLifecycle:
         del outcome, kwargs
         return OAuthOperationSummary(detail="Authenticated.")
 
+    async def revalidate(self, **kwargs: object) -> OAuthAuthorization:
+        return await self.begin(**kwargs)
+
+    async def reauthenticate(self, **kwargs: object) -> OAuthAuthorization:
+        return await self.begin(**kwargs)
+
     async def unlink(self, **kwargs: object) -> OAuthOperationSummary:
         del kwargs
         return OAuthOperationSummary(detail="Unlinked.")

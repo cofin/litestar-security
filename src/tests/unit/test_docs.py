@@ -221,6 +221,12 @@ def _oauth_kwargs() -> "dict[str, Any]":
         async def establish_login(self, **kwargs: object) -> None:
             del kwargs
 
+        async def revalidate(self, **kwargs: object) -> None:
+            del kwargs
+
+        async def reauthenticate(self, **kwargs: object) -> None:
+            del kwargs
+
         async def unlink(self, **kwargs: object) -> None:
             del kwargs
 

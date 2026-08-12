@@ -19,7 +19,7 @@ from examples.support import (
     build_websocket_config,
     example_session_config,
 )
-from litestar_security import SecurityConfig, SecurityContext, SecurityPlugin, any_of, public, require_role, required
+from litestar_security import SecurityConfig, SecurityContext, SecurityPlugin, any_of, public, required, requires_role
 
 __all__ = ("EXAMPLE_MODES", "create_app")
 
@@ -62,17 +62,17 @@ class ExampleSecurityAdmin(Controller):
 
     path = "/admin/security"
 
-    @post("/disable", auth=required(), guards=[require_role("security-admin")], sync_to_thread=False)
+    @post("/disable", auth=required(), guards=[requires_role("security-admin")], sync_to_thread=False)
     def disable_account(self) -> dict[str, str]:
         """Demonstrate application-owned account disable orchestration."""
         return {"detail": "Account disabled by application service."}
 
-    @post("/force-reset", auth=required(), guards=[require_role("security-admin")], sync_to_thread=False)
+    @post("/force-reset", auth=required(), guards=[requires_role("security-admin")], sync_to_thread=False)
     def force_reset(self) -> dict[str, str]:
         """Demonstrate application-owned forced password reset."""
         return {"detail": "Password reset required by application service."}
 
-    @post("/revoke", auth=required(), guards=[require_role("security-admin")], sync_to_thread=False)
+    @post("/revoke", auth=required(), guards=[requires_role("security-admin")], sync_to_thread=False)
     def revoke_security_state(self) -> dict[str, str]:
         """Demonstrate factor, session, and key revocation."""
         return {"detail": "Application security state revoked."}

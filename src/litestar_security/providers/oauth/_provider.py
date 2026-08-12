@@ -35,6 +35,7 @@ __all__ = (
     "OAuthProvider",
     "OAuthProviderClient",
     "OAuthProviderError",
+    "OAuthReauthenticationProvider",
     "ProviderGrant",
     "ProviderIdentity",
     "ProviderTokenSet",
@@ -226,6 +227,7 @@ class ProviderIdentity:
     raw_claims: Mapping[str, object] = field(repr=False)
     acr: str | None = None
     amr: tuple[str, ...] = ()
+    authenticated_at: datetime | None = None
 
     def __post_init__(self) -> None:
         """Require stable identity keys and freeze verified raw claims."""
@@ -241,6 +243,7 @@ class ProviderIdentity:
             or self.amr.__class__ is not tuple
             or any(not _strict_text(method) for method in self.amr)
             or len(self.amr) != len(set(self.amr))
+            or (self.authenticated_at is not None and not _aware_time(self.authenticated_at))
             or not isinstance(raw_claims, Mapping)
             or any(not _strict_text(key) for key in self.raw_claims)
         ):
@@ -317,6 +320,23 @@ class OAuthProvider(Protocol):
         Args:
             token: The credential to revoke.
             token_type_hint: The optional standardized token type hint.
+        """
+        ...  # pragma: no cover
+
+
+@runtime_checkable
+class OAuthReauthenticationProvider(OAuthProvider, Protocol):
+    """Provider capable of forcing fresh, signed authentication evidence."""
+
+    def build_reauthentication_url(self, start: OAuthTransactionStart, *, max_age: int) -> str:
+        """Build an authorization URL that requires signed provider freshness.
+
+        Args:
+            start: The bound authorization transaction.
+            max_age: Maximum accepted provider authentication age in seconds.
+
+        Returns:
+            The provider authorization URL with its freshness request.
         """
         ...  # pragma: no cover
 

@@ -26,10 +26,10 @@ from litestar_security import (
     mechanism,
     optional,
     public,
-    require_any_of,
-    require_authenticated,
-    require_scope,
     required,
+    requires_any_of,
+    requires_authenticated,
+    requires_scope,
 )
 
 if TYPE_CHECKING:
@@ -62,7 +62,7 @@ no_session: SecurityContext = SecurityContext(session=NullSessionHandle())
 native_scope = cast("Scope", {"type": "http", "session": {}})
 native_session: SecurityContext = SecurityContext(session=LitestarSessionHandle(native_scope))
 
-authorization_guard: AuthorizationPredicate = require_any_of(require_authenticated(), require_scope("reports:read"))
+authorization_guard: AuthorizationPredicate = requires_any_of(requires_authenticated(), requires_scope("reports:read"))
 public_metadata = {"auth": public()}
 csrf_metadata = {CSRF_REQUIRED_OPT_KEY: True}
 
@@ -82,9 +82,9 @@ class OwnedOptController(Controller):
 
     path = "/controller"
     opt = {"auth": all_of("session", "api_key")}  # noqa: RUF012 - Litestar controller options are class-owned
-    guards = (require_authenticated(),)
+    guards = (requires_authenticated(),)
 
-    @get("/resource", auth=any_of("session", "api_key"), guards=[require_scope("resource:read")])
+    @get("/resource", auth=any_of("session", "api_key"), guards=[requires_scope("resource:read")])
     async def resource(self) -> None:
         """Type-check an owned handler override."""
 
@@ -106,11 +106,11 @@ secure_router = Router(
     path="/router",
     route_handlers=[secured_handler],
     opt={"auth": required("session")},
-    guards=[require_authenticated()],
+    guards=[requires_authenticated()],
 )
 typed_app = Litestar(
     route_handlers=[secure_router, OwnedOptController, SecureAccounts, OpenStatus],
     opt={"auth": required()},
-    guards=[require_authenticated()],
+    guards=[requires_authenticated()],
     openapi_config=None,
 )

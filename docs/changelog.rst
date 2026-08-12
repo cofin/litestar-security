@@ -34,6 +34,10 @@ Changed (breaking)
   can link at most one identity for a provider, scope upgrades confirm the
   callback identity exactly, and unlink is provider-bound. Split token-vault,
   login-resolution, and revocation-retry store APIs are removed.
+* Authorization guard factories consistently use the ``requires_*`` prefix:
+  for example, ``require_scope`` becomes ``requires_scope`` and
+  ``require_all_of`` becomes ``requires_all_of``. The singular spellings are
+  removed without aliases.
 
 Added
 ~~~~~
@@ -53,6 +57,17 @@ Added
   refresh supervision.
 * ``MemoryOAuthTransactionStore`` performs bounded expiry cleanup and defaults
   to a maximum of 1,024 live transactions, rejecting new state at capacity.
+* OAuth provider confirmation is split into two explicit operations.
+  ``REVALIDATE`` confirms possession of the exact linked identity and never
+  produces freshness evidence. Capability-gated OIDC ``REAUTHENTICATE`` uses
+  ``max_age``, requires signed ``auth_time``, enforces configured ACR/AMR,
+  account epoch and browser/session bindings, and returns one purpose-bound
+  ``StepUpCredential``. Generated routes expose ``/revalidate`` and
+  ``/reauthenticate/{purpose}`` under each provider.
+* ``discover_oidc_provider()`` and ``discover_google_oidc_provider()`` compose
+  generic or Google OIDC providers from application-owned shared discovery and
+  JWKS resources. GitHub profile and verified-email requests now run
+  concurrently through the provider's bounded async HTTP client.
 
 
 0.3.0

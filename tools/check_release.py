@@ -160,7 +160,7 @@ def smoke_wheel(
     python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if lower_bound:
         run("uv", "pip", "install", "--python", str(python), "litestar==2.24.0")
-    run("uv", "pip", "install", "--python", str(python), str(wheel))
+    run("uv", "pip", "install", "--python", str(python), f"{wheel}[all]")
     run(str(python), "-I", "-c", SMOKE_SCRIPT, cwd=workspace, env=clean_environment)
     cli = environment / ("Scripts/litestar.exe" if os.name == "nt" else "bin/litestar")
     result = run(str(cli), "security", "--version", cwd=workspace, env=clean_environment)

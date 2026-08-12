@@ -413,6 +413,13 @@ async def test_reference_store_cleans_expired_entries_and_rejects_capacity_growt
     await store.create(replace(first, state_digest=b"y" * 32))
 
 
+async def test_reference_store_rejects_a_naive_cleanup_clock() -> None:
+    store = MemoryOAuthTransactionStore(protector=_Protector(), capacity=1, clock=lambda: _NOW.replace(tzinfo=None))
+
+    with pytest.raises(ValueError, match="clock must return aware time"):
+        await store.create(_transaction())
+
+
 def test_oauth_cookie_uses_dedicated_host_only_policy() -> None:
     cookie = oauth_binding_cookie(SecretStr("cookie-secret"))
 

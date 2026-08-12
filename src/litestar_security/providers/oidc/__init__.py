@@ -6,6 +6,8 @@ from litestar_security.providers.oidc._keycloak import KeycloakClaims, map_keycl
 from litestar_security.providers.oidc._logout import OIDCJWTLogoutTokenConsumer
 from litestar_security.providers.oidc._provider import (
     OIDCProvider,
+    discover_google_oidc_provider,
+    discover_oidc_provider,
     google_oidc_provider,
     keycloak_oidc_provider,
     oidc_provider,
@@ -21,6 +23,8 @@ __all__ = (
     "OIDCMetadata",
     "OIDCProvider",
     "ServiceTokenConfig",
+    "discover_google_oidc_provider",
+    "discover_oidc_provider",
     "google_oidc_provider",
     "keycloak_oidc_provider",
     "map_keycloak_claims",

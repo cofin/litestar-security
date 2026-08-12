@@ -101,7 +101,7 @@ from litestar_security.context import (
     SecurityContext,
     SessionPersistenceUnavailableError,
 )
-from litestar_security.guards import require_scope
+from litestar_security.guards import requires_scope
 from litestar_security.headers import SecurityHeadersConfig
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
@@ -1164,7 +1164,7 @@ async def test_local_access_token_runtime_enforces_scope_account_and_epoch(
     invalid_verification = await bearer_slot.verifier.verify("malformed", now=datetime.now(timezone.utc))
     assert isinstance(invalid_verification, InvalidCredentials)
 
-    @get("/", auth=required("bearer"), guards=[require_scope("reports:read")])
+    @get("/", auth=required("bearer"), guards=[requires_scope("reports:read")])
     async def handler(request: Request) -> dict[str, object]:
         return {
             "id": request.user.id,
@@ -1719,7 +1719,7 @@ def test_authorization_guard_has_identical_http_and_websocket_decisions(connecti
     )
     connection = connection_type(scope=scope, receive=receive, send=send)  # type: ignore[operator]
 
-    require_scope("reports:read")(connection, _RouteHandler())  # type: ignore[arg-type]
+    requires_scope("reports:read")(connection, _RouteHandler())  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -1781,7 +1781,7 @@ def test_websocket_native_guard_denial_closes_before_handler_and_di() -> None:
         events.append("dependency")
         return "resource"
 
-    @websocket("/ws", guards=[require_scope("reports:write")])
+    @websocket("/ws", guards=[requires_scope("reports:write")])
     async def handler(socket: WebSocket, resource: NamedDependency[str]) -> None:
         events.append(resource)
         await socket.accept()

@@ -252,6 +252,17 @@
         "title": "LocalToken",
         "type": "object"
       },
+      "OAuthConfirmation": {
+        "properties": {
+          "return_to": {
+            "default": "/",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "title": "OAuthConfirmation",
+        "type": "object"
+      },
       "OAuthLink": {
         "properties": {
           "return_to": {
@@ -308,6 +319,50 @@
           "detail"
         ],
         "title": "OAuthOperationSummary",
+        "type": "object"
+      },
+      "OAuthReauthenticationOutcome": {
+        "properties": {
+          "account_id": {
+            "type": "string"
+          },
+          "credential": {
+            "$ref": "#/components/schemas/StepUpCredential"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "provider_account_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "credential",
+          "provider",
+          "provider_account_id"
+        ],
+        "title": "OAuthReauthenticationOutcome",
+        "type": "object"
+      },
+      "OAuthRevalidationOutcome": {
+        "properties": {
+          "account_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "provider_account_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "provider",
+          "provider_account_id"
+        ],
+        "title": "OAuthRevalidationOutcome",
         "type": "object"
       },
       "OAuthScopeUpgrade": {
@@ -573,6 +628,27 @@
           "step_up_grant"
         ],
         "title": "StepUpAuthorization",
+        "type": "object"
+      },
+      "StepUpCredential": {
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expires_at",
+          "purpose",
+          "token"
+        ],
+        "title": "StepUpCredential",
         "type": "object"
       },
       "StepUpGrant": {
@@ -1310,6 +1386,12 @@
                     {
                       "$ref": "#/components/schemas/OAuthOperationSummary"
                     },
+                    {
+                      "$ref": "#/components/schemas/OAuthReauthenticationOutcome"
+                    },
+                    {
+                      "$ref": "#/components/schemas/OAuthRevalidationOutcome"
+                    },
                     {}
                   ]
                 }
@@ -1763,6 +1845,213 @@
           }
         ],
         "summary": "Log out of the provider session",
+        "tags": [
+          "OAuth providers"
+        ]
+      }
+    },
+    "/auth/oauth/{provider}/reauthenticate/{purpose}": {
+      "post": {
+        "deprecated": false,
+        "description": "Request configured signed freshness and assurance for one exact step-up purpose.",
+        "operationId": "OAuthReauthenticate",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "purpose",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthConfirmation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "302": {
+            "description": "A redirect to provider authentication.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "location": {
+                "deprecated": false,
+                "description": "target path for the redirect",
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Reauthenticate with an OIDC provider",
+        "tags": [
+          "OAuth providers"
+        ]
+      }
+    },
+    "/auth/oauth/{provider}/revalidate": {
+      "post": {
+        "deprecated": false,
+        "description": "Confirm possession of the exact linked provider identity without asserting freshness.",
+        "operationId": "OAuthRevalidate",
+        "parameters": [
+          {
+            "deprecated": false,
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthConfirmation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "302": {
+            "description": "A redirect to provider authorization.",
+            "headers": {
+              "Pragma": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "cache-control": {
+                "deprecated": false,
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "location": {
+                "deprecated": false,
+                "description": "target path for the redirect",
+                "required": false,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication or step-up is required."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "The provider is unavailable."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "LocalSession": []
+          }
+        ],
+        "summary": "Confirm a linked provider identity",
         "tags": [
           "OAuth providers"
         ]

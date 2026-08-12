@@ -42,6 +42,7 @@ from litestar_security.accounts._records import (
 from litestar_security.accounts._stores import LoginMethodStore
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
+from litestar_security.schema import WireStruct
 
 __all__ = (
     "AESGCMSecretProtector",
@@ -374,13 +375,16 @@ class RecoveryCodeGrant:
     codes: tuple[str, ...] = field(repr=False)
 
 
-@dataclass(frozen=True, slots=True)
-class StepUpCredential:
+class StepUpCredential(WireStruct, frozen=True, kw_only=True):
     """Reveal-once transport-bound step-up credential."""
 
-    token: str = field(repr=False)
+    token: str
     purpose: str
     expires_at: datetime
+
+    def __repr__(self) -> str:
+        """Redact the reveal-once credential."""
+        return f"{type(self).__name__}(token=<redacted>, purpose={self.purpose!r}, expires_at={self.expires_at!r})"
 
 
 @dataclass(frozen=True, slots=True)

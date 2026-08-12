@@ -127,6 +127,14 @@ class _ExampleOAuthService:
             detail="Authenticated.", provider_account_id=f"{cast('Any', outcome).provider}-account"
         )
 
+    async def revalidate(self, **kwargs: object) -> OAuthAuthorization:
+        return cast("OAuthAuthorization", await cast("Any", self.begin)(operation=OAuthOperation.REVALIDATE, **kwargs))
+
+    async def reauthenticate(self, **kwargs: object) -> OAuthAuthorization:
+        return cast(
+            "OAuthAuthorization", await cast("Any", self.begin)(operation=OAuthOperation.REAUTHENTICATE, **kwargs)
+        )
+
     async def unlink(self, **_kwargs: object) -> OAuthOperationSummary:
         return OAuthOperationSummary(detail="Unlinked.")
 

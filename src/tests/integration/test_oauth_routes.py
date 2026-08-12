@@ -46,7 +46,9 @@ from litestar_security.providers.oauth import (
     OAuthOperationSummary,
     OAuthProviderError,
     OAuthProviderRegistration,
+    OAuthReauthenticationOutcome,
     OAuthRedirectPolicy,
+    OAuthRevalidationOutcome,
     OAuthScopeUpgrade,
     OAuthStepUp,
     OAuthStepUpAuthorization,
@@ -55,6 +57,7 @@ from litestar_security.providers.oauth import (
     OIDCBackchannelLogout,
     OIDCLogoutIdentity,
     OIDCLogoutLifecycleService,
+    OIDCReauthenticationPolicy,
     ProtectedOAuthSecret,
     ProviderIdentity,
     ProviderTokenSet,
@@ -138,6 +141,23 @@ class RouteService:
             detail="Authenticated.", provider_account_id=f"{cast('Any', outcome).provider}-account"
         )
 
+    async def revalidate(self, **kwargs: object) -> OAuthAuthorization:
+        provider = cast("str", kwargs["provider"])
+        return OAuthAuthorization(
+            url=f"https://issuer.example/authorize?provider={provider}",
+            binding_cookie=Cookie(
+                key="__Host-litestar-security-oauth",
+                value="binding",
+                path="/",
+                secure=True,
+                httponly=True,
+                samesite="lax",
+            ),
+        )
+
+    async def reauthenticate(self, **kwargs: object) -> OAuthAuthorization:
+        return await self.revalidate(**kwargs)
+
     async def unlink(self, **kwargs: object) -> OAuthOperationSummary:
         del kwargs
         return OAuthOperationSummary(detail="Unlinked.")
@@ -220,6 +240,7 @@ class StepUpAuthorizer:
     def __init__(self, *, epoch: int = 2) -> None:
         self.epoch = epoch
         self.purposes: list[str] = []
+        self.issued_purposes: list[str] = []
 
     async def authorize(
         self, *, grant: str, account_id: str, purpose: str, request: Request[Any, Any, Any]
@@ -235,6 +256,20 @@ class StepUpAuthorizer:
     def session_binding(self, request: Request[Any, Any, Any]) -> str:
         del request
         return "session-binding"
+
+    async def issue(self, *, purpose: str, **kwargs: object) -> StepUpCredential:
+        del kwargs
+        self.issued_purposes.append(purpose)
+        return StepUpCredential(
+            token="provider-step-up",  # noqa: S106 - fixed opaque test credential
+            purpose=purpose,
+            expires_at=NOW + timedelta(minutes=5),
+        )
+
+
+class ReauthenticationProvider(FakeOAuthProvider):
+    def build_reauthentication_url(self, start: object, *, max_age: int) -> str:
+        return f"{self.build_authorization_url(cast('Any', start))}&max_age={max_age}"
 
 
 class CallbackStepUpService:
@@ -344,6 +379,7 @@ def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycl
     local: LocalTransport | None = None,
     rp_logout: bool = True,
     retain_tokens: bool = False,
+    reauthentication: Mapping[str, OIDCReauthenticationPolicy] | None = None,
     clock: object = lambda: NOW,
 ) -> OAuthLifecycleService:
     return OAuthLifecycleService(
@@ -356,6 +392,7 @@ def lifecycle_service(  # noqa: PLR0913 - test builder mirrors explicit lifecycl
                 end_session_endpoint="https://issuer.example/logout" if rp_logout else None,
                 post_logout_redirect_uri="https://app.example/logged-out" if rp_logout else None,
                 retain_tokens=retain_tokens,
+                reauthentication=reauthentication or {},
             ),
         ),
         transactions=OAuthTransactionService(
@@ -777,6 +814,77 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
     ).detail == "Unlinked."
     assert local.logged_out == ["account-1"]
     assert step_up.purposes == ["oauth-link", "oauth-scope-upgrade", "oauth-provider-token-management", "oauth-unlink"]
+
+
+async def test_revalidation_never_issues_freshness_but_oidc_reauthentication_issues_exact_purpose() -> None:
+    provider = ReauthenticationProvider(
+        name="example",
+        tokens=ProviderTokenSet(
+            access_token=SecretStr("access"),
+            token_type="Bearer",  # noqa: S106 - standardized OAuth token type
+            scopes=frozenset({"profile"}),
+            expires_at=NOW + timedelta(hours=1),
+        ),
+        identity=ProviderIdentity(
+            provider="example",
+            issuer="https://issuer.example",
+            subject="subject",
+            display_name="User",
+            email=None,
+            email_verified=False,
+            raw_claims={"auth_time": int(NOW.timestamp()), "acr": "gold", "amr": ["pwd", "mfa"]},
+            acr="gold",
+            amr=("pwd", "mfa"),
+            authenticated_at=NOW,
+        ),
+    )
+    step_up = StepUpAuthorizer()
+    service = lifecycle_service(
+        provider=provider,
+        store=MemoryOAuthAccountStore(login_method_counts={"account-1": 1}),
+        step_up=step_up,
+        reauthentication={
+            "disable-mfa": OIDCReauthenticationPolicy(
+                max_age=0, acr_values=frozenset({"gold"}), amr_values=frozenset({"mfa"})
+            )
+        },
+    )
+    request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {"cookies": {}})())
+    link = await service.begin(
+        provider="example",
+        operation=OAuthOperation.LINK,
+        account_id="account-1",
+        provider_account_id=None,
+        return_to="/",
+        scopes=None,
+        step_up_grant="grant",
+        request=request,
+    )
+    request.cookies["__Host-litestar-security-oauth"] = link.binding_cookie.value
+    await service.complete_callback(
+        provider="example", code="code", state=parse_qs(urlsplit(link.url).query)["state"][0], request=request
+    )
+
+    revalidation = await service.revalidate(provider="example", account_id="account-1", return_to="/", request=request)
+    revalidated = await service.complete_callback(
+        provider="example", code="code", state=parse_qs(urlsplit(revalidation.url).query)["state"][0], request=request
+    )
+    assert isinstance(revalidated, OAuthRevalidationOutcome)
+    assert step_up.issued_purposes == []
+
+    reauthentication = await service.reauthenticate(
+        provider="example", purpose="disable-mfa", account_id="account-1", return_to="/", request=request
+    )
+    assert parse_qs(urlsplit(reauthentication.url).query)["max_age"] == ["0"]
+    reauthenticated = await service.complete_callback(
+        provider="example",
+        code="code",
+        state=parse_qs(urlsplit(reauthentication.url).query)["state"][0],
+        request=request,
+    )
+    assert isinstance(reauthenticated, OAuthReauthenticationOutcome)
+    assert reauthenticated.credential.purpose == "disable-mfa"
+    assert step_up.issued_purposes == ["disable-mfa"]
 
 
 async def test_lifecycle_and_local_transport_reject_invalid_or_unavailable_paths() -> None:

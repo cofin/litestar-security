@@ -2,9 +2,10 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from logging import getLogger
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Protocol, cast, runtime_checkable
 from urllib.parse import urlencode, urlsplit
 
@@ -44,8 +45,11 @@ from litestar.utils.scope.state import ScopeState
 from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
 from litestar_security._dto import apply_wire_dtos
 from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
+from litestar_security.accounts import (
+    StepUpCredential,  # noqa: TC001 - OpenAPI resolves the outcome annotation at runtime
+)
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
-from litestar_security.context import Principal
+from litestar_security.context import AuthenticationEvidence, Principal
 from litestar_security.providers.oauth._accounts import (
     AccountLinkError,
     LinkedProviderAccount,
@@ -57,6 +61,7 @@ from litestar_security.providers.oauth._accounts import (
 from litestar_security.providers.oauth._provider import (
     OAuthProvider,
     OAuthProviderError,
+    OAuthReauthenticationProvider,
     ProviderGrant,
     ProviderIdentity,
 )
@@ -64,6 +69,7 @@ from litestar_security.providers.oauth._transactions import (
     OAUTH_BINDING_COOKIE_NAME,
     InvalidOAuthCallback,
     OAuthOperation,
+    OAuthTransaction,
     OAuthTransactionService,
     OAuthTransactionUnavailable,
     SecretStr,
@@ -79,6 +85,7 @@ __all__ = (
     "OAuthAuthorization",
     "OAuthCallbackOutcome",
     "OAuthConfig",
+    "OAuthConfirmation",
     "OAuthLifecycle",
     "OAuthLifecycleService",
     "OAuthLink",
@@ -86,6 +93,8 @@ __all__ = (
     "OAuthLogout",
     "OAuthOperationSummary",
     "OAuthProviderRegistration",
+    "OAuthReauthenticationOutcome",
+    "OAuthRevalidationOutcome",
     "OAuthScopeUpgrade",
     "OAuthStepUp",
     "OAuthStepUpAuthorization",
@@ -94,6 +103,7 @@ __all__ = (
     "OIDCLogoutIdentity",
     "OIDCLogoutLifecycleService",
     "OIDCLogoutTokenConsumer",
+    "OIDCReauthenticationPolicy",
     "OIDCSessionLogoutStore",
     "StepUpOAuthAuthorizer",
     "build_oauth_routes",
@@ -107,6 +117,11 @@ _OAUTH_PROVIDERS_TAG = ROUTE_TAGS["oauth.providers"].name
 _OIDC_LOGOUT_TAG = ROUTE_TAGS["oidc.logout"].name
 _MAXIMUM_TCP_PORT = 65_535
 _MAXIMUM_SECURITY_EPOCH = 9_223_372_036_854_775_807
+_MAXIMUM_REAUTHENTICATION_AGE = 600
+
+
+def _empty_reauthentication_policies() -> dict[str, "OIDCReauthenticationPolicy"]:
+    return {}
 
 
 class OAuthOperationSummary(WireStruct, frozen=True, kw_only=True, omit_defaults=True):
@@ -161,6 +176,12 @@ class OAuthStepUp(WireStruct, frozen=True, kw_only=True):
         return f"{type(self).__name__}(step_up_grant=<redacted>)"
 
 
+class OAuthConfirmation(WireStruct, frozen=True, kw_only=True):
+    """Provider confirmation redirect request."""
+
+    return_to: str = "/"
+
+
 class OIDCBackchannelLogout(WireStruct, frozen=True, kw_only=True):
     """OIDC back-channel logout token form, decoded from a form-encoded body."""
 
@@ -191,6 +212,23 @@ class OAuthCallbackOutcome:
     linked: LinkedProviderAccount
     authenticated_at: datetime
     provisioned: bool
+
+
+class OAuthRevalidationOutcome(WireStruct, frozen=True, kw_only=True):
+    """Exact linked-provider possession result without a freshness claim."""
+
+    account_id: str
+    provider: str
+    provider_account_id: str
+
+
+class OAuthReauthenticationOutcome(WireStruct, frozen=True, kw_only=True):
+    """Exact OIDC freshness result containing one purpose-bound credential."""
+
+    account_id: str
+    provider: str
+    provider_account_id: str
+    credential: "StepUpCredential"
 
 
 class OAuthLogout(msgspec.Struct, frozen=True, kw_only=True):
@@ -238,6 +276,9 @@ class OAuthProviderRegistration:
     end_session_endpoint: str | None = None
     post_logout_redirect_uri: str | None = None
     retain_tokens: bool = False
+    reauthentication: Mapping[str, "OIDCReauthenticationPolicy"] = field(
+        default_factory=_empty_reauthentication_policies
+    )
 
     @classmethod
     def oidc(
@@ -289,8 +330,39 @@ class OAuthProviderRegistration:
             or (self.post_logout_redirect_uri is not None and not _exact_https_url(self.post_logout_redirect_uri))
             or ((self.end_session_endpoint is None) != (self.post_logout_redirect_uri is None))
             or self.retain_tokens.__class__ is not bool
+            or not isinstance(cast("object", self.reauthentication), Mapping)
         ):
             message = "OAuth provider registration is invalid"
+            raise ImproperlyConfiguredException(detail=message)
+        policies = dict(self.reauthentication)
+        if any(
+            not purpose.strip() or policy.__class__ is not OIDCReauthenticationPolicy
+            for purpose, policy in policies.items()
+        ):
+            message = "OAuth provider reauthentication policy is invalid"
+            raise ImproperlyConfiguredException(detail=message)
+        object.__setattr__(self, "reauthentication", MappingProxyType(policies))
+
+
+@dataclass(frozen=True, slots=True)
+class OIDCReauthenticationPolicy:
+    """Provider freshness and assurance requirements for one local purpose."""
+
+    max_age: int = 0
+    acr_values: frozenset[str] = frozenset()
+    amr_values: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        """Require bounded age and immutable nonblank assurance values."""
+        if (
+            self.max_age.__class__ is not int
+            or not 0 <= self.max_age <= _MAXIMUM_REAUTHENTICATION_AGE
+            or self.acr_values.__class__ is not frozenset
+            or any(not value.strip() for value in self.acr_values)
+            or self.amr_values.__class__ is not frozenset
+            or any(not value.strip() for value in self.amr_values)
+        ):
+            message = "OIDC reauthentication policy is invalid"
             raise ImproperlyConfiguredException(detail=message)
 
 
@@ -372,6 +444,19 @@ class OAuthStepUpAuthorizer(Protocol):
 
     def session_binding(self, request: Request[Any, Any, Any]) -> str | None:
         """Return the current transport binding used by callback validation."""
+        ...  # pragma: no cover
+
+    async def issue(  # noqa: PLR0913 - freshness evidence fields remain independently verified
+        self,
+        *,
+        account_id: str,
+        purpose: str,
+        authenticated_at: datetime,
+        acr: str | None,
+        amr: tuple[str, ...],
+        request: Request[Any, Any, Any],
+    ) -> "StepUpCredential":
+        """Issue one purpose-bound credential from provider freshness evidence."""
         ...  # pragma: no cover
 
 
@@ -464,6 +549,43 @@ class StepUpOAuthAuthorizer:
             raise _step_up_unavailable()
         return epoch
 
+    async def issue(  # noqa: PLR0913 - freshness evidence fields remain independently verified
+        self,
+        *,
+        account_id: str,
+        purpose: str,
+        authenticated_at: datetime,
+        acr: str | None,
+        amr: tuple[str, ...],
+        request: Request[Any, Any, Any],
+    ) -> "StepUpCredential":
+        """Issue one transport-bound grant from verified OIDC freshness evidence."""
+        epoch = await self.current_security_epoch(account_id)
+        try:
+            binding = self.transport_binding(request)
+        except Exception:  # noqa: BLE001 - application-owned binding failures fail closed
+            raise _step_up_unavailable() from None
+        if binding is None or binding.__class__ is not bytes or not binding:
+            raise NotAuthorizedException(detail="Fresh step-up authentication required")
+        evidence = AuthenticationEvidence(
+            mechanism="oidc-reauthentication",
+            slot="oauth.callback",
+            authenticated_at=authenticated_at,
+            expires_at=authenticated_at + timedelta(minutes=15),
+            methods=frozenset({"oidc"}),
+            traits=frozenset({"provider-reauthentication"}),
+            acr=acr,
+            amr=amr,
+        )
+        result = await self.service.issue(
+            principal_id=account_id, security_epoch=epoch, purpose=purpose, transport_binding=binding, evidence=evidence
+        )
+        if isinstance(result, InvalidCredentials):
+            raise NotAuthorizedException(detail="Fresh step-up authentication required")
+        if isinstance(result, VerificationUnavailable):
+            raise _step_up_unavailable()
+        return result
+
 
 def _step_up_unavailable() -> ServiceUnavailableException:
     return ServiceUnavailableException(detail="Step-up authentication is unavailable")
@@ -515,14 +637,26 @@ class OAuthLifecycle(Protocol):
 
     async def complete_callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthCallbackOutcome:
+    ) -> OAuthCallbackOutcome | OAuthReauthenticationOutcome | OAuthRevalidationOutcome:
         """Consume a callback and commit provider-account state without presentation adaptation."""
         ...  # pragma: no cover
 
     async def establish_login(
         self, outcome: OAuthCallbackOutcome, *, request: Request[Any, Any, Any]
-    ) -> OAuthOperationSummary | Response[Any]:
+    ) -> OAuthOperationSummary | OAuthReauthenticationOutcome | OAuthRevalidationOutcome | Response[Any]:
         """Establish the configured local transport for a completed login."""
+        ...  # pragma: no cover
+
+    async def revalidate(
+        self, *, provider: str, account_id: str, return_to: str, request: Request[Any, Any, Any]
+    ) -> OAuthAuthorization:
+        """Begin exact linked-provider possession confirmation."""
+        ...  # pragma: no cover
+
+    async def reauthenticate(
+        self, *, provider: str, purpose: str, account_id: str, return_to: str, request: Request[Any, Any, Any]
+    ) -> OAuthAuthorization:
+        """Begin capability-gated OIDC freshness verification."""
         ...  # pragma: no cover
 
     async def unlink(
@@ -651,9 +785,11 @@ class OAuthLifecycleService:
 
     async def callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthOperationSummary | Response[Any]:
+    ) -> OAuthOperationSummary | OAuthReauthenticationOutcome | OAuthRevalidationOutcome | Response[Any]:
         """Adapt a neutral callback outcome to the generated route response."""
         outcome = await self.complete_callback(provider=provider, code=code, state=state, request=request)
+        if isinstance(outcome, (OAuthRevalidationOutcome, OAuthReauthenticationOutcome)):
+            return outcome
         if outcome.operation is OAuthOperation.LOGIN:
             return await self.establish_login(outcome, request=request)
         detail = "Linked." if outcome.operation is OAuthOperation.LINK else "Scopes updated."
@@ -661,7 +797,7 @@ class OAuthLifecycleService:
 
     async def complete_callback(
         self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
-    ) -> OAuthCallbackOutcome:
+    ) -> OAuthCallbackOutcome | OAuthReauthenticationOutcome | OAuthRevalidationOutcome:
         """Consume a callback and commit account state without presenting HTTP or establishing a session."""
         if not code or not state:
             raise InvalidOAuthCallback
@@ -677,6 +813,8 @@ class OAuthLifecycleService:
         now = self._now()
         tokens = await registration.provider.exchange_code(code=SecretStr(code), transaction=transaction, now=now)
         identity = await registration.provider.resolve_identity(tokens, transaction=transaction, now=now)
+        if transaction.operation in {OAuthOperation.REVALIDATE, OAuthOperation.REAUTHENTICATE}:
+            return await self._complete_confirmation(transaction, registration, identity, now=now, request=request)
         grant = ProviderGrant(scopes=tokens.scopes, expires_at=tokens.expires_at)
         provisioned = False
         if transaction.operation is OAuthOperation.LOGIN:
@@ -715,9 +853,146 @@ class OAuthLifecycleService:
             provisioned=provisioned,
         )
 
+    async def revalidate(
+        self, *, provider: str, account_id: str, return_to: str, request: Request[Any, Any, Any]
+    ) -> OAuthAuthorization:
+        """Begin exact linked-provider possession confirmation without freshness semantics."""
+        return await self._begin_confirmation(
+            provider=provider,
+            account_id=account_id,
+            operation=OAuthOperation.REVALIDATE,
+            purpose=None,
+            return_to=return_to,
+            request=request,
+        )
+
+    async def reauthenticate(
+        self, *, provider: str, purpose: str, account_id: str, return_to: str, request: Request[Any, Any, Any]
+    ) -> OAuthAuthorization:
+        """Begin configured OIDC reauthentication for one exact purpose."""
+        return await self._begin_confirmation(
+            provider=provider,
+            account_id=account_id,
+            operation=OAuthOperation.REAUTHENTICATE,
+            purpose=purpose,
+            return_to=return_to,
+            request=request,
+        )
+
+    async def _begin_confirmation(  # noqa: PLR0913 - every trust binding is explicit
+        self,
+        *,
+        provider: str,
+        account_id: str,
+        operation: OAuthOperation,
+        purpose: str | None,
+        return_to: str,
+        request: Request[Any, Any, Any],
+    ) -> OAuthAuthorization:
+        registration = self._registration(provider)
+        linked = await self.accounts.store.resolve_provider_account(account_id, provider)
+        if linked is None or self.step_up is None:
+            raise NotAuthorizedException(detail="Provider confirmation is unavailable")
+        policy = registration.reauthentication.get(purpose or "")
+        if operation is OAuthOperation.REAUTHENTICATE:
+            if policy is None or not isinstance(cast("object", registration.provider), OAuthReauthenticationProvider):
+                raise NotAuthorizedException(detail="Provider reauthentication is not configured")
+            maximum_age = policy.max_age
+        else:
+            maximum_age = None
+        epoch = await self.step_up.current_security_epoch(account_id)
+        cookie_value = request.cookies.get(OAUTH_BINDING_COOKIE_NAME)
+        start = await self.transactions.start(
+            operation=operation,
+            provider=provider,
+            redirect_uri=registration.redirect_uri,
+            return_to=return_to,
+            requested_scopes=registration.default_scopes,
+            now=self._now(),
+            include_nonce=registration.include_nonce,
+            expected_issuer=registration.expected_issuer,
+            account_id=account_id,
+            session_binding=self._session_binding(request),
+            browser_binding=SecretStr(cookie_value) if cookie_value else None,
+            security_epoch=epoch,
+            provider_account_id=linked.provider_account_id,
+            step_up_purpose=purpose,
+            maximum_authentication_age=maximum_age,
+        )
+        url = (
+            cast("OAuthReauthenticationProvider", registration.provider).build_reauthentication_url(
+                start, max_age=cast("int", maximum_age)
+            )
+            if operation is OAuthOperation.REAUTHENTICATE
+            else registration.provider.build_authorization_url(start)
+        )
+        return OAuthAuthorization(url=url, binding_cookie=oauth_binding_cookie(start.browser_binding))
+
+    async def _complete_confirmation(
+        self,
+        transaction: "OAuthTransaction",
+        registration: OAuthProviderRegistration,
+        identity: ProviderIdentity,
+        *,
+        now: datetime,
+        request: Request[Any, Any, Any],
+    ) -> OAuthReauthenticationOutcome | OAuthRevalidationOutcome:
+        if (
+            transaction.account_id is None
+            or transaction.provider_account_id is None
+            or transaction.security_epoch is None
+            or self.step_up is None
+        ):
+            raise OAuthAccountError
+        current_epoch = await self.step_up.current_security_epoch(transaction.account_id)
+        linked = await self.accounts.store.resolve_provider_account(transaction.account_id, transaction.provider)
+        if (
+            current_epoch != transaction.security_epoch
+            or linked is None
+            or linked.provider_account_id != transaction.provider_account_id
+            or (identity.provider, identity.issuer, identity.subject)
+            != (linked.provider, linked.issuer, linked.subject)
+        ):
+            raise OAuthAccountError
+        if transaction.operation is OAuthOperation.REVALIDATE:
+            return OAuthRevalidationOutcome(
+                account_id=transaction.account_id,
+                provider=transaction.provider,
+                provider_account_id=linked.provider_account_id,
+            )
+        purpose = transaction.step_up_purpose
+        policy = registration.reauthentication.get(purpose or "")
+        authenticated_at = identity.authenticated_at
+        maximum_age = transaction.maximum_authentication_age
+        if (
+            purpose is None
+            or policy is None
+            or maximum_age is None
+            or authenticated_at is None
+            or authenticated_at > now
+            or now - authenticated_at > timedelta(seconds=maximum_age)
+            or (policy.acr_values and identity.acr not in policy.acr_values)
+            or not policy.amr_values.issubset(identity.amr)
+        ):
+            raise OAuthAccountError
+        credential = await self.step_up.issue(
+            account_id=transaction.account_id,
+            purpose=purpose,
+            authenticated_at=authenticated_at,
+            acr=identity.acr,
+            amr=identity.amr,
+            request=request,
+        )
+        return OAuthReauthenticationOutcome(
+            account_id=transaction.account_id,
+            provider=transaction.provider,
+            provider_account_id=linked.provider_account_id,
+            credential=credential,
+        )
+
     async def establish_login(
         self, outcome: OAuthCallbackOutcome, *, request: Request[Any, Any, Any]
-    ) -> OAuthOperationSummary | Response[Any]:
+    ) -> OAuthOperationSummary | OAuthReauthenticationOutcome | OAuthRevalidationOutcome | Response[Any]:
         """Establish the configured local transport for a completed login only."""
         if outcome.__class__ is not OAuthCallbackOutcome or outcome.operation is not OAuthOperation.LOGIN:
             raise OAuthAccountError
@@ -1247,15 +1522,74 @@ class _OAuthController(Controller):
         oauth_state: Annotated[str, QueryParameter(name="state", include_in_schema=False)],
         request: Request[Any, Any, Any],
         oauth_service: NamedDependency[SkipValidation[OAuthLifecycle]],
-    ) -> OAuthOperationSummary | Response[Any]:
+    ) -> OAuthOperationSummary | OAuthReauthenticationOutcome | OAuthRevalidationOutcome | Response[Any]:
         """Consume a transaction-bound callback and issue local authentication."""
         outcome = await oauth_service.complete_callback(
             provider=provider, code=code, state=oauth_state, request=request
         )
+        if isinstance(outcome, (OAuthRevalidationOutcome, OAuthReauthenticationOutcome)):
+            return outcome
         if outcome.operation is OAuthOperation.LOGIN:
             return await oauth_service.establish_login(outcome, request=request)
         detail = "Linked." if outcome.operation is OAuthOperation.LINK else "Scopes updated."
         return OAuthOperationSummary(detail=detail, provider_account_id=outcome.linked.provider_account_id)
+
+    @post(
+        "/revalidate",
+        name="oauth.revalidate",
+        operation_id="OAuthRevalidate",
+        summary="Confirm a linked provider identity",
+        description="Confirm possession of the exact linked provider identity without asserting freshness.",
+        response_description="A redirect to provider authorization.",
+        status_code=HTTP_302_FOUND,
+        responses=_OAUTH_AUTHENTICATED_RESPONSES,
+        auth=required(),
+    )
+    async def revalidate(
+        self,
+        provider: FromPath[str],
+        data: JSONBody[OAuthConfirmation],
+        request: Request[Any, Any, Any],
+        principal: NamedDependency[Principal[Any]],
+        oauth_service: NamedDependency[SkipValidation[OAuthLifecycle]],
+    ) -> Redirect:
+        """Begin linked-provider possession confirmation."""
+        return _authorization_response(
+            await oauth_service.revalidate(
+                provider=provider, account_id=_account_id(principal), return_to=data.return_to, request=request
+            )
+        )
+
+    @post(
+        "/reauthenticate/{purpose:str}",
+        name="oauth.reauthenticate",
+        operation_id="OAuthReauthenticate",
+        summary="Reauthenticate with an OIDC provider",
+        description="Request configured signed freshness and assurance for one exact step-up purpose.",
+        response_description="A redirect to provider authentication.",
+        status_code=HTTP_302_FOUND,
+        responses=_OAUTH_AUTHENTICATED_RESPONSES,
+        auth=required(),
+    )
+    async def reauthenticate(  # noqa: PLR0913,PLR0917 - Litestar injects each explicit trust binding
+        self,
+        provider: FromPath[str],
+        purpose: FromPath[str],
+        data: JSONBody[OAuthConfirmation],
+        request: Request[Any, Any, Any],
+        principal: NamedDependency[Principal[Any]],
+        oauth_service: NamedDependency[SkipValidation[OAuthLifecycle]],
+    ) -> Redirect:
+        """Begin capability-gated OIDC provider reauthentication."""
+        return _authorization_response(
+            await oauth_service.reauthenticate(
+                provider=provider,
+                purpose=purpose,
+                account_id=_account_id(principal),
+                return_to=data.return_to,
+                request=request,
+            )
+        )
 
     @post(
         "/link",

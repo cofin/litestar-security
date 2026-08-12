@@ -1,7 +1,7 @@
 """OIDC provider lifecycle layered over OAuth and a distinct JWT verifier."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from hmac import compare_digest
@@ -9,8 +9,23 @@ from typing import NoReturn, cast
 
 from litestar.exceptions import ImproperlyConfiguredException
 
-from litestar_security.authentication import Authenticated
-from litestar_security.providers.jwt import JWTClaims, JWTVerifier
+from litestar_security.authentication import (
+    Authenticated,
+    AuthenticationOutcome,
+    InvalidCredentials,
+    VerificationUnavailable,
+)
+from litestar_security.config import WorkerLimits
+from litestar_security.providers._internal import DynamicVerifierCache
+from litestar_security.providers.jwks import JWKSProvider
+from litestar_security.providers.jwt import (
+    JWTClaims,
+    JWTValidationConfig,
+    JWTVerifier,
+    PyJWTVerifier,
+    VerificationKey,
+    parse_unverified_jwt_route,
+)
 from litestar_security.providers.oauth import (
     OAuthClientAuth,
     OAuthEndpointConfig,
@@ -23,14 +38,24 @@ from litestar_security.providers.oauth import (
     ProviderTokenSet,
     SecretStr,
 )
-from litestar_security.providers.oidc._discovery import OIDCMetadata
+from litestar_security.providers.oidc._discovery import OIDCDiscoveryClient, OIDCMetadata
 
-__all__ = ("OIDCProvider", "google_oidc_provider", "keycloak_oidc_provider", "oidc_provider")
+__all__ = (
+    "OIDCProvider",
+    "discover_google_oidc_provider",
+    "discover_oidc_provider",
+    "google_oidc_provider",
+    "keycloak_oidc_provider",
+    "oidc_provider",
+)
 
 
 _GOOGLE_ISSUER = "https://accounts.google.com"
 _DEFAULT_SCOPES = frozenset({"openid", "email", "profile"})
 _ID_TOKEN_TYPES = frozenset({"jwt"})
+_MAXIMUM_REAUTHENTICATION_AGE = 600
+_MAXIMUM_TIMESTAMP = 253_402_300_799
+_MAXIMUM_TOKEN_BYTES = 16_384
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +116,23 @@ class OIDCProvider:
             The fixed provider authorization URL.
         """
         return self.oauth.build_authorization_url(start)
+
+    def build_reauthentication_url(self, start: OAuthTransactionStart, *, max_age: int) -> str:
+        """Build a forced-authentication request using OIDC ``max_age``.
+
+        Args:
+            start: The bound authorization transaction.
+            max_age: Maximum accepted signed authentication age, including zero.
+
+        Returns:
+            The authorization URL with the reserved ``max_age`` parameter.
+
+        Raises:
+            OAuthProviderError: If the age is invalid or provider state is inconsistent.
+        """
+        if max_age.__class__ is not int or not 0 <= max_age <= _MAXIMUM_REAUTHENTICATION_AGE:
+            _raise_provider()
+        return f"{self.oauth.build_authorization_url(start)}&max_age={max_age}"
 
     async def exchange_code(
         self, *, code: SecretStr, transaction: OAuthTransaction, now: datetime | None = None
@@ -155,6 +197,7 @@ class OIDCProvider:
             _raise_provider()
         acr = _optional_text(raw.get("acr"))
         amr = _authentication_methods(raw.get("amr"))
+        authenticated_at = _authentication_time(raw.get("auth_time"))
         return ProviderIdentity(
             provider=self.name,
             issuer=claims.issuer,
@@ -165,6 +208,7 @@ class OIDCProvider:
             raw_claims=raw,
             acr=acr,
             amr=amr,
+            authenticated_at=authenticated_at,
         )
 
     async def refresh(
@@ -194,6 +238,152 @@ class OIDCProvider:
     async def aclose(self) -> None:
         """Close the owned OAuth transport."""
         await self.oauth.aclose()
+
+
+@dataclass(frozen=True, slots=True)
+class _DiscoveredOIDCVerifier:
+    config: JWTValidationConfig
+    jwks: JWKSProvider
+    jwks_uri: str
+    worker_limits: WorkerLimits = field(repr=False, compare=False)
+    _verifiers: DynamicVerifierCache[PyJWTVerifier] = field(
+        default_factory=DynamicVerifierCache[PyJWTVerifier], init=False, repr=False, compare=False
+    )
+
+    async def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[JWTClaims]:
+        route = parse_unverified_jwt_route(token, maximum_token_bytes=_MAXIMUM_TOKEN_BYTES)
+        if isinstance(route, InvalidCredentials):
+            return route
+        algorithm = route.header.get("alg")
+        key_id = route.header.get("kid")
+        if not isinstance(algorithm, str) or algorithm not in self.config.algorithms:
+            return InvalidCredentials()
+        if not isinstance(key_id, str) or not key_id:
+            return InvalidCredentials()
+        selection = cast(
+            "object", await self.jwks.select_key(self.config.issuer, self.jwks_uri, key_id, algorithm, now=now)
+        )
+        if isinstance(selection, (InvalidCredentials, VerificationUnavailable)):
+            return selection
+        if not isinstance(selection, VerificationKey):
+            return VerificationUnavailable()
+        verifier = self._verifiers.get_or_create(
+            (key_id, algorithm),
+            selection.key,
+            lambda: PyJWTVerifier(
+                config=replace(self.config, algorithms=frozenset({algorithm})),
+                key=selection.key,
+                mechanism_name="oidc",
+                slot_name="oauth.id-token",
+                maximum_token_bytes=_MAXIMUM_TOKEN_BYTES,
+                limiter=self.worker_limits.crypto_limiter,
+                worker_timeout=self.worker_limits.timeout,
+            ),
+        )
+        return await verifier.verify(token, now=now)
+
+
+async def discover_oidc_provider(  # noqa: PLR0913 - discovery trust inputs remain explicit
+    *,
+    name: str,
+    issuer: str,
+    client_id: str,
+    client_secret: SecretStr | None,
+    discovery: OIDCDiscoveryClient,
+    jwks: JWKSProvider,
+    scopes: frozenset[str] = _DEFAULT_SCOPES,
+    client_auth: OAuthClientAuth = OAuthClientAuth.CLIENT_SECRET_BASIC,
+    worker_limits: WorkerLimits | None = None,
+    http_policy: OAuthHTTPPolicy | None = None,
+) -> OIDCProvider:
+    """Discover and construct OIDC over application-owned shared resources.
+
+    Args:
+        name: Stable local provider name.
+        issuer: Exact issuer allowed by the discovery client.
+        client_id: Registered OIDC client identifier.
+        client_secret: Protected client secret when required.
+        discovery: Shared application-owned discovery client.
+        jwks: Shared application-owned JWKS provider.
+        scopes: Allowlisted provider scopes.
+        client_auth: Token endpoint client authentication method.
+        worker_limits: Shared bounded crypto-worker budget.
+        http_policy: Bounded OAuth transport policy.
+
+    Returns:
+        A discovered provider whose OAuth client is owned by the result.
+
+    Raises:
+        ImproperlyConfiguredException: If shared resources or trust inputs are invalid.
+        OIDCDiscoveryError: If discovery fails.
+    """
+    if not isinstance(cast("object", discovery), OIDCDiscoveryClient) or not isinstance(
+        cast("object", jwks), JWKSProvider
+    ):
+        _raise_config("OIDC discovery factory requires shared discovery and JWKS resources")
+    metadata = await discovery.discover(issuer)
+    workers = WorkerLimits() if worker_limits is None else worker_limits
+    config = JWTValidationConfig(
+        issuer=metadata.issuer,
+        audiences=frozenset({client_id}),
+        algorithms=metadata.algorithms,
+        required_claims=frozenset({"iss", "sub", "aud", "exp", "iat"}),
+        access_token_profile=False,
+        token_types=_ID_TOKEN_TYPES,
+    )
+    verifier = _DiscoveredOIDCVerifier(config=config, jwks=jwks, jwks_uri=metadata.jwks_uri, worker_limits=workers)
+    return oidc_provider(
+        name=name,
+        client_id=client_id,
+        client_secret=client_secret,
+        metadata=metadata,
+        verifier=verifier,
+        scopes=scopes,
+        client_auth=client_auth,
+        http_policy=http_policy,
+    )
+
+
+async def discover_google_oidc_provider(  # noqa: PLR0913 - discovery trust inputs remain explicit
+    *,
+    client_id: str,
+    client_secret: SecretStr,
+    discovery: OIDCDiscoveryClient,
+    jwks: JWKSProvider,
+    scopes: frozenset[str] = _DEFAULT_SCOPES,
+    offline_access: bool = False,
+    worker_limits: WorkerLimits | None = None,
+    http_policy: OAuthHTTPPolicy | None = None,
+) -> OIDCProvider:
+    """Discover Google's exact issuer using caller-owned shared resources."""
+    if not isinstance(cast("object", discovery), OIDCDiscoveryClient) or not isinstance(
+        cast("object", jwks), JWKSProvider
+    ):
+        _raise_config("OIDC discovery factory requires shared discovery and JWKS resources")
+    metadata = await discovery.discover(_GOOGLE_ISSUER)
+    workers = WorkerLimits() if worker_limits is None else worker_limits
+    verifier = _DiscoveredOIDCVerifier(
+        config=JWTValidationConfig(
+            issuer=metadata.issuer,
+            audiences=frozenset({client_id}),
+            algorithms=metadata.algorithms,
+            required_claims=frozenset({"iss", "sub", "aud", "exp", "iat"}),
+            access_token_profile=False,
+            token_types=_ID_TOKEN_TYPES,
+        ),
+        jwks=jwks,
+        jwks_uri=metadata.jwks_uri,
+        worker_limits=workers,
+    )
+    return google_oidc_provider(
+        client_id=client_id,
+        client_secret=client_secret,
+        metadata=metadata,
+        verifier=verifier,
+        scopes=scopes,
+        offline_access=offline_access,
+        http_policy=http_policy,
+    )
 
 
 def oidc_provider(  # noqa: PLR0913 - constructor keeps every trust and transport input explicit
@@ -376,6 +566,20 @@ def _authentication_methods(value: object) -> tuple[str, ...]:
     ):
         _raise_provider()
     return tuple(cast("list[str] | tuple[str, ...]", methods))
+
+
+def _authentication_time(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        _raise_provider()
+    timestamp = value
+    if not 0 <= timestamp <= _MAXIMUM_TIMESTAMP:
+        _raise_provider()
+    try:
+        return datetime.fromtimestamp(timestamp, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        _raise_provider()
 
 
 def _boolean(value: object) -> bool:
