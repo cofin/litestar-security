@@ -17,9 +17,11 @@ Added
   accounts that have enrolled a second factor (TOTP or passkey) receive an MFA
   challenge during password login, allowing accounts without configured factors
   to log in directly.
-* Configurable password policy: ``LocalAuthConfig`` and ``RegistrationPolicy``
-  now accept a customizable ``PasswordPolicy`` instance to configure minimum/maximum
-  lengths and byte sizes for account registration, password changes, and recovery flows.
+* Configurable password policy: ``PasswordPolicy`` now defaults to a minimum
+  length of 12 characters (lowered from 15). ``LocalAuthConfig`` and
+  ``RegistrationPolicy`` accept a customizable ``PasswordPolicy`` instance to
+  configure custom minimum/maximum lengths and byte sizes for account
+  registration, password changes, and recovery flows.
 * Backend conformance test hooks: ``assert_security_backend_conformance`` now accepts
   ``identifiers`` factory and ``seed_account`` async hooks, enabling relational and
   strict database backends with foreign-key constraints to participate in full conformance
