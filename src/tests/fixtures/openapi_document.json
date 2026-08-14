@@ -837,6 +837,16 @@
             },
             "description": "The lifecycle request is invalid."
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication is required."
+          },
           "403": {
             "content": {
               "application/json": {
@@ -3802,6 +3812,16 @@
               }
             },
             "description": "The lifecycle request is invalid."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            },
+            "description": "Authentication is required."
           },
           "403": {
             "content": {

@@ -24,6 +24,7 @@ from litestar.exceptions import (
     ClientException,
     HTTPException,
     ImproperlyConfiguredException,
+    NotAuthorizedException,
     ServiceUnavailableException,
     TooManyRequestsException,
 )
@@ -1046,7 +1047,7 @@ def test_generated_mfa_handlers_apply_shared_rate_limit_before_factor_work() -> 
 
 @pytest.mark.parametrize(
     ("outcome_name", "status", "retry_after"),
-    [("unavailable", 503, None), ("rate_limited", 429, "7"), ("invalid", 400, None)],
+    [("unavailable", 503, None), ("rate_limited", 429, "7"), ("invalid", 401, None)],
 )
 def test_generated_local_route_errors_raise_interceptable_classified_exceptions(
     outcome_name: str, status: int, retry_after: str | None
@@ -1090,6 +1091,7 @@ def test_generated_local_route_errors_raise_interceptable_classified_exceptions(
         exception_handlers={
             ServiceUnavailableException: record,
             TooManyRequestsException: record,
+            NotAuthorizedException: record,
             ClientException: record,
         },
     )
@@ -2940,14 +2942,14 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
         token_operation = app.openapi_schema.paths["/identity/token"].post
         revoke_operation = app.openapi_schema.paths["/identity/token/revoke"].post
         assert token_operation.security == [{}]
-        assert set(token_operation.responses) == {"200", "400", "403", "429", "503"}
+        assert set(token_operation.responses) == {"200", "400", "401", "403", "429", "503"}
         assert revoke_operation.security == [{"bearer": []}]
         assert set(revoke_operation.responses) == {"200", "400", "401", "503"}
     if mode in {"session", "hybrid"}:
         login_operation = app.openapi_schema.paths["/identity/login"].post
         logout_operation = app.openapi_schema.paths["/identity/logout"].post
         assert login_operation.security == [{}]
-        assert set(login_operation.responses) == {"200", "400", "403", "429", "503"}
+        assert set(login_operation.responses) == {"200", "400", "401", "403", "429", "503"}
         assert logout_operation.security == [{"LocalSession": []}]
         assert set(logout_operation.responses) == {"200", "401", "503"}
 

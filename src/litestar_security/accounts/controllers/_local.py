@@ -105,12 +105,14 @@ _LOCAL_MFA_LOGIN_RESPONSES = {
 
 _LOCAL_SESSION_MFA_LOGIN_RESPONSES = {
     HTTP_200_OK: ResponseSpec(LocalAccount, description="The signed-in account projection."),
+    **_LOCAL_AUTH_REQUIRED_RESPONSES,
     **_LOCAL_MFA_LOGIN_RESPONSES,
 }
 
 
 _LOCAL_TOKEN_MFA_LOGIN_RESPONSES = {
     HTTP_200_OK: ResponseSpec(TokenPair, description="A newly issued access and refresh token pair."),
+    **_LOCAL_AUTH_REQUIRED_RESPONSES,
     **_LOCAL_MFA_LOGIN_RESPONSES,
 }
 
@@ -252,7 +254,7 @@ class _LocalSessionController(Controller):
         if isinstance(result, MFARequired):
             return cast("Response[LocalAccount | LocalMFAChallenge]", _mfa_required_response(result))
         if not isinstance(result, LocalAccount):
-            _route_error(result)
+            _route_error(result, credentials=isinstance(result, InvalidCredentials))
         return Response(content=result, status_code=HTTP_200_OK)
 
     @post(
@@ -428,7 +430,7 @@ class _LocalTokenController(Controller):
         if isinstance(result, MFARequired):
             return cast("Response[TokenPair | LocalMFAChallenge]", _mfa_required_response(result))
         if not isinstance(result, TokenPair):
-            _route_error(result)
+            _route_error(result, credentials=isinstance(result, InvalidCredentials))
         return Response(content=result, status_code=HTTP_200_OK)
 
     @post(
