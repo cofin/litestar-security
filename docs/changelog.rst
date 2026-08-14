@@ -1,6 +1,41 @@
 Changelog
 =========
 
+0.5.0
+-----
+
+Added
+~~~~~
+
+* Layer-level route exclusions: routers and controllers now support
+  ``opt={"exclude_from_auth": True}`` or ``exclude_from_auth=True``, allowing
+  plugin-mounted subtrees (such as static-file routers from ``litestar-vite``)
+  to be exempted from global security requirements without raising configuration
+  errors. Child routes retain the ability to override parent exclusion policies.
+* Per-account conditional MFA login challenges: ``MFAConfig.require_at_login``
+  now accepts ``"enrolled"`` in addition to boolean flags. When enabled, only
+  accounts that have enrolled a second factor (TOTP or passkey) receive an MFA
+  challenge during password login, allowing accounts without configured factors
+  to log in directly.
+* Configurable password policy: ``LocalAuthConfig`` and ``RegistrationPolicy``
+  now accept a customizable ``PasswordPolicy`` instance to configure minimum/maximum
+  lengths and byte sizes for account registration, password changes, and recovery flows.
+* Backend conformance test hooks: ``assert_security_backend_conformance`` now accepts
+  ``identifiers`` factory and ``seed_account`` async hooks, enabling relational and
+  strict database backends with foreign-key constraints to participate in full conformance
+  verification.
+
+Fixed
+~~~~~
+
+* Session rotation recovery: ``NativeSessionAuth.establish`` falls back to creating
+  a new session when rebinding a stale or expired session cookie, preventing 503
+  ``VerificationUnavailable`` errors during login.
+* Optional dependency isolation in testing: ``litestar_security.testing`` uses lazy
+  attribute resolution for optional MFA and WebAuthn symbols, allowing unit tests and
+  test kits to import cleanly without requiring optional dependencies installed.
+
+
 0.4.0
 -----
 

@@ -10,7 +10,7 @@ that constructs them.
 from dataclasses import dataclass, field
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_address, ip_network
 from logging import getLogger
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast, runtime_checkable
 
 from litestar import Request
 from litestar.exceptions import ImproperlyConfiguredException
@@ -24,6 +24,7 @@ from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
     LifecycleRejected,
     LocalAccountState,
+    LoginMethod,
     PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordReauthenticationProof,
@@ -48,6 +49,13 @@ __all__ = ("LocalAuthService", "forwarded_client_key", "trusted_client_key")
 UserT = TypeVar("UserT")
 _LOGGER = getLogger(__name__)
 _MAXIMUM_TCP_PORT = 65_535
+
+
+@runtime_checkable
+class _MethodListingStore(Protocol):
+    """Protocol for account stores that support listing enrolled login methods."""
+
+    async def list_methods(self, account_id: str) -> tuple[LoginMethod, ...]: ...
 
 
 def _parse_forwarded_address(raw: str) -> "IPv4Address | IPv6Address | None":
@@ -189,6 +197,7 @@ class LocalAuthService(Generic[UserT]):
     refresh_tokens: RefreshTokenService[UserT] | None = field(default=None, repr=False)
     rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
     mfa_login: MFALoginService | None = field(default=None, repr=False, compare=False)
+    mfa_require_at_login: bool | str = field(default=True, repr=False, compare=False)
     client_key: "Callable[[ASGIConnection[Any, Any, Any, Any]], str | None]" = field(
         default=trusted_client_key, repr=False, compare=False
     )
@@ -232,7 +241,16 @@ class LocalAuthService(Generic[UserT]):
             return account
         mfa_login = self.mfa_login
         if mfa_login is not None:
-            return await mfa_login.issue(cast("LocalAccountState[object]", account), client_key=client_key)
+            should_challenge = True
+            if self.mfa_require_at_login == "enrolled":
+                store: object = self.accounts
+                if isinstance(store, _MethodListingStore):
+                    methods = await store.list_methods(account.account_id)
+                    should_challenge = any(m.kind in {"totp", "passkey"} for m in methods) if methods else False
+                else:
+                    should_challenge = False
+            if should_challenge:
+                return await mfa_login.issue(cast("LocalAccountState[object]", account), client_key=client_key)
         session_auth = self.session_auth
         if session_auth is None:
             return VerificationUnavailable()
@@ -262,7 +280,16 @@ class LocalAuthService(Generic[UserT]):
             return account
         mfa_login = self.mfa_login
         if mfa_login is not None:
-            return await mfa_login.issue(cast("LocalAccountState[object]", account), client_key=client_key)
+            should_challenge = True
+            if self.mfa_require_at_login == "enrolled":
+                store: object = self.accounts
+                if isinstance(store, _MethodListingStore):
+                    methods = await store.list_methods(account.account_id)
+                    should_challenge = any(m.kind in {"totp", "passkey"} for m in methods) if methods else False
+                else:
+                    should_challenge = False
+            if should_challenge:
+                return await mfa_login.issue(cast("LocalAccountState[object]", account), client_key=client_key)
         refresh_tokens = self.refresh_tokens
         if refresh_tokens is None:
             return VerificationUnavailable()

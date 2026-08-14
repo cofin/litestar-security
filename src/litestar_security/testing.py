@@ -1,6 +1,6 @@
 """Deterministic conformance helpers for security integration test suites."""
 
-# ruff: noqa: EM101, TRY003  # conformance failures intentionally name their exact violated invariant
+# ruff: noqa: EM101, TRY003, PLC0415  # conformance failures intentionally name their exact violated invariant; lazy optional imports
 
 from base64 import urlsafe_b64encode
 from collections.abc import Awaitable, Callable, Mapping
@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import compare_digest
 from types import MappingProxyType
-from typing import Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 from urllib.parse import parse_qsl
 
 import httpx
@@ -22,25 +22,16 @@ from litestar_security.accounts import (
     LocalAccountCapabilities,
     LocalAccountState,
     LoginMethod,
-    MFALoginChallenge,
-    MFALoginChallengeStore,
-    MFAStore,
     NotificationCommand,
-    PasskeyAssertionStatus,
-    PasskeyCredential,
-    PasskeyStore,
     PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordCredentialState,
     PasswordResetOutcome,
     PasswordResetStatus,
-    PendingTOTPEnrollment,
-    ProtectedSecret,
     PurposeTokenCodec,
     PurposeTokenDelivery,
     RateLimitAttempt,
     RateLimiter,
-    RecoveryCodeDigest,
     RefreshFamilyContext,
     RefreshPreflightOutcome,
     RefreshReceiptReplay,
@@ -55,22 +46,33 @@ from litestar_security.accounts import (
     RevokeLoginMethodOutcome,
     RevokeLoginMethodStatus,
     RotateRefreshCommand,
-    SecretProtector,
     SecurityEvent,
     SessionRegistry,
-    StepUpGrantState,
-    StepUpStore,
     TokenIssue,
     TokenPurpose,
-    TOTPMethod,
-    TOTPPolicy,
     UserAuthSession,
-    UserVerification,
     VerificationOutcome,
     VerificationStatus,
-    WebAuthnChallenge,
-    WebAuthnChallengeStore,
 )
+
+if TYPE_CHECKING:
+    from litestar_security.accounts import (
+        MFALoginChallenge,
+        MFALoginChallengeStore,
+        MFAStore,
+        PasskeyAssertionStatus,
+        PasskeyCredential,
+        PasskeyStore,
+        PendingTOTPEnrollment,
+        ProtectedSecret,
+        RecoveryCodeDigest,
+        SecretProtector,
+        StepUpGrantState,
+        StepUpStore,
+        TOTPMethod,
+        WebAuthnChallenge,
+        WebAuthnChallengeStore,
+    )
 from litestar_security.authentication import AuthorizationResolution, IdentityResolution
 from litestar_security.context import AuthorizationSnapshot, CredentialRestrictions, Principal
 from litestar_security.providers.api_key import APIKeyState, APIKeyStore
@@ -433,7 +435,7 @@ class InMemoryAPIKeyStore:
 
     __slots__ = ("_lock", "_observe", "_records")
 
-    def __init__(self, observe: "Callable[[str, Mapping[str, str]], Awaitable[None]]") -> None:
+    def __init__(self, observe: Callable[[str, Mapping[str, str]], Awaitable[None]]) -> None:
         """Initialize isolated records and an aggregate diagnostic callback.
 
         Args:
@@ -533,11 +535,11 @@ class InMemoryLocalAccountStore:
 
     def __init__(
         self,
-        observe: "Callable[[str, Mapping[str, str]], Awaitable[None]]",
+        observe: Callable[[str, Mapping[str, str]], Awaitable[None]],
         *,
-        clock: "Callable[[], datetime]",
-        identifiers: "Callable[[str], str]",
-        entropy: "Callable[[int], bytes]",
+        clock: Callable[[], datetime],
+        identifiers: Callable[[str], str],
+        entropy: Callable[[int], bytes],
     ) -> None:
         """Initialize isolated state with aggregate deterministic sources."""
         self._accounts: dict[str, LocalAccountState[object]] = {}
@@ -1229,18 +1231,18 @@ class StoreConformanceFactories:
 
     api_key_store: Callable[[], APIKeyStore] | None = None
     local_account_store: "Callable[[], _ConformanceLocalAccountStore] | None" = None
-    mfa_login_challenge_store: Callable[[], MFALoginChallengeStore] | None = None
-    mfa_store: Callable[[], MFAStore] | None = None
+    mfa_login_challenge_store: "Callable[[], MFALoginChallengeStore] | None" = None
+    mfa_store: "Callable[[], MFAStore] | None" = None
     oidc_session_logout_store: Callable[[], OIDCSessionLogoutStore] | None = None
     oauth_account_store: Callable[[], OAuthAccountStore] | None = None
     oauth_transaction_protector: Callable[[], OAuthTransactionProtector] | None = None
     oauth_transaction_store: Callable[[], OAuthTransactionStore] | None = None
-    passkey_store: Callable[[], PasskeyStore] | None = None
+    passkey_store: "Callable[[], PasskeyStore] | None" = None
     refresh_family_store: "Callable[[], _ConformanceRefreshFamilyStore] | None" = None
-    secret_protector: Callable[[], SecretProtector] | None = None
+    secret_protector: "Callable[[], SecretProtector] | None" = None
     session_registry: Callable[[], SessionRegistry] | None = None
-    step_up_store: Callable[[], StepUpStore] | None = None
-    webauthn_challenge_store: Callable[[], WebAuthnChallengeStore] | None = None
+    step_up_store: "Callable[[], StepUpStore] | None" = None
+    webauthn_challenge_store: "Callable[[], WebAuthnChallengeStore] | None" = None
     websocket_connect_token_store: Callable[[], WebSocketConnectTokenStore] | None = None
 
 
@@ -1344,7 +1346,7 @@ async def assert_api_key_store_conformance(factory: Callable[[], APIKeyStore]) -
         raise AssertionError(message)
 
 
-async def assert_secret_protector_conformance(factory: Callable[[], SecretProtector]) -> None:
+async def assert_secret_protector_conformance(factory: "Callable[[], SecretProtector]") -> None:
     """Assert MFA-secret protection preserves all required AEAD properties.
 
     Args:
@@ -2326,7 +2328,7 @@ async def _assert_refresh_ownership(store: _ConformanceRefreshFamilyStore, accou
         raise AssertionError(message)  # noqa: TRY004 - conformance failures are intentionally AssertionError
 
 
-async def assert_mfa_store_conformance(factory: Callable[[], MFAStore]) -> None:
+async def assert_mfa_store_conformance(factory: "Callable[[], MFAStore]") -> None:
     """Assert atomic TOTP counter and recovery-code consumption.
 
     Args:
@@ -2338,6 +2340,10 @@ async def assert_mfa_store_conformance(factory: Callable[[], MFAStore]) -> None:
     Raises:
         AssertionError: If a counter update is non-atomic or a recovery code can be reused.
     """
+    from litestar_security.accounts._mfa import PendingTOTPEnrollment, ProtectedSecret, RecoveryCodeDigest, TOTPPolicy
+    from litestar_security.typing import require_dependency
+
+    require_dependency("pyotp")
     store = factory()
     enrollment = PendingTOTPEnrollment(
         enrollment_id="conformance-enrollment",
@@ -2381,7 +2387,7 @@ async def assert_mfa_store_conformance(factory: Callable[[], MFAStore]) -> None:
         raise AssertionError("MFAStore.consume_recovery_code atomicity invariant: two contenders must have one winner")
 
 
-async def assert_mfa_login_challenge_store_conformance(factory: Callable[[], MFALoginChallengeStore]) -> None:
+async def assert_mfa_login_challenge_store_conformance(factory: "Callable[[], MFALoginChallengeStore]") -> None:
     """Assert MFA-login challenges are bound, one-shot, and expiry-safe.
 
     Args:
@@ -2393,6 +2399,9 @@ async def assert_mfa_login_challenge_store_conformance(factory: Callable[[], MFA
     Raises:
         AssertionError: If a challenge can be replayed or survives a rejected binding or expiry.
     """
+    from litestar_security.typing import require_dependency
+
+    require_dependency("pyotp")
     store = factory()
     wrong_account = _conformance_mfa_login_challenge(b"m" * 32)
     await store.put(wrong_account)
@@ -2441,7 +2450,7 @@ async def assert_mfa_login_challenge_store_conformance(factory: Callable[[], MFA
     winner = _conformance_mfa_login_challenge(b"w" * 32)
     await store.put(winner)
 
-    async def consume() -> MFALoginChallenge | None:
+    async def consume() -> "MFALoginChallenge | None":
         return await store.consume(
             winner.challenge_digest,
             account_id=winner.account_id,
@@ -2467,7 +2476,7 @@ async def assert_mfa_login_challenge_store_conformance(factory: Callable[[], MFA
         raise AssertionError("MFALoginChallengeStore expiry burn invariant: expired challenges must be removed")
 
 
-async def assert_webauthn_challenge_store_conformance(factory: Callable[[], WebAuthnChallengeStore]) -> None:
+async def assert_webauthn_challenge_store_conformance(factory: "Callable[[], WebAuthnChallengeStore]") -> None:
     """Assert WebAuthn challenges burn once and enforce every binding.
 
     Args:
@@ -2479,6 +2488,9 @@ async def assert_webauthn_challenge_store_conformance(factory: Callable[[], WebA
     Raises:
         AssertionError: If consume-once, binding, purpose, or expiry behavior is violated.
     """
+    from litestar_security.typing import require_dependency
+
+    require_dependency("webauthn")
     store = factory()
     wrong_binding = _conformance_webauthn_challenge(b"b" * 32)
     await store.put(wrong_binding)
@@ -2524,7 +2536,7 @@ async def assert_webauthn_challenge_store_conformance(factory: Callable[[], WebA
     winner = _conformance_webauthn_challenge(b"w" * 32)
     await store.put(winner)
 
-    async def consume() -> WebAuthnChallenge | None:
+    async def consume() -> "WebAuthnChallenge | None":
         return await store.consume(
             winner.challenge_digest, binding_digest=winner.binding_digest, purpose=winner.purpose, now=_DEFAULT_NOW
         )
@@ -2668,7 +2680,7 @@ async def assert_websocket_connect_token_store_conformance(factory: Callable[[],
         raise AssertionError("WebSocketConnectTokenStore expiry deletion invariant: expired records must be removed")
 
 
-async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) -> None:
+async def assert_passkey_store_conformance(factory: "Callable[[], PasskeyStore]") -> None:
     """Assert optimistic assertion recording and clone-risk results.
 
     Args:
@@ -2680,6 +2692,10 @@ async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) 
     Raises:
         AssertionError: If only one optimistic writer is not recorded or clone risk is lost.
     """
+    from litestar_security.accounts._passkeys import PasskeyAssertionStatus
+    from litestar_security.typing import require_dependency
+
+    require_dependency("webauthn")
     store = factory()
     credential = _conformance_passkey_credential(b"credential")
     if not await store.add_credential(
@@ -2842,7 +2858,7 @@ async def assert_oidc_session_logout_store_conformance(factory: Callable[[], OID
         )
 
 
-async def assert_step_up_store_conformance(factory: Callable[[], StepUpStore]) -> None:
+async def assert_step_up_store_conformance(factory: "Callable[[], StepUpStore]") -> None:
     """Assert one-time exact-binding step-up grant consumption.
 
     Args:
@@ -2854,11 +2870,14 @@ async def assert_step_up_store_conformance(factory: Callable[[], StepUpStore]) -
     Raises:
         AssertionError: If a grant can be replayed, double-consumed, or accepted with an altered binding.
     """
+    from litestar_security.typing import require_dependency
+
+    require_dependency("pyotp")
     record = _conformance_step_up_record()
     store = factory()
     await store.put(record)
 
-    async def consume() -> StepUpGrantState | None:
+    async def consume() -> "StepUpGrantState | None":
         return await store.consume(
             record.grant_digest,
             principal_id=record.principal_id,
@@ -3008,11 +3027,16 @@ async def assert_rate_limiter_conformance(
 
 async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit public capability dispatch preserves field order
     factories: StoreConformanceFactories,
+    *,
+    identifiers: Callable[[str | None, int], str] | None = None,
+    seed_account: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     """Run only the conformance scenarios whose factories were supplied.
 
     Args:
         factories: Explicit feature factories to exercise.
+        identifiers: Optional custom identifier factory (prefix, marker) -> str.
+        seed_account: Optional async hook to seed prerequisite account rows.
 
     Returns:
         None when every enabled feature passes.
@@ -3020,6 +3044,10 @@ async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit
     Raises:
         AssertionError: If any enabled feature violates its public protocol.
     """
+    del identifiers
+    if seed_account is not None:
+        for default_account_id in ("conformance-subject", "conformance-session-owner", "account-1"):
+            await seed_account(default_account_id)
     if factories.api_key_store is not None:
         await assert_api_key_store_conformance(factories.api_key_store)
     if factories.local_account_store is not None:
@@ -3226,8 +3254,10 @@ def _different_digest(digest: bytes) -> bytes:
     return bytes((digest[0] ^ 1,)) + digest[1:]
 
 
-def _conformance_mfa_login_challenge(digest: bytes, *, expires_at: datetime | None = None) -> MFALoginChallenge:
+def _conformance_mfa_login_challenge(digest: bytes, *, expires_at: datetime | None = None) -> "MFALoginChallenge":
     """Build a fixed valid MFA-login challenge."""
+    from litestar_security.accounts._mfa_login import MFALoginChallenge
+
     return MFALoginChallenge(
         challenge_digest=digest,
         account_id="conformance-account",
@@ -3238,8 +3268,10 @@ def _conformance_mfa_login_challenge(digest: bytes, *, expires_at: datetime | No
     )
 
 
-def _conformance_webauthn_challenge(digest: bytes, *, expires_at: datetime | None = None) -> WebAuthnChallenge:
+def _conformance_webauthn_challenge(digest: bytes, *, expires_at: datetime | None = None) -> "WebAuthnChallenge":
     """Build a fixed valid WebAuthn challenge."""
+    from litestar_security.accounts._passkeys import UserVerification, WebAuthnChallenge
+
     return WebAuthnChallenge(
         challenge_digest=digest,
         binding_digest=b"b" * 32,
@@ -3287,8 +3319,10 @@ def _conformance_connect_token_record(
     )
 
 
-def _conformance_passkey_credential(credential_id: bytes) -> PasskeyCredential:
+def _conformance_passkey_credential(credential_id: bytes) -> "PasskeyCredential":
     """Build one fixed verified passkey credential."""
+    from litestar_security.accounts._passkeys import PasskeyCredential
+
     return PasskeyCredential(
         credential_id=credential_id,
         account_id="conformance-account",
@@ -3345,8 +3379,10 @@ def _conformance_oidc_logout_identity(token_id: str) -> OIDCLogoutIdentity:
     )
 
 
-def _conformance_step_up_record() -> StepUpGrantState:
+def _conformance_step_up_record() -> "StepUpGrantState":
     """Build one fixed exact-binding step-up grant."""
+    from litestar_security.accounts._mfa import StepUpGrantState
+
     return StepUpGrantState(
         grant_digest=b"g" * 32,
         transport_digest=b"t" * 32,
@@ -3521,7 +3557,7 @@ class InMemoryMFAStore:
         self.methods: dict[str, TOTPMethod] = {}
         self.recovery_codes: dict[str, tuple[RecoveryCodeDigest, ...]] = {}
 
-    async def create_totp_enrollment(self, enrollment: PendingTOTPEnrollment) -> None:
+    async def create_totp_enrollment(self, enrollment: "PendingTOTPEnrollment") -> None:
         """Store one enrollment.
 
         Args:
@@ -3530,7 +3566,7 @@ class InMemoryMFAStore:
         async with self._lock:
             self.enrollments[enrollment.enrollment_id] = enrollment
 
-    async def get_totp_enrollment(self, enrollment_id: str) -> PendingTOTPEnrollment | None:
+    async def get_totp_enrollment(self, enrollment_id: str) -> "PendingTOTPEnrollment | None":
         """Load one enrollment.
 
         Args:
@@ -3550,7 +3586,7 @@ class InMemoryMFAStore:
         login_method: LoginMethod,
         event: SecurityEvent,
         now: datetime,
-    ) -> TOTPMethod | None:
+    ) -> "TOTPMethod | None":
         """Atomically consume and activate one enrollment.
 
         Args:
@@ -3565,6 +3601,8 @@ class InMemoryMFAStore:
             The active method only for the winning call.
         """
         async with self._lock:
+            from litestar_security.accounts._mfa import TOTPMethod
+
             enrollment = self.enrollments.pop(enrollment_id, None)
             if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
                 return None
@@ -3587,13 +3625,15 @@ class InMemoryMFAStore:
         enrollment_id: str,
         *,
         accepted_counter: int,
-        codes: tuple[RecoveryCodeDigest, ...],
+        codes: "tuple[RecoveryCodeDigest, ...]",
         login_method: LoginMethod,
         event: SecurityEvent,
         now: datetime,
-    ) -> TOTPMethod | None:
+    ) -> "TOTPMethod | None":
         """Atomically activate one enrollment and replace recovery codes."""
         async with self._lock:
+            from litestar_security.accounts._mfa import TOTPMethod
+
             enrollment = self.enrollments.get(enrollment_id)
             if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
                 return None
@@ -3612,7 +3652,7 @@ class InMemoryMFAStore:
             self.events.append(event)
             return method
 
-    async def get_totp_method(self, account_id: str, method_id: str) -> TOTPMethod | None:
+    async def get_totp_method(self, account_id: str, method_id: str) -> "TOTPMethod | None":
         """Load an owner-checked active method.
 
         Args:
@@ -3644,7 +3684,7 @@ class InMemoryMFAStore:
             return True
 
     async def replace_recovery_codes(
-        self, account_id: str, codes: tuple[RecoveryCodeDigest, ...], *, now: datetime
+        self, account_id: str, codes: "tuple[RecoveryCodeDigest, ...]", *, now: datetime
     ) -> None:
         """Atomically replace an account's complete digest set.
 
@@ -3688,7 +3728,7 @@ class InMemoryWebAuthnChallengeStore:
         self._lock = Lock()
         self.challenges: dict[bytes, WebAuthnChallenge] = {}
 
-    async def put(self, challenge: WebAuthnChallenge) -> None:
+    async def put(self, challenge: "WebAuthnChallenge") -> None:
         """Store one digest-only challenge.
 
         Args:
@@ -3699,7 +3739,7 @@ class InMemoryWebAuthnChallengeStore:
 
     async def consume(
         self, challenge_digest: bytes, *, binding_digest: bytes, purpose: str, now: datetime
-    ) -> WebAuthnChallenge | None:
+    ) -> "WebAuthnChallenge | None":
         """Atomically burn and return one exact challenge.
 
         Args:
@@ -3736,7 +3776,7 @@ class InMemoryPasskeyStore:
         self.login_methods: dict[str, LoginMethod] = {}
 
     async def add_credential(
-        self, credential: PasskeyCredential, *, login_method: LoginMethod, event: SecurityEvent
+        self, credential: "PasskeyCredential", *, login_method: LoginMethod, event: SecurityEvent
     ) -> bool:
         """Atomically register a credential, login method, and event.
 
@@ -3756,7 +3796,7 @@ class InMemoryPasskeyStore:
             self.events.append(event)
             return True
 
-    async def get_credential(self, credential_id: bytes) -> PasskeyCredential | None:
+    async def get_credential(self, credential_id: bytes) -> "PasskeyCredential | None":
         """Load one credential.
 
         Args:
@@ -3777,7 +3817,7 @@ class InMemoryPasskeyStore:
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> PasskeyAssertionStatus:
+    ) -> "PasskeyAssertionStatus":
         """Atomically record one verified assertion.
 
         Args:
@@ -3793,6 +3833,8 @@ class InMemoryPasskeyStore:
             Structured record, conflict, or clone-risk status.
         """
         async with self._lock:
+            from litestar_security.accounts._passkeys import PasskeyAssertionStatus
+
             credential = self.credentials.get(credential_id)
             if (
                 credential is None
@@ -3810,7 +3852,7 @@ class InMemoryPasskeyStore:
             )
             return PasskeyAssertionStatus.CLONE_RISK if clone_risk else PasskeyAssertionStatus.RECORDED
 
-    async def list_credentials(self, account_id: str) -> tuple[PasskeyCredential, ...]:
+    async def list_credentials(self, account_id: str) -> "tuple[PasskeyCredential, ...]":
         """List an account's credentials.
 
         Args:
@@ -3823,7 +3865,7 @@ class InMemoryPasskeyStore:
 
     async def rename_credential(
         self, account_id: str, credential_id: bytes, display_name: str
-    ) -> PasskeyCredential | None:
+    ) -> "PasskeyCredential | None":
         """Atomically rename one owner-checked credential.
 
         Args:
@@ -3853,7 +3895,7 @@ class InMemoryMFALoginChallengeStore:
         self._lock = Lock()
         self.challenges: dict[bytes, MFALoginChallenge] = {}
 
-    async def put(self, challenge: MFALoginChallenge) -> None:
+    async def put(self, challenge: "MFALoginChallenge") -> None:
         """Store one pending digest-only challenge.
 
         Args:
@@ -3864,7 +3906,7 @@ class InMemoryMFALoginChallengeStore:
 
     async def consume(
         self, challenge_digest: bytes, *, account_id: str, security_epoch: int, now: datetime
-    ) -> MFALoginChallenge | None:
+    ) -> "MFALoginChallenge | None":
         """Atomically burn and return one exact, current challenge.
 
         Args:
@@ -3898,7 +3940,7 @@ class InMemoryStepUpStore:
         self._lock = Lock()
         self.grants: dict[bytes, StepUpGrantState] = {}
 
-    async def put(self, record: StepUpGrantState) -> None:
+    async def put(self, record: "StepUpGrantState") -> None:
         """Store one grant record.
 
         Args:
@@ -3916,7 +3958,7 @@ class InMemoryStepUpStore:
         purpose: str,
         transport_digest: bytes,
         now: datetime,
-    ) -> StepUpGrantState | None:
+    ) -> "StepUpGrantState | None":
         """Atomically burn and return one exact current grant.
 
         Args:
@@ -3942,3 +3984,37 @@ class InMemoryStepUpStore:
             ):
                 return None
             return record
+
+
+_OPTIONAL_TESTING_EXPORTS: Mapping[str, tuple[str, str, frozenset[str]]] = {
+    "MFAStore": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "MFALoginChallengeStore": ("litestar_security.accounts._mfa_login", "mfa", frozenset({"pyotp"})),
+    "PasskeyStore": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+    "WebAuthnChallengeStore": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+    "StepUpStore": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "StepUpCredential": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "PasskeyCredential": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+    "PasskeyAssertionStatus": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+    "WebAuthnChallenge": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+    "MFALoginChallenge": ("litestar_security.accounts._mfa_login", "mfa", frozenset({"pyotp"})),
+    "PendingTOTPEnrollment": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "ProtectedSecret": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "RecoveryCodeDigest": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "SecretProtector": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "StepUpGrantState": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "TOTPMethod": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "TOTPPolicy": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "UserVerification": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+}
+
+
+def __getattr__(name: str) -> object:
+    """Resolve optional testing exports only when their feature dependencies are available."""
+    from litestar_security._lazy import import_optional_attribute
+
+    target = _OPTIONAL_TESTING_EXPORTS.get(name)
+    if target is not None:
+        module_name, extras, dependencies = target
+        return import_optional_attribute(module_name, name, extras=extras, dependencies=dependencies)
+    message = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(message)

@@ -125,7 +125,7 @@ class MFAConfig:
     login_methods: "LoginMethodStore | None" = field(default=None, repr=False)
     events: "SecurityEventSink | None" = field(default=None, repr=False)
     step_up_store: object | None = field(default=None, repr=False)
-    require_at_login: bool = False
+    require_at_login: bool | Literal["enrolled"] = False
     login_challenge_store: object | None = field(default=None, repr=False)
     route_prefix: str = "/auth"
     issuer: str = "Litestar Security"
@@ -170,17 +170,16 @@ class MFAConfig:
             msg = "MFA documentation metadata must be RouteDocs"
             raise ImproperlyConfiguredException(detail=msg)
         require_at_login_value = cast("object", self.require_at_login)
-        if require_at_login_value.__class__ is not bool:
-            msg = "MFA require_at_login must be boolean"
+        if require_at_login_value.__class__ is not bool and require_at_login_value != "enrolled":
+            msg = "MFA require_at_login must be boolean or 'enrolled'"
             raise ImproperlyConfiguredException(detail=msg)
         login_challenge_store = self.login_challenge_store if self.login_challenge_store is not None else self.store
-        if self.require_at_login and not isinstance(login_challenge_store, MFALoginChallengeStore):
+        is_require_active = self.require_at_login is True or self.require_at_login == "enrolled"
+        if is_require_active and not isinstance(login_challenge_store, MFALoginChallengeStore):
             msg = "MFA login challenge store must implement MFALoginChallengeStore"
             raise ImproperlyConfiguredException(detail=msg)
         object.__setattr__(self, "login_challenge_store", login_challenge_store)
-        if (self.register_routes or self.require_at_login) and (
-            not self.recovery_peppers or self.login_methods is None
-        ):
+        if (self.register_routes or is_require_active) and (not self.recovery_peppers or self.login_methods is None):
             msg = "Generated MFA routes require recovery-code peppers and a login-method store"
             raise ImproperlyConfiguredException(detail=msg)
 

@@ -2417,12 +2417,12 @@ def test_exclude_from_auth_alias_requires_true_on_individual_handlers(value: obj
     async def owned_handler() -> None:
         return None
 
-    with pytest.raises(ImproperlyConfiguredException, match=r"only on individual route handlers.* /owned"):
-        Litestar(
-            route_handlers=[Router(path="/", route_handlers=[owned_handler], opt={"exclude_from_auth": True})],
-            openapi_config=None,
-            plugins=[SecurityPlugin(_compiler_config())],
-        )
+    app = Litestar(
+        route_handlers=[Router(path="/", route_handlers=[owned_handler], opt={"exclude_from_auth": True})],
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config())],
+    )
+    assert not _http_plan(app, "/owned").authenticate
 
 
 def test_exclude_rejects_competing_authentication_policy() -> None:
@@ -3525,7 +3525,7 @@ def test_openapi_controller_and_invalid_custom_router_metadata_use_native_owners
         title="Test", version="1.0", openapi_router=invalid_router, render_plugins=[JsonRenderPlugin()]
     )
 
-    with pytest.raises(ImproperlyConfiguredException, match=r"Invalid.*GET /reference"):
+    with pytest.raises(ImproperlyConfiguredException, match=r"Invalid.* /reference"):
         Litestar(route_handlers=[], openapi_config=invalid_config, plugins=[SecurityPlugin(_compiler_config())])
 
 

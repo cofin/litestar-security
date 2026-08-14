@@ -740,3 +740,20 @@ async def test_conformance_detects_partial_rotation_states(
 
 async def test_empty_aggregate_conformance_requires_no_unrelated_store() -> None:
     await assert_security_backend_conformance(StoreConformanceFactories())
+
+
+async def test_aggregate_backend_conformance_invokes_seed_account_hook() -> None:
+    seeded: list[str] = []
+
+    async def seed(account_id: str) -> None:
+        seeded.append(account_id)
+
+    await assert_security_backend_conformance(StoreConformanceFactories(), seed_account=seed)
+    assert seeded == ["conformance-subject", "conformance-session-owner", "account-1"]
+
+
+async def test_aggregate_backend_conformance_accepts_custom_identifier_factory() -> None:
+    def custom_identifiers(prefix: str | None, marker: int) -> str:
+        return f"{prefix or ''}custom-uuid-{marker}"
+
+    await assert_security_backend_conformance(StoreConformanceFactories(), identifiers=custom_identifiers)

@@ -730,6 +730,14 @@ class NativeSessionAuth(Generic[UserT]):
                 if prior is not None
                 else await self.accounts.create(command, event=event)
             )
+            if record is None and prior is not None:
+                create_event = self._event(
+                    occurred_at,
+                    operation="local.session.create",
+                    outcome=OUTCOME_CREATED,
+                    account_id=account.account_id,
+                )
+                record = await self.accounts.create(command, event=create_event)
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
         if record is None or not self._record_matches_command(record, command):
