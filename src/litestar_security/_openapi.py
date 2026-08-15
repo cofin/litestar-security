@@ -600,7 +600,7 @@ class RouteCompiler(Generic[UserT]):
         except ImproperlyConfiguredException as exc:
             self._raise_route_error(route, route_handler, exc.detail)
 
-    def _resolve_effective_policy(  # noqa: C901, PLR0911, PLR0912 - layer hierarchy traversal inspects each level deterministically
+    def _resolve_effective_policy(  # noqa: C901 - each precedence level validates and returns its own outcome
         self, route: BaseRoute, route_handler: BaseRouteHandler
     ) -> AuthenticationPolicy | None:
         """Resolve the effective authentication policy or exclusion across ownership layers.
@@ -608,20 +608,19 @@ class RouteCompiler(Generic[UserT]):
         Walks ownership layers innermost to outermost (handler -> controller -> router -> app).
         The first layer declaring an explicit auth policy or exclude_from_auth wins.
         """
-        parent_has_exclude = False
+        parent_layers: list[tuple[AuthenticationPolicy | None, bool]] = []
         for layer in route_handler.ownership_layers[:-1]:
             layer_opt = getattr(layer, "opt", None)
             if not isinstance(layer_opt, Mapping):
                 continue
             opt_map = cast("Mapping[str, object]", layer_opt)
             has_exclude = _EXCLUDE_FROM_AUTH_OPT_KEY in opt_map
-            if has_exclude:
-                parent_has_exclude = True
-                if opt_map[_EXCLUDE_FROM_AUTH_OPT_KEY] is not True:
-                    self._raise_route_error(route, route_handler, "exclude_from_auth must be exactly True when present")
+            if has_exclude and opt_map[_EXCLUDE_FROM_AUTH_OPT_KEY] is not True:
+                self._raise_route_error(route, route_handler, "exclude_from_auth must be exactly True when present")
             policy = self._policy_from_opt(route, route_handler, opt_map)
             if has_exclude and policy is not None:
                 self._raise_route_error(route, route_handler, "Route declares both auth and exclude_from_auth")
+            parent_layers.append((policy, has_exclude))
 
         handler_opt = route_handler.opt
         handler_has_exclude = _EXCLUDE_FROM_AUTH_OPT_KEY in handler_opt
@@ -629,14 +628,9 @@ class RouteCompiler(Generic[UserT]):
             self._raise_route_error(route, route_handler, "exclude_from_auth must be exactly True when present")
 
         handler_policy = self._policy_from_opt(route, route_handler, handler_opt)
-        handler_explicit_exclude = handler_has_exclude and not parent_has_exclude
-        parent_policies = [
-            self._policy_from_opt(route, route_handler, cast("Mapping[str, object]", getattr(layer, "opt", {})))
-            for layer in route_handler.ownership_layers[:-1]
-            if isinstance(getattr(layer, "opt", None), Mapping)
-        ]
-        handler_explicit_policy = handler_policy is not None and not any(
-            parent_p is handler_policy for parent_p in parent_policies
+        handler_explicit_exclude = handler_has_exclude and not any(has_exclude for _, has_exclude in parent_layers)
+        handler_explicit_policy = handler_policy is not None and all(
+            parent_policy is not handler_policy for parent_policy, _ in parent_layers
         )
         if handler_explicit_exclude and handler_explicit_policy:
             self._raise_route_error(route, route_handler, "Route declares both auth and exclude_from_auth")
@@ -646,23 +640,15 @@ class RouteCompiler(Generic[UserT]):
         if handler_explicit_policy:
             return handler_policy
 
-        for layer in reversed(route_handler.ownership_layers[:-1]):
-            layer_opt = getattr(layer, "opt", None)
-            if not isinstance(layer_opt, Mapping):
-                continue
-            opt_map = cast("Mapping[str, object]", layer_opt)
-            policy = self._policy_from_opt(route, route_handler, opt_map)
+        for policy, has_exclude in reversed(parent_layers):
             if policy is not None:
                 return policy
-            if _EXCLUDE_FROM_AUTH_OPT_KEY in opt_map:
+            if has_exclude:
                 return exclude()
 
         if handler_has_exclude:
             return exclude()
-        if handler_policy is not None:
-            return handler_policy
-
-        return None
+        return handler_policy
 
     def _nearest_non_application_policy(
         self, route: BaseRoute, route_handler: BaseRouteHandler
