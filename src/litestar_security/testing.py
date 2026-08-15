@@ -3138,14 +3138,14 @@ async def assert_rate_limiter_conformance(
 async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit public capability dispatch preserves field order
     factories: StoreConformanceFactories,
     *,
-    seed_account: Callable[[str], Awaitable[None]] | None = None,
+    create_account: Callable[[str], Awaitable[None]] | None = None,
     identifiers: Callable[[str, int], str] | None = None,
 ) -> None:
     """Run only the conformance scenarios whose factories were supplied.
 
     Args:
         factories: Explicit feature factories to exercise.
-        seed_account: Optional async hook to seed prerequisite account rows. A
+        create_account: Optional async hook to seed prerequisite account rows. A
             relational backend enforcing account foreign keys needs every
             identifier the enabled scenarios reference to exist first.
         identifiers: Optional deterministic ``(namespace, sequence)`` account
@@ -3161,12 +3161,12 @@ async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit
     Raises:
         AssertionError: If any enabled feature violates its public protocol.
     """
-    if seed_account is not None:
+    if create_account is not None:
         seed_ids = (
             _CONFORMANCE_ACCOUNT_IDS if identifiers is None else _resolve_conformance_account_ids(identifiers).seeded()
         )
         for default_account_id in seed_ids:
-            await seed_account(default_account_id)
+            await create_account(default_account_id)
     if factories.api_key_store is not None:
         await assert_api_key_store_conformance(factories.api_key_store, identifiers=identifiers)
     if factories.local_account_store is not None:

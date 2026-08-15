@@ -743,13 +743,13 @@ async def test_empty_aggregate_conformance_requires_no_unrelated_store() -> None
     await assert_security_backend_conformance(StoreConformanceFactories())
 
 
-async def test_aggregate_backend_conformance_invokes_seed_account_hook() -> None:
+async def test_aggregate_backend_conformance_invokes_create_account_hook() -> None:
     seeded: list[str] = []
 
     async def seed(account_id: str) -> None:
         seeded.append(account_id)
 
-    await assert_security_backend_conformance(StoreConformanceFactories(), seed_account=seed)
+    await assert_security_backend_conformance(StoreConformanceFactories(), create_account=seed)
     assert seeded == [
         "account-1",
         "conformance-account",
@@ -779,7 +779,7 @@ async def test_aggregate_conformance_seeds_factory_derived_account_ids_only() ->
     async def seed(account_id: str) -> None:
         seeded.append(account_id)
 
-    await assert_security_backend_conformance(StoreConformanceFactories(), seed_account=seed, identifiers=identifiers)
+    await assert_security_backend_conformance(StoreConformanceFactories(), create_account=seed, identifiers=identifiers)
     assert seeded, "a supplied identifier factory must still drive account seeding"
     assert set(seeded) == generated, "every seeded account id must come from the supplied factory"
     for account_id in seeded:
@@ -800,7 +800,7 @@ async def test_identifier_factory_drives_session_registry_account_references() -
         return backend.accounts
 
     await assert_security_backend_conformance(
-        StoreConformanceFactories(session_registry=sessions), seed_account=seed, identifiers=identifiers
+        StoreConformanceFactories(session_registry=sessions), create_account=seed, identifiers=identifiers
     )
     observed = {
         session.account_id

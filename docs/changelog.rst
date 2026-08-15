@@ -23,10 +23,10 @@ Added
   configure custom minimum/maximum lengths and byte sizes for account
   registration, password changes, and recovery flows.
 * Backend conformance test hooks: ``assert_security_backend_conformance`` now accepts
-  a ``seed_account`` async hook and an ``identifiers`` factory taking
+  a ``create_account`` async hook and an ``identifiers`` factory taking
   ``(namespace, sequence)``, enabling relational and strict database backends with
   typed account columns and foreign-key constraints to participate in full conformance
-  verification. Without a factory, ``seed_account`` receives the fixed conformance
+  verification. Without a factory, ``create_account`` receives the fixed conformance
   account identifiers; with one, it receives the factory-derived identifiers instead,
   and every account-scoped identifier the per-store scenarios reference comes from the
   factory. Accounts the scenarios register through the store itself keep their
