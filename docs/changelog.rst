@@ -23,12 +23,20 @@ Added
   configure custom minimum/maximum lengths and byte sizes for account
   registration, password changes, and recovery flows.
 * Backend conformance test hooks: ``assert_security_backend_conformance`` now accepts
-  a ``seed_account`` async hook, enabling relational and strict database backends with
-  foreign-key constraints to participate in full conformance verification. The hook is
-  called for every account identifier the enabled scenarios reference.
+  a ``seed_account`` async hook and an ``identifiers`` factory taking
+  ``(namespace, sequence)``, enabling relational and strict database backends with
+  typed account columns and foreign-key constraints to participate in full conformance
+  verification. Without a factory, ``seed_account`` receives the fixed conformance
+  account identifiers; with one, it receives the factory-derived identifiers instead,
+  and every account-scoped identifier the per-store scenarios reference comes from the
+  factory. Accounts the scenarios register through the store itself keep their
+  backend-generated identifiers and need no seeding.
 * ``LoginMethodStore`` gains ``list_methods``, the port that reports an account's
-  viable login methods. Implementations must add it; ``require_at_login="enrolled"``
-  reads the enrolled set through it and refuses to bind without it.
+  viable login methods. This is a breaking change for every custom
+  ``LoginMethodStore`` implementation: the MFA service validates any supplied
+  login-method store against the protocol in every ``require_at_login`` mode, so
+  implementations must add ``list_methods`` before upgrading.
+  ``require_at_login="enrolled"`` reads the enrolled set through it.
 
 Fixed
 ~~~~~
