@@ -80,5 +80,11 @@ only a digest and atomically consumes a challenge exactly once.
 
 **An account with no enrolled factor cannot complete a login.** Roll out
 enrollment and retain a usable factor before enabling this deployment-wide
-setting. In particular, keep the ``method_id`` returned at TOTP enrollment:
-there is no factor-discovery port to recover it later.
+setting.
+
+Set ``require_at_login="enrolled"`` to challenge only the accounts that hold a
+viable TOTP or passkey factor, so unenrolled accounts sign in directly. The
+enrolled set is read from
+:meth:`~litestar_security.accounts.LoginMethodStore.list_methods` on the
+configured ``login_methods`` store, and binding fails when that store does not
+implement it.

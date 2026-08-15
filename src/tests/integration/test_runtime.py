@@ -799,6 +799,7 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccountState[object]
             issue=unused,
             issue_absent=unused,
             list_for_account=list_for_account,
+            list_methods=unused,
             prepare_rotation=unused,
             rebind=rebind,
             register_login_method=unused,
@@ -850,6 +851,9 @@ class _RouteMFAStore(InMemoryMFAStore):
     """Add the login-method port to the reusable in-memory MFA store for route setup."""
 
     __slots__ = ()
+
+    async def list_methods(self, _account_id: str) -> tuple[LoginMethod, ...]:
+        return tuple(self.login_methods.values())
 
     async def register_login_method(self, _account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
         self.login_methods[method.method_id] = method
@@ -1702,7 +1706,7 @@ async def test_conditional_mfa_login_when_enrolled_requires_challenge() -> None:
     mfa = _mfa_at_login_config(required="enrolled")
     recovery_codes = await cast("Any", mfa.mfa_service).generate_recovery_codes("account-1")
     assert isinstance(recovery_codes, RecoveryCodeGrant)
-    accounts.methods["mfa-recovery"] = LoginMethod("mfa-recovery", "totp", _NOW)
+    cast("Any", mfa.login_methods).login_methods["mfa-recovery"] = LoginMethod("mfa-recovery", "totp", _NOW)
     csrf = CSRFConfig(secret="s" * 32)
     local_auth: Any = LocalAuth.session(
         accounts=cast("Any", accounts),

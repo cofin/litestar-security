@@ -363,13 +363,22 @@ class LocalAuthConfig(Generic[UserT]):
         if not isinstance(store, MFALoginChallengeStore) or not isinstance(mfa.mfa_service, MFAService):
             msg = "MFA login binding requires configured challenge and MFA services"
             raise ImproperlyConfiguredException(detail=msg)
+        login_methods = mfa.login_methods
+        if mfa.require_at_login == "enrolled" and not isinstance(login_methods, LoginMethodStore):
+            msg = "Conditional MFA login requires a login-method store implementing LoginMethodStore.list_methods"
+            raise ImproperlyConfiguredException(detail=msg)
         service = MFALoginService(store=store, mfa=mfa.mfa_service, pepper=self.secrets.mfa_login_pepper)
         object.__setattr__(self, "mfa_login", service)
         object.__setattr__(self, "_mfa_login_config", mfa)
         object.__setattr__(
             self,
             "local_auth_service",
-            replace(self.local_auth_service, mfa_login=service, mfa_require_at_login=mfa.require_at_login),
+            replace(
+                self.local_auth_service,
+                mfa_login=service,
+                mfa_require_at_login=mfa.require_at_login,
+                mfa_login_methods=login_methods,
+            ),
         )
 
     def _validate_capabilities(self) -> None:

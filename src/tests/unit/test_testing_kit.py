@@ -749,11 +749,11 @@ async def test_aggregate_backend_conformance_invokes_seed_account_hook() -> None
         seeded.append(account_id)
 
     await assert_security_backend_conformance(StoreConformanceFactories(), seed_account=seed)
-    assert seeded == ["conformance-subject", "conformance-session-owner", "account-1"]
-
-
-async def test_aggregate_backend_conformance_accepts_custom_identifier_factory() -> None:
-    def custom_identifiers(prefix: str | None, marker: int) -> str:
-        return f"{prefix or ''}custom-uuid-{marker}"
-
-    await assert_security_backend_conformance(StoreConformanceFactories(), identifiers=custom_identifiers)
+    assert seeded == [
+        "account-1",
+        "conformance-account",
+        "conformance-principal",
+        "conformance-session-other",
+        "conformance-session-owner",
+        "conformance-subject",
+    ]

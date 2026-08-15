@@ -199,6 +199,21 @@ class PasswordCredentialStore(Protocol):
 class LoginMethodStore(Protocol):
     """Maintain viable login methods through guarded atomic operations."""
 
+    async def list_methods(self, account_id: str) -> "tuple[LoginMethod, ...]":
+        """Return every login method currently viable for one account.
+
+        Implementers must return only methods that can still satisfy a login;
+        a revoked or pending-enrollment method must be omitted, because
+        conditional MFA reads this to decide whether to challenge.
+
+        Args:
+            account_id: The account whose methods to list.
+
+        Returns:
+            The viable methods, empty when the account has enrolled none.
+        """
+        ...  # pragma: no cover
+
     async def register_login_method(self, account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
         """Register one login method and its durable event.
 

@@ -82,7 +82,15 @@ elif PYOTP_INSTALLED:
 else:
 
     class StepUpCredential(WireStruct, frozen=True, kw_only=True):  # type: ignore[no-redef]
+        """Mirror the MFA step-up credential so the wire contract stays whole without pyotp."""
+
         token: str
+        purpose: str
+        expires_at: datetime
+
+        def __repr__(self) -> str:
+            """Redact the reveal-once credential."""
+            return f"{type(self).__name__}(token=<redacted>, purpose={self.purpose!r}, expires_at={self.expires_at!r})"
 
 
 __all__ = (

@@ -145,6 +145,14 @@ __all__ = (
 )
 
 _DEFAULT_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_CONFORMANCE_ACCOUNT_IDS = (
+    "account-1",
+    "conformance-account",
+    "conformance-principal",
+    "conformance-session-other",
+    "conformance-session-owner",
+    "conformance-subject",
+)
 _DEFAULT_CREDENTIAL_HASH = "$litestar-security$deterministic-test-hash"
 ClaimsT = TypeVar("ClaimsT")
 ResultT = TypeVar("ResultT")
@@ -620,6 +628,12 @@ class InMemoryLocalAccountStore:
             self._password_hashes[account_id] = password_hash
             self._accounts[account_id] = replace(account, security_epoch=expected_epoch + 1)
             return PasswordChangeOutcome(PasswordChangeStatus.CHANGED, expected_epoch + 1)
+
+    async def list_methods(self, account_id: str) -> tuple[LoginMethod, ...]:
+        """Return every login method recorded for an account."""
+        await self._observe("accounts.list_methods", {"account_id": account_id})
+        async with self._lock:
+            return tuple(self._login_methods.get(account_id, {}).values())
 
     async def register_login_method(self, account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
         """Record a login method for an existing account."""
@@ -2340,10 +2354,11 @@ async def assert_mfa_store_conformance(factory: "Callable[[], MFAStore]") -> Non
     Raises:
         AssertionError: If a counter update is non-atomic or a recovery code can be reused.
     """
-    from litestar_security.accounts._mfa import PendingTOTPEnrollment, ProtectedSecret, RecoveryCodeDigest, TOTPPolicy
     from litestar_security.typing import require_dependency
 
     require_dependency("pyotp")
+    from litestar_security.accounts._mfa import PendingTOTPEnrollment, ProtectedSecret, RecoveryCodeDigest, TOTPPolicy
+
     store = factory()
     enrollment = PendingTOTPEnrollment(
         enrollment_id="conformance-enrollment",
@@ -2692,10 +2707,11 @@ async def assert_passkey_store_conformance(factory: "Callable[[], PasskeyStore]"
     Raises:
         AssertionError: If only one optimistic writer is not recorded or clone risk is lost.
     """
-    from litestar_security.accounts._passkeys import PasskeyAssertionStatus
     from litestar_security.typing import require_dependency
 
     require_dependency("webauthn")
+    from litestar_security.accounts._passkeys import PasskeyAssertionStatus
+
     store = factory()
     credential = _conformance_passkey_credential(b"credential")
     if not await store.add_credential(
@@ -3026,17 +3042,15 @@ async def assert_rate_limiter_conformance(
 
 
 async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit public capability dispatch preserves field order
-    factories: StoreConformanceFactories,
-    *,
-    identifiers: Callable[[str | None, int], str] | None = None,
-    seed_account: Callable[[str], Awaitable[None]] | None = None,
+    factories: StoreConformanceFactories, *, seed_account: Callable[[str], Awaitable[None]] | None = None
 ) -> None:
     """Run only the conformance scenarios whose factories were supplied.
 
     Args:
         factories: Explicit feature factories to exercise.
-        identifiers: Optional custom identifier factory (prefix, marker) -> str.
-        seed_account: Optional async hook to seed prerequisite account rows.
+        seed_account: Optional async hook to seed prerequisite account rows. A
+            relational backend enforcing account foreign keys needs every
+            identifier the enabled scenarios reference to exist first.
 
     Returns:
         None when every enabled feature passes.
@@ -3044,9 +3058,8 @@ async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit
     Raises:
         AssertionError: If any enabled feature violates its public protocol.
     """
-    del identifiers
     if seed_account is not None:
-        for default_account_id in ("conformance-subject", "conformance-session-owner", "account-1"):
+        for default_account_id in _CONFORMANCE_ACCOUNT_IDS:
             await seed_account(default_account_id)
     if factories.api_key_store is not None:
         await assert_api_key_store_conformance(factories.api_key_store)

@@ -481,6 +481,14 @@ class SessionRegistry(Protocol):
 
         Returns:
             The replacement record, or ``None`` when the prior session was already gone.
+
+        Notes:
+            ``None`` means the prior record is absent, and nothing else. A caller
+            that receives it creates a fresh session instead, so an implementer
+            that also returns ``None`` for a rebind conflict or a rejected event
+            leaves the prior session live and unrevoked beside its replacement,
+            which is the fixation window this operation exists to close. Raise on
+            those failures rather than returning ``None``.
         """
         ...  # pragma: no cover
 

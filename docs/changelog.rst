@@ -23,9 +23,12 @@ Added
   configure custom minimum/maximum lengths and byte sizes for account
   registration, password changes, and recovery flows.
 * Backend conformance test hooks: ``assert_security_backend_conformance`` now accepts
-  ``identifiers`` factory and ``seed_account`` async hooks, enabling relational and
-  strict database backends with foreign-key constraints to participate in full conformance
-  verification.
+  a ``seed_account`` async hook, enabling relational and strict database backends with
+  foreign-key constraints to participate in full conformance verification. The hook is
+  called for every account identifier the enabled scenarios reference.
+* ``LoginMethodStore`` gains ``list_methods``, the port that reports an account's
+  viable login methods. Implementations must add it; ``require_at_login="enrolled"``
+  reads the enrolled set through it and refuses to bind without it.
 
 Fixed
 ~~~~~
