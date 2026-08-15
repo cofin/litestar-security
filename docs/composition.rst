@@ -21,12 +21,15 @@ not told to skip. Litestar's answer is the middleware's ``exclude`` argument,
 and ``exclude`` on :class:`~litestar_security.SecurityConfig` is the same
 mechanism, spelled the same way.
 
-Litestar's other escape hatch, the ``exclude_from_auth`` opt, is deliberately
-narrower here. It is honored on an individual route handler and rejected on a
-router, controller, or application, because a layer-level exclusion opens an
-entire subtree without naming what is in it. Routers built by another plugin
-expose ``opt`` only at the router level, so ``exclude_from_auth`` is not the
-route to take for them — path patterns are.
+Litestar's other escape hatch, the ``opt={"exclude_from_auth": True}`` key,
+is resolved hierarchically across ownership layers (``RouteHandler`` > ``Controller`` > ``Router`` > ``App``).
+Placing ``opt={"exclude_from_auth": True}`` on a router (such as those returned by
+:func:`~litestar.static_files.create_static_files_router` or asset plugins like ``litestar-vite``)
+automatically excludes all routes in that subtree from authentication by default.
+Child layers (such as a :class:`~litestar_security.SecureController` or a handler
+declaring ``auth=required(...)``) mounted inside an excluded router cleanly override the
+parent router to enforce authentication. For public application routes that require
+typed request context, prefer :class:`~litestar_security.PublicController` or ``auth=public()``.
 
 Excluding paths
 ===============

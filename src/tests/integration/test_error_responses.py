@@ -65,9 +65,9 @@ _RAISED_DENIALS = (
             "/auth/token",
             "/auth/token",
             {"identifier": "absent@example.com", "password": "wrong-password"},
-            HTTP_400_BAD_REQUEST,
+            HTTP_401_UNAUTHORIZED,
         ),
-        id="token-400",
+        id="token-401",
     ),
     pytest.param(
         _Denial("POST", "/auth/token/refresh", "/auth/token/refresh", {}, HTTP_400_BAD_REQUEST), id="refresh-400-extra"

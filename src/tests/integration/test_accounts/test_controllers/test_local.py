@@ -116,8 +116,8 @@ async def test_generated_login_and_lifecycle_handlers_project_typed_outcomes() -
     response = await login(None, credentials, request, service)
     assert response.status_code == 200
     assert response.content.account_id == "account-1"
-    error = await _raised(login(None, credentials, request, service), ClientException)
-    assert cast("ClientException", error).detail == "The request is invalid."
+    error = await _raised(login(None, credentials, request, service), NotAuthorizedException)
+    assert cast("NotAuthorizedException", error).detail == "Authentication required."
     assert (await recovery(None, identifier, request, service)).status_code == 202
     error = await _raised(recovery(None, identifier, request, service), TooManyRequestsException)
     assert cast("TooManyRequestsException", error).headers["Retry-After"] == "7"
@@ -201,7 +201,10 @@ async def test_generated_session_and_token_handlers_cover_success_and_safe_failu
     login = cast("Any", local_controllers._LocalTokenController.login.fn)  # noqa: SLF001
     assert (await login(None, credentials, request, services)).status_code == 200
     await _assert_http_exception(
-        login(None, credentials, request, services), ClientException, status_code=400, detail="The request is invalid."
+        login(None, credentials, request, services),
+        NotAuthorizedException,
+        status_code=401,
+        detail="Authentication required.",
     )
     refresh = cast("Any", local_controllers._LocalTokenController.refresh.fn)  # noqa: SLF001
     assert (await refresh(None, token_request, request, services, "AAAAAAAAAAAAAAAAAAAAAA")).status_code == 200

@@ -23,7 +23,7 @@ from litestar_security.accounts._auth_service import LocalAuthService, trusted_c
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._mfa import MFAService
 from litestar_security.accounts._mfa_login import MFALoginChallengeStore, MFALoginService
-from litestar_security.accounts._passwords import Argon2PasswordHasher, PasswordHasher
+from litestar_security.accounts._passwords import Argon2PasswordHasher, PasswordHasher, PasswordPolicy
 from litestar_security.accounts._purpose_tokens import PurposeTokenCodec
 from litestar_security.accounts._rate_limits import RateLimiter, RateLimitGuard, StoreRateLimiter
 from litestar_security.accounts._receipts import RefreshReceiptKey, RefreshReceiptSealer
@@ -176,6 +176,7 @@ class LocalAuthConfig(Generic[UserT]):
     token_client_id: str = _DEFAULT_LOCAL_CLIENT_ID
     access_token_lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME
     password_hasher: PasswordHasher = field(default_factory=Argon2PasswordHasher, repr=False, compare=False)
+    password_policy: PasswordPolicy = field(default_factory=PasswordPolicy, repr=False)
     session_auth: NativeSessionAuth[UserT] | None = field(default=None, repr=False, compare=False)
     session_resolver: UserAuthSessionResolver[UserT] | None = field(default=None, repr=False, compare=False)
     rate_limiter: RateLimiter | None = field(default=None, repr=False, compare=False)
@@ -200,7 +201,7 @@ class LocalAuthConfig(Generic[UserT]):
         init=False, default_factory=dict[WirePolicy, "tuple[Router, ...]"], repr=False, compare=False
     )
 
-    def __post_init__(self) -> None:  # noqa: C901, PLR0915 - transport invariants remain centralized
+    def __post_init__(self) -> None:  # noqa: C901, PLR0912, PLR0915 - transport invariants remain centralized
         """Validate transport-specific values and structural capabilities."""
         if self.mode.__class__ is not LocalAuthMode:
             msg = "Local authentication mode must be a LocalAuthMode"
@@ -221,6 +222,9 @@ class LocalAuthConfig(Generic[UserT]):
         password_hasher_value: object = object.__getattribute__(self, "password_hasher")
         if not isinstance(password_hasher_value, PasswordHasher):
             msg = "Local authentication password_hasher must implement PasswordHasher"
+            raise ImproperlyConfiguredException(detail=msg)
+        if self.password_policy.__class__ is not PasswordPolicy:
+            msg = "Local authentication password policy must be PasswordPolicy"
             raise ImproperlyConfiguredException(detail=msg)
         if self.route_prefix.__class__ is not str:
             msg = "Local authentication route prefix must be an absolute non-root path"
@@ -343,7 +347,7 @@ class LocalAuthConfig(Generic[UserT]):
         Raises:
             ImproperlyConfiguredException: If binding is late, conflicting, or incomplete.
         """
-        if mfa.require_at_login is not True:
+        if mfa.require_at_login is not True and mfa.require_at_login != "enrolled":
             msg = "MFA login binding requires an MFAConfig with require_at_login enabled"
             raise ImproperlyConfiguredException(detail=msg)
         current = self.mfa_login
@@ -359,10 +363,23 @@ class LocalAuthConfig(Generic[UserT]):
         if not isinstance(store, MFALoginChallengeStore) or not isinstance(mfa.mfa_service, MFAService):
             msg = "MFA login binding requires configured challenge and MFA services"
             raise ImproperlyConfiguredException(detail=msg)
+        login_methods = mfa.login_methods
+        if mfa.require_at_login == "enrolled" and not isinstance(login_methods, LoginMethodStore):
+            msg = "Conditional MFA login requires a login-method store implementing LoginMethodStore.list_methods"
+            raise ImproperlyConfiguredException(detail=msg)
         service = MFALoginService(store=store, mfa=mfa.mfa_service, pepper=self.secrets.mfa_login_pepper)
         object.__setattr__(self, "mfa_login", service)
         object.__setattr__(self, "_mfa_login_config", mfa)
-        object.__setattr__(self, "local_auth_service", replace(self.local_auth_service, mfa_login=service))
+        object.__setattr__(
+            self,
+            "local_auth_service",
+            replace(
+                self.local_auth_service,
+                mfa_login=service,
+                mfa_require_at_login=mfa.require_at_login,
+                mfa_login_methods=login_methods,
+            ),
+        )
 
     def _validate_capabilities(self) -> None:
         required: list[type[Any]] = [
@@ -442,7 +459,11 @@ class LocalAuthConfig(Generic[UserT]):
             accounts=self.accounts, hasher=self.password_hasher, events=self.events
         )
         password_change = PasswordChangeService(
-            accounts=self.accounts, hasher=self.password_hasher, sessions=session_registry, refresh_tokens=refresh_store
+            accounts=self.accounts,
+            hasher=self.password_hasher,
+            sessions=session_registry,
+            refresh_tokens=refresh_store,
+            password_policy=self.password_policy,
         )
         verification = VerificationTokenService(
             accounts=self.accounts,
@@ -458,6 +479,10 @@ class LocalAuthConfig(Generic[UserT]):
             sessions=session_registry,
             refresh_tokens=refresh_store,
             rate_limits=self.rate_limits,
+            password_policy=self.password_policy,
+        )
+        effective_registration_policy = (
+            self.registration.password_policy if self.registration.password_policy is not None else self.password_policy
         )
         registration = (
             RegistrationService(
@@ -465,6 +490,7 @@ class LocalAuthConfig(Generic[UserT]):
                 hasher=self.password_hasher,
                 tokens=self.secrets.purpose_tokens,
                 registration=self.registration,
+                password_policy=effective_registration_policy,
                 rate_limits=self.rate_limits,
             )
             if self.registration.mode is not RegistrationMode.DISABLED
@@ -559,6 +585,7 @@ class LocalAuth:
         session_auth: NativeSessionAuth[UserT] | None = None,
         session_resolver: UserAuthSessionResolver[UserT] | None = None,
         password_hasher: PasswordHasher | None = None,
+        password_policy: PasswordPolicy | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
         register_routes: bool = True,
@@ -578,6 +605,8 @@ class LocalAuth:
                 token profiles, refresh tokens and receipts.
             password_hasher: Override the Argon2 hasher, for example to tune its
                 cost parameters.
+            password_policy: Optional password policy validating lengths, shapes,
+                compromised lists, or identifier overlaps.
             registration: The self-service registration policy. Registration is
                 disabled unless a policy allows it.
             route_prefix: The path the generated route tree is mounted under.
@@ -605,6 +634,7 @@ class LocalAuth:
             session_auth=session_auth,
             session_resolver=session_resolver,
             password_hasher=Argon2PasswordHasher() if password_hasher is None else password_hasher,
+            password_policy=PasswordPolicy() if password_policy is None else password_policy,
             registration=registration,
             route_prefix=route_prefix,
             register_routes=register_routes,
@@ -625,6 +655,7 @@ class LocalAuth:
         token_client_id: str = _DEFAULT_LOCAL_CLIENT_ID,
         access_token_lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME,
         password_hasher: PasswordHasher | None = None,
+        password_policy: PasswordPolicy | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
         register_routes: bool = True,
@@ -645,6 +676,8 @@ class LocalAuth:
                 token profiles, refresh tokens and receipts.
             password_hasher: Override the Argon2 hasher, for example to tune its
                 cost parameters.
+            password_policy: Optional password policy validating lengths, shapes,
+                compromised lists, or identifier overlaps.
             registration: The self-service registration policy. Registration is
                 disabled unless a policy allows it.
             route_prefix: The path the generated route tree is mounted under.
@@ -677,6 +710,7 @@ class LocalAuth:
                 if password_hasher is None
                 else password_hasher
             ),
+            password_policy=PasswordPolicy() if password_policy is None else password_policy,
             registration=registration,
             route_prefix=route_prefix,
             register_routes=register_routes,
@@ -700,6 +734,7 @@ class LocalAuth:
         session_auth: NativeSessionAuth[UserT] | None = None,
         session_resolver: UserAuthSessionResolver[UserT] | None = None,
         password_hasher: PasswordHasher | None = None,
+        password_policy: PasswordPolicy | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
         route_prefix: str = "/auth",
         register_routes: bool = True,
@@ -723,6 +758,8 @@ class LocalAuth:
                 token profiles, refresh tokens and receipts.
             password_hasher: Override the Argon2 hasher, for example to tune its
                 cost parameters.
+            password_policy: Optional password policy validating lengths, shapes,
+                compromised lists, or identifier overlaps.
             registration: The self-service registration policy. Registration is
                 disabled unless a policy allows it.
             route_prefix: The path the generated route tree is mounted under.
@@ -760,6 +797,7 @@ class LocalAuth:
                 if password_hasher is None
                 else password_hasher
             ),
+            password_policy=PasswordPolicy() if password_policy is None else password_policy,
             registration=registration,
             route_prefix=route_prefix,
             register_routes=register_routes,

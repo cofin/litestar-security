@@ -32,7 +32,7 @@ repos:
     # Must match the locked ruff. A hook on a different release enables a
     # different set of rules, so the gate and `uv run ruff` would disagree
     # about the same file.
-    rev: v0.16.1
+    rev: v0.16.2
     hooks:
       - id: ruff-check
         args: [--fix]

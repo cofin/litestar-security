@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 from warnings import catch_warnings, simplefilter
 
 import pytest
-from litestar import Litestar, WebSocket, asgi, get, websocket
+from litestar import Litestar, Router, WebSocket, asgi, get, websocket
 from litestar.config.app import AppConfig
 from litestar.exceptions import ImproperlyConfiguredException, LitestarWarning
 from litestar.openapi import OpenAPIConfig
@@ -17,7 +17,7 @@ from litestar.routes import ASGIRoute, BaseRoute, WebSocketRoute
 from litestar.static_files import create_static_files_router
 from litestar.testing import TestClient
 
-from litestar_security import SecurityConfig, SecurityPlugin
+from litestar_security import PublicController, SecureController, SecurityConfig, SecurityPlugin
 from litestar_security.authentication import (
     Authenticated,
     AuthenticationEvidence,
@@ -250,10 +250,74 @@ def test_reused_plugin_registers_one_exclusion_report() -> None:
     assert len(reused.lifespan) == 1
 
 
-def test_router_level_exclude_from_auth_is_still_rejected(static_directory: Path) -> None:
+def test_router_level_exclude_from_auth_on_static_files_serves_anonymously(static_directory: Path) -> None:
+    (static_directory / "app.css").write_text("body { color: red; }")
     static_router = create_static_files_router(
         path="/static", directories=[static_directory], opt={"exclude_from_auth": True}
     )
+    app = Litestar(
+        route_handlers=[_api_thing, static_router], openapi_config=None, plugins=[SecurityPlugin(_api_team_config())]
+    )
+    with TestClient(app) as client:
+        assert client.get("/static/app.css").status_code == 200
+        assert client.get("/api/thing").status_code == 401
 
-    with pytest.raises(ImproperlyConfiguredException, match="only on individual route handlers"):
-        Litestar(route_handlers=[static_router], plugins=[SecurityPlugin(_api_team_config())])
+
+def test_router_level_exclude_from_auth_with_child_handler_override() -> None:
+    @get("/public-endpoint", sync_to_thread=False)
+    def public_endpoint() -> str:
+        return "public"
+
+    @get("/protected-endpoint", auth=required("api-key"), sync_to_thread=False)
+    def protected_endpoint() -> str:
+        return "protected"
+
+    router = Router(
+        path="/group", route_handlers=[public_endpoint, protected_endpoint], opt={"exclude_from_auth": True}
+    )
+    app = Litestar(route_handlers=[router], openapi_config=None, plugins=[SecurityPlugin(_api_team_config())])
+    with TestClient(app) as client:
+        assert client.get("/group/public-endpoint").status_code == 200
+        assert client.get("/group/protected-endpoint").status_code == 401
+        assert client.get("/group/protected-endpoint", headers={"x-auth-api-key": "valid"}).status_code == 200
+
+
+def test_router_level_exclude_from_auth_with_child_controller_override() -> None:
+    class ProtectedController(SecureController):
+        path = "/secure"
+
+        @get("/resource", sync_to_thread=False)
+        def resource(self) -> str:
+            return "secure"
+
+    class OpenController(PublicController):
+        path = "/open"
+
+        @get("/resource", sync_to_thread=False)
+        def resource(self) -> str:
+            return "open"
+
+    router = Router(path="/sub", route_handlers=[ProtectedController, OpenController], opt={"exclude_from_auth": True})
+    app = Litestar(route_handlers=[router], openapi_config=None, plugins=[SecurityPlugin(_api_team_config())])
+    with TestClient(app) as client:
+        assert client.get("/sub/secure/resource").status_code == 401
+        assert client.get("/sub/open/resource").status_code == 200
+
+
+def test_same_layer_conflicting_auth_and_exclude_raises() -> None:
+    @get("/conflict", auth=required("api-key"), opt={"exclude_from_auth": True}, sync_to_thread=False)
+    def conflict_endpoint() -> str:
+        return "conflict"
+
+    with pytest.raises(ImproperlyConfiguredException, match="Route declares both auth and exclude_from_auth"):
+        Litestar(route_handlers=[conflict_endpoint], plugins=[SecurityPlugin(_api_team_config())])
+
+
+@pytest.mark.parametrize("invalid_value", ["True", 1, False, None])
+def test_invalid_exclude_from_auth_value_raises(invalid_value: Any) -> None:
+    @get("/bad-opt", opt={"exclude_from_auth": invalid_value}, sync_to_thread=False)
+    def bad_endpoint() -> str:
+        return "bad"
+
+    with pytest.raises(ImproperlyConfiguredException, match="exclude_from_auth must be exactly True when present"):
+        Litestar(route_handlers=[bad_endpoint], plugins=[SecurityPlugin(_api_team_config())])

@@ -706,6 +706,9 @@ class _BrokenAccountStore:
             return PasswordChangeOutcome(PasswordChangeStatus.CHANGED, expected_epoch + 1)
         return result
 
+    async def list_methods(self, account_id: str) -> tuple[LoginMethod, ...]:
+        return await self.delegate.list_methods(account_id)
+
     async def register_login_method(self, account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
         await self.delegate.register_login_method(account_id, method, event=event)
 

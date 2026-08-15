@@ -3,6 +3,7 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
 from anyio import Event, create_task_group, fail_after
@@ -616,7 +617,7 @@ async def test_aggregate_conformance_runs_only_supplied_feature_factories(  # no
         return InMemoryWebSocketConnectTokenStore()
 
     def record(feature: str) -> Callable[..., Awaitable[None]]:
-        async def assert_feature(*_args: object) -> None:
+        async def assert_feature(*_args: object, **_kwargs: object) -> None:
             calls.append(feature)
 
         return assert_feature
@@ -740,3 +741,103 @@ async def test_conformance_detects_partial_rotation_states(
 
 async def test_empty_aggregate_conformance_requires_no_unrelated_store() -> None:
     await assert_security_backend_conformance(StoreConformanceFactories())
+
+
+async def test_aggregate_backend_conformance_invokes_create_account_hook() -> None:
+    seeded: list[str] = []
+
+    async def seed(account_id: str) -> None:
+        seeded.append(account_id)
+
+    await assert_security_backend_conformance(StoreConformanceFactories(), create_account=seed)
+    assert seeded == [
+        "account-1",
+        "conformance-account",
+        "conformance-principal",
+        "conformance-session-other",
+        "conformance-session-owner",
+        "conformance-subject",
+    ]
+
+
+def _uuid_identifiers() -> tuple[Callable[[str, int], str], set[str]]:
+    """Return a UUID identifier factory plus the set of every value it produced."""
+    generated: set[str] = set()
+
+    def identifiers(namespace: str, sequence: int) -> str:
+        value = str(uuid5(NAMESPACE_URL, f"conformance-{namespace}-{sequence}"))
+        generated.add(value)
+        return value
+
+    return identifiers, generated
+
+
+async def test_aggregate_conformance_seeds_factory_derived_account_ids_only() -> None:
+    identifiers, generated = _uuid_identifiers()
+    seeded: list[str] = []
+
+    async def seed(account_id: str) -> None:
+        seeded.append(account_id)
+
+    await assert_security_backend_conformance(StoreConformanceFactories(), create_account=seed, identifiers=identifiers)
+    assert seeded, "a supplied identifier factory must still drive account seeding"
+    assert set(seeded) == generated, "every seeded account id must come from the supplied factory"
+    for account_id in seeded:
+        UUID(account_id)
+
+
+async def test_identifier_factory_drives_session_registry_account_references() -> None:
+    identifiers, generated = _uuid_identifiers()
+    backends: list[InMemorySecurityBackend] = []
+    seeded: list[str] = []
+
+    async def seed(account_id: str) -> None:
+        seeded.append(account_id)
+
+    def sessions() -> testing_module.InMemoryLocalAccountStore:
+        backend = InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW)
+        backends.append(backend)
+        return backend.accounts
+
+    await assert_security_backend_conformance(
+        StoreConformanceFactories(session_registry=sessions), create_account=seed, identifiers=identifiers
+    )
+    observed = {
+        session.account_id
+        for backend in backends
+        for session in backend.accounts._sessions.values()  # noqa: SLF001 # pyright: ignore[reportPrivateUsage] - asserts stored rows directly
+    }
+    assert observed, "the session-registry scenario must have created sessions"
+    assert observed <= generated, "every stored session must reference a factory-derived account id"
+    assert observed <= set(seeded), "every referenced account id must have been seeded first"
+
+
+async def test_identifier_factory_drives_the_full_reference_conformance_run() -> None:
+    identifiers, generated = _uuid_identifiers()
+
+    def accounts() -> testing_module.InMemoryLocalAccountStore:
+        return InMemorySecurityBackend(clock=lambda: _CONFORMANCE_NOW).accounts
+
+    await assert_security_backend_conformance(
+        StoreConformanceFactories(
+            api_key_store=lambda: InMemorySecurityBackend(clock=lambda: _NOW).api_keys,
+            local_account_store=accounts,
+            mfa_login_challenge_store=testing_module.InMemoryMFALoginChallengeStore,
+            mfa_store=testing_module.InMemoryMFAStore,
+            oidc_session_logout_store=_oidc_logout_store,
+            oauth_account_store=MemoryOAuthAccountStore,
+            oauth_transaction_protector=lambda: AESGCMOAuthTransactionProtector(
+                active_key=OAuthTransactionProtectorKey("v1", b"o" * 32)
+            ),
+            oauth_transaction_store=lambda: MemoryOAuthTransactionStore(protector=_ConformanceTransactionProtector()),
+            passkey_store=testing_module.InMemoryPasskeyStore,
+            refresh_family_store=accounts,
+            secret_protector=lambda: AESGCMSecretProtector(active_key=SecretProtectorKey("v1", b"s" * 32)),
+            session_registry=accounts,
+            step_up_store=testing_module.InMemoryStepUpStore,
+            webauthn_challenge_store=testing_module.InMemoryWebAuthnChallengeStore,
+            websocket_connect_token_store=InMemoryWebSocketConnectTokenStore,
+        ),
+        identifiers=identifiers,
+    )
+    assert generated, "the full reference run must have consumed the identifier factory"

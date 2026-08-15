@@ -29,6 +29,8 @@ from litestar_security.authentication import InvalidCredentials, VerificationUna
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from litestar_security.accounts._passwords import PasswordPolicy
+
 __all__ = (
     "AccountLookup",
     "LocalAccountCapabilities",
@@ -51,6 +53,7 @@ class RegistrationPolicy:
 
     mode: RegistrationMode
     require_verification: bool = True
+    password_policy: "PasswordPolicy | None" = None
 
     @classmethod
     def disabled(cls) -> "RegistrationPolicy":
@@ -62,30 +65,42 @@ class RegistrationPolicy:
         return cls(mode=RegistrationMode.DISABLED)
 
     @classmethod
-    def public(cls, *, require_verification: bool = True) -> "RegistrationPolicy":
+    def public(
+        cls, *, require_verification: bool = True, password_policy: "PasswordPolicy | None" = None
+    ) -> "RegistrationPolicy":
         """Enable public self-service registration.
 
         Args:
             require_verification: Issue a verification token with the account and
                 leave the account unverified until that token is consumed.
+            password_policy: Optional password policy override for self-service registration.
 
         Returns:
             A policy that generates an open registration route.
         """
-        return cls(mode=RegistrationMode.PUBLIC, require_verification=require_verification)
+        return cls(
+            mode=RegistrationMode.PUBLIC, require_verification=require_verification, password_policy=password_policy
+        )
 
     @classmethod
-    def invite_only(cls, *, require_verification: bool = True) -> "RegistrationPolicy":
+    def invite_only(
+        cls, *, require_verification: bool = True, password_policy: "PasswordPolicy | None" = None
+    ) -> "RegistrationPolicy":
         """Require an atomic invitation consume during registration.
 
         Args:
             require_verification: Issue a verification token with the account and
                 leave the account unverified until that token is consumed.
+            password_policy: Optional password policy override for invitation registration.
 
         Returns:
             A policy whose registration route additionally requires an invitation token.
         """
-        return cls(mode=RegistrationMode.INVITE_ONLY, require_verification=require_verification)
+        return cls(
+            mode=RegistrationMode.INVITE_ONLY,
+            require_verification=require_verification,
+            password_policy=password_policy,
+        )
 
 
 @runtime_checkable
@@ -183,6 +198,21 @@ class PasswordCredentialStore(Protocol):
 @runtime_checkable
 class LoginMethodStore(Protocol):
     """Maintain viable login methods through guarded atomic operations."""
+
+    async def list_methods(self, account_id: str) -> "tuple[LoginMethod, ...]":
+        """Return every login method currently viable for one account.
+
+        Implementers must return only methods that can still satisfy a login;
+        a revoked or pending-enrollment method must be omitted, because
+        conditional MFA reads this to decide whether to challenge.
+
+        Args:
+            account_id: The account whose methods to list.
+
+        Returns:
+            The viable methods, empty when the account has enrolled none.
+        """
+        ...  # pragma: no cover
 
     async def register_login_method(self, account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
         """Register one login method and its durable event.

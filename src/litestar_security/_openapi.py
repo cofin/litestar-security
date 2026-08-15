@@ -442,9 +442,10 @@ class RouteCompiler(Generic[UserT]):
         self._restate_denials_as_problem_details(route_handler)
         policy: AuthenticationPolicy
         csrf_override: bool | None
-        native_exclude = self._handler_excludes_auth(route, route_handler)
+        resolved_policy = self._resolve_effective_policy(route, route_handler)
         if self._is_excluded(route):
-            self._reject_excluded_policy(route, route_handler, self._resolved_policy(route, route_handler))
+            if resolved_policy is not None and not isinstance(resolved_policy, ExcludePolicy):
+                self._reject_excluded_policy(route, route_handler, resolved_policy)
             policy = exclude()
             csrf_override = self._http_csrf_override(route, route_handler)
         elif self._is_generated_options(route_handler):
@@ -454,11 +455,6 @@ class RouteCompiler(Generic[UserT]):
             policy = self._nearest_non_application_policy(route, route_handler) or public()
             csrf_override = self._http_csrf_override(route, route_handler)
         else:
-            resolved_policy = self._resolved_policy(route, route_handler)
-            if native_exclude and resolved_policy is not None:
-                self._raise_route_error(route, route_handler, "Route declares both auth and exclude_from_auth")
-            if native_exclude:
-                resolved_policy = exclude()
             if resolved_policy is None:
                 policy = required() if self.registry.mechanism_names else public()
             else:
@@ -560,17 +556,13 @@ class RouteCompiler(Generic[UserT]):
                 )
 
     def _effective_plan(self, route: BaseRoute, route_handler: BaseRouteHandler) -> SecurityRuntimePlan:
-        native_exclude = self._handler_excludes_auth(route, route_handler)
-        policy = self._resolved_policy(route, route_handler)
-        if native_exclude and policy is not None:
-            self._raise_route_error(route, route_handler, "Route declares both auth and exclude_from_auth")
+        resolved_policy = self._resolve_effective_policy(route, route_handler)
         if self._is_excluded(route):
-            self._reject_excluded_policy(route, route_handler, policy)
+            if resolved_policy is not None and not isinstance(resolved_policy, ExcludePolicy):
+                self._reject_excluded_policy(route, route_handler, resolved_policy)
             return self._compile_policy(route, route_handler, exclude())
-        if native_exclude:
-            return self._compile_policy(route, route_handler, exclude())
-        if policy is not None:
-            return self._compile_policy(route, route_handler, policy)
+        if resolved_policy is not None:
+            return self._compile_policy(route, route_handler, resolved_policy)
         return self._default_plan(route, route_handler)
 
     def _default_plan(self, route: BaseRoute, route_handler: BaseRouteHandler) -> SecurityRuntimePlan:
@@ -608,15 +600,55 @@ class RouteCompiler(Generic[UserT]):
         except ImproperlyConfiguredException as exc:
             self._raise_route_error(route, route_handler, exc.detail)
 
-    def _resolved_policy(self, route: BaseRoute, route_handler: BaseRouteHandler) -> AuthenticationPolicy | None:
-        for layer in reversed(route_handler.ownership_layers):
+    def _resolve_effective_policy(  # noqa: C901 - each precedence level validates and returns its own outcome
+        self, route: BaseRoute, route_handler: BaseRouteHandler
+    ) -> AuthenticationPolicy | None:
+        """Resolve the effective authentication policy or exclusion across ownership layers.
+
+        Walks ownership layers innermost to outermost (handler -> controller -> router -> app).
+        The first layer declaring an explicit auth policy or exclude_from_auth wins.
+        """
+        parent_layers: list[tuple[AuthenticationPolicy | None, bool]] = []
+        for layer in route_handler.ownership_layers[:-1]:
             layer_opt = getattr(layer, "opt", None)
             if not isinstance(layer_opt, Mapping):
-                continue  # pragma: no cover - Litestar ownership layers expose opt as mappings
-            policy = self._policy_from_opt(route, route_handler, cast("Mapping[str, object]", layer_opt))
+                continue
+            opt_map = cast("Mapping[str, object]", layer_opt)
+            has_exclude = _EXCLUDE_FROM_AUTH_OPT_KEY in opt_map
+            if has_exclude and opt_map[_EXCLUDE_FROM_AUTH_OPT_KEY] is not True:
+                self._raise_route_error(route, route_handler, "exclude_from_auth must be exactly True when present")
+            policy = self._policy_from_opt(route, route_handler, opt_map)
+            if has_exclude and policy is not None:
+                self._raise_route_error(route, route_handler, "Route declares both auth and exclude_from_auth")
+            parent_layers.append((policy, has_exclude))
+
+        handler_opt = route_handler.opt
+        handler_has_exclude = _EXCLUDE_FROM_AUTH_OPT_KEY in handler_opt
+        if handler_has_exclude and handler_opt[_EXCLUDE_FROM_AUTH_OPT_KEY] is not True:
+            self._raise_route_error(route, route_handler, "exclude_from_auth must be exactly True when present")
+
+        handler_policy = self._policy_from_opt(route, route_handler, handler_opt)
+        handler_explicit_exclude = handler_has_exclude and not any(has_exclude for _, has_exclude in parent_layers)
+        handler_explicit_policy = handler_policy is not None and all(
+            parent_policy is not handler_policy for parent_policy, _ in parent_layers
+        )
+        if handler_explicit_exclude and handler_explicit_policy:
+            self._raise_route_error(route, route_handler, "Route declares both auth and exclude_from_auth")
+
+        if handler_explicit_exclude:
+            return exclude()
+        if handler_explicit_policy:
+            return handler_policy
+
+        for policy, has_exclude in reversed(parent_layers):
             if policy is not None:
                 return policy
-        return None
+            if has_exclude:
+                return exclude()
+
+        if handler_has_exclude:
+            return exclude()
+        return handler_policy
 
     def _nearest_non_application_policy(
         self, route: BaseRoute, route_handler: BaseRouteHandler
@@ -649,6 +681,8 @@ class RouteCompiler(Generic[UserT]):
             policy = self._policy_from_opt(route, route_handler, cast("Mapping[str, object]", layer_opt))
             if policy is not None:
                 return policy
+            if _EXCLUDE_FROM_AUTH_OPT_KEY in layer_opt:
+                return exclude()
         return None
 
     def _policy_from_opt(
@@ -673,28 +707,6 @@ class RouteCompiler(Generic[UserT]):
             return None
         if route_handler.opt[CSRF_REQUIRED_OPT_KEY] is not True:
             self._raise_route_error(route, route_handler, "csrf_required must be exactly True when present")
-        return True
-
-    def _handler_excludes_auth(self, route: BaseRoute, route_handler: BaseRouteHandler) -> bool:
-        """Validate and resolve Litestar's handler-local authentication bypass opt.
-
-        Args:
-            route: The route containing the handler.
-            route_handler: The handler whose metadata is being compiled.
-
-        Returns:
-            Whether the handler requests native authentication bypass.
-        """
-        for layer in route_handler.ownership_layers[:-1]:
-            layer_opt = getattr(layer, "opt", None)
-            if isinstance(layer_opt, Mapping) and _EXCLUDE_FROM_AUTH_OPT_KEY in layer_opt:
-                self._raise_route_error(
-                    route, route_handler, "exclude_from_auth is supported only on individual route handlers"
-                )
-        if _EXCLUDE_FROM_AUTH_OPT_KEY not in route_handler.opt:
-            return False
-        if route_handler.opt[_EXCLUDE_FROM_AUTH_OPT_KEY] is not True:
-            self._raise_route_error(route, route_handler, "exclude_from_auth must be exactly True when present")
         return True
 
     def _reject_csrf_metadata(self, route: BaseRoute, route_handler: BaseRouteHandler) -> None:

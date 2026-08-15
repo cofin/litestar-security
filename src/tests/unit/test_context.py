@@ -5,8 +5,9 @@ from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from importlib.metadata import requires
+from json import loads
 from subprocess import run
-from typing import ClassVar
+from typing import ClassVar, get_type_hints
 
 import pytest
 from litestar import Controller
@@ -19,6 +20,7 @@ import litestar_security._typing as typing_module
 import litestar_security.authentication as authentication_module
 import litestar_security.typing as public_typing
 from litestar_security import CSRF_REQUIRED_OPT_KEY, PublicController, SecureController, exclude
+from litestar_security.accounts._mfa import StepUpCredential
 from litestar_security.authentication import public, required
 from litestar_security.context import (
     AuthenticationEvidence,
@@ -683,3 +685,56 @@ for name in controllers.__all__:
     result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("blocked_dependency", ["pyotp", "webauthn", "cbor2", "argon2"])
+def test_testing_module_isolates_missing_optional_dependencies(blocked_dependency: str) -> None:
+    script = f"""
+import sys
+sys.modules[{blocked_dependency!r}] = None
+
+import litestar_security.testing as testing
+from litestar_security.testing import InMemoryLocalAccountStore, InMemorySecurityBackend
+
+backend = InMemorySecurityBackend()
+assert backend.accounts is not None
+assert testing.assert_session_registry_conformance is not None
+"""
+    result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("blocked_dependency", ["pyotp", "webauthn"])
+def test_oauth_routes_isolate_missing_optional_dependencies(blocked_dependency: str) -> None:
+    script = f"""
+import sys
+sys.modules[{blocked_dependency!r}] = None
+
+import litestar_security.providers.oauth._routes as oauth_routes
+
+assert oauth_routes.OAuthAuthorization is not None
+"""
+    result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
+    assert result.returncode == 0, result.stderr
+
+
+def test_pyotp_absent_step_up_credential_mirror_matches_the_canonical_struct() -> None:
+    script = """
+import json
+import sys
+from typing import get_type_hints
+
+sys.modules["pyotp"] = None
+
+import litestar_security.providers.oauth._routes as oauth_routes
+
+fields = [(name, str(kind)) for name, kind in get_type_hints(oauth_routes.StepUpCredential).items()]
+print(json.dumps(fields))
+"""
+    result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
+    assert result.returncode == 0, result.stderr
+    fallback_fields = [tuple(field) for field in loads(result.stdout)]
+    canonical_fields = [(name, str(kind)) for name, kind in get_type_hints(StepUpCredential).items()]
+    assert fallback_fields == canonical_fields, (
+        "the pyotp-absent StepUpCredential mirror must match the canonical wire struct field-for-field"
+    )

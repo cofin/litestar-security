@@ -1,6 +1,54 @@
 Changelog
 =========
 
+0.5.0
+-----
+
+Added
+~~~~~
+
+* Layer-level route exclusions: routers and controllers now support
+  ``opt={"exclude_from_auth": True}`` or ``exclude_from_auth=True``, allowing
+  plugin-mounted subtrees (such as static-file routers from ``litestar-vite``)
+  to be exempted from global security requirements without raising configuration
+  errors. Child routes retain the ability to override parent exclusion policies.
+* Per-account conditional MFA login challenges: ``MFAConfig.require_at_login``
+  now accepts ``"enrolled"`` in addition to boolean flags. When enabled, only
+  accounts that have enrolled a second factor (TOTP or passkey) receive an MFA
+  challenge during password login, allowing accounts without configured factors
+  to log in directly.
+* Configurable password policy: ``PasswordPolicy`` now defaults to a minimum
+  length of 12 characters (lowered from 15). ``LocalAuthConfig`` and
+  ``RegistrationPolicy`` accept a customizable ``PasswordPolicy`` instance to
+  configure custom minimum/maximum lengths and byte sizes for account
+  registration, password changes, and recovery flows.
+* Backend conformance test hooks: ``assert_security_backend_conformance`` now accepts
+  a ``create_account`` async hook and an ``identifiers`` factory taking
+  ``(namespace, sequence)``, enabling relational and strict database backends with
+  typed account columns and foreign-key constraints to participate in full conformance
+  verification. Without a factory, ``create_account`` receives the fixed conformance
+  account identifiers; with one, it receives the factory-derived identifiers instead,
+  and every account-scoped identifier the per-store scenarios reference comes from the
+  factory. Accounts the scenarios register through the store itself keep their
+  backend-generated identifiers and need no seeding.
+* ``LoginMethodStore`` gains ``list_methods``, the port that reports an account's
+  viable login methods. This is a breaking change for every custom
+  ``LoginMethodStore`` implementation: the MFA service validates any supplied
+  login-method store against the protocol in every ``require_at_login`` mode, so
+  implementations must add ``list_methods`` before upgrading.
+  ``require_at_login="enrolled"`` reads the enrolled set through it.
+
+Fixed
+~~~~~
+
+* Session rotation recovery: ``NativeSessionAuth.establish`` falls back to creating
+  a new session when rebinding a stale or expired session cookie, preventing 503
+  ``VerificationUnavailable`` errors during login.
+* Optional dependency isolation in testing: ``litestar_security.testing`` uses lazy
+  attribute resolution for optional MFA and WebAuthn symbols, allowing unit tests and
+  test kits to import cleanly without requiring optional dependencies installed.
+
+
 0.4.0
 -----
 

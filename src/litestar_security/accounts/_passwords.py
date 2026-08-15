@@ -66,7 +66,7 @@ class PasswordPolicyDecision:
 class PasswordPolicy:
     """Length-first password policy without composition or rotation rules."""
 
-    minimum_length: int = 15
+    minimum_length: int = 12
     maximum_length: int = 128
     maximum_bytes: int = _MAXIMUM_PASSWORD_BYTES
     normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)

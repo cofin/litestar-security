@@ -105,6 +105,7 @@ _BASE_LOCAL_CAPABILITIES = {
     "get_password_state",
     "issue",
     "issue_absent",
+    "list_methods",
     "register_login_method",
     "replace_password_and_bump_epoch",
     "revoke_login_method",

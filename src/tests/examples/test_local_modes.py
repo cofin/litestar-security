@@ -49,6 +49,9 @@ class _MFAStore(InMemoryMFAStore):
 
     __slots__ = ()
 
+    async def list_methods(self, _account_id: str) -> tuple[LoginMethod, ...]:
+        return tuple(self.login_methods.values())
+
     async def register_login_method(self, _account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
         self.login_methods[method.method_id] = method
         self.events.append(event)

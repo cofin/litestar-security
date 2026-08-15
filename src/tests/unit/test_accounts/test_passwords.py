@@ -25,9 +25,9 @@ from tests.fixtures.accounts import SecurityEvents as _SecurityEvents
 @pytest.mark.parametrize(
     ("password", "identifier", "violations"),
     [
-        ("a" * 14, None, {accounts_module.PasswordPolicyViolation.TOO_SHORT}),
+        ("a" * 11, None, {accounts_module.PasswordPolicyViolation.TOO_SHORT}),
         ("a" * 129, None, {accounts_module.PasswordPolicyViolation.TOO_LONG}),
-        ("\ud800" * 15, None, {accounts_module.PasswordPolicyViolation.INVALID_TEXT}),
+        ("\ud800" * 12, None, {accounts_module.PasswordPolicyViolation.INVALID_TEXT}),
         (
             "é" * 513,
             None,
@@ -52,9 +52,15 @@ def test_password_policy_reports_only_secret_free_violations(
 
 def test_password_policy_defaults_allow_unicode_spaces_and_long_passphrases() -> None:
     policy = accounts_module.PasswordPolicy()
-    accepted = ("correct horse battery staple", "   spaced passphrase   ", "🦄 unicode passphrase", "é" * 128)
+    accepted = (
+        "12chars-pass",
+        "correct horse battery staple",
+        "   spaced passphrase   ",
+        "🦄 unicode passphrase",
+        "é" * 128,
+    )
 
-    assert (policy.minimum_length, policy.maximum_length, policy.maximum_bytes) == (15, 128, 1_024)
+    assert (policy.minimum_length, policy.maximum_length, policy.maximum_bytes) == (12, 128, 1_024)
     assert all(policy.check(password).accepted for password in accepted)
     assert policy.check("sufficiently long candidate", normalized_identifier="another@example.com").accepted
     assert accounts_module.normalize_identifier("  Usér@EXAMPLE.COM  ") == "usér@example.com"
@@ -65,7 +71,7 @@ def test_password_policy_defaults_allow_unicode_spaces_and_long_passphrases() ->
     [
         {"minimum_length": 0},
         {"minimum_length": True},
-        {"maximum_length": 14},
+        {"maximum_length": 11},
         {"maximum_bytes": 0},
         {"maximum_bytes": 1_025},
         {"normalizer": None},

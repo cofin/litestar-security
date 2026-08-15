@@ -24,6 +24,7 @@ from litestar.exceptions import (
     ClientException,
     HTTPException,
     ImproperlyConfiguredException,
+    NotAuthorizedException,
     ServiceUnavailableException,
     TooManyRequestsException,
 )
@@ -1046,7 +1047,7 @@ def test_generated_mfa_handlers_apply_shared_rate_limit_before_factor_work() -> 
 
 @pytest.mark.parametrize(
     ("outcome_name", "status", "retry_after"),
-    [("unavailable", 503, None), ("rate_limited", 429, "7"), ("invalid", 400, None)],
+    [("unavailable", 503, None), ("rate_limited", 429, "7"), ("invalid", 401, None)],
 )
 def test_generated_local_route_errors_raise_interceptable_classified_exceptions(
     outcome_name: str, status: int, retry_after: str | None
@@ -1090,6 +1091,7 @@ def test_generated_local_route_errors_raise_interceptable_classified_exceptions(
         exception_handlers={
             ServiceUnavailableException: record,
             TooManyRequestsException: record,
+            NotAuthorizedException: record,
             ClientException: record,
         },
     )
@@ -1488,6 +1490,7 @@ def _feature_test_ports() -> tuple[object, object, object, object]:
         advance_totp_counter=false,
         replace_recovery_codes=none,
         consume_recovery_code=false,
+        list_methods=none,
         register_login_method=none,
         revoke_login_method=none,
         put=none,
@@ -1500,6 +1503,7 @@ def _feature_test_ports() -> tuple[object, object, object, object]:
         record_assertion=none,
         list_credentials=none,
         rename_credential=none,
+        list_methods=none,
         register_login_method=none,
         revoke_login_method=none,
     )
@@ -1760,6 +1764,7 @@ def _local_session_accounts() -> Any:
         "issue",
         "issue_absent",
         "list_for_account",
+        "list_methods",
         "prepare_rotation",
         "rebind",
         "register",
@@ -2417,12 +2422,12 @@ def test_exclude_from_auth_alias_requires_true_on_individual_handlers(value: obj
     async def owned_handler() -> None:
         return None
 
-    with pytest.raises(ImproperlyConfiguredException, match=r"only on individual route handlers.* /owned"):
-        Litestar(
-            route_handlers=[Router(path="/", route_handlers=[owned_handler], opt={"exclude_from_auth": True})],
-            openapi_config=None,
-            plugins=[SecurityPlugin(_compiler_config())],
-        )
+    app = Litestar(
+        route_handlers=[Router(path="/", route_handlers=[owned_handler], opt={"exclude_from_auth": True})],
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config())],
+    )
+    assert not _http_plan(app, "/owned").authenticate
 
 
 def test_exclude_rejects_competing_authentication_policy() -> None:
@@ -2789,6 +2794,7 @@ def test_disabled_registration_adds_no_route_and_lifecycle_response_uses_native_
             "get_password_state",
             "issue",
             "issue_absent",
+            "list_methods",
             "prepare_rotation",
             "register_login_method",
             "replace_password_and_bump_epoch",
@@ -2940,14 +2946,14 @@ def test_generated_local_routes_are_mode_explicit_native_and_admin_free(  # noqa
         token_operation = app.openapi_schema.paths["/identity/token"].post
         revoke_operation = app.openapi_schema.paths["/identity/token/revoke"].post
         assert token_operation.security == [{}]
-        assert set(token_operation.responses) == {"200", "400", "403", "429", "503"}
+        assert set(token_operation.responses) == {"200", "400", "401", "403", "429", "503"}
         assert revoke_operation.security == [{"bearer": []}]
         assert set(revoke_operation.responses) == {"200", "400", "401", "503"}
     if mode in {"session", "hybrid"}:
         login_operation = app.openapi_schema.paths["/identity/login"].post
         logout_operation = app.openapi_schema.paths["/identity/logout"].post
         assert login_operation.security == [{}]
-        assert set(login_operation.responses) == {"200", "400", "403", "429", "503"}
+        assert set(login_operation.responses) == {"200", "400", "401", "403", "429", "503"}
         assert logout_operation.security == [{"LocalSession": []}]
         assert set(logout_operation.responses) == {"200", "401", "503"}
 
@@ -3525,7 +3531,7 @@ def test_openapi_controller_and_invalid_custom_router_metadata_use_native_owners
         title="Test", version="1.0", openapi_router=invalid_router, render_plugins=[JsonRenderPlugin()]
     )
 
-    with pytest.raises(ImproperlyConfiguredException, match=r"Invalid.*GET /reference"):
+    with pytest.raises(ImproperlyConfiguredException, match=r"Invalid.* /reference"):
         Litestar(route_handlers=[], openapi_config=invalid_config, plugins=[SecurityPlugin(_compiler_config())])
 
 

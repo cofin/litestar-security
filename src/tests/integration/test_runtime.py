@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import anyio
 import jwt
@@ -45,6 +45,7 @@ from litestar_security.accounts import (
     PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordCredentialState,
+    PasswordPolicy,
     PasswordResetOutcome,
     PasswordResetStatus,
     PasswordVerificationOutcome,
@@ -798,6 +799,7 @@ def _native_local_accounts() -> tuple[SimpleNamespace, LocalAccountState[object]
             issue=unused,
             issue_absent=unused,
             list_for_account=list_for_account,
+            list_methods=unused,
             prepare_rotation=unused,
             rebind=rebind,
             register_login_method=unused,
@@ -850,6 +852,9 @@ class _RouteMFAStore(InMemoryMFAStore):
 
     __slots__ = ()
 
+    async def list_methods(self, _account_id: str) -> tuple[LoginMethod, ...]:
+        return tuple(self.login_methods.values())
+
     async def register_login_method(self, _account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
         self.login_methods[method.method_id] = method
         self.events.append(event)
@@ -881,9 +886,13 @@ class _GeneratedRouteAccounts:
     sessions: dict[str, UserAuthSession] = field(default_factory=dict)
     purpose_tokens: dict[str, TokenIssue] = field(default_factory=dict)
     refresh_tokens: dict[str, _RouteRefreshState] = field(default_factory=dict)
+    methods: dict[str, LoginMethod] = field(default_factory=dict)
     verification_token: str | None = None
     recovery_token: str | None = None
     absent_probes: int = 0
+
+    async def list_methods(self, _account_id: str) -> tuple[LoginMethod, ...]:
+        return tuple(self.methods.values())
 
     async def find_for_login(self, normalized_identifier: str) -> LocalAccountState[object] | None:
         if self.account is None or self.account.normalized_identifier != normalized_identifier:
@@ -998,16 +1007,24 @@ class _GeneratedRouteAccounts:
     async def get(self, session_id: str) -> UserAuthSession | None:
         return self.sessions.get(session_id)
 
-    async def list_for_account(self, account_id: str) -> list[UserAuthSession]:
-        return [record for record in self.sessions.values() if record.account_id == account_id]
-
-    async def touch(self, session_id: str, *, now: datetime) -> UserAuthSession | None:
-        record = self.sessions.get(session_id)
-        if record is None:
+    async def rebind(self, session_id: str, command: CreateSessionCommand, **_kwargs: object) -> UserAuthSession | None:
+        if session_id not in self.sessions:
             return None
-        touched = replace(record, last_seen_at=now)
-        self.sessions[session_id] = touched
-        return touched
+        self.sessions.pop(session_id, None)
+        return await self.create(command)
+
+    async def touch(self, session_id: str, last_seen_at: datetime, **_kwargs: object) -> UserAuthSession | None:
+        session = self.sessions.get(session_id)
+        if session is None:
+            return None
+        session.last_seen_at = last_seen_at
+        return session
+
+    async def revoke(self, session_id: str, **_kwargs: object) -> bool:
+        return self.sessions.pop(session_id, None) is not None
+
+    async def list_for_account(self, account_id: str, **_kwargs: object) -> tuple[UserAuthSession, ...]:
+        return tuple(session for session in self.sessions.values() if session.account_id == account_id)
 
     async def revoke_session_for_account(self, account_id: str, session_id: str, **_kwargs: object) -> bool:
         record = self.sessions.get(session_id)
@@ -1029,14 +1046,6 @@ class _GeneratedRouteAccounts:
         for key in matches:
             del self.sessions[key]
         return len(matches)
-
-    async def rebind(
-        self, prior_session_id: str, command: CreateSessionCommand, **kwargs: object
-    ) -> UserAuthSession | None:
-        if prior_session_id not in self.sessions:
-            return None
-        del self.sessions[prior_session_id]
-        return await self.create(command, **kwargs)
 
     async def create_family(self, command: CreateRefreshFamilyCommand, **_kwargs: object) -> bool:
         self.refresh_tokens[command.token_id] = _RouteRefreshState(
@@ -1111,7 +1120,7 @@ class _GeneratedRouteAccounts:
         return len(matches)
 
 
-def _mfa_at_login_config(*, required: bool = True) -> MFAConfig:
+def _mfa_at_login_config(*, required: bool | Literal["enrolled"] = True) -> MFAConfig:
     """Build the minimal MFA capability graph needed by local-login route tests."""
     store = _RouteMFAStore()
     return MFAConfig(
@@ -1428,6 +1437,109 @@ def test_generated_session_routes_complete_local_account_lifecycle() -> None:
         assert client.get("/auth/sessions").status_code == HTTP_401_UNAUTHORIZED
 
 
+def test_generated_session_login_rotates_and_succeeds_with_existing_stale_session_cookie() -> None:
+    password = "initial password 123"  # noqa: S105
+    accounts = _verified_route_accounts(password)
+    csrf = CSRFConfig(secret="s" * 32)
+    binding = SessionBindingConfig(
+        pepper=b"b" * 32, cookie_name="binding", secure=False, allow_insecure=True, max_age=600
+    )
+    local_auth = LocalAuth.session(
+        accounts=accounts, secrets=_local_auth_secrets(), binding=binding, password_hasher=_RoutePasswordHasher()
+    )
+    session_config = CookieBackendConfig(
+        secret=bytes(range(16)),
+        key="native-session",
+        max_age=600,
+        scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+        secure=False,
+    )
+
+    @get("/csrf", auth=public(), csrf_required=True)
+    async def csrf_seed() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[csrf_seed],
+        csrf_config=csrf,
+        middleware=[session_config.middleware],
+        openapi_config=None,
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))],
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/csrf").status_code == 200
+        csrf_headers = {csrf.header_name: cast("str", client.cookies.get(csrf.cookie_name))}
+        # First login establishes initial session
+        first_login = client.post(
+            "/auth/login", json={"identifier": "user@example.com", "password": password}, headers=csrf_headers
+        )
+        assert first_login.status_code == 200
+
+        # Simulate session expired/deleted from accounts backend while cookie remains on client
+        accounts.sessions.clear()
+
+        # Second login with stale session cookie present must succeed and rotate session rather than 503
+        second_login = client.post(
+            "/auth/login", json={"identifier": "user@example.com", "password": password}, headers=csrf_headers
+        )
+        assert second_login.status_code == 200
+        assert second_login.json() == {"account_id": "account-1", "display_name": "User"}
+        assert client.get("/auth/sessions").status_code == 200
+
+
+def test_local_auth_enforces_custom_password_policy_on_registration_and_change() -> None:
+    accounts = _GeneratedRouteAccounts()
+    csrf = CSRFConfig(secret="s" * 32)
+    binding = SessionBindingConfig(
+        pepper=b"b" * 32, cookie_name="binding", secure=False, allow_insecure=True, max_age=600
+    )
+    custom_policy = PasswordPolicy(minimum_length=20)
+    local_auth = LocalAuth.session(
+        accounts=accounts,
+        secrets=_local_auth_secrets(),
+        binding=binding,
+        password_hasher=_RoutePasswordHasher(),
+        password_policy=custom_policy,
+        registration=RegistrationPolicy.public(),
+    )
+    session_config = CookieBackendConfig(
+        secret=bytes(range(16)),
+        key="native-session",
+        max_age=600,
+        scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+        secure=False,
+    )
+
+    @get("/csrf", auth=public(), csrf_required=True)
+    async def csrf_seed() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[csrf_seed],
+        csrf_config=csrf,
+        middleware=[session_config.middleware],
+        openapi_config=None,
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth))],
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/csrf").status_code == 200
+        # 16-char password rejected by minimum_length=20 policy
+        too_short_reg = client.post(
+            "/auth/register",
+            json={"identifier": "user@example.com", "password": "short_pass_123456", "display_name": "User"},
+        )
+        assert too_short_reg.status_code == 400
+
+        # 20-char password accepted
+        valid_reg = client.post(
+            "/auth/register",
+            json={"identifier": "user@example.com", "password": "valid_long_password_1234", "display_name": "User"},
+        )
+        assert valid_reg.status_code == 202
+
+
 def test_generated_token_routes_register_verify_login_refresh_and_revoke(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]],
 ) -> None:
@@ -1541,6 +1653,99 @@ async def test_generated_session_login_requires_and_completes_mfa() -> None:
     assert completed.status_code == 200
     assert completed.json() == {"account_id": "account-1", "display_name": "User"}
     assert sessions.status_code == 200
+
+
+async def test_conditional_mfa_login_when_unenrolled_signs_in_directly() -> None:
+    password = "initial password 123"  # noqa: S105 - test-only credential
+    accounts = _verified_route_accounts(password)
+    mfa = _mfa_at_login_config(required="enrolled")
+    csrf = CSRFConfig(secret="s" * 32)
+    local_auth: Any = LocalAuth.session(
+        accounts=cast("Any", accounts),
+        secrets=_local_auth_secrets(),
+        binding=SessionBindingConfig(
+            pepper=b"b" * 32, cookie_name="binding", secure=False, allow_insecure=True, max_age=600
+        ),
+        password_hasher=_RoutePasswordHasher(),
+    )
+    session_config = CookieBackendConfig(
+        secret=bytes(range(16)),
+        key="native-session",
+        max_age=600,
+        scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+        secure=False,
+    )
+
+    @get("/csrf", auth=public(), csrf_required=True)
+    async def csrf_seed() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[csrf_seed],
+        csrf_config=csrf,
+        middleware=[session_config.middleware],
+        openapi_config=None,
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa))],
+    )
+    async with AsyncTestClient(app=app) as client:
+        assert (await client.get("/csrf")).status_code == 200
+        csrf_headers = {csrf.header_name: cast("str", client.cookies.get(csrf.cookie_name))}
+        response = await client.post(
+            "/auth/login", json={"identifier": "user@example.com", "password": password}, headers=csrf_headers
+        )
+        sessions = await client.get("/auth/sessions")
+
+    assert response.status_code == 200
+    assert response.json() == {"account_id": "account-1", "display_name": "User"}
+    assert sessions.status_code == 200
+
+
+async def test_conditional_mfa_login_when_enrolled_requires_challenge() -> None:
+    password = "initial password 123"  # noqa: S105 - test-only credential
+    accounts = _verified_route_accounts(password)
+    mfa = _mfa_at_login_config(required="enrolled")
+    recovery_codes = await cast("Any", mfa.mfa_service).generate_recovery_codes("account-1")
+    assert isinstance(recovery_codes, RecoveryCodeGrant)
+    cast("Any", mfa.login_methods).login_methods["mfa-recovery"] = LoginMethod("mfa-recovery", "totp", _NOW)
+    csrf = CSRFConfig(secret="s" * 32)
+    local_auth: Any = LocalAuth.session(
+        accounts=cast("Any", accounts),
+        secrets=_local_auth_secrets(),
+        binding=SessionBindingConfig(
+            pepper=b"b" * 32, cookie_name="binding", secure=False, allow_insecure=True, max_age=600
+        ),
+        password_hasher=_RoutePasswordHasher(),
+    )
+    session_config = CookieBackendConfig(
+        secret=bytes(range(16)),
+        key="native-session",
+        max_age=600,
+        scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+        secure=False,
+    )
+
+    @get("/csrf", auth=public(), csrf_required=True)
+    async def csrf_seed() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[csrf_seed],
+        csrf_config=csrf,
+        middleware=[session_config.middleware],
+        openapi_config=None,
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa))],
+    )
+    async with AsyncTestClient(app=app) as client:
+        assert (await client.get("/csrf")).status_code == 200
+        csrf_headers = {csrf.header_name: cast("str", client.cookies.get(csrf.cookie_name))}
+        pending = await client.post(
+            "/auth/login", json={"identifier": "user@example.com", "password": password}, headers=csrf_headers
+        )
+        challenge = pending.json()
+
+    assert pending.status_code == 403
+    assert challenge["code"] == "mfa_required"
+    assert challenge["methods"] == ["recovery-code", "totp"]
 
 
 async def test_generated_token_login_requires_and_completes_mfa(

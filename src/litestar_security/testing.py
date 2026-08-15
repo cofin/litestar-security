@@ -1,6 +1,6 @@
 """Deterministic conformance helpers for security integration test suites."""
 
-# ruff: noqa: EM101, TRY003  # conformance failures intentionally name their exact violated invariant
+# ruff: noqa: EM101, TRY003, PLC0415  # conformance failures intentionally name their exact violated invariant; lazy optional imports
 
 from base64 import urlsafe_b64encode
 from collections.abc import Awaitable, Callable, Mapping
@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import compare_digest
 from types import MappingProxyType
-from typing import Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 from urllib.parse import parse_qsl
 
 import httpx
@@ -22,25 +22,16 @@ from litestar_security.accounts import (
     LocalAccountCapabilities,
     LocalAccountState,
     LoginMethod,
-    MFALoginChallenge,
-    MFALoginChallengeStore,
-    MFAStore,
     NotificationCommand,
-    PasskeyAssertionStatus,
-    PasskeyCredential,
-    PasskeyStore,
     PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordCredentialState,
     PasswordResetOutcome,
     PasswordResetStatus,
-    PendingTOTPEnrollment,
-    ProtectedSecret,
     PurposeTokenCodec,
     PurposeTokenDelivery,
     RateLimitAttempt,
     RateLimiter,
-    RecoveryCodeDigest,
     RefreshFamilyContext,
     RefreshPreflightOutcome,
     RefreshReceiptReplay,
@@ -55,22 +46,33 @@ from litestar_security.accounts import (
     RevokeLoginMethodOutcome,
     RevokeLoginMethodStatus,
     RotateRefreshCommand,
-    SecretProtector,
     SecurityEvent,
     SessionRegistry,
-    StepUpGrantState,
-    StepUpStore,
     TokenIssue,
     TokenPurpose,
-    TOTPMethod,
-    TOTPPolicy,
     UserAuthSession,
-    UserVerification,
     VerificationOutcome,
     VerificationStatus,
-    WebAuthnChallenge,
-    WebAuthnChallengeStore,
 )
+
+if TYPE_CHECKING:
+    from litestar_security.accounts import (
+        MFALoginChallenge,
+        MFALoginChallengeStore,
+        MFAStore,
+        PasskeyAssertionStatus,
+        PasskeyCredential,
+        PasskeyStore,
+        PendingTOTPEnrollment,
+        ProtectedSecret,
+        RecoveryCodeDigest,
+        SecretProtector,
+        StepUpGrantState,
+        StepUpStore,
+        TOTPMethod,
+        WebAuthnChallenge,
+        WebAuthnChallengeStore,
+    )
 from litestar_security.authentication import AuthorizationResolution, IdentityResolution
 from litestar_security.context import AuthorizationSnapshot, CredentialRestrictions, Principal
 from litestar_security.providers.api_key import APIKeyState, APIKeyStore
@@ -143,6 +145,14 @@ __all__ = (
 )
 
 _DEFAULT_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_CONFORMANCE_ACCOUNT_IDS = (
+    "account-1",
+    "conformance-account",
+    "conformance-principal",
+    "conformance-session-other",
+    "conformance-session-owner",
+    "conformance-subject",
+)
 _DEFAULT_CREDENTIAL_HASH = "$litestar-security$deterministic-test-hash"
 ClaimsT = TypeVar("ClaimsT")
 ResultT = TypeVar("ResultT")
@@ -151,6 +161,34 @@ UserT = TypeVar("UserT")
 
 def _default_identifier(namespace: str, sequence: int) -> str:
     return f"{namespace}-{sequence:04d}"
+
+
+@dataclass(frozen=True, slots=True)
+class _ConformanceAccountIds:
+    """Account-scoped identifiers referenced by the conformance scenarios."""
+
+    account: str = "conformance-account"
+    principal: str = "conformance-principal"
+    session_other: str = "conformance-session-other"
+    session_owner: str = "conformance-session-owner"
+    subject: str = "conformance-subject"
+
+    def seeded(self) -> tuple[str, ...]:
+        """Return every account identifier a referential backend must pre-create."""
+        return (self.account, self.principal, self.session_other, self.session_owner, self.subject)
+
+
+def _resolve_conformance_account_ids(identifiers: "Callable[[str, int], str] | None") -> _ConformanceAccountIds:
+    """Derive account identifiers from the supplied factory, or keep the fixed defaults."""
+    if identifiers is None:
+        return _ConformanceAccountIds()
+    return _ConformanceAccountIds(
+        account=identifiers("conformance-account", 0),
+        principal=identifiers("conformance-principal", 0),
+        session_other=identifiers("conformance-session-other", 0),
+        session_owner=identifiers("conformance-session-owner", 0),
+        subject=identifiers("conformance-subject", 0),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,7 +471,7 @@ class InMemoryAPIKeyStore:
 
     __slots__ = ("_lock", "_observe", "_records")
 
-    def __init__(self, observe: "Callable[[str, Mapping[str, str]], Awaitable[None]]") -> None:
+    def __init__(self, observe: Callable[[str, Mapping[str, str]], Awaitable[None]]) -> None:
         """Initialize isolated records and an aggregate diagnostic callback.
 
         Args:
@@ -533,11 +571,11 @@ class InMemoryLocalAccountStore:
 
     def __init__(
         self,
-        observe: "Callable[[str, Mapping[str, str]], Awaitable[None]]",
+        observe: Callable[[str, Mapping[str, str]], Awaitable[None]],
         *,
-        clock: "Callable[[], datetime]",
-        identifiers: "Callable[[str], str]",
-        entropy: "Callable[[int], bytes]",
+        clock: Callable[[], datetime],
+        identifiers: Callable[[str], str],
+        entropy: Callable[[int], bytes],
     ) -> None:
         """Initialize isolated state with aggregate deterministic sources."""
         self._accounts: dict[str, LocalAccountState[object]] = {}
@@ -618,6 +656,12 @@ class InMemoryLocalAccountStore:
             self._password_hashes[account_id] = password_hash
             self._accounts[account_id] = replace(account, security_epoch=expected_epoch + 1)
             return PasswordChangeOutcome(PasswordChangeStatus.CHANGED, expected_epoch + 1)
+
+    async def list_methods(self, account_id: str) -> tuple[LoginMethod, ...]:
+        """Return every login method recorded for an account."""
+        await self._observe("accounts.list_methods", {"account_id": account_id})
+        async with self._lock:
+            return tuple(self._login_methods.get(account_id, {}).values())
 
     async def register_login_method(self, account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
         """Record a login method for an existing account."""
@@ -1229,18 +1273,18 @@ class StoreConformanceFactories:
 
     api_key_store: Callable[[], APIKeyStore] | None = None
     local_account_store: "Callable[[], _ConformanceLocalAccountStore] | None" = None
-    mfa_login_challenge_store: Callable[[], MFALoginChallengeStore] | None = None
-    mfa_store: Callable[[], MFAStore] | None = None
+    mfa_login_challenge_store: "Callable[[], MFALoginChallengeStore] | None" = None
+    mfa_store: "Callable[[], MFAStore] | None" = None
     oidc_session_logout_store: Callable[[], OIDCSessionLogoutStore] | None = None
     oauth_account_store: Callable[[], OAuthAccountStore] | None = None
     oauth_transaction_protector: Callable[[], OAuthTransactionProtector] | None = None
     oauth_transaction_store: Callable[[], OAuthTransactionStore] | None = None
-    passkey_store: Callable[[], PasskeyStore] | None = None
+    passkey_store: "Callable[[], PasskeyStore] | None" = None
     refresh_family_store: "Callable[[], _ConformanceRefreshFamilyStore] | None" = None
-    secret_protector: Callable[[], SecretProtector] | None = None
+    secret_protector: "Callable[[], SecretProtector] | None" = None
     session_registry: Callable[[], SessionRegistry] | None = None
-    step_up_store: Callable[[], StepUpStore] | None = None
-    webauthn_challenge_store: Callable[[], WebAuthnChallengeStore] | None = None
+    step_up_store: "Callable[[], StepUpStore] | None" = None
+    webauthn_challenge_store: "Callable[[], WebAuthnChallengeStore] | None" = None
     websocket_connect_token_store: Callable[[], WebSocketConnectTokenStore] | None = None
 
 
@@ -1287,11 +1331,17 @@ async def assert_oauth_transaction_protector_conformance(factory: Callable[[], O
         raise AssertionError(message)
 
 
-async def assert_api_key_store_conformance(factory: Callable[[], APIKeyStore]) -> None:
+async def assert_api_key_store_conformance(
+    factory: Callable[[], APIKeyStore], *, identifiers: "Callable[[str, int], str] | None" = None
+) -> None:
     """Assert API-key isolation and atomic rotation behavior.
 
     Args:
         factory: Isolated zero-argument store factory.
+
+        identifiers: Optional deterministic ``(namespace, sequence)`` account
+            identifier factory for typed referential backends; ``None`` keeps
+            the fixed conformance constants.
 
     Returns:
         None when every invariant holds.
@@ -1304,8 +1354,12 @@ async def assert_api_key_store_conformance(factory: Callable[[], APIKeyStore]) -
     if store is isolated:
         message = "APIKeyStore factory invariant: each call must return isolated state"
         raise AssertionError(message)
-    current = _conformance_api_key_record("a2tra2tra2tra2tr")
-    replacements = (_conformance_api_key_record("ZmZmZmZmZmZmZmZm"), _conformance_api_key_record("Z2dnZ2dnZ2dnZ2dn"))
+    ids = _resolve_conformance_account_ids(identifiers)
+    current = _conformance_api_key_record("a2tra2tra2tra2tr", subject_id=ids.subject)
+    replacements = (
+        _conformance_api_key_record("ZmZmZmZmZmZmZmZm", subject_id=ids.subject),
+        _conformance_api_key_record("Z2dnZ2dnZ2dnZ2dn", subject_id=ids.subject),
+    )
     await store.create(current)
     if await store.get(current.key_id) != current or await isolated.get(current.key_id) is not None:
         message = "APIKeyStore.create/get isolation invariant: created records must be exact and factory-local"
@@ -1344,7 +1398,7 @@ async def assert_api_key_store_conformance(factory: Callable[[], APIKeyStore]) -
         raise AssertionError(message)
 
 
-async def assert_secret_protector_conformance(factory: Callable[[], SecretProtector]) -> None:
+async def assert_secret_protector_conformance(factory: "Callable[[], SecretProtector]") -> None:
     """Assert MFA-secret protection preserves all required AEAD properties.
 
     Args:
@@ -1823,7 +1877,10 @@ async def _assert_final_login_method(store: _ConformanceLocalAccountStore, accou
 
 
 async def assert_session_registry_conformance(  # noqa: C901, PLR0915 - one public scenario intentionally names each invariant
-    factory: Callable[[], SessionRegistry], *, now: datetime = _DEFAULT_NOW
+    factory: Callable[[], SessionRegistry],
+    *,
+    now: datetime = _DEFAULT_NOW,
+    identifiers: "Callable[[str, int], str] | None" = None,
 ) -> None:
     """Assert session-registry state, atomic replacement, and ownership behavior.
 
@@ -1831,6 +1888,10 @@ async def assert_session_registry_conformance(  # noqa: C901, PLR0915 - one publ
         factory: Isolated zero-argument session-registry factory initialized so
             ``get()`` evaluates expiry against ``now``.
         now: Time used for every created record and expiry assertion.
+
+        identifiers: Optional deterministic ``(namespace, sequence)`` account
+            identifier factory for typed referential backends; ``None`` keeps
+            the fixed conformance constants.
 
     Returns:
         None when every session-registry invariant holds.
@@ -1844,7 +1905,8 @@ async def assert_session_registry_conformance(  # noqa: C901, PLR0915 - one publ
     if store is isolated:
         message = "SessionRegistry factory invariant: each call must return isolated state"
         raise AssertionError(message)
-    command = _conformance_session_command(marker=1, account_id="conformance-session-owner", now=now)
+    ids = _resolve_conformance_account_ids(identifiers)
+    command = _conformance_session_command(marker=1, account_id=ids.session_owner, now=now)
     created = await store.create(command, event=_conformance_event("create-session"))
     expected = _conformance_session_record(command)
     if created != expected or await store.get(command.session_id) != expected:
@@ -1892,7 +1954,7 @@ async def assert_session_registry_conformance(  # noqa: C901, PLR0915 - one publ
         )
         raise AssertionError(message)
 
-    other = _conformance_session_command(marker=5, account_id="conformance-session-other", now=now)
+    other = _conformance_session_command(marker=5, account_id=ids.session_other, now=now)
     await store.create(other, event=_conformance_event("create-other-session"))
     if await store.revoke_session_for_account(
         command.account_id, other.session_id, event=_conformance_event("cross-account-session-revoke")
@@ -2326,11 +2388,17 @@ async def _assert_refresh_ownership(store: _ConformanceRefreshFamilyStore, accou
         raise AssertionError(message)  # noqa: TRY004 - conformance failures are intentionally AssertionError
 
 
-async def assert_mfa_store_conformance(factory: Callable[[], MFAStore]) -> None:
+async def assert_mfa_store_conformance(
+    factory: "Callable[[], MFAStore]", *, identifiers: "Callable[[str, int], str] | None" = None
+) -> None:
     """Assert atomic TOTP counter and recovery-code consumption.
 
     Args:
         factory: Isolated zero-argument MFA-store factory.
+
+        identifiers: Optional deterministic ``(namespace, sequence)`` account
+            identifier factory for typed referential backends; ``None`` keeps
+            the fixed conformance constants.
 
     Returns:
         None when every MFA-store invariant holds.
@@ -2338,11 +2406,17 @@ async def assert_mfa_store_conformance(factory: Callable[[], MFAStore]) -> None:
     Raises:
         AssertionError: If a counter update is non-atomic or a recovery code can be reused.
     """
+    from litestar_security.typing import require_dependency
+
+    require_dependency("pyotp")
+    from litestar_security.accounts._mfa import PendingTOTPEnrollment, ProtectedSecret, RecoveryCodeDigest, TOTPPolicy
+
+    ids = _resolve_conformance_account_ids(identifiers)
     store = factory()
     enrollment = PendingTOTPEnrollment(
         enrollment_id="conformance-enrollment",
         method_id="conformance-totp",
-        account_id="conformance-account",
+        account_id=ids.account,
         protected_secret=ProtectedSecret(ciphertext=b"secret", key_version="v1"),
         policy=TOTPPolicy(),
         created_at=_DEFAULT_NOW,
@@ -2381,11 +2455,17 @@ async def assert_mfa_store_conformance(factory: Callable[[], MFAStore]) -> None:
         raise AssertionError("MFAStore.consume_recovery_code atomicity invariant: two contenders must have one winner")
 
 
-async def assert_mfa_login_challenge_store_conformance(factory: Callable[[], MFALoginChallengeStore]) -> None:
+async def assert_mfa_login_challenge_store_conformance(
+    factory: "Callable[[], MFALoginChallengeStore]", *, identifiers: "Callable[[str, int], str] | None" = None
+) -> None:
     """Assert MFA-login challenges are bound, one-shot, and expiry-safe.
 
     Args:
         factory: Isolated zero-argument MFA login challenge-store factory.
+
+        identifiers: Optional deterministic ``(namespace, sequence)`` account
+            identifier factory for typed referential backends; ``None`` keeps
+            the fixed conformance constants.
 
     Returns:
         None when every MFA login challenge invariant holds.
@@ -2393,8 +2473,12 @@ async def assert_mfa_login_challenge_store_conformance(factory: Callable[[], MFA
     Raises:
         AssertionError: If a challenge can be replayed or survives a rejected binding or expiry.
     """
+    from litestar_security.typing import require_dependency
+
+    require_dependency("pyotp")
     store = factory()
-    wrong_account = _conformance_mfa_login_challenge(b"m" * 32)
+    ids = _resolve_conformance_account_ids(identifiers)
+    wrong_account = _conformance_mfa_login_challenge(b"m" * 32, account_id=ids.account)
     await store.put(wrong_account)
     if (
         await store.consume(
@@ -2416,7 +2500,7 @@ async def assert_mfa_login_challenge_store_conformance(factory: Callable[[], MFA
         is not None
     ):
         raise AssertionError("MFALoginChallengeStore account-binding burn invariant: a rejected binding must burn")
-    wrong_epoch = _conformance_mfa_login_challenge(b"n" * 32)
+    wrong_epoch = _conformance_mfa_login_challenge(b"n" * 32, account_id=ids.account)
     await store.put(wrong_epoch)
     if (
         await store.consume(
@@ -2438,10 +2522,10 @@ async def assert_mfa_login_challenge_store_conformance(factory: Callable[[], MFA
         is not None
     ):
         raise AssertionError("MFALoginChallengeStore epoch-binding burn invariant: a rejected binding must burn")
-    winner = _conformance_mfa_login_challenge(b"w" * 32)
+    winner = _conformance_mfa_login_challenge(b"w" * 32, account_id=ids.account)
     await store.put(winner)
 
-    async def consume() -> MFALoginChallenge | None:
+    async def consume() -> "MFALoginChallenge | None":
         return await store.consume(
             winner.challenge_digest,
             account_id=winner.account_id,
@@ -2451,7 +2535,9 @@ async def assert_mfa_login_challenge_store_conformance(factory: Callable[[], MFA
 
     if await _single_winner((lambda: _presence(consume()), lambda: _presence(consume()))) != 1:
         raise AssertionError("MFALoginChallengeStore atomicity invariant: two contenders must have one winner")
-    expired = _conformance_mfa_login_challenge(b"x" * 32, expires_at=_DEFAULT_NOW + timedelta(seconds=1))
+    expired = _conformance_mfa_login_challenge(
+        b"x" * 32, expires_at=_DEFAULT_NOW + timedelta(seconds=1), account_id=ids.account
+    )
     await store.put(expired)
     if (
         await store.consume(
@@ -2467,11 +2553,17 @@ async def assert_mfa_login_challenge_store_conformance(factory: Callable[[], MFA
         raise AssertionError("MFALoginChallengeStore expiry burn invariant: expired challenges must be removed")
 
 
-async def assert_webauthn_challenge_store_conformance(factory: Callable[[], WebAuthnChallengeStore]) -> None:
+async def assert_webauthn_challenge_store_conformance(
+    factory: "Callable[[], WebAuthnChallengeStore]", *, identifiers: "Callable[[str, int], str] | None" = None
+) -> None:
     """Assert WebAuthn challenges burn once and enforce every binding.
 
     Args:
         factory: Isolated zero-argument WebAuthn challenge-store factory.
+
+        identifiers: Optional deterministic ``(namespace, sequence)`` account
+            identifier factory for typed referential backends; ``None`` keeps
+            the fixed conformance constants.
 
     Returns:
         None when every WebAuthn challenge invariant holds.
@@ -2479,8 +2571,12 @@ async def assert_webauthn_challenge_store_conformance(factory: Callable[[], WebA
     Raises:
         AssertionError: If consume-once, binding, purpose, or expiry behavior is violated.
     """
+    from litestar_security.typing import require_dependency
+
+    require_dependency("webauthn")
     store = factory()
-    wrong_binding = _conformance_webauthn_challenge(b"b" * 32)
+    ids = _resolve_conformance_account_ids(identifiers)
+    wrong_binding = _conformance_webauthn_challenge(b"b" * 32, account_id=ids.account)
     await store.put(wrong_binding)
     if (
         await store.consume(
@@ -2499,7 +2595,7 @@ async def assert_webauthn_challenge_store_conformance(factory: Callable[[], WebA
         is not None
     ):
         raise AssertionError("WebAuthnChallengeStore binding burn invariant: mismatched challenge must be removed")
-    wrong_purpose = _conformance_webauthn_challenge(b"p" * 32)
+    wrong_purpose = _conformance_webauthn_challenge(b"p" * 32, account_id=ids.account)
     await store.put(wrong_purpose)
     if (
         await store.consume(
@@ -2521,17 +2617,19 @@ async def assert_webauthn_challenge_store_conformance(factory: Callable[[], WebA
         is not None
     ):
         raise AssertionError("WebAuthnChallengeStore purpose burn invariant: mismatched challenge must be removed")
-    winner = _conformance_webauthn_challenge(b"w" * 32)
+    winner = _conformance_webauthn_challenge(b"w" * 32, account_id=ids.account)
     await store.put(winner)
 
-    async def consume() -> WebAuthnChallenge | None:
+    async def consume() -> "WebAuthnChallenge | None":
         return await store.consume(
             winner.challenge_digest, binding_digest=winner.binding_digest, purpose=winner.purpose, now=_DEFAULT_NOW
         )
 
     if await _single_winner((lambda: _presence(consume()), lambda: _presence(consume()))) != 1:
         raise AssertionError("WebAuthnChallengeStore atomicity invariant: two contenders must have one winner")
-    expired = _conformance_webauthn_challenge(b"x" * 32, expires_at=_DEFAULT_NOW + timedelta(seconds=1))
+    expired = _conformance_webauthn_challenge(
+        b"x" * 32, expires_at=_DEFAULT_NOW + timedelta(seconds=1), account_id=ids.account
+    )
     await store.put(expired)
     if (
         await store.consume(
@@ -2623,11 +2721,17 @@ async def assert_oauth_transaction_store_conformance(factory: Callable[[], OAuth
         raise AssertionError("OAuthTransactionStore expiry invariant: expired transactions must be rejected")
 
 
-async def assert_websocket_connect_token_store_conformance(factory: Callable[[], WebSocketConnectTokenStore]) -> None:
+async def assert_websocket_connect_token_store_conformance(
+    factory: Callable[[], WebSocketConnectTokenStore], *, identifiers: "Callable[[str, int], str] | None" = None
+) -> None:
     """Assert WebSocket connect tokens are exact, one-shot, and expiry-safe.
 
     Args:
         factory: Isolated zero-argument WebSocket connect-token store factory.
+
+        identifiers: Optional deterministic ``(namespace, sequence)`` account
+            identifier factory for typed referential backends; ``None`` keeps
+            the fixed conformance constants.
 
     Returns:
         None when every WebSocket connect-token invariant holds.
@@ -2636,7 +2740,8 @@ async def assert_websocket_connect_token_store_conformance(factory: Callable[[],
         AssertionError: If a wrong digest burns a token, or a token can be reused or outlive expiry.
     """
     store = factory()
-    record = _conformance_connect_token_record("aWlpaWlpaWlpaWlpaWlpaQ", b"d" * 32)
+    ids = _resolve_conformance_account_ids(identifiers)
+    record = _conformance_connect_token_record("aWlpaWlpaWlpaWlpaWlpaQ", b"d" * 32, subject_id=ids.subject)
     await store.create(record)
     if await store.consume(connect_token_id=record.connect_token_id, digest=b"z" * 32, now=_DEFAULT_NOW) is not None:
         raise AssertionError("WebSocketConnectTokenStore digest invariant: wrong digest must return None")
@@ -2644,7 +2749,7 @@ async def assert_websocket_connect_token_store_conformance(factory: Callable[[],
         raise AssertionError(
             "WebSocketConnectTokenStore digest preservation invariant: wrong digest must not consume the record"
         )
-    winner = _conformance_connect_token_record("ampqampqampqampqampqag", b"w" * 32)
+    winner = _conformance_connect_token_record("ampqampqampqampqampqag", b"w" * 32, subject_id=ids.subject)
     await store.create(winner)
 
     async def consume() -> WebSocketConnectAuthorization | None:
@@ -2653,7 +2758,7 @@ async def assert_websocket_connect_token_store_conformance(factory: Callable[[],
     if await _single_winner((lambda: _presence(consume()), lambda: _presence(consume()))) != 1:
         raise AssertionError("WebSocketConnectTokenStore atomicity invariant: two contenders must have one winner")
     expired = _conformance_connect_token_record(
-        "eXh4eXh4eXh4eXh4eXh4eA", b"e" * 32, expires_at=_DEFAULT_NOW + timedelta(seconds=1)
+        "eXh4eXh4eXh4eXh4eXh4eA", b"e" * 32, expires_at=_DEFAULT_NOW + timedelta(seconds=1), subject_id=ids.subject
     )
     await store.create(expired)
     if (
@@ -2668,11 +2773,17 @@ async def assert_websocket_connect_token_store_conformance(factory: Callable[[],
         raise AssertionError("WebSocketConnectTokenStore expiry deletion invariant: expired records must be removed")
 
 
-async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) -> None:
+async def assert_passkey_store_conformance(
+    factory: "Callable[[], PasskeyStore]", *, identifiers: "Callable[[str, int], str] | None" = None
+) -> None:
     """Assert optimistic assertion recording and clone-risk results.
 
     Args:
         factory: Isolated zero-argument passkey-store factory.
+
+        identifiers: Optional deterministic ``(namespace, sequence)`` account
+            identifier factory for typed referential backends; ``None`` keeps
+            the fixed conformance constants.
 
     Returns:
         None when every passkey-store invariant holds.
@@ -2680,8 +2791,14 @@ async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) 
     Raises:
         AssertionError: If only one optimistic writer is not recorded or clone risk is lost.
     """
+    from litestar_security.typing import require_dependency
+
+    require_dependency("webauthn")
+    from litestar_security.accounts._passkeys import PasskeyAssertionStatus
+
     store = factory()
-    credential = _conformance_passkey_credential(b"credential")
+    ids = _resolve_conformance_account_ids(identifiers)
+    credential = _conformance_passkey_credential(b"credential", account_id=ids.account)
     if not await store.add_credential(
         credential,
         login_method=LoginMethod("passkey-method", "passkey", _DEFAULT_NOW),
@@ -2714,7 +2831,7 @@ async def assert_passkey_store_conformance(factory: Callable[[], PasskeyStore]) 
         raise AssertionError(
             "PasskeyStore.record_assertion state invariant: winning assertion must persist exact state"
         )
-    clone = _conformance_passkey_credential(b"clone")
+    clone = _conformance_passkey_credential(b"clone", account_id=ids.account)
     await store.add_credential(
         clone, login_method=LoginMethod("clone-method", "passkey", _DEFAULT_NOW), event=_conformance_event("add-clone")
     )
@@ -2842,11 +2959,17 @@ async def assert_oidc_session_logout_store_conformance(factory: Callable[[], OID
         )
 
 
-async def assert_step_up_store_conformance(factory: Callable[[], StepUpStore]) -> None:
+async def assert_step_up_store_conformance(
+    factory: "Callable[[], StepUpStore]", *, identifiers: "Callable[[str, int], str] | None" = None
+) -> None:
     """Assert one-time exact-binding step-up grant consumption.
 
     Args:
         factory: Isolated zero-argument step-up store factory.
+
+        identifiers: Optional deterministic ``(namespace, sequence)`` account
+            identifier factory for typed referential backends; ``None`` keeps
+            the fixed conformance constants.
 
     Returns:
         None when the store has one winner and rejects every distinct binding mismatch.
@@ -2854,11 +2977,14 @@ async def assert_step_up_store_conformance(factory: Callable[[], StepUpStore]) -
     Raises:
         AssertionError: If a grant can be replayed, double-consumed, or accepted with an altered binding.
     """
-    record = _conformance_step_up_record()
+    from litestar_security.typing import require_dependency
+
+    require_dependency("pyotp")
+    record = _conformance_step_up_record(principal_id=_resolve_conformance_account_ids(identifiers).principal)
     store = factory()
     await store.put(record)
 
-    async def consume() -> StepUpGrantState | None:
+    async def consume() -> "StepUpGrantState | None":
         return await store.consume(
             record.grant_digest,
             principal_id=record.principal_id,
@@ -2895,11 +3021,17 @@ async def assert_step_up_store_conformance(factory: Callable[[], StepUpStore]) -
             raise AssertionError(message)
 
 
-async def assert_oauth_account_store_conformance(factory: Callable[[], OAuthAccountStore]) -> None:
+async def assert_oauth_account_store_conformance(
+    factory: Callable[[], OAuthAccountStore], *, identifiers: "Callable[[str, int], str] | None" = None
+) -> None:
     """Assert final-method protection and atomic OAuth identity unlinking.
 
     Args:
         factory: Isolated zero-argument OAuth account-store factory.
+
+        identifiers: Optional deterministic ``(namespace, sequence)`` account
+            identifier factory for typed referential backends; ``None`` keeps
+            the fixed conformance constants.
 
     Returns:
         None when every OAuth account-store invariant holds.
@@ -2907,10 +3039,11 @@ async def assert_oauth_account_store_conformance(factory: Callable[[], OAuthAcco
     Raises:
         AssertionError: If a final method can be removed or concurrent unlinking has two winners.
     """
+    ids = _resolve_conformance_account_ids(identifiers)
     store = factory()
     identity = _conformance_provider_identity("first")
     first = await store.link(
-        "conformance-account",
+        ids.account,
         identity,
         _conformance_provider_grant(),
         _conformance_provider_tokens("first"),
@@ -2923,16 +3056,16 @@ async def assert_oauth_account_store_conformance(factory: Callable[[], OAuthAcco
     if wrong_owner.status is not UnlinkStatus.NOT_FOUND:
         raise AssertionError("OAuthAccountStore ownership invariant: another account must receive NOT_FOUND")
     final = await store.unlink(
-        "conformance-account", first.provider, first.provider_account_id, require_remaining=True, now=_DEFAULT_NOW
+        ids.account, first.provider, first.provider_account_id, require_remaining=True, now=_DEFAULT_NOW
     )
     if final.status is not UnlinkStatus.FINAL_METHOD:
         raise AssertionError("OAuthAccountStore final-method invariant: the last identity must return FINAL_METHOD")
-    preserved = await store.resolve_provider_account("conformance-account", first.provider)
+    preserved = await store.resolve_provider_account(ids.account, first.provider)
     if preserved != first:
         raise AssertionError("OAuthAccountStore ownership preservation invariant: rejected unlink must not mutate")
     second_identity = replace(_conformance_provider_identity("second"), provider="second-provider")
     second = await store.link(
-        "conformance-account",
+        ids.account,
         second_identity,
         _conformance_provider_grant(),
         _conformance_provider_tokens("second"),
@@ -2943,11 +3076,7 @@ async def assert_oauth_account_store_conformance(factory: Callable[[], OAuthAcco
     async def unlink() -> UnlinkStatus:
         return (
             await store.unlink(
-                "conformance-account",
-                second.provider,
-                second.provider_account_id,
-                require_remaining=True,
-                now=_DEFAULT_NOW,
+                ids.account, second.provider, second.provider_account_id, require_remaining=True, now=_DEFAULT_NOW
             )
         ).status
 
@@ -3008,11 +3137,23 @@ async def assert_rate_limiter_conformance(
 
 async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit public capability dispatch preserves field order
     factories: StoreConformanceFactories,
+    *,
+    create_account: Callable[[str], Awaitable[None]] | None = None,
+    identifiers: Callable[[str, int], str] | None = None,
 ) -> None:
     """Run only the conformance scenarios whose factories were supplied.
 
     Args:
         factories: Explicit feature factories to exercise.
+        create_account: Optional async hook to seed prerequisite account rows. A
+            relational backend enforcing account foreign keys needs every
+            identifier the enabled scenarios reference to exist first.
+        identifiers: Optional deterministic ``(namespace, sequence)`` account
+            identifier factory. A backend persisting account references as
+            typed columns (for example UUID foreign keys) supplies one so
+            every account-scoped identifier the scenarios reference satisfies
+            its column type; the default keeps the fixed conformance
+            constants.
 
     Returns:
         None when every enabled feature passes.
@@ -3020,40 +3161,48 @@ async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit
     Raises:
         AssertionError: If any enabled feature violates its public protocol.
     """
+    if create_account is not None:
+        seed_ids = (
+            _CONFORMANCE_ACCOUNT_IDS if identifiers is None else _resolve_conformance_account_ids(identifiers).seeded()
+        )
+        for default_account_id in seed_ids:
+            await create_account(default_account_id)
     if factories.api_key_store is not None:
-        await assert_api_key_store_conformance(factories.api_key_store)
+        await assert_api_key_store_conformance(factories.api_key_store, identifiers=identifiers)
     if factories.local_account_store is not None:
         await assert_local_account_store_conformance(factories.local_account_store)
     if factories.mfa_login_challenge_store is not None:
-        await assert_mfa_login_challenge_store_conformance(factories.mfa_login_challenge_store)
+        await assert_mfa_login_challenge_store_conformance(factories.mfa_login_challenge_store, identifiers=identifiers)
     if factories.mfa_store is not None:
-        await assert_mfa_store_conformance(factories.mfa_store)
+        await assert_mfa_store_conformance(factories.mfa_store, identifiers=identifiers)
     if factories.oidc_session_logout_store is not None:
         await assert_oidc_session_logout_store_conformance(factories.oidc_session_logout_store)
     if factories.oauth_account_store is not None:
-        await assert_oauth_account_store_conformance(factories.oauth_account_store)
+        await assert_oauth_account_store_conformance(factories.oauth_account_store, identifiers=identifiers)
     if factories.oauth_transaction_protector is not None:
         await assert_oauth_transaction_protector_conformance(factories.oauth_transaction_protector)
     if factories.oauth_transaction_store is not None:
         await assert_oauth_transaction_store_conformance(factories.oauth_transaction_store)
     if factories.passkey_store is not None:
-        await assert_passkey_store_conformance(factories.passkey_store)
+        await assert_passkey_store_conformance(factories.passkey_store, identifiers=identifiers)
     if factories.refresh_family_store is not None:
         await assert_refresh_family_store_conformance(factories.refresh_family_store)
     if factories.secret_protector is not None:
         await assert_secret_protector_conformance(factories.secret_protector)
     if factories.session_registry is not None:
-        await assert_session_registry_conformance(factories.session_registry)
+        await assert_session_registry_conformance(factories.session_registry, identifiers=identifiers)
     if factories.step_up_store is not None:
-        await assert_step_up_store_conformance(factories.step_up_store)
+        await assert_step_up_store_conformance(factories.step_up_store, identifiers=identifiers)
     if factories.webauthn_challenge_store is not None:
-        await assert_webauthn_challenge_store_conformance(factories.webauthn_challenge_store)
+        await assert_webauthn_challenge_store_conformance(factories.webauthn_challenge_store, identifiers=identifiers)
     if factories.websocket_connect_token_store is not None:
-        await assert_websocket_connect_token_store_conformance(factories.websocket_connect_token_store)
+        await assert_websocket_connect_token_store_conformance(
+            factories.websocket_connect_token_store, identifiers=identifiers
+        )
 
 
-def _conformance_api_key_record(key_id: str) -> APIKeyState:
-    return APIKeyState(key_id=key_id, subject_id="conformance-subject", digest=b"d" * 32)
+def _conformance_api_key_record(key_id: str, *, subject_id: str = "conformance-subject") -> APIKeyState:
+    return APIKeyState(key_id=key_id, subject_id=subject_id, digest=b"d" * 32)
 
 
 def _conformance_session_command(
@@ -3226,11 +3375,15 @@ def _different_digest(digest: bytes) -> bytes:
     return bytes((digest[0] ^ 1,)) + digest[1:]
 
 
-def _conformance_mfa_login_challenge(digest: bytes, *, expires_at: datetime | None = None) -> MFALoginChallenge:
+def _conformance_mfa_login_challenge(
+    digest: bytes, *, expires_at: datetime | None = None, account_id: str = "conformance-account"
+) -> "MFALoginChallenge":
     """Build a fixed valid MFA-login challenge."""
+    from litestar_security.accounts._mfa_login import MFALoginChallenge
+
     return MFALoginChallenge(
         challenge_digest=digest,
-        account_id="conformance-account",
+        account_id=account_id,
         security_epoch=0,
         client_key="conformance-client",
         issued_at=_DEFAULT_NOW,
@@ -3238,13 +3391,17 @@ def _conformance_mfa_login_challenge(digest: bytes, *, expires_at: datetime | No
     )
 
 
-def _conformance_webauthn_challenge(digest: bytes, *, expires_at: datetime | None = None) -> WebAuthnChallenge:
+def _conformance_webauthn_challenge(
+    digest: bytes, *, expires_at: datetime | None = None, account_id: str = "conformance-account"
+) -> "WebAuthnChallenge":
     """Build a fixed valid WebAuthn challenge."""
+    from litestar_security.accounts._passkeys import UserVerification, WebAuthnChallenge
+
     return WebAuthnChallenge(
         challenge_digest=digest,
         binding_digest=b"b" * 32,
         purpose="authentication",
-        account_id="conformance-account",
+        account_id=account_id,
         rp_id="example.test",
         origins=("https://app.example",),
         user_verification=UserVerification.REQUIRED,
@@ -3270,13 +3427,13 @@ def _conformance_oauth_transaction(digest: bytes, *, expires_at: datetime | None
 
 
 def _conformance_connect_token_record(
-    connect_token_id: str, digest: bytes, *, expires_at: datetime | None = None
+    connect_token_id: str, digest: bytes, *, expires_at: datetime | None = None, subject_id: str = "conformance-subject"
 ) -> WebSocketConnectAuthorization:
     """Build one fixed valid WebSocket connect-token record."""
     return WebSocketConnectAuthorization(
         connect_token_id=connect_token_id,
         digest=digest,
-        subject_id="conformance-subject",
+        subject_id=subject_id,
         security_epoch=0,
         route_name="conformance-route",
         origin="https://app.example",
@@ -3287,11 +3444,15 @@ def _conformance_connect_token_record(
     )
 
 
-def _conformance_passkey_credential(credential_id: bytes) -> PasskeyCredential:
+def _conformance_passkey_credential(
+    credential_id: bytes, *, account_id: str = "conformance-account"
+) -> "PasskeyCredential":
     """Build one fixed verified passkey credential."""
+    from litestar_security.accounts._passkeys import PasskeyCredential
+
     return PasskeyCredential(
         credential_id=credential_id,
-        account_id="conformance-account",
+        account_id=account_id,
         public_key=b"public-key",
         sign_count=1,
         backup_eligible=False,
@@ -3345,12 +3506,14 @@ def _conformance_oidc_logout_identity(token_id: str) -> OIDCLogoutIdentity:
     )
 
 
-def _conformance_step_up_record() -> StepUpGrantState:
+def _conformance_step_up_record(*, principal_id: str = "conformance-principal") -> "StepUpGrantState":
     """Build one fixed exact-binding step-up grant."""
+    from litestar_security.accounts._mfa import StepUpGrantState
+
     return StepUpGrantState(
         grant_digest=b"g" * 32,
         transport_digest=b"t" * 32,
-        principal_id="conformance-principal",
+        principal_id=principal_id,
         security_epoch=7,
         purpose="conformance-purpose",
         methods=frozenset({"passkey"}),
@@ -3521,7 +3684,7 @@ class InMemoryMFAStore:
         self.methods: dict[str, TOTPMethod] = {}
         self.recovery_codes: dict[str, tuple[RecoveryCodeDigest, ...]] = {}
 
-    async def create_totp_enrollment(self, enrollment: PendingTOTPEnrollment) -> None:
+    async def create_totp_enrollment(self, enrollment: "PendingTOTPEnrollment") -> None:
         """Store one enrollment.
 
         Args:
@@ -3530,7 +3693,7 @@ class InMemoryMFAStore:
         async with self._lock:
             self.enrollments[enrollment.enrollment_id] = enrollment
 
-    async def get_totp_enrollment(self, enrollment_id: str) -> PendingTOTPEnrollment | None:
+    async def get_totp_enrollment(self, enrollment_id: str) -> "PendingTOTPEnrollment | None":
         """Load one enrollment.
 
         Args:
@@ -3550,7 +3713,7 @@ class InMemoryMFAStore:
         login_method: LoginMethod,
         event: SecurityEvent,
         now: datetime,
-    ) -> TOTPMethod | None:
+    ) -> "TOTPMethod | None":
         """Atomically consume and activate one enrollment.
 
         Args:
@@ -3565,6 +3728,8 @@ class InMemoryMFAStore:
             The active method only for the winning call.
         """
         async with self._lock:
+            from litestar_security.accounts._mfa import TOTPMethod
+
             enrollment = self.enrollments.pop(enrollment_id, None)
             if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
                 return None
@@ -3587,13 +3752,15 @@ class InMemoryMFAStore:
         enrollment_id: str,
         *,
         accepted_counter: int,
-        codes: tuple[RecoveryCodeDigest, ...],
+        codes: "tuple[RecoveryCodeDigest, ...]",
         login_method: LoginMethod,
         event: SecurityEvent,
         now: datetime,
-    ) -> TOTPMethod | None:
+    ) -> "TOTPMethod | None":
         """Atomically activate one enrollment and replace recovery codes."""
         async with self._lock:
+            from litestar_security.accounts._mfa import TOTPMethod
+
             enrollment = self.enrollments.get(enrollment_id)
             if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
                 return None
@@ -3612,7 +3779,7 @@ class InMemoryMFAStore:
             self.events.append(event)
             return method
 
-    async def get_totp_method(self, account_id: str, method_id: str) -> TOTPMethod | None:
+    async def get_totp_method(self, account_id: str, method_id: str) -> "TOTPMethod | None":
         """Load an owner-checked active method.
 
         Args:
@@ -3644,7 +3811,7 @@ class InMemoryMFAStore:
             return True
 
     async def replace_recovery_codes(
-        self, account_id: str, codes: tuple[RecoveryCodeDigest, ...], *, now: datetime
+        self, account_id: str, codes: "tuple[RecoveryCodeDigest, ...]", *, now: datetime
     ) -> None:
         """Atomically replace an account's complete digest set.
 
@@ -3688,7 +3855,7 @@ class InMemoryWebAuthnChallengeStore:
         self._lock = Lock()
         self.challenges: dict[bytes, WebAuthnChallenge] = {}
 
-    async def put(self, challenge: WebAuthnChallenge) -> None:
+    async def put(self, challenge: "WebAuthnChallenge") -> None:
         """Store one digest-only challenge.
 
         Args:
@@ -3699,7 +3866,7 @@ class InMemoryWebAuthnChallengeStore:
 
     async def consume(
         self, challenge_digest: bytes, *, binding_digest: bytes, purpose: str, now: datetime
-    ) -> WebAuthnChallenge | None:
+    ) -> "WebAuthnChallenge | None":
         """Atomically burn and return one exact challenge.
 
         Args:
@@ -3736,7 +3903,7 @@ class InMemoryPasskeyStore:
         self.login_methods: dict[str, LoginMethod] = {}
 
     async def add_credential(
-        self, credential: PasskeyCredential, *, login_method: LoginMethod, event: SecurityEvent
+        self, credential: "PasskeyCredential", *, login_method: LoginMethod, event: SecurityEvent
     ) -> bool:
         """Atomically register a credential, login method, and event.
 
@@ -3756,7 +3923,7 @@ class InMemoryPasskeyStore:
             self.events.append(event)
             return True
 
-    async def get_credential(self, credential_id: bytes) -> PasskeyCredential | None:
+    async def get_credential(self, credential_id: bytes) -> "PasskeyCredential | None":
         """Load one credential.
 
         Args:
@@ -3777,7 +3944,7 @@ class InMemoryPasskeyStore:
         backup_state: bool,
         clone_risk: bool,
         now: datetime,
-    ) -> PasskeyAssertionStatus:
+    ) -> "PasskeyAssertionStatus":
         """Atomically record one verified assertion.
 
         Args:
@@ -3793,6 +3960,8 @@ class InMemoryPasskeyStore:
             Structured record, conflict, or clone-risk status.
         """
         async with self._lock:
+            from litestar_security.accounts._passkeys import PasskeyAssertionStatus
+
             credential = self.credentials.get(credential_id)
             if (
                 credential is None
@@ -3810,7 +3979,7 @@ class InMemoryPasskeyStore:
             )
             return PasskeyAssertionStatus.CLONE_RISK if clone_risk else PasskeyAssertionStatus.RECORDED
 
-    async def list_credentials(self, account_id: str) -> tuple[PasskeyCredential, ...]:
+    async def list_credentials(self, account_id: str) -> "tuple[PasskeyCredential, ...]":
         """List an account's credentials.
 
         Args:
@@ -3823,7 +3992,7 @@ class InMemoryPasskeyStore:
 
     async def rename_credential(
         self, account_id: str, credential_id: bytes, display_name: str
-    ) -> PasskeyCredential | None:
+    ) -> "PasskeyCredential | None":
         """Atomically rename one owner-checked credential.
 
         Args:
@@ -3853,7 +4022,7 @@ class InMemoryMFALoginChallengeStore:
         self._lock = Lock()
         self.challenges: dict[bytes, MFALoginChallenge] = {}
 
-    async def put(self, challenge: MFALoginChallenge) -> None:
+    async def put(self, challenge: "MFALoginChallenge") -> None:
         """Store one pending digest-only challenge.
 
         Args:
@@ -3864,7 +4033,7 @@ class InMemoryMFALoginChallengeStore:
 
     async def consume(
         self, challenge_digest: bytes, *, account_id: str, security_epoch: int, now: datetime
-    ) -> MFALoginChallenge | None:
+    ) -> "MFALoginChallenge | None":
         """Atomically burn and return one exact, current challenge.
 
         Args:
@@ -3898,7 +4067,7 @@ class InMemoryStepUpStore:
         self._lock = Lock()
         self.grants: dict[bytes, StepUpGrantState] = {}
 
-    async def put(self, record: StepUpGrantState) -> None:
+    async def put(self, record: "StepUpGrantState") -> None:
         """Store one grant record.
 
         Args:
@@ -3916,7 +4085,7 @@ class InMemoryStepUpStore:
         purpose: str,
         transport_digest: bytes,
         now: datetime,
-    ) -> StepUpGrantState | None:
+    ) -> "StepUpGrantState | None":
         """Atomically burn and return one exact current grant.
 
         Args:
@@ -3942,3 +4111,37 @@ class InMemoryStepUpStore:
             ):
                 return None
             return record
+
+
+_OPTIONAL_TESTING_EXPORTS: Mapping[str, tuple[str, str, frozenset[str]]] = {
+    "MFAStore": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "MFALoginChallengeStore": ("litestar_security.accounts._mfa_login", "mfa", frozenset({"pyotp"})),
+    "PasskeyStore": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+    "WebAuthnChallengeStore": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+    "StepUpStore": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "StepUpCredential": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "PasskeyCredential": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+    "PasskeyAssertionStatus": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+    "WebAuthnChallenge": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+    "MFALoginChallenge": ("litestar_security.accounts._mfa_login", "mfa", frozenset({"pyotp"})),
+    "PendingTOTPEnrollment": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "ProtectedSecret": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "RecoveryCodeDigest": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "SecretProtector": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "StepUpGrantState": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "TOTPMethod": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "TOTPPolicy": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "UserVerification": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+}
+
+
+def __getattr__(name: str) -> object:
+    """Resolve optional testing exports only when their feature dependencies are available."""
+    from litestar_security._lazy import import_optional_attribute
+
+    target = _OPTIONAL_TESTING_EXPORTS.get(name)
+    if target is not None:
+        module_name, extras, dependencies = target
+        return import_optional_attribute(module_name, name, extras=extras, dependencies=dependencies)
+    message = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(message)

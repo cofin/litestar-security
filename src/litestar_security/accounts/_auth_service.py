@@ -33,7 +33,7 @@ from litestar_security.accounts._refresh import RefreshTokenService
 from litestar_security.accounts._refresh_tokens import TokenPair
 from litestar_security.accounts._registration import RegistrationService, VerificationTokenService
 from litestar_security.accounts._sessions import NativeSessionAuth, SessionAuthentication
-from litestar_security.accounts._stores import LocalAccountCapabilities
+from litestar_security.accounts._stores import LocalAccountCapabilities, LoginMethodStore
 from litestar_security.accounts.schemas import LocalAccount, LocalCredentials, LocalPasswordChange
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
@@ -48,6 +48,7 @@ __all__ = ("LocalAuthService", "forwarded_client_key", "trusted_client_key")
 UserT = TypeVar("UserT")
 _LOGGER = getLogger(__name__)
 _MAXIMUM_TCP_PORT = 65_535
+_SECOND_FACTOR_KINDS = frozenset({"totp", "passkey"})
 
 
 def _parse_forwarded_address(raw: str) -> "IPv4Address | IPv6Address | None":
@@ -189,6 +190,8 @@ class LocalAuthService(Generic[UserT]):
     refresh_tokens: RefreshTokenService[UserT] | None = field(default=None, repr=False)
     rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
     mfa_login: MFALoginService | None = field(default=None, repr=False, compare=False)
+    mfa_require_at_login: bool | str = field(default=True, repr=False, compare=False)
+    mfa_login_methods: "LoginMethodStore | None" = field(default=None, repr=False, compare=False)
     client_key: "Callable[[ASGIConnection[Any, Any, Any, Any]], str | None]" = field(
         default=trusted_client_key, repr=False, compare=False
     )
@@ -231,7 +234,7 @@ class LocalAuthService(Generic[UserT]):
         if not isinstance(account, LocalAccountState):
             return account
         mfa_login = self.mfa_login
-        if mfa_login is not None:
+        if mfa_login is not None and await self._requires_mfa_challenge(account.account_id):
             return await mfa_login.issue(cast("LocalAccountState[object]", account), client_key=client_key)
         session_auth = self.session_auth
         if session_auth is None:
@@ -261,7 +264,7 @@ class LocalAuthService(Generic[UserT]):
         if not isinstance(account, LocalAccountState):
             return account
         mfa_login = self.mfa_login
-        if mfa_login is not None:
+        if mfa_login is not None and await self._requires_mfa_challenge(account.account_id):
             return await mfa_login.issue(cast("LocalAccountState[object]", account), client_key=client_key)
         refresh_tokens = self.refresh_tokens
         if refresh_tokens is None:
@@ -496,3 +499,17 @@ class LocalAuthService(Generic[UserT]):
         if not isinstance(proof, PasswordReauthenticationProof):
             return proof
         return await self.password_change.change(account_id, data.password, proof=proof, compromise=data.compromise)
+
+    async def _requires_mfa_challenge(self, account_id: str) -> bool:
+        """Return whether this login must present a second factor.
+
+        Binding rejects ``"enrolled"`` without a login-method store, so the
+        enrollment answer is always available here rather than guessed.
+        """
+        if self.mfa_require_at_login != "enrolled":
+            return True
+        login_methods = self.mfa_login_methods
+        if login_methods is None:  # pragma: no cover - bind-time validation guarantees the store
+            return True
+        methods = await login_methods.list_methods(account_id)
+        return any(method.kind in _SECOND_FACTOR_KINDS for method in methods)
