@@ -1,8 +1,10 @@
 """Unit tests for the framework-neutral public testing kit."""
 
+import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from subprocess import run
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
@@ -841,3 +843,34 @@ async def test_identifier_factory_drives_the_full_reference_conformance_run() ->
         identifiers=identifiers,
     )
     assert generated, "the full reference run must have consumed the identifier factory"
+
+
+@pytest.mark.parametrize("blocked_dependency", ["webauthn", "pyotp"])
+def test_testing_kit_imports_without_optional_feature_extras(blocked_dependency: str) -> None:
+    """Regression for #48: the aggregate testing module must import and expose its
+    non-passkey conformance helpers even when a feature extra (e.g. [passkeys]) is
+    not installed. Passkey/MFA symbols are behind the ``TYPE_CHECKING`` boundary and
+    the in-memory stores resolve their optional dependencies lazily, so blocking a
+    feature dependency must not break importing the shared surface."""
+    script = f"""
+import sys
+
+sys.modules[{blocked_dependency!r}] = None
+
+from litestar_security.testing import (
+    StoreConformanceFactories,
+    InMemorySecurityBackend,
+    assert_security_backend_conformance,
+    assert_api_key_store_conformance,
+)
+
+# Helpers that do not touch the blocked feature must remain usable.
+backend = InMemorySecurityBackend()
+assert backend.accounts is not None
+assert callable(assert_security_backend_conformance)
+assert callable(assert_api_key_store_conformance)
+assert StoreConformanceFactories is not None
+"""
+    result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
+
+    assert result.returncode == 0, result.stderr
