@@ -313,11 +313,17 @@ def test_same_layer_conflicting_auth_and_exclude_raises() -> None:
         Litestar(route_handlers=[conflict_endpoint], plugins=[SecurityPlugin(_api_team_config())])
 
 
-@pytest.mark.parametrize("invalid_value", ["True", 1, False, None])
-def test_invalid_exclude_from_auth_value_raises(invalid_value: Any) -> None:
-    @get("/bad-opt", opt={"exclude_from_auth": invalid_value}, sync_to_thread=False)
-    def bad_endpoint() -> str:
-        return "bad"
+@pytest.mark.parametrize(("value", "authenticates"), [("True", False), (1, False), (False, True), (None, True)])
+def test_exclude_from_auth_value_is_read_by_truthiness(value: Any, authenticates: bool) -> None:
+    """Any value Litestar would treat as truthy excludes; a falsy value authenticates."""
 
-    with pytest.raises(ImproperlyConfiguredException, match="exclude_from_auth must be exactly True when present"):
-        Litestar(route_handlers=[bad_endpoint], plugins=[SecurityPlugin(_api_team_config())])
+    @get("/opt-value", opt={"exclude_from_auth": value}, sync_to_thread=False)
+    def opt_value_endpoint() -> str:
+        return "value"
+
+    app = Litestar(route_handlers=[opt_value_endpoint], plugins=[SecurityPlugin(_api_team_config())])
+
+    with TestClient(app) as client:
+        assert (client.get("/opt-value").status_code == 401) is authenticates
+
+

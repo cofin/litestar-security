@@ -296,6 +296,7 @@ class RouteCompiler(Generic[UserT]):
     openapi_config: OpenAPIConfig | None = None
     max_openapi_combinations: int = 32
     csrf_exclude_key: str | None = None
+    exclude_opt_key: str = _EXCLUDE_FROM_AUTH_OPT_KEY
     external_csrf: ExternalCSRF | None = None
     websocket_config: WebSocketSecurityConfig = field(default_factory=WebSocketSecurityConfig)
     exclude: Sequence[str] | str | None = None
@@ -603,50 +604,54 @@ class RouteCompiler(Generic[UserT]):
     def _resolve_effective_policy(  # noqa: C901 - each precedence level validates and returns its own outcome
         self, route: BaseRoute, route_handler: BaseRouteHandler
     ) -> AuthenticationPolicy | None:
-        """Resolve the effective authentication policy or exclusion across ownership layers.
+        """Resolve the effective authentication policy or exclusion for one route.
 
-        Walks ownership layers innermost to outermost (handler -> controller -> router -> app).
-        The first layer declaring an explicit auth policy or exclude_from_auth wins.
+        Whether the route is excluded is read from the **resolved** handler
+        ``opt`` by truthiness, exactly as Litestar's own
+        ``should_bypass_middleware`` reads the key. Litestar has already merged
+        the ownership layers innermost-wins, so a handler declaring a falsy value
+        opts back into authentication under an excluded owner.
+
+        Precedence between a declared ``auth`` policy and an exclusion is
+        resolved innermost-first across the owning layers, so the nearest owner
+        wins. A policy object has no "absent" spelling the way a falsy opt does,
+        so an inherited policy is told apart from a declared one by identity.
         """
-        parent_layers: list[tuple[AuthenticationPolicy | None, bool]] = []
+        owners: list[tuple[AuthenticationPolicy | None, bool]] = []
         for layer in route_handler.ownership_layers[:-1]:
             layer_opt = getattr(layer, "opt", None)
             if not isinstance(layer_opt, Mapping):
                 continue
             opt_map = cast("Mapping[str, object]", layer_opt)
-            has_exclude = _EXCLUDE_FROM_AUTH_OPT_KEY in opt_map
-            if has_exclude and opt_map[_EXCLUDE_FROM_AUTH_OPT_KEY] is not True:
-                self._raise_route_error(route, route_handler, "exclude_from_auth must be exactly True when present")
-            policy = self._policy_from_opt(route, route_handler, opt_map)
-            if has_exclude and policy is not None:
+            layer_excluded = bool(opt_map.get(self.exclude_opt_key))
+            layer_policy = self._policy_from_opt(route, route_handler, opt_map)
+            if layer_excluded and layer_policy is not None:
                 self._raise_route_error(route, route_handler, "Route declares both auth and exclude_from_auth")
-            parent_layers.append((policy, has_exclude))
+            owners.append((layer_policy, layer_excluded))
 
-        handler_opt = route_handler.opt
-        handler_has_exclude = _EXCLUDE_FROM_AUTH_OPT_KEY in handler_opt
-        if handler_has_exclude and handler_opt[_EXCLUDE_FROM_AUTH_OPT_KEY] is not True:
-            self._raise_route_error(route, route_handler, "exclude_from_auth must be exactly True when present")
-
-        handler_policy = self._policy_from_opt(route, route_handler, handler_opt)
-        handler_explicit_exclude = handler_has_exclude and not any(has_exclude for _, has_exclude in parent_layers)
-        handler_explicit_policy = handler_policy is not None and all(
-            parent_policy is not handler_policy for parent_policy, _ in parent_layers
+        excluded = bool(route_handler.opt.get(self.exclude_opt_key))
+        handler_policy = self._policy_from_opt(route, route_handler, route_handler.opt)
+        handler_declared_exclude = excluded and not any(owner_excluded for _, owner_excluded in owners)
+        handler_declared_policy = handler_policy is not None and all(
+            owner_policy is not handler_policy for owner_policy, _ in owners
         )
-        if handler_explicit_exclude and handler_explicit_policy:
+        if handler_declared_exclude and handler_declared_policy:
             self._raise_route_error(route, route_handler, "Route declares both auth and exclude_from_auth")
 
-        if handler_explicit_exclude:
+        if handler_declared_exclude:
             return exclude()
-        if handler_explicit_policy:
+        if handler_declared_policy:
             return handler_policy
 
-        for policy, has_exclude in reversed(parent_layers):
-            if policy is not None:
-                return policy
-            if has_exclude:
+        for owner_policy, owner_excluded in reversed(owners):
+            if owner_policy is not None:
+                return owner_policy
+            # An owner's exclusion only stands while the resolved value agrees;
+            # a nearer layer may have opted back in with a falsy value.
+            if owner_excluded and excluded:
                 return exclude()
 
-        if handler_has_exclude:
+        if excluded:
             return exclude()
         return handler_policy
 
@@ -681,7 +686,7 @@ class RouteCompiler(Generic[UserT]):
             policy = self._policy_from_opt(route, route_handler, cast("Mapping[str, object]", layer_opt))
             if policy is not None:
                 return policy
-            if _EXCLUDE_FROM_AUTH_OPT_KEY in layer_opt:
+            if layer_opt.get(self.exclude_opt_key):
                 return exclude()
         return None
 
