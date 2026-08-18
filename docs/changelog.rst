@@ -4,6 +4,14 @@ Changelog
 0.6.0
 -----
 
+Changed (breaking)
+~~~~~~~~~~~~~~~~~~
+
+* The ``all`` extra is removed. Install the capabilities a deployment actually
+  uses instead: ``argon2``, ``mfa``, ``passkeys``, and ``oauth`` remain, and
+  they compose — ``pip install 'litestar-security[mfa,passkeys]'``. Replace
+  ``litestar-security[all]`` with the explicit set.
+
 Added
 ~~~~~
 

@@ -25,8 +25,9 @@ Install an extra only for the optional capability your application uses:
        add another distribution dependency.
    * - ``pip install 'litestar-security[argon2]'``
      - Argon2-backed local-password authentication.
-   * - ``pip install 'litestar-security[all]'``
-     - Every optional capability above.
+
+Extras are additive, so install the ones a deployment actually uses:
+``pip install 'litestar-security[mfa,passkeys]'``.
 
 JWT and JWKS validation, API-key authentication, IAP verification, and OIDC
 token verification are part of the core installation and need no extra.

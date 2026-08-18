@@ -334,9 +334,7 @@ def test_another_plugin_may_own_the_metadata_route() -> None:
         return {"served_by": "another-plugin"}
 
     config = _app_config(
-        resource="https://api.example.com",
-        authorization_servers=("https://issuer.example.com",),
-        register_route=False,
+        resource="https://api.example.com", authorization_servers=("https://issuer.example.com",), register_route=False
     )
 
     with create_test_client([foreign_metadata], plugins=[SecurityPlugin(config)]) as client:
