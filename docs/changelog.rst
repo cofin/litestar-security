@@ -1,6 +1,40 @@
 Changelog
 =========
 
+0.6.0
+-----
+
+Added
+~~~~~
+
+* ``litestar security routes`` renders the compiled security posture of every
+  registered route: policy, whether authentication runs, CSRF enforcement, and
+  inherited guards. Excluded routes that still carry an inherited guard are
+  flagged, because guards are cumulative in Litestar and such a route is still
+  denied.
+* ``SecurityConfig.exclude_opt_key`` configures the name of the route ``opt``
+  key that excludes a route from authentication, mirroring ``exclude_opt_key``
+  on Litestar's own security backends. Defaults to ``exclude_from_auth``.
+* ``ProtectedResourceConfig.register_route`` suppresses registration of the
+  RFC 9728 metadata route while keeping the document described and advertised.
+  RFC 9728 pins the document to the application root, so two plugins that both
+  publish it otherwise fail at startup with a duplicate handler registration.
+
+Fixed
+~~~~~
+
+* ``exclude_from_auth`` is read by truthiness, as Litestar reads it. A falsy
+  value means "authenticate this route" instead of raising at startup, so a
+  handler can opt back in underneath an excluded router and configurations that
+  asset plugins expose no longer prevent an application from starting.
+* An exclusion no longer derives a CSRF demand. A single excluded route could
+  previously make an application with a session-capable mechanism fail to start
+  unless it configured native CSRF or a named ``ExternalCSRF``, which meant
+  mounting an asset plugin forced an unrelated CSRF decision. Excluded routes
+  are left to Litestar's own CSRF middleware; session-capable protected routes
+  still require CSRF coverage.
+
+
 0.5.0
 -----
 
