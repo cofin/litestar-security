@@ -332,7 +332,7 @@ def test_same_layer_conflicting_auth_and_exclude_raises() -> None:
 
 
 @pytest.mark.parametrize(("value", "authenticates"), [("True", False), (1, False), (False, True), (None, True)])
-def test_exclude_from_auth_value_is_read_by_truthiness(value: Any, authenticates: bool) -> None:
+def test_exclude_from_auth_value_is_read_by_truthiness(value: Any, *, authenticates: bool) -> None:
     """Any value Litestar would treat as truthy excludes; a falsy value authenticates."""
 
     @get("/opt-value", opt={"exclude_from_auth": value}, sync_to_thread=False)
