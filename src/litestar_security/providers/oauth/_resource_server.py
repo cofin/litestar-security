@@ -90,6 +90,12 @@ class ProtectedResourceConfig:
         advertise_resource_metadata: Whether bearer authentication failures
             advertise this document through the RFC 9728
             ``resource_metadata`` challenge parameter.
+        register_route: Whether this plugin registers the route serving the
+            document. Set it to ``False`` when a co-installed plugin already
+            publishes the same path, which RFC 9728 pins to the application
+            root. Everything else is unaffected: the document is still
+            described at ``metadata_url`` and still advertised on bearer
+            failures, because it is still served there - by the other plugin.
         cache_max_age: Seconds a client may cache the document, at most a day.
     """
 
@@ -100,6 +106,7 @@ class ProtectedResourceConfig:
     resource_documentation: str | None = None
     route_prefix: str = ""
     advertise_resource_metadata: bool = True
+    register_route: bool = True
     cache_max_age: int = 300
     document: Mapping[str, JSONValue] = field(init=False)
     canonical_bytes: bytes = field(init=False, repr=False)
@@ -140,6 +147,8 @@ class ProtectedResourceConfig:
         object.__setattr__(self, "route_prefix", route_prefix)
         if self.advertise_resource_metadata.__class__ is not bool:
             _reject("Protected resource challenge advertisement must be boolean")
+        if self.register_route.__class__ is not bool:
+            _reject("Protected resource route registration must be boolean")
         if (
             isinstance(self.cache_max_age, bool)
             or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary

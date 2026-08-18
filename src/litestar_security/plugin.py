@@ -727,7 +727,9 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         app_config.route_handlers.append(build_local_jwks_handler(self.config.local_jwks))
 
     def _configure_protected_resource(self, app_config: AppConfig) -> None:
-        if self.config.protected_resource is None:
+        # `register_route=False` keeps the metadata configured while another
+        # co-installed plugin owns the path RFC 9728 pins to the root.
+        if self.config.protected_resource is None or not self.config.protected_resource.register_route:
             return
         from litestar_security.providers.oauth import (  # noqa: PLC0415 - the OAuth tree loads only when configured
             build_protected_resource_handler,
