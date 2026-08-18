@@ -314,6 +314,9 @@ class RouteCompiler(Generic[UserT]):
         if self.csrf_exclude_key in _RESERVED_OPT_KEYS:
             message = "Native CSRF exclusion opt key collides with reserved Litestar Security metadata"
             raise ImproperlyConfiguredException(detail=message)
+        if self.exclude_opt_key in _RESERVED_OPT_KEYS:
+            message = "Route exclusion opt key collides with reserved Litestar Security metadata"
+            raise ImproperlyConfiguredException(detail=message)
         self._exclude_pattern = build_exclude_path_pattern(exclude=self.exclude, middleware_cls=type(self))
         # build_exclude_path_pattern joins the sequence into one expression, so
         # attributing a match back to the pattern that produced it needs the

@@ -382,3 +382,41 @@ def test_excluded_route_keeps_native_csrf_when_the_application_configures_it() -
     )
 
     assert "exclude_from_csrf" not in handler.opt
+
+
+def test_exclusion_opt_key_is_configurable() -> None:
+    """The key is a convention with a configurable name, as it is on Litestar's own backends."""
+
+    @get("/custom", opt={"skip_my_auth": True}, sync_to_thread=False)
+    def custom_key_endpoint() -> str:
+        return "custom"
+
+    @get("/default", opt={"exclude_from_auth": True}, sync_to_thread=False)
+    def default_key_endpoint() -> str:
+        return "default"
+
+    config = _api_team_config()
+    config.exclude_opt_key = "skip_my_auth"
+    app = Litestar(
+        route_handlers=[custom_key_endpoint, default_key_endpoint],
+        openapi_config=None,
+        plugins=[SecurityPlugin(config)],
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/custom").status_code == 200
+        assert client.get("/default").status_code == 401
+
+
+def test_exclusion_opt_key_colliding_with_reserved_metadata_is_rejected() -> None:
+    config = _api_team_config()
+    config.exclude_opt_key = "litestar_security_plan"
+
+    with pytest.raises(ImproperlyConfiguredException, match="collides with reserved Litestar Security metadata"):
+        Litestar(route_handlers=[_api_thing], openapi_config=None, plugins=[SecurityPlugin(config)])
+
+
+@pytest.mark.parametrize("value", ["", "   ", 5, None])
+def test_exclusion_opt_key_must_be_non_blank_text(value: object) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="exclusion opt key must be non-blank text"):
+        SecurityConfig(exclude_opt_key=value)  # type: ignore[arg-type]

@@ -170,6 +170,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 external_csrf=self.config.external_csrf,
                 websocket_config=self.config.websocket,
                 exclude=self.config.exclude,
+                exclude_opt_key=self.config.exclude_opt_key,
                 converts_to_problem_details=self._converts_to_problem_details(app_config),
                 raised_error_schema=self.config.raised_error_schema,
             )
