@@ -476,18 +476,15 @@ class RouteCompiler(Generic[UserT]):
         csrf_override: bool | None,
     ) -> SecurityRuntimePlan:
         base_plan = self._compile_policy(route, route_handler, policy)
-        if isinstance(policy, ExcludePolicy):
-            derived = any(
-                self.registry.get_mechanism(name).session_capable for name in self.registry.default_mechanism_names
-            )
-        else:
-            derived = any(
-                self.registry.get_mechanism(name).session_capable
-                for name in self.registry.mechanism_names
-                if any(
-                    requirement.name == name for alternative in base_plan.alternatives for requirement in alternative
-                )
-            )
+        # An exclusion states that this plugin does not own the route, so it
+        # derives no CSRF demand. Deriving one from the default mechanisms made a
+        # plugin-mounted asset route force the whole application to configure
+        # CSRF, which native Litestar never does.
+        derived = not isinstance(policy, ExcludePolicy) and any(
+            self.registry.get_mechanism(name).session_capable
+            for name in self.registry.mechanism_names
+            if any(requirement.name == name for alternative in base_plan.alternatives for requirement in alternative)
+        )
         effective = derived if csrf_override is None else csrf_override
         return self._compile_policy(route, route_handler, policy, csrf_required=effective)
 
@@ -495,6 +492,12 @@ class RouteCompiler(Generic[UserT]):
         self, route: HTTPRoute, route_handler: HTTPRouteHandler, policy: AuthenticationPolicy, plan: SecurityRuntimePlan
     ) -> SecurityRuntimePlan:
         native = self.csrf_exclude_key is not None
+        # An excluded route is left to Litestar's own CSRF middleware exactly as
+        # `exclude_from_auth` leaves it there natively: this plugin neither
+        # demands coverage nor writes a native exclusion for it. An explicit
+        # csrf_required=True on the handler still applies.
+        if isinstance(policy, ExcludePolicy) and plan.csrf_required is not True:
+            return plan
         # A public() plan is excluded from native CSRF. A public route that
         # establishes cookie state must instead declare csrf_required=True;
         # see patterns.md, "Local generated routes".

@@ -2321,12 +2321,13 @@ def test_exclude_policy_and_native_handler_alias_compile_without_authentication(
         if isinstance(route_value, ASGIRoute) and route_value.path == "/native-mount"
     )
 
+    # An exclusion states this plugin does not own the route, so it derives no
+    # CSRF demand and writes no native exclusion; Litestar's own CSRF middleware
+    # is left to handle the route exactly as it does natively.
     assert (
         typed_plan
         == native_plan
-        == SecurityRuntimePlan(
-            authenticate=False, bypass_authentication=True, csrf_required=True, csrf_enforcement="native"
-        )
+        == SecurityRuntimePlan(authenticate=False, bypass_authentication=True, csrf_required=False)
     )
     assert _operation_security(app, "/typed") == _operation_security(app, "/native") == [{}]
     assert socket_route.route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from re import escape
+from secrets import token_hex
 from typing import TYPE_CHECKING, Any, cast
 from warnings import catch_warnings, simplefilter
 
 import pytest
 from litestar import Litestar, Router, WebSocket, asgi, get, websocket
 from litestar.config.app import AppConfig
+from litestar.config.csrf import CSRFConfig
 from litestar.exceptions import ImproperlyConfiguredException, LitestarWarning
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import SecurityScheme
@@ -88,6 +90,22 @@ def _api_team_config(*, exclude: Sequence[str] | str | None = None) -> SecurityC
             for name in names
         ),
         exclude=exclude,
+    )
+
+
+def _session_config() -> SecurityConfig[object]:
+    """Build a session-capable configuration, which derives native CSRF coverage."""
+    return SecurityConfig(
+        slots=(_HeaderSlot(name="slot-session"),),  # type: ignore[arg-type]
+        mechanisms=(
+            AuthenticationMechanism(
+                authenticator=_HeaderAuthenticator(name="session", slot="slot-session"),  # type: ignore[arg-type]
+                resolver=_HeaderResolver(),
+                scheme_name="session",
+                security_scheme=SecurityScheme(type="http", scheme="bearer"),
+                session_capable=True,
+            ),
+        ),
     )
 
 
@@ -327,3 +345,40 @@ def test_exclude_from_auth_value_is_read_by_truthiness(value: Any, authenticates
         assert (client.get("/opt-value").status_code == 401) is authenticates
 
 
+def test_static_assets_declaring_exclusion_serve_without_csrf_configuration() -> None:
+    """A plugin-mounted asset router must not force a CSRF decision on the application."""
+
+    @get("/assets/app.css", opt={"exclude_from_auth": True}, sync_to_thread=False)
+    def asset_endpoint() -> str:
+        return "css"
+
+    app = Litestar(route_handlers=[asset_endpoint], openapi_config=None, plugins=[SecurityPlugin(_session_config())])
+
+    with TestClient(app) as client:
+        assert client.get("/assets/app.css").status_code == 200
+
+
+def test_session_capable_protected_route_still_requires_csrf_configuration() -> None:
+    """The demand is removed for exclusions only; a session route without CSRF is still refused."""
+    with pytest.raises(ImproperlyConfiguredException, match="Route requires native CSRF or a named ExternalCSRF"):
+        Litestar(route_handlers=[_api_thing], openapi_config=None, plugins=[SecurityPlugin(_session_config())])
+
+
+def test_excluded_route_keeps_native_csrf_when_the_application_configures_it() -> None:
+    """With CSRF configured the route is left to Litestar's middleware, as it is natively."""
+
+    @get("/assets/app.css", opt={"exclude_from_auth": True}, sync_to_thread=False)
+    def asset_endpoint() -> str:
+        return "css"
+
+    app = Litestar(
+        route_handlers=[asset_endpoint],
+        openapi_config=None,
+        csrf_config=CSRFConfig(secret=token_hex()),
+        plugins=[SecurityPlugin(_session_config())],
+    )
+    handler = next(
+        route.route_handler_map["GET"][0] for route in app.routes if getattr(route, "path", None) == "/assets/app.css"
+    )
+
+    assert "exclude_from_csrf" not in handler.opt
