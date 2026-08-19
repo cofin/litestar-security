@@ -1197,7 +1197,7 @@ def _merge_authorization(outcomes: Sequence[Authenticated[Any]]) -> Authorizatio
     scopes: set[str] = set()
     roles: set[str] = set()
     capabilities: set[str] = set()
-    team_roles: dict[str, set[str]] = {}
+    tenant_roles: dict[str, set[str]] = {}
     tenant_ids: set[str] = set()
     resources: set[ResourcePermission] = set()
     attributes: dict[str, object] = {}
@@ -1205,8 +1205,8 @@ def _merge_authorization(outcomes: Sequence[Authenticated[Any]]) -> Authorizatio
         scopes.update(outcome.grants.scopes)
         roles.update(outcome.grants.roles)
         capabilities.update(outcome.grants.capabilities)
-        for team_id, grants in outcome.grants.team_roles.items():
-            team_roles.setdefault(team_id, set()).update(grants)
+        for tenant_id, grants in outcome.grants.tenant_roles.items():
+            tenant_roles.setdefault(tenant_id, set()).update(grants)
         tenant_ids.update(outcome.grants.tenant_ids)
         resources.update(outcome.grants.resources)
         attributes.update(outcome.grants.attributes)
@@ -1214,7 +1214,7 @@ def _merge_authorization(outcomes: Sequence[Authenticated[Any]]) -> Authorizatio
         scopes=frozenset(scopes),
         roles=frozenset(roles),
         capabilities=frozenset(capabilities),
-        team_roles={team_id: frozenset(grants) for team_id, grants in team_roles.items()},
+        tenant_roles={tenant_id: frozenset(grants) for tenant_id, grants in tenant_roles.items()},
         tenant_ids=frozenset(tenant_ids),
         resources=frozenset(resources),
         attributes=attributes,

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from litestar_security import SecurityPlugin
 
 
-@pytest.mark.parametrize("mode", ["google-iap", "google-oauth", "github-oauth", "keycloak", "api-team-service"])
+@pytest.mark.parametrize("mode", ["google-iap", "google-oauth", "github-oauth", "keycloak", "api-tenant-service"])
 def test_provider_modes_boot_with_native_openapi(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     monkeypatch.setenv("LITESTAR_SECURITY_EXAMPLE", mode)
     app = create_app()
@@ -29,7 +29,7 @@ def test_provider_modes_boot_with_native_openapi(monkeypatch: pytest.MonkeyPatch
         assert plugin.config.iap is not None
         assert plugin.config.iap.audience == frozenset({"/projects/123/global/backendServices/456"})
         assert "GoogleIAP" in app.openapi_schema.components.security_schemes
-    elif mode == "api-team-service":
+    elif mode == "api-tenant-service":
         assert plugin.config.api_key is not None
         assert plugin.config.service_token is not None
         assert {"APIKey", "service-jwt"} <= set(app.openapi_schema.components.security_schemes)

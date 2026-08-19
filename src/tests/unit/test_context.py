@@ -243,30 +243,30 @@ def test_evidence_rejects_blank_names_and_naive_timestamps(kwargs: dict[str, obj
 
 def test_authorization_snapshot_defensively_freezes_input() -> None:
     scopes = {"read"}
-    team_roles = {"team-1": {"member"}}
+    tenant_roles = {"tenant-1": {"member"}}
     attributes = {"region": "us"}
     snapshot = AuthorizationSnapshot(
         scopes=scopes,
         roles={"admin"},
         capabilities={"reports.export"},
-        team_roles=team_roles,
+        tenant_roles=tenant_roles,
         tenant_ids={"tenant-1"},
         attributes=attributes,
     )
 
     scopes.add("write")
-    team_roles["team-1"].add("owner")
-    team_roles["team-2"] = {"member"}
+    tenant_roles["tenant-1"].add("owner")
+    tenant_roles["tenant-2"] = {"member"}
     attributes["region"] = "eu"
 
     assert snapshot.scopes == frozenset({"read"})
     assert snapshot.roles == frozenset({"admin"})
     assert snapshot.capabilities == frozenset({"reports.export"})
-    assert snapshot.team_roles == {"team-1": frozenset({"member"})}
+    assert snapshot.tenant_roles == {"tenant-1": frozenset({"member"})}
     assert snapshot.tenant_ids == frozenset({"tenant-1"})
     assert snapshot.attributes == {"region": "us"}
     with pytest.raises(TypeError):
-        snapshot.team_roles["team-2"] = frozenset({"member"})  # type: ignore[index]
+        snapshot.tenant_roles["tenant-2"] = frozenset({"member"})  # type: ignore[index]
     with pytest.raises(TypeError):
         snapshot.attributes["region"] = "eu"  # type: ignore[index]
 
@@ -277,8 +277,8 @@ def test_authorization_snapshot_defensively_freezes_input() -> None:
         {"scopes": {" "}},
         {"roles": {""}},
         {"capabilities": {" "}},
-        {"team_roles": {"": {"member"}}},
-        {"team_roles": {"team-1": {" "}}},
+        {"tenant_roles": {"": {"member"}}},
+        {"tenant_roles": {"tenant-1": {" "}}},
         {"tenant_ids": {" "}},
     ],
 )
@@ -303,14 +303,14 @@ async def test_static_authorization_snapshot_refresher_returns_its_immutable_sna
 
 def test_credential_restrictions_normalize_sets_and_preserve_empty() -> None:
     restrictions = CredentialRestrictions(
-        scopes={" read "}, roles=frozenset(), capabilities=None, team_ids={" team-1 "}, tenant_ids={"tenant-1"}
+        scopes={" read "}, roles=frozenset(), capabilities=None, tenant_ids={"tenant-1"}
     )
 
     assert restrictions.scopes == frozenset({"read"})
     assert restrictions.roles == frozenset()
     assert restrictions.capabilities is None
-    assert restrictions.team_ids == frozenset({"team-1"})
     assert restrictions.tenant_ids == frozenset({"tenant-1"})
+    assert not hasattr(restrictions, "team_ids")
 
 
 def test_resource_permission_is_immutable_and_normalized() -> None:
@@ -323,9 +323,7 @@ def test_resource_permission_is_immutable_and_normalized() -> None:
         ResourcePermission(resource="report-1", scopes={""})
 
 
-@pytest.mark.parametrize(
-    "kwargs", [{"scopes": {" "}}, {"roles": {""}}, {"capabilities": {" "}}, {"team_ids": {""}}, {"tenant_ids": {" "}}]
-)
+@pytest.mark.parametrize("kwargs", [{"scopes": {" "}}, {"roles": {""}}, {"capabilities": {" "}}, {"tenant_ids": {" "}}])
 def test_credential_restrictions_reject_blank_values(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="must not be blank"):
         CredentialRestrictions(**kwargs)

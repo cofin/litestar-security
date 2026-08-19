@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from litestar_security.providers.jwks import JWKSProvider
 
 __all__ = (
-    "build_api_team_config",
+    "build_api_tenant_config",
     "build_iap_config",
     "build_local_auth",
     "build_oauth_config",
@@ -163,7 +163,7 @@ def build_oauth_config(mode: str) -> OAuthConfig:
     return OAuthConfig(oauth_service=_ExampleOAuthService(provider_name))
 
 
-def build_api_team_config() -> tuple[APIKeyConfig, ServiceTokenConfig]:
+def build_api_tenant_config() -> tuple[APIKeyConfig, ServiceTokenConfig]:
     """Build API-key and userless workload-JWT boundaries for the API example."""
     backend = InMemorySecurityBackend()
     jwks = cast("JWKSProvider", _UnavailableJWKS())
@@ -171,7 +171,7 @@ def build_api_team_config() -> tuple[APIKeyConfig, ServiceTokenConfig]:
         APIKeyConfig(store=backend.api_keys, pepper=b"a" * 32, identity_resolver=_ExampleIdentityResolver()),
         ServiceTokenConfig(
             issuer="https://workload.example",
-            audiences=frozenset({"team-api"}),
+            audiences=frozenset({"tenant-api"}),
             allowed_algorithms=frozenset({"ES256"}),
             jwks=jwks,
             jwks_uri="https://workload.example/jwks",

@@ -88,30 +88,30 @@ application owns shared ``OIDCDiscoveryClient`` and ``JWKSProvider`` resources.
 The returned provider owns only its OAuth HTTP client; closing it does not close
 the shared discovery or JWKS resources.
 
-Team authorization
-------------------
+Tenant authorization
+--------------------
 
 Once authentication and authorization resolution are configured, a guard can
-check the team named by the route:
+check the tenant named by the route:
 
 .. code-block:: python
 
    from litestar import get
 
-   from litestar_security import requires_team_role, required
+   from litestar_security import requires_tenant_role, required
 
 
    @get(
-       "/teams/{team_id:str}",
+       "/tenants/{tenant_id:str}",
        auth=required(),
-       guards=[requires_team_role(team_parameter="team_id", roles={"owner"})],
+       guards=[requires_tenant_role(tenant_parameter="tenant_id", roles={"owner"})],
    )
-   async def team_settings(team_id: str) -> dict[str, str]:
-       return {"team_id": team_id}
+   async def tenant_settings(tenant_id: str) -> dict[str, str]:
+       return {"tenant_id": tenant_id}
 
 The guard compares the path value with the server-resolved authorization
-snapshot. A client cannot gain access by changing ``team_id``.
+snapshot. A client cannot gain access by changing ``tenant_id``.
 
 See :doc:`jwt-and-jwks` for local signing, OIDC discovery, remote keys, and
-rotation. The repository's ``api-team-service`` example combines an API key,
-a workload JWT, and team authorization.
+rotation. The repository's ``api-tenant-service`` example combines an API key,
+a workload JWT, and tenant authorization.
