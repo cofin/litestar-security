@@ -12,7 +12,7 @@ from litestar.di import NamedDependency  # noqa: TC002 - Litestar resolves handl
 from litestar.openapi import OpenAPIConfig
 
 from examples.support import (
-    build_api_team_config,
+    build_api_tenant_config,
     build_iap_config,
     build_local_auth,
     build_oauth_config,
@@ -24,7 +24,7 @@ from litestar_security import SecurityConfig, SecurityContext, SecurityPlugin, a
 __all__ = ("EXAMPLE_MODES", "create_app")
 
 EXAMPLE_MODES = (
-    "api-team-service",
+    "api-tenant-service",
     "github-oauth",
     "google-iap",
     "google-oauth",
@@ -119,8 +119,8 @@ def _build_security_config(mode: str) -> SecurityConfig[object]:
         elif mode in {"google-oauth", "github-oauth", "keycloak"}:
             config.local_auth = build_local_auth("local-session")
             config.oauth = build_oauth_config(mode)
-        elif mode == "api-team-service":
-            config.api_key, config.service_token = build_api_team_config()
+        elif mode == "api-tenant-service":
+            config.api_key, config.service_token = build_api_tenant_config()
         elif mode == "websocket":
             config.local_auth = build_local_auth("local-hybrid")
             config.websocket = build_websocket_config()

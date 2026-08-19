@@ -42,7 +42,7 @@ from litestar_security.context import (
     ResourcePermission,
     resolve_authorization,
 )
-from litestar_security.guards import requires_team_role
+from litestar_security.guards import requires_tenant_role
 from litestar_security.testing import StaticAuthorizationResolver, StaticIdentityResolver
 
 if TYPE_CHECKING:
@@ -541,7 +541,7 @@ async def test_same_subject_merges_evidence_and_grants_in_order() -> None:
                         scopes={"read"},
                         roles={"member"},
                         capabilities={"reports.view"},
-                        team_roles={"team-1": {"member"}},
+                        tenant_roles={"tenant-1": {"member"}},
                         tenant_ids={"tenant-1"},
                         resources={ResourcePermission(resource="report-1", scopes={"read"})},
                         attributes={"source-a": True},
@@ -559,7 +559,7 @@ async def test_same_subject_merges_evidence_and_grants_in_order() -> None:
                         scopes={"write"},
                         roles={"admin"},
                         capabilities={"reports.export"},
-                        team_roles={"team-1": {"owner"}, "team-2": {"member"}},
+                        tenant_roles={"tenant-1": {"owner"}, "tenant-2": {"member"}},
                         tenant_ids={"tenant-2"},
                         resources={ResourcePermission(resource="report-2", scopes={"write"})},
                         attributes={"source-b": True},
@@ -578,9 +578,9 @@ async def test_same_subject_merges_evidence_and_grants_in_order() -> None:
     assert context.authorization.scopes == frozenset({"read", "write"})
     assert context.authorization.roles == frozenset({"member", "admin"})
     assert context.authorization.capabilities == frozenset({"reports.view", "reports.export"})
-    assert context.authorization.team_roles == {
-        "team-1": frozenset({"member", "owner"}),
-        "team-2": frozenset({"member"}),
+    assert context.authorization.tenant_roles == {
+        "tenant-1": frozenset({"member", "owner"}),
+        "tenant-2": frozenset({"member"}),
     }
     assert context.authorization.tenant_ids == frozenset({"tenant-1", "tenant-2"})
     assert context.authorization.resources == frozenset({
@@ -591,12 +591,12 @@ async def test_same_subject_merges_evidence_and_grants_in_order() -> None:
 
 
 def _authorization_for_dimension(dimension: str) -> AuthorizationSnapshot:
-    if dimension == "team_ids":
-        return AuthorizationSnapshot(team_roles={"a": {"member"}, "b": {"member"}, "c": {"member"}})
+    if dimension == "tenant_ids":
+        return AuthorizationSnapshot(tenant_roles={"a": {"member"}, "b": {"member"}, "c": {"member"}})
     return AuthorizationSnapshot(**{dimension: {"a", "b", "c"}})
 
 
-@pytest.mark.parametrize("dimension", ["scopes", "roles", "capabilities", "team_ids", "tenant_ids"])
+@pytest.mark.parametrize("dimension", ["scopes", "roles", "capabilities", "tenant_ids"])
 @pytest.mark.parametrize(
     ("bounds", "expected"),
     [
@@ -635,8 +635,8 @@ async def test_restriction_intersection_truth_table(
 
     _, context = await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True)
 
-    if dimension == "team_ids":
-        actual = set(context.authorization.team_roles)
+    if dimension == "tenant_ids":
+        actual = set(context.authorization.tenant_roles)
     else:
         actual = set(getattr(context.authorization, dimension))
     assert actual == expected
@@ -675,26 +675,26 @@ def test_resource_restriction_truth_table(
 @pytest.mark.parametrize(
     ("role_bound", "expected"),
     [
-        (frozenset({"member"}), {"team-1": frozenset({"member"}), "team-2": frozenset({"member"})}),
+        (frozenset({"member"}), {"tenant-1": frozenset({"member"}), "tenant-2": frozenset({"member"})}),
         (frozenset({"auditor"}), {}),
-        (None, {"team-1": frozenset({"admin", "member"}), "team-2": frozenset({"member"})}),
+        (None, {"tenant-1": frozenset({"admin", "member"}), "tenant-2": frozenset({"member"})}),
     ],
-    ids=["narrows-every-team", "drops-empty-grants", "unbounded-preserves-team-roles"],
+    ids=["narrows-every-tenant", "drops-empty-grants", "unbounded-preserves-tenant-roles"],
 )
-def test_resolve_authorization_narrows_team_roles_with_credential_role_bound(
+def test_resolve_authorization_narrows_tenant_roles_with_credential_role_bound(
     role_bound: frozenset[str] | None, expected: dict[str, frozenset[str]]
 ) -> None:
     snapshot = AuthorizationSnapshot(
         roles=frozenset({"admin", "member"}),
-        team_roles={"team-2": frozenset({"member"}), "team-1": frozenset({"admin", "member"})},
+        tenant_roles={"tenant-2": frozenset({"member"}), "tenant-1": frozenset({"admin", "member"})},
     )
 
     effective = resolve_authorization(snapshot, (CredentialRestrictions(roles=role_bound),))
 
-    assert effective.team_roles == expected
+    assert effective.tenant_roles == expected
 
 
-async def test_team_role_guard_denies_role_removed_by_credential_ceiling() -> None:
+async def test_tenant_role_guard_denies_role_removed_by_credential_ceiling() -> None:
     events: list[str] = []
     evaluator, _, _, _ = _evaluator(
         [
@@ -708,7 +708,7 @@ async def test_team_role_guard_denies_role_removed_by_credential_ceiling() -> No
         events,
         authorization_resolver=_AuthorizationResolver(
             AuthorizationSnapshot(
-                roles=frozenset({"admin", "member"}), team_roles={"team-1": frozenset({"admin", "member"})}
+                roles=frozenset({"admin", "member"}), tenant_roles={"tenant-1": frozenset({"admin", "member"})}
             ),
             events,
         ),
@@ -716,20 +716,20 @@ async def test_team_role_guard_denies_role_removed_by_credential_ceiling() -> No
     principal, context = await evaluator.evaluate(_CONNECTION, NullSessionHandle(), required=True)
     connection = cast(
         "ASGIConnection[Any, Any, Any, Any]",
-        SimpleNamespace(user=principal, auth=context, path_params={"team_id": "team-1"}),
+        SimpleNamespace(user=principal, auth=context, path_params={"tenant_id": "tenant-1"}),
     )
 
-    decision = requires_team_role(roles={"admin"}).decide(connection)
+    decision = requires_tenant_role(roles={"admin"}).decide(connection)
 
     assert not decision.granted
-    assert decision.code == "missing_team_role"
+    assert decision.code == "missing_tenant_role"
 
 
 async def test_application_authorization_is_resolved_once_then_narrowed_by_all_credentials() -> None:
     events: list[str] = []
     application = AuthorizationSnapshot(
         scopes={"read", "write"},
-        team_roles={"team-1": {"member"}, "team-2": {"owner"}},
+        tenant_roles={"tenant-1": {"member"}, "tenant-2": {"owner"}},
         tenant_ids={"tenant-1"},
         resources={ResourcePermission(resource="report-1", scopes={"read", "write"})},
     )
@@ -742,10 +742,10 @@ async def test_application_authorization_is_resolved_once_then_narrowed_by_all_c
                 _success(
                     "api-key",
                     "slot-api-key",
-                    grants=AuthorizationSnapshot(scopes={"manufactured"}, team_roles={"missing": {"owner"}}),
+                    grants=AuthorizationSnapshot(scopes={"manufactured"}, tenant_roles={"missing": {"owner"}}),
                     restrictions=CredentialRestrictions(
                         scopes={"read"},
-                        team_ids={"team-1", "missing"},
+                        tenant_ids={"tenant-1", "missing"},
                         resources=frozenset({ResourcePermission(resource="report-1", scopes={"read"})}),
                     ),
                 ),
@@ -776,7 +776,7 @@ async def test_application_authorization_is_resolved_once_then_narrowed_by_all_c
 
     assert authorization_resolver.calls == 1
     assert context.authorization.scopes == frozenset({"read"})
-    assert context.authorization.team_roles == {"team-1": frozenset({"member"})}
+    assert context.authorization.tenant_roles == {"tenant-1": frozenset({"member"})}
     assert context.authorization.tenant_ids == frozenset({"tenant-1"})
     assert context.authorization.resources == frozenset({ResourcePermission(resource="report-1", scopes=frozenset())})
     assert "manufactured" not in context.authorization.scopes

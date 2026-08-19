@@ -26,8 +26,8 @@ __all__ = (
     "requires_one_of",
     "requires_role",
     "requires_scope",
-    "requires_team_role",
     "requires_tenant",
+    "requires_tenant_role",
 )
 
 
@@ -182,28 +182,28 @@ def requires_capability(capability: str) -> AuthorizationPredicate:
     return _GrantPredicate(kind="capability", value=_normalize_name(capability, "Capability"))
 
 
-def requires_team_role(*, team_parameter: str = "team_id", roles: Collection[str]) -> AuthorizationPredicate:
-    """Require one allowed role for the team selected by a parsed path parameter.
+def requires_tenant_role(*, tenant_parameter: str = "tenant_id", roles: Collection[str]) -> AuthorizationPredicate:
+    """Require one allowed role for the tenant selected by a parsed path parameter.
 
-    The team is read from the parsed path parameter rather than the request body,
+    The tenant is read from the parsed path parameter rather than the request body,
     so the value the guard checks is the one the route will act on.
 
     Args:
-        team_parameter: The path parameter naming the team.
+        tenant_parameter: The path parameter naming the tenant.
         roles: The roles that satisfy the guard, normalized before comparison.
 
     Returns:
-        A predicate satisfied when the principal holds one of the roles in that team.
+        A predicate satisfied when the principal holds one of the roles in that tenant.
 
     Raises:
         ImproperlyConfiguredException: If no roles are supplied.
     """
-    normalized_roles = frozenset(_normalize_name(role, "Team role") for role in roles)
+    normalized_roles = frozenset(_normalize_name(role, "Tenant role") for role in roles)
     if not normalized_roles:
-        message = "Team-role guard requires at least one role"
+        message = "Tenant-role guard requires at least one role"
         raise ImproperlyConfiguredException(detail=message)
-    return _TeamRolePredicate(
-        team_parameter=_normalize_name(team_parameter, "Team path parameter"), roles=normalized_roles
+    return _TenantRolePredicate(
+        tenant_parameter=_normalize_name(tenant_parameter, "Tenant path parameter"), roles=normalized_roles
     )
 
 
@@ -430,15 +430,22 @@ class _GrantPredicate(AuthorizationPredicate):
 
 
 @dataclass(frozen=True, slots=True)
-class _TeamRolePredicate(AuthorizationPredicate):
-    team_parameter: str
+class _TenantRolePredicate(AuthorizationPredicate):
+    tenant_parameter: str
     roles: frozenset[str]
 
     def decide(self, connection: ASGIConnection[Any, Any, Any, Any]) -> AuthorizationDecision:
-        team_id = connection.path_params.get(self.team_parameter)
-        team_roles = _authorization(connection).team_roles.get(str(team_id), frozenset()) if team_id is not None else ()
+        tenant_id = connection.path_params.get(self.tenant_parameter)
+        tenant_roles: frozenset[str] = (
+            _authorization(connection).tenant_roles.get(str(tenant_id), frozenset[str]())
+            if tenant_id is not None
+            else frozenset[str]()
+        )
         return _grant_decision(
-            connection, granted=bool(self.roles.intersection(team_roles)), code="missing_team_role", path="team_role"
+            connection,
+            granted=bool(self.roles.intersection(tenant_roles)),
+            code="missing_tenant_role",
+            path="tenant_role",
         )
 
 

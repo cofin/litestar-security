@@ -30,8 +30,8 @@ from litestar_security.guards import (
     requires_one_of,
     requires_role,
     requires_scope,
-    requires_team_role,
     requires_tenant,
+    requires_tenant_role,
 )
 
 _DUPLICATE_GUARD = requires_authenticated()
@@ -208,10 +208,10 @@ def test_native_authorization_guard_allows_matching_scope_and_denies_without_lea
         ("scope", True),
         ("role", True),
         ("capability", True),
-        ("team", True),
-        ("team-role-mismatch", False),
-        ("team-missing-param", False),
-        ("team-forged-param", False),
+        ("tenant_role", True),
+        ("tenant-role-mismatch", False),
+        ("tenant-role-missing-param", False),
+        ("tenant-role-forged-param", False),
         ("tenant", True),
         ("tenant-mismatch", False),
         ("tenant-missing-param", False),
@@ -222,17 +222,17 @@ def test_authorization_base_guard_truth_table(case: str, allowed: bool) -> None:
         scopes={"reports:read"},
         roles={"admin"},
         capabilities={"reports.export"},
-        team_roles={"team-1": {"owner"}},
+        tenant_roles={"tenant-1": {"owner"}},
         tenant_ids={"tenant-1"},
     )
-    path_params: dict[str, object] = {"team_id": "team-1", "tenant_id": "tenant-1"}
-    if case == "team-role-mismatch":
-        guard = requires_team_role(team_parameter="team_id", roles={"admin"})
-    elif case == "team-missing-param":
-        guard = requires_team_role(team_parameter="missing", roles={"owner"})
-    elif case == "team-forged-param":
-        guard = requires_team_role(team_parameter="team_id", roles={"owner"})
-        path_params["team_id"] = "team-2"
+    path_params: dict[str, object] = {"tenant_id": "tenant-1"}
+    if case == "tenant-role-mismatch":
+        guard = requires_tenant_role(tenant_parameter="tenant_id", roles={"admin"})
+    elif case == "tenant-role-missing-param":
+        guard = requires_tenant_role(tenant_parameter="missing", roles={"owner"})
+    elif case == "tenant-role-forged-param":
+        guard = requires_tenant_role(tenant_parameter="tenant_id", roles={"owner"})
+        path_params["tenant_id"] = "tenant-2"
     elif case == "tenant-mismatch":
         guard = requires_tenant(tenant_parameter="tenant_id")
         path_params["tenant_id"] = "tenant-2"
@@ -244,7 +244,7 @@ def test_authorization_base_guard_truth_table(case: str, allowed: bool) -> None:
             "scope": requires_scope("reports:read"),
             "role": requires_role("admin"),
             "capability": requires_capability("reports.export"),
-            "team": requires_team_role(team_parameter="team_id", roles={"owner", "admin"}),
+            "tenant_role": requires_tenant_role(tenant_parameter="tenant_id", roles={"owner", "admin internal"}),
             "tenant": requires_tenant(tenant_parameter="tenant_id"),
         }[case]
     connection = _guard_connection(authorization=authorization, path_params=path_params)
@@ -263,7 +263,7 @@ def test_authorization_base_guard_truth_table(case: str, allowed: bool) -> None:
         requires_scope("reports:read"),
         requires_role("admin"),
         requires_capability("reports.export"),
-        requires_team_role(team_parameter="team_id", roles={"owner"}),
+        requires_tenant_role(tenant_parameter="tenant_id", roles={"owner"}),
         requires_tenant(tenant_parameter="tenant_id"),
         requires_any_of(requires_scope("reports:read"), requires_role("admin")),
     ],
@@ -309,7 +309,7 @@ def test_authorization_combinator_truth_tables(
         (partial(requires_at_least, 2, requires_authenticated()), "between 1 and 1"),
         (partial(requires_all_of, _DUPLICATE_GUARD, _DUPLICATE_GUARD), "duplicate child"),
         (partial(requires_scope, " "), "must not be blank"),
-        (partial(requires_team_role, team_parameter="team_id", roles=set()), "at least one role"),
+        (partial(requires_tenant_role, tenant_parameter="tenant_id", roles=set()), "at least one role"),
     ],
 )
 def test_authorization_guard_construction_rejects_invalid_expressions(factory: object, match: str) -> None:
@@ -356,8 +356,8 @@ def test_requires_guard_exports_and_clean_break() -> None:
     assert litestar_security.requires_scope is requires_scope
     assert litestar_security.requires_role is requires_role
     assert litestar_security.requires_capability is requires_capability
-    assert litestar_security.requires_team_role is requires_team_role
     assert litestar_security.requires_tenant is requires_tenant
+    assert litestar_security.requires_tenant_role is requires_tenant_role
 
     for name in ("requires_all_of", "requires_any_of", "requires_at_least", "requires_one_of"):
         assert getattr(guards_module, name).__name__ == name
@@ -377,6 +377,7 @@ def test_requires_guard_exports_and_clean_break() -> None:
         "require_role",
         "require_capability",
         "require_team_role",
+        "requires_team_role",
         "require_tenant",
         "require_all_of",
         "require_any_of",

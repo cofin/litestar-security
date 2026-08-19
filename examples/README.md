@@ -15,7 +15,7 @@ LITESTAR_SECURITY_EXAMPLE=google-iap uv run litestar --app examples.app:create_a
 LITESTAR_SECURITY_EXAMPLE=google-oauth uv run litestar --app examples.app:create_app run
 LITESTAR_SECURITY_EXAMPLE=github-oauth uv run litestar --app examples.app:create_app run
 LITESTAR_SECURITY_EXAMPLE=keycloak uv run litestar --app examples.app:create_app run
-LITESTAR_SECURITY_EXAMPLE=api-team-service uv run litestar --app examples.app:create_app run
+LITESTAR_SECURITY_EXAMPLE=api-tenant-service uv run litestar --app examples.app:create_app run
 LITESTAR_SECURITY_EXAMPLE=websocket uv run litestar --app examples.app:create_app run
 LITESTAR_SECURITY_EXAMPLE=custom-admin uv run litestar --app examples.app:create_app run
 ```
@@ -30,9 +30,9 @@ Provider modes use deterministic, secret-free stub transports by default.
 audience; unsigned identity headers are never credentials. The OAuth modes
 exercise native login, callback, link, unlink, scope-upgrade, revoke, and logout
 routes with state/PKCE binding. The disposable Keycloak realm lives at
-`src/tests/fixtures/keycloak/realm.json`. `api-team-service` composes an opaque
+`src/tests/fixtures/keycloak/realm.json`. `api-tenant-service` composes an opaque
 HMAC-digested API key with an external userless workload JWT; application guards
-remain responsible for team and tenant authorization.
+remain responsible for tenant authorization.
 
 The stub modes are not deployment configuration. Production IAP must be behind
 the intended Google load-balancer boundary, OAuth clients must load real

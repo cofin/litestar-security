@@ -69,8 +69,8 @@ from litestar_security.guards import (
     requires_one_of,
     requires_role,
     requires_scope,
-    requires_team_role,
     requires_tenant,
+    requires_tenant_role,
 )
 from litestar_security.headers import ContentSecurityPolicy, CSPMode, SecurityHeadersConfig, csp_nonce
 from litestar_security.plugin import CurrentUser, SecurityPlugin
@@ -208,8 +208,8 @@ __all__ = (
     "requires_one_of",
     "requires_role",
     "requires_scope",
-    "requires_team_role",
     "requires_tenant",
+    "requires_tenant_role",
     "resolve_authorization",
     "websocket_policy_fingerprint",
 )

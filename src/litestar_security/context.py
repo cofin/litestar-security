@@ -325,7 +325,7 @@ class AuthorizationSnapshot:
     scopes: frozenset[str] = frozenset()
     roles: frozenset[str] = frozenset()
     capabilities: frozenset[str] = frozenset()
-    team_roles: Mapping[str, frozenset[str]] = field(
+    tenant_roles: Mapping[str, frozenset[str]] = field(
         default_factory=lambda: cast("Mapping[str, frozenset[str]]", MappingProxyType({}))
     )
     tenant_ids: frozenset[str] = frozenset()
@@ -339,10 +339,10 @@ class AuthorizationSnapshot:
         object.__setattr__(self, "capabilities", _normalize_values(self.capabilities, "Capability"))
         object.__setattr__(
             self,
-            "team_roles",
+            "tenant_roles",
             MappingProxyType({
-                _normalize_text(team_id, "Team id"): _normalize_values(roles, "Team role")
-                for team_id, roles in self.team_roles.items()
+                _normalize_text(tenant_id, "Tenant id"): _normalize_values(roles, "Tenant role")
+                for tenant_id, roles in self.tenant_roles.items()
             }),
         )
         object.__setattr__(self, "tenant_ids", _normalize_values(self.tenant_ids, "Tenant id"))
@@ -357,7 +357,6 @@ class CredentialRestrictions:
     scopes: frozenset[str] | None = None
     roles: frozenset[str] | None = None
     capabilities: frozenset[str] | None = None
-    team_ids: frozenset[str] | None = None
     tenant_ids: frozenset[str] | None = None
     resources: frozenset[ResourcePermission] | None = None
 
@@ -366,7 +365,6 @@ class CredentialRestrictions:
         object.__setattr__(self, "scopes", _normalize_optional_values(self.scopes, "Scope"))
         object.__setattr__(self, "roles", _normalize_optional_values(self.roles, "Role"))
         object.__setattr__(self, "capabilities", _normalize_optional_values(self.capabilities, "Capability"))
-        object.__setattr__(self, "team_ids", _normalize_optional_values(self.team_ids, "Team id"))
         object.__setattr__(self, "tenant_ids", _normalize_optional_values(self.tenant_ids, "Tenant id"))
         object.__setattr__(self, "resources", None if self.resources is None else frozenset(self.resources))
 
@@ -391,7 +389,7 @@ def resolve_authorization(
     scopes = snapshot.scopes
     roles = snapshot.roles
     capabilities = snapshot.capabilities
-    team_roles = snapshot.team_roles
+    tenant_roles = snapshot.tenant_roles
     tenant_ids = snapshot.tenant_ids
     resources = snapshot.resources
     for restriction in restrictions:
@@ -401,25 +399,26 @@ def resolve_authorization(
             roles = roles & restriction.roles
         if restriction.capabilities is not None:
             capabilities = capabilities & restriction.capabilities
-        if restriction.team_ids is not None:
-            team_roles = {
-                team_id: team_roles[team_id] for team_id in sorted(team_roles) if team_id in restriction.team_ids
-            }
-        if restriction.roles is not None:
-            team_roles = {
-                team_id: narrowed
-                for team_id in sorted(team_roles)
-                if (narrowed := team_roles[team_id] & restriction.roles)
-            }
         if restriction.tenant_ids is not None:
+            tenant_roles = {
+                tenant_id: tenant_roles[tenant_id]
+                for tenant_id in sorted(tenant_roles)
+                if tenant_id in restriction.tenant_ids
+            }
             tenant_ids = tenant_ids & restriction.tenant_ids
+        if restriction.roles is not None:
+            tenant_roles = {
+                tenant_id: narrowed
+                for tenant_id in sorted(tenant_roles)
+                if (narrowed := tenant_roles[tenant_id] & restriction.roles)
+            }
         if restriction.resources is not None:
             resources = _intersect_resources(resources, restriction.resources)
     return AuthorizationSnapshot(
         scopes=scopes,
         roles=roles,
         capabilities=capabilities,
-        team_roles=team_roles,
+        tenant_roles=tenant_roles,
         tenant_ids=tenant_ids,
         resources=resources,
         attributes=snapshot.attributes,

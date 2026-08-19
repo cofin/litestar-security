@@ -85,7 +85,7 @@ on the router or controller that owns them.
 Authorization guards compose separately:
 
 * ``requires_scope`` and ``requires_capability``;
-* ``requires_role`` and ``requires_team_role``;
+* ``requires_role`` and ``requires_tenant_role``;
 * ``requires_tenant``; and
 * ``requires_assurance`` for recent or stronger evidence.
 

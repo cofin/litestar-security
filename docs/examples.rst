@@ -10,7 +10,7 @@ They are deterministic and secret-free by default:
    LITESTAR_SECURITY_EXAMPLE=google-oauth uv run litestar --app examples.app:create_app run
    LITESTAR_SECURITY_EXAMPLE=github-oauth uv run litestar --app examples.app:create_app run
    LITESTAR_SECURITY_EXAMPLE=keycloak uv run litestar --app examples.app:create_app run
-   LITESTAR_SECURITY_EXAMPLE=api-team-service uv run litestar --app examples.app:create_app run
+   LITESTAR_SECURITY_EXAMPLE=api-tenant-service uv run litestar --app examples.app:create_app run
 
 The local modes generate ephemeral signing material and insecure loopback-only
 cookies. Provider modes use stub transports and never fall back to placeholder
