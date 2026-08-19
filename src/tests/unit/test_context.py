@@ -323,9 +323,7 @@ def test_resource_permission_is_immutable_and_normalized() -> None:
         ResourcePermission(resource="report-1", scopes={""})
 
 
-@pytest.mark.parametrize(
-    "kwargs", [{"scopes": {" "}}, {"roles": {""}}, {"capabilities": {" "}}, {"tenant_ids": {" "}}]
-)
+@pytest.mark.parametrize("kwargs", [{"scopes": {" "}}, {"roles": {""}}, {"capabilities": {" "}}, {"tenant_ids": {" "}}])
 def test_credential_restrictions_reject_blank_values(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="must not be blank"):
         CredentialRestrictions(**kwargs)
