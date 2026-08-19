@@ -42,7 +42,17 @@ def main() -> None:
         wheel = next(distributions.glob("litestar_security-*.whl"))
         run("uv", "venv", "--python", os.environ.get("PYTHON_VERSION", "3.10"), str(environment))
         python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        run("uv", "pip", "install", "--python", str(python), f"{wheel}[all]", "pytest", "mypy", "pyright")
+        run(
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            f"{wheel}[argon2,mfa,oauth,passkeys]",
+            "pytest",
+            "mypy",
+            "pyright",
+        )
         run("uv", "pip", "install", "--python", str(python), "--no-deps", str(FIXTURE))
         clean_environment = dict(os.environ)
         clean_environment.pop("PYTHONPATH", None)

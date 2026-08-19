@@ -20,6 +20,7 @@ def test_security_config_declares_its_fields_in_order() -> None:
         "mechanisms",
         "max_openapi_combinations",
         "external_csrf",
+        "exclude_opt_key",
         "exclude",
         "require_default",
         "local_auth",

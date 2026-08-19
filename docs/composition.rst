@@ -25,11 +25,49 @@ Litestar's other escape hatch, the ``opt={"exclude_from_auth": True}`` key,
 is resolved hierarchically across ownership layers (``RouteHandler`` > ``Controller`` > ``Router`` > ``App``).
 Placing ``opt={"exclude_from_auth": True}`` on a router (such as those returned by
 :func:`~litestar.static_files.create_static_files_router` or asset plugins like ``litestar-vite``)
-automatically excludes all routes in that subtree from authentication by default.
-Child layers (such as a :class:`~litestar_security.SecureController` or a handler
-declaring ``auth=required(...)``) mounted inside an excluded router cleanly override the
-parent router to enforce authentication. For public application routes that require
-typed request context, prefer :class:`~litestar_security.PublicController` or ``auth=public()``.
+excludes every route in that subtree from authentication. Child layers (such as a
+:class:`~litestar_security.SecureController` or a handler declaring
+``auth=required(...)``) mounted inside an excluded router override the parent and
+authenticate. For public application routes that require typed request context,
+prefer :class:`~litestar_security.PublicController` or ``auth=public()``.
+
+The key is read exactly as Litestar reads it, by **truthiness**. A falsy value
+means "authenticate this route", so a handler can opt back in underneath an
+excluded router:
+
+.. code-block:: python
+
+   @get("/assets/private.css", opt={"exclude_from_auth": False})
+   async def private_asset() -> str: ...
+
+The key's name is a convention, not a fixed string. Litestar's own security
+backends expose it as ``exclude_opt_key``, and so does
+:class:`~litestar_security.SecurityConfig`:
+
+.. code-block:: python
+
+   config = SecurityConfig(mechanisms=[api_key_mechanism], exclude_opt_key="skip_my_auth")
+
+What an exclusion does not do
+=============================
+
+An exclusion suppresses **authentication**. It does not suppress
+authorization guards, and it takes no CSRF position.
+
+Litestar resolves ``guards=[...]`` cumulatively across ownership layers, and no
+layer can un-inherit a guard an ancestor declared. An excluded route beneath a
+guarded owner is therefore still denied — in plain Litestar exactly as here.
+This is why an application-wide guard composes badly with plugin-mounted routes:
+
+.. code-block:: python
+
+   # Every route the application mounts, including another plugin's assets,
+   # inherits this guard and is denied.
+   app = Litestar(route_handlers=[...], guards=[requires_role("member")])
+
+Scope guards to the routers and handlers that need them instead. Run
+``litestar security routes`` to see which routes are excluded and which of them
+still carry an inherited guard.
 
 Excluding paths
 ===============
@@ -60,11 +98,17 @@ Patterns are matched against the **route path** as Litestar registered it, not
 against the request URL. A static files router mounted at ``/static`` registers
 ``/static/{file_path:path}``, which ``^/static`` matches.
 
-Exclusion is total. An excluded route is not authenticated, receives no
-principal, and contributes an anonymous security requirement to OpenAPI rather
-than the configured schemes. That last part is why the pattern is applied when
-routes are compiled rather than per request: a runtime-only bypass would leave
-the OpenAPI document claiming a route is protected while it is not.
+An excluded route is not authenticated, and it contributes an anonymous security
+requirement to OpenAPI rather than the configured schemes. That last part is why
+the pattern is applied when routes are compiled rather than per request: a
+runtime-only bypass would leave the OpenAPI document claiming a route is
+protected while it is not.
+
+An excluded route still receives the anonymous :class:`~litestar_security.Principal`
+and its :class:`~litestar_security.SecurityContext`, so ``principal`` and
+``security_context`` stay injectable there. Plain Litestar leaves those scope
+keys unset; populating them is a deliberate difference that keeps the reserved
+dependencies usable on every route.
 
 .. warning::
 

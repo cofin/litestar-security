@@ -324,3 +324,57 @@ def test_handler_can_be_mounted_without_the_plugin() -> None:
 def test_no_document_is_registered_when_the_feature_is_unconfigured() -> None:
     with create_test_client([], plugins=[SecurityPlugin(SecurityConfig[object]())]) as client:
         assert client.get(METADATA_PATH).status_code != HTTP_200_OK
+
+
+def test_another_plugin_may_own_the_metadata_route() -> None:
+    """Suppressing registration lets a co-installed plugin serve the same path."""
+
+    @get(METADATA_PATH, sync_to_thread=False)
+    def foreign_metadata() -> dict[str, Any]:
+        return {"served_by": "another-plugin"}
+
+    config = _app_config(
+        resource="https://api.example.com", authorization_servers=("https://issuer.example.com",), register_route=False
+    )
+
+    with create_test_client([foreign_metadata], plugins=[SecurityPlugin(config)]) as client:
+        response = client.get(METADATA_PATH)
+
+    assert response.status_code == HTTP_200_OK
+    assert response.json() == {"served_by": "another-plugin"}
+
+
+def test_suppressed_registration_still_advertises_the_metadata_url() -> None:
+    """The challenge parameter is independent of who serves the document."""
+
+    @get("/private", sync_to_thread=False)
+    def private() -> str:
+        return "private"
+
+    config = SecurityConfig(
+        slots=(_HeaderSlot(),),  # type: ignore[arg-type]
+        mechanisms=(
+            AuthenticationMechanism(
+                authenticator=_HeaderAuthenticator(),  # type: ignore[arg-type]
+                resolver=_HeaderResolver(),
+                scheme_name="api-key",
+                security_scheme=SecurityScheme(type="http", scheme="bearer"),
+            ),
+        ),
+        protected_resource=ProtectedResourceConfig(
+            resource="https://api.example.com",
+            authorization_servers=("https://issuer.example.com",),
+            register_route=False,
+        ),
+    )
+
+    with create_test_client([private], plugins=[SecurityPlugin(config)]) as client:
+        unauthorized = client.get("/private")
+
+    assert unauthorized.status_code == HTTP_401_UNAUTHORIZED
+    assert f'resource_metadata="https://api.example.com{METADATA_PATH}"' in unauthorized.headers["www-authenticate"]
+
+
+def test_register_route_must_be_boolean() -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="Protected resource route registration must be boolean"):
+        ProtectedResourceConfig(resource="https://api.example.com", register_route="yes")  # type: ignore[arg-type]

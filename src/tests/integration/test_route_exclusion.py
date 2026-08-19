@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from re import escape
+from secrets import token_hex
 from typing import TYPE_CHECKING, Any, cast
 from warnings import catch_warnings, simplefilter
 
 import pytest
 from litestar import Litestar, Router, WebSocket, asgi, get, websocket
 from litestar.config.app import AppConfig
+from litestar.config.csrf import CSRFConfig
 from litestar.exceptions import ImproperlyConfiguredException, LitestarWarning
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import SecurityScheme
@@ -88,6 +90,22 @@ def _api_team_config(*, exclude: Sequence[str] | str | None = None) -> SecurityC
             for name in names
         ),
         exclude=exclude,
+    )
+
+
+def _session_config() -> SecurityConfig[object]:
+    """Build a session-capable configuration, which derives native CSRF coverage."""
+    return SecurityConfig(
+        slots=(_HeaderSlot(name="slot-session"),),  # type: ignore[arg-type]
+        mechanisms=(
+            AuthenticationMechanism(
+                authenticator=_HeaderAuthenticator(name="session", slot="slot-session"),  # type: ignore[arg-type]
+                resolver=_HeaderResolver(),
+                scheme_name="session",
+                security_scheme=SecurityScheme(type="http", scheme="bearer"),
+                session_capable=True,
+            ),
+        ),
     )
 
 
@@ -313,11 +331,92 @@ def test_same_layer_conflicting_auth_and_exclude_raises() -> None:
         Litestar(route_handlers=[conflict_endpoint], plugins=[SecurityPlugin(_api_team_config())])
 
 
-@pytest.mark.parametrize("invalid_value", ["True", 1, False, None])
-def test_invalid_exclude_from_auth_value_raises(invalid_value: Any) -> None:
-    @get("/bad-opt", opt={"exclude_from_auth": invalid_value}, sync_to_thread=False)
-    def bad_endpoint() -> str:
-        return "bad"
+@pytest.mark.parametrize(("value", "authenticates"), [("True", False), (1, False), (False, True), (None, True)])
+def test_exclude_from_auth_value_is_read_by_truthiness(value: Any, *, authenticates: bool) -> None:
+    """Any value Litestar would treat as truthy excludes; a falsy value authenticates."""
 
-    with pytest.raises(ImproperlyConfiguredException, match="exclude_from_auth must be exactly True when present"):
-        Litestar(route_handlers=[bad_endpoint], plugins=[SecurityPlugin(_api_team_config())])
+    @get("/opt-value", opt={"exclude_from_auth": value}, sync_to_thread=False)
+    def opt_value_endpoint() -> str:
+        return "value"
+
+    app = Litestar(route_handlers=[opt_value_endpoint], plugins=[SecurityPlugin(_api_team_config())])
+
+    with TestClient(app) as client:
+        assert (client.get("/opt-value").status_code == 401) is authenticates
+
+
+def test_static_assets_declaring_exclusion_serve_without_csrf_configuration() -> None:
+    """A plugin-mounted asset router must not force a CSRF decision on the application."""
+
+    @get("/assets/app.css", opt={"exclude_from_auth": True}, sync_to_thread=False)
+    def asset_endpoint() -> str:
+        return "css"
+
+    app = Litestar(route_handlers=[asset_endpoint], openapi_config=None, plugins=[SecurityPlugin(_session_config())])
+
+    with TestClient(app) as client:
+        assert client.get("/assets/app.css").status_code == 200
+
+
+def test_session_capable_protected_route_still_requires_csrf_configuration() -> None:
+    """The demand is removed for exclusions only; a session route without CSRF is still refused."""
+    with pytest.raises(ImproperlyConfiguredException, match="Route requires native CSRF or a named ExternalCSRF"):
+        Litestar(route_handlers=[_api_thing], openapi_config=None, plugins=[SecurityPlugin(_session_config())])
+
+
+def test_excluded_route_keeps_native_csrf_when_the_application_configures_it() -> None:
+    """With CSRF configured the route is left to Litestar's middleware, as it is natively."""
+
+    @get("/assets/app.css", opt={"exclude_from_auth": True}, sync_to_thread=False)
+    def asset_endpoint() -> str:
+        return "css"
+
+    app = Litestar(
+        route_handlers=[asset_endpoint],
+        openapi_config=None,
+        csrf_config=CSRFConfig(secret=token_hex()),
+        plugins=[SecurityPlugin(_session_config())],
+    )
+    handler = next(
+        route.route_handler_map["GET"][0] for route in app.routes if getattr(route, "path", None) == "/assets/app.css"
+    )
+
+    assert "exclude_from_csrf" not in handler.opt
+
+
+def test_exclusion_opt_key_is_configurable() -> None:
+    """The key is a convention with a configurable name, as it is on Litestar's own backends."""
+
+    @get("/custom", opt={"skip_my_auth": True}, sync_to_thread=False)
+    def custom_key_endpoint() -> str:
+        return "custom"
+
+    @get("/default", opt={"exclude_from_auth": True}, sync_to_thread=False)
+    def default_key_endpoint() -> str:
+        return "default"
+
+    config = _api_team_config()
+    config.exclude_opt_key = "skip_my_auth"
+    app = Litestar(
+        route_handlers=[custom_key_endpoint, default_key_endpoint],
+        openapi_config=None,
+        plugins=[SecurityPlugin(config)],
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/custom").status_code == 200
+        assert client.get("/default").status_code == 401
+
+
+def test_exclusion_opt_key_colliding_with_reserved_metadata_is_rejected() -> None:
+    config = _api_team_config()
+    config.exclude_opt_key = "litestar_security_plan"
+
+    with pytest.raises(ImproperlyConfiguredException, match="collides with reserved Litestar Security metadata"):
+        Litestar(route_handlers=[_api_thing], openapi_config=None, plugins=[SecurityPlugin(config)])
+
+
+@pytest.mark.parametrize("value", ["", "   ", 5, None])
+def test_exclusion_opt_key_must_be_non_blank_text(value: object) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="exclusion opt key must be non-blank text"):
+        SecurityConfig(exclude_opt_key=value)  # type: ignore[arg-type]

@@ -267,6 +267,13 @@ def _feature_route_prefix(value: object) -> str:
     return normalized
 
 
+def _exclusion_opt_key(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        msg = "Route exclusion opt key must be non-blank text"
+        raise ImproperlyConfiguredException(detail=msg)
+    return value.strip()
+
+
 def _exclude_patterns(value: object) -> tuple[str, ...] | str | None:
     if value is None or isinstance(value, str):
         return value
@@ -287,6 +294,14 @@ class SecurityConfig(Generic[UserT]):
     mechanisms: Sequence[AuthenticationMechanism[Any, Any, UserT]] = ()
     max_openapi_combinations: int = 32
     external_csrf: ExternalCSRF | None = None
+    exclude_opt_key: str = "exclude_from_auth"
+    """Name of the route ``opt`` key that excludes a route from authentication.
+
+    Mirrors ``exclude_opt_key`` on Litestar's own security backends, where the
+    key is a convention with a configurable name rather than a fixed string. The
+    value is read by truthiness, so a falsy value on a route means "authenticate
+    this route" even when an owning layer excluded it.
+    """
     exclude: Sequence[str] | str | None = None
     """Regular expressions matched against a route path to exclude it from security.
 
@@ -375,6 +390,7 @@ class SecurityConfig(Generic[UserT]):
             raise ImproperlyConfiguredException(detail=msg)
         self._validate_protected_resource()
         self.exclude = _exclude_patterns(self.exclude)
+        self.exclude_opt_key = _exclusion_opt_key(self.exclude_opt_key)
         self.slots = tuple(self.slots)
         self.mechanisms = tuple(self.mechanisms)
         local_accounts = getattr(self.local_auth, "accounts", None)

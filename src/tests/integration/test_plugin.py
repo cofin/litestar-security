@@ -2321,12 +2321,13 @@ def test_exclude_policy_and_native_handler_alias_compile_without_authentication(
         if isinstance(route_value, ASGIRoute) and route_value.path == "/native-mount"
     )
 
+    # An exclusion states this plugin does not own the route, so it derives no
+    # CSRF demand and writes no native exclusion; Litestar's own CSRF middleware
+    # is left to handle the route exactly as it does natively.
     assert (
         typed_plan
         == native_plan
-        == SecurityRuntimePlan(
-            authenticate=False, bypass_authentication=True, csrf_required=True, csrf_enforcement="native"
-        )
+        == SecurityRuntimePlan(authenticate=False, bypass_authentication=True, csrf_required=False)
     )
     assert _operation_security(app, "/typed") == _operation_security(app, "/native") == [{}]
     assert socket_route.route_handler.opt["litestar_security_plan"] == SecurityRuntimePlan(
@@ -2409,15 +2410,56 @@ def test_exclude_honors_explicit_http_csrf_requirement_without_session_credentia
     assert accepted.json() == {"ok": True}
 
 
-@pytest.mark.parametrize("value", [False, None, 1, "yes"])
-def test_exclude_from_auth_alias_requires_true_on_individual_handlers(value: object) -> None:
-    @get("/invalid", opt={"exclude_from_auth": value})
-    async def invalid_handler() -> None:
+@pytest.mark.parametrize("value", [False, None, 0])
+def test_exclude_from_auth_falsy_value_authenticates_like_native_litestar(value: object) -> None:
+    """A falsy opt means "authenticate this route", matching ``should_bypass_middleware``."""
+
+    @get("/opted-in", opt={"exclude_from_auth": value})
+    async def opted_in_handler() -> None:
         return None
 
-    with pytest.raises(ImproperlyConfiguredException, match=r"exclude_from_auth must be exactly True.*GET /invalid"):
-        Litestar(route_handlers=[invalid_handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+    app = Litestar(route_handlers=[opted_in_handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
 
+    assert _http_plan(app, "/opted-in").authenticate
+
+
+@pytest.mark.parametrize("value", [1, "yes"])
+def test_exclude_from_auth_truthy_value_excludes_like_native_litestar(value: object) -> None:
+    """Litestar reads the key by truthiness, so a non-boolean truthy value excludes."""
+
+    @get("/excluded", opt={"exclude_from_auth": value})
+    async def excluded_handler() -> None:
+        return None
+
+    app = Litestar(route_handlers=[excluded_handler], openapi_config=None, plugins=[SecurityPlugin(_compiler_config())])
+
+    assert not _http_plan(app, "/excluded").authenticate
+
+
+def test_exclude_from_auth_child_falsy_value_overrides_an_excluded_owner() -> None:
+    """The resolved opt decides, so a handler opts back in under an excluded router."""
+
+    @get("/opted-in", opt={"exclude_from_auth": False})
+    async def opted_in_handler() -> None:
+        return None
+
+    @get("/inherited")
+    async def inherited_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[
+            Router(path="/", route_handlers=[opted_in_handler, inherited_handler], opt={"exclude_from_auth": True})
+        ],
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config())],
+    )
+
+    assert _http_plan(app, "/opted-in").authenticate
+    assert not _http_plan(app, "/inherited").authenticate
+
+
+def test_exclude_from_auth_owner_excludes_every_handler_it_owns() -> None:
     @get("/owned")
     async def owned_handler() -> None:
         return None
@@ -2428,6 +2470,22 @@ def test_exclude_from_auth_alias_requires_true_on_individual_handlers(value: obj
         plugins=[SecurityPlugin(_compiler_config())],
     )
     assert not _http_plan(app, "/owned").authenticate
+
+
+def test_generated_options_handler_under_an_excluded_owner_stays_unauthenticated() -> None:
+    """The generated handler inherits the owner's opt but is classified by identity."""
+
+    @get("/owned")
+    async def owned_handler() -> None:
+        return None
+
+    app = Litestar(
+        route_handlers=[Router(path="/", route_handlers=[owned_handler], opt={"exclude_from_auth": True})],
+        openapi_config=None,
+        plugins=[SecurityPlugin(_compiler_config())],
+    )
+
+    assert not _http_plan(app, "/owned", "OPTIONS").authenticate
 
 
 def test_exclude_rejects_competing_authentication_policy() -> None:

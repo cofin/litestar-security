@@ -44,9 +44,7 @@ def test_package_declares_account_feature_dependencies_only_through_extras() -> 
     assert "argon2-cffi<26,>=25.1;extra=='argon2'" in declared
     assert "pyotp<3,>=2.10;extra=='mfa'" in declared
     assert "webauthn<4,>=3;extra=='passkeys'" in declared
-    assert "argon2-cffi<26,>=25.1;extra=='all'" in declared
-    assert "pyotp<3,>=2.10;extra=='all'" in declared
-    assert "webauthn<4,>=3;extra=='all'" in declared
+    assert not any(";extra=='all'" in requirement for requirement in declared)
     assert not any(
         requirement.startswith(("argon2-cffi", "pyotp", "webauthn")) and ";extra==" not in requirement
         for requirement in declared

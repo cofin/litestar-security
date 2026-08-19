@@ -2,25 +2,7 @@
 # Project Metadata #
 ####################
 [project]
-name = "litestar-security"
-version = "0.5.0"
-description = "Authentication and authorization for Litestar applications"
-readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "MIT" }
 authors = [{ name = "Cody Fincher", email = "cody@litestar.dev" }]
-keywords = [
-  "api-keys",
-  "authentication",
-  "authorization",
-  "litestar",
-  "oauth2",
-  "oidc",
-  "passkeys",
-  "security",
-  "webauthn",
-  "websockets",
-]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Environment :: Web Environment",
@@ -38,14 +20,27 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]
-dependencies = [
-  "httpx>=0.28.1",
-  "litestar>=2.24.0",
-  "PyJWT[crypto]>=2.13",
+dependencies = ["httpx>=0.28.1", "litestar>=2.24.0", "PyJWT[crypto]>=2.13"]
+description = "Authentication and authorization for Litestar applications"
+keywords = [
+  "api-keys",
+  "authentication",
+  "authorization",
+  "litestar",
+  "oauth2",
+  "oidc",
+  "passkeys",
+  "security",
+  "webauthn",
+  "websockets",
 ]
+license = { text = "MIT" }
+name = "litestar-security"
+readme = "README.md"
+requires-python = ">=3.10"
+version = "0.6.0"
 
 [project.optional-dependencies]
-all = ["argon2-cffi>=25.1,<26", "PyOTP>=2.10,<3", "webauthn>=3,<4"]
 argon2 = ["argon2-cffi>=25.1,<26"]
 mfa = ["PyOTP>=2.10,<3"]
 oauth = []
@@ -63,85 +58,64 @@ security = "litestar_security._cli:security_group"
 # Build & Versioning #
 ######################
 [build-system]
-requires = ["hatchling"]
 build-backend = "hatchling.build"
+requires = ["hatchling"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/litestar_security"]
 
 [tool.bumpversion]
-current_version = "0.5.0"
+allow_dirty = true
+commit = false
+current_version = "0.6.0"
+ignore_missing_files = false
+ignore_missing_version = false
 parse = """(?x)
     (?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)
     (-(?P<pre>alpha|beta|rc)\\.(?P<pre_n>\\d+))?
 """
-serialize = ["{major}.{minor}.{patch}", "{major}.{minor}.{patch}-{pre}.{pre_n}"]
-search = "{current_version}"
-replace = "{new_version}"
 regex = false
-ignore_missing_version = false
-ignore_missing_files = false
-tag = false
+replace = "{new_version}"
+search = "{current_version}"
+serialize = ["{major}.{minor}.{patch}", "{major}.{minor}.{patch}-{pre}.{pre_n}"]
 sign_tags = false
-commit = false
-allow_dirty = true
+tag = false
 
 [tool.bumpversion.parts.pre]
-values = ["alpha", "beta", "rc", "stable"]
-optional_value = "stable"
 first_value = "stable"
+optional_value = "stable"
+values = ["alpha", "beta", "rc", "stable"]
 
 [tool.bumpversion.parts.pre_n]
 first_value = "1"
 
 [[tool.bumpversion.files]]
 filename = "pyproject.toml"
-search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
+search = 'version = "{current_version}"'
 
 [[tool.bumpversion.files]]
 filename = "uv.lock"
-search = """
-name = "litestar-security"
-version = "{current_version}"
-"""
 replace = """
 name = "litestar-security"
 version = "{new_version}"
 """
+search = """
+name = "litestar-security"
+version = "{current_version}"
+"""
 
 [[tool.bumpversion.files]]
 filename = "tools/check_release.py"
-search = "{current_version}"
 replace = "{new_version}"
+search = "{current_version}"
 
 #####################
 # Dependency Groups #
 #####################
 [dependency-groups]
-build = ["bump-my-version"]
-docs = [
-  "shibuya",
-  "sphinx>=7.1.2",
-  "sphinx-copybutton>=0.5.2",
-  "sphinx-design>=0.5.0",
-]
-tests = [
-  "coverage[toml]",
-  "polyfactory",
-  "pytest",
-  "pytest-cov",
-  "pytest-xdist",
-]
 benchmark = ["pytest-benchmark"]
-lint = [
-  "codespell",
-  "mypy",
-  "prek",
-  "pyright",
-  "ruff",
-  "slotscheck",
-]
+build = ["bump-my-version"]
 dev = [
   { include-group = "build" },
   { include-group = "docs" },
@@ -149,21 +123,15 @@ dev = [
   { include-group = "benchmark" },
   { include-group = "lint" },
 ]
+docs = ["shibuya", "sphinx>=7.1.2", "sphinx-copybutton>=0.5.2", "sphinx-design>=0.5.0"]
+lint = ["codespell", "mypy", "prek", "pyright", "ruff", "slotscheck"]
+tests = ["coverage[toml]", "polyfactory", "pytest", "pytest-cov", "pytest-xdist"]
 
 ###########
 # Testing #
 ###########
 [tool.pytest.ini_options]
-addopts = [
-  "-ra",
-  "--strict-config",
-  "--strict-markers",
-  "--benchmark-disable",
-  "-m",
-  "not performance",
-  "-n",
-  "auto",
-]
+addopts = ["-ra", "--strict-config", "--strict-markers", "--benchmark-disable", "-m", "not performance", "-n", "auto"]
 # Every coroutine test in this suite runs on anyio, against the single backend
 # the session-scoped anyio_backend fixture pins. Auto mode makes that the
 # default so a new async test cannot be silently skipped for want of a marker.
@@ -178,9 +146,6 @@ branch = true
 source = ["src/litestar_security"]
 
 [tool.coverage.report]
-fail_under = 95
-show_missing = true
-skip_covered = true
 exclude_also = [
   "pragma: no cover",
   "if TYPE_CHECKING:",
@@ -189,6 +154,9 @@ exclude_also = [
   "@overload",
   "if sys\\.version_info",
 ]
+fail_under = 95
+show_missing = true
+skip_covered = true
 
 #########
 # UV    #
@@ -223,10 +191,10 @@ sqlspec = "2099-01-01T00:00:00Z"
 # Ruff  #
 #########
 [tool.ruff]
-target-version = "py310"
+extend-exclude = ["docs/_build"]
 line-length = 120
 src = ["src"]
-extend-exclude = ["docs/_build"]
+target-version = "py310"
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -237,7 +205,6 @@ preview = true
 skip-magic-trailing-comma = true
 
 [tool.ruff.lint]
-select = ["ALL"]
 ignore = [
   "COM812",
   "CPY001",
@@ -245,6 +212,7 @@ ignore = [
   "D104",
   "ISC001",
 ]
+select = ["ALL"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["litestar_security"]
@@ -307,6 +275,7 @@ disallow_any_generics = true
 disallow_incomplete_defs = true
 disallow_untyped_decorators = true
 disallow_untyped_defs = true
+files = ["src/litestar_security", "src/tests/helpers/typing.py", "examples"]
 implicit_reexport = false
 show_error_codes = true
 strict = true
@@ -315,7 +284,6 @@ warn_return_any = true
 warn_unreachable = true
 warn_unused_configs = true
 warn_unused_ignores = true
-files = ["src/litestar_security", "src/tests/helpers/typing.py", "examples"]
 
 ###########
 # Pyright #

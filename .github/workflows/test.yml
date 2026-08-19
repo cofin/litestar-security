@@ -71,7 +71,7 @@ jobs:
           uv build --wheel --out-dir /tmp/litestar-security-dist
           uv venv --python "$PYTHON_VERSION" /tmp/litestar-security-wheel
           wheels=(/tmp/litestar-security-dist/*.whl)
-          uv pip install --python /tmp/litestar-security-wheel/bin/python "${wheels[0]}[all]"
+          uv pip install --python /tmp/litestar-security-wheel/bin/python "${wheels[0]}[argon2,mfa,oauth,passkeys]"
           cd /tmp
           /tmp/litestar-security-wheel/bin/python -I - <<'PY'
           from importlib.resources import files

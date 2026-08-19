@@ -97,6 +97,21 @@ The ``principal`` and ``security_context`` dependencies remain typed on public
 and protected routes. ``current_user`` is the explicit narrowing dependency
 that rejects anonymous and userless service principals.
 
+Where this differs from plain Litestar
+======================================
+
+Two differences are deliberate. An excluded route still receives the anonymous
+``Principal`` and ``SecurityContext``; plain Litestar leaves ``scope["user"]``
+and ``scope["auth"]`` unset, which would make the reserved dependencies
+unusable on those routes. And only the OPTIONS handlers Litestar generates skip
+authentication, where plain Litestar skips every ``OPTIONS`` request by default;
+an application's own ``OPTIONS`` handler is authenticated like any other route.
+
+Everything else follows the framework, including the parts that surprise people.
+``exclude_from_auth`` is read by truthiness, and guards are cumulative, so an
+excluded route beneath a guarded owner is still denied exactly as it would be
+without this plugin.
+
 Routes another plugin registered — static assets, a queue dashboard, a debug
 toolbar — carry no ``auth`` of their own and so compile to implicit
 ``required()``. Exclude them by path with ``SecurityConfig(exclude=[...])``; see
