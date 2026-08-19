@@ -11,10 +11,19 @@ Changed (breaking)
   uses instead: ``argon2``, ``mfa``, ``passkeys``, and ``oauth`` remain, and
   they compose — ``pip install 'litestar-security[mfa,passkeys]'``. Replace
   ``litestar-security[all]`` with the explicit set.
+* ``requires_team_role`` is replaced by :func:`~litestar_security.requires_tenant_role`
+  with parameter ``tenant_parameter: str = "tenant_id"``, unifying multi-tenancy
+  authorization around tenants across the codebase.
+* :class:`~litestar_security.AuthorizationSnapshot` replaces ``team_roles`` with
+  ``tenant_roles: Mapping[str, frozenset[str]]``.
+* :class:`~litestar_security.CredentialRestrictions` removes ``team_ids`` and
+  uses ``tenant_ids`` exclusively for tenant scoping bounds.
 
 Added
 ~~~~~
 
+* :func:`~litestar_security.requires_tenant_role` evaluates role membership within a
+  tenant identified by a parsed path parameter.
 * ``litestar security routes`` renders the compiled security posture of every
   registered route: policy, whether authentication runs, CSRF enforcement, and
   inherited guards. Excluded routes that still carry an inherited guard are
