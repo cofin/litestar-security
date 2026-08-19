@@ -689,10 +689,11 @@ class RouteCompiler(Generic[UserT]):
             layer_opt = getattr(layer, "opt", None)
             if not isinstance(layer_opt, Mapping):
                 continue  # pragma: no cover - Litestar ownership layers expose opt as mappings
-            policy = self._policy_from_opt(route, route_handler, cast("Mapping[str, object]", layer_opt))
+            opt_map = cast("Mapping[str, object]", layer_opt)
+            policy = self._policy_from_opt(route, route_handler, opt_map)
             if policy is not None:
                 return policy
-            if layer_opt.get(self.exclude_opt_key):
+            if opt_map.get(self.exclude_opt_key):
                 return exclude()
         return None
 
