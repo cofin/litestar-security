@@ -55,7 +55,7 @@ class WirePolicy:
             message = f"Wire rename strategy must be callable or one of: {named}"
             raise ImproperlyConfiguredException(detail=message)
         forbid_unknown_fields = cast("object", self.forbid_unknown_fields)
-        if forbid_unknown_fields.__class__ is not bool:
+        if type(forbid_unknown_fields) is not bool:
             message = "Wire unknown-field policy must be boolean"
             raise ImproperlyConfiguredException(detail=message)
 

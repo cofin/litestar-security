@@ -6,8 +6,7 @@ import click
 from litestar.routes import HTTPRoute
 
 from litestar_security.__metadata__ import __project__, __version__
-from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
-from litestar_security.authentication import is_generated_options_handler
+from litestar_security.authentication import RUNTIME_PLAN_OPT_KEY, is_generated_options_handler
 from litestar_security.guards import AuthorizationPredicate
 
 if TYPE_CHECKING:

@@ -5,7 +5,9 @@ import these freely.
 """
 
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from ipaddress import AddressValueError, IPv4Address, IPv6Address
+from json import dumps
 from string import hexdigits
 from typing import TYPE_CHECKING, NoReturn, cast
 from urllib.parse import urlsplit
@@ -145,3 +147,65 @@ def canonical_hostname(value: str) -> str | None:
     ):
         return None
     return value
+
+
+_INVALID_POLICY_FINGERPRINT = "WebSocket policy fingerprint input is invalid"
+
+
+def websocket_policy_fingerprint(plan: object) -> str:
+    """Return a stable process-independent fingerprint for one compiled plan.
+
+    Args:
+        plan: The frozen compiled security plan.
+
+    Returns:
+        A hexadecimal SHA-256 fingerprint.
+    """
+    authenticate = getattr(plan, "authenticate", False)
+    required = getattr(plan, "required", False)
+    allow_anonymous = getattr(plan, "allow_anonymous", False)
+    participant_names = getattr(plan, "participant_names", None)
+    alternatives = getattr(plan, "alternatives", ())
+    if (
+        authenticate.__class__ is not bool
+        or required.__class__ is not bool
+        or allow_anonymous.__class__ is not bool
+        or (participant_names is not None and participant_names.__class__ is not frozenset)
+        or alternatives.__class__ is not tuple
+    ):
+        raise ValueError(_INVALID_POLICY_FINGERPRINT)
+    participant_values = cast("frozenset[object]", participant_names or frozenset())
+    if any(value.__class__ is not str or not value for value in participant_values):
+        raise ValueError(_INVALID_POLICY_FINGERPRINT)
+    serialized_participants = sorted(cast("frozenset[str]", participant_values))
+    serialized_alternatives: list[list[dict[str, object]]] = []
+    for alternative in cast("tuple[object, ...]", alternatives):
+        if alternative.__class__ is not tuple:
+            raise ValueError(_INVALID_POLICY_FINGERPRINT)
+        serialized_alternative: list[dict[str, object]] = []
+        for requirement in cast("tuple[object, ...]", alternative):
+            name = getattr(requirement, "name", None)
+            scopes = getattr(requirement, "scopes", None)
+            if (
+                type(name) is not str
+                or not name
+                or type(scopes) is not tuple
+                or any(type(scope) is not str or not scope for scope in cast("tuple[object, ...]", scopes))
+            ):
+                raise ValueError(_INVALID_POLICY_FINGERPRINT)
+            serialized_alternative.append({"name": name, "scopes": list(cast("tuple[str, ...]", scopes))})
+        serialized_alternatives.append(serialized_alternative)
+    payload = dumps(
+        {
+            "allow_anonymous": allow_anonymous,
+            "alternatives": serialized_alternatives,
+            "authenticate": authenticate,
+            "participant_names": serialized_participants,
+            "required": required,
+            "v": 1,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return sha256(b"litestar-security/websocket-policy/v1\x00" + payload).hexdigest()

@@ -25,7 +25,6 @@ from litestar.status_codes import (
 
 from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
 from litestar_security._dto import apply_wire_dtos
-from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa import MFAService, RecoveryCodeGrant, StepUpCredential, StepUpService
 from litestar_security.accounts._operations import (
@@ -63,7 +62,14 @@ from litestar_security.accounts.schemas import (
     TOTPProvisioning,
     TOTPVerification,
 )
-from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, optional, public, required
+from litestar_security.authentication import (
+    GENERATED_ROUTE_OPT_KEY,
+    InvalidCredentials,
+    VerificationUnavailable,
+    optional,
+    public,
+    required,
+)
 from litestar_security.context import AuthenticationEvidence, Principal
 from litestar_security.schema import WirePolicy
 

@@ -6,8 +6,8 @@ route, origin, and policy, and consumed atomically at handshake.
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from binascii import Error as BinasciiError
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import compare_digest
@@ -17,13 +17,20 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from anyio import Lock
 from litestar.app import Litestar
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar.connection import ASGIConnection
+from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
 from litestar.handlers import WebsocketRouteHandler
 
-from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
-from litestar_security.context import CredentialRestrictions, Principal, SecurityContext
-from litestar_security.websocket._internal import aware_utc, canonical_origin, strict_text
-from litestar_security.websocket._lifecycle import websocket_policy_fingerprint
+from litestar_security.context import (
+    AuthenticationEvidence,
+    AuthorizationSnapshot,
+    CredentialRestrictions,
+    Principal,
+    SecurityContext,
+    SessionHandle,
+    resolve_authorization,
+)
+from litestar_security.websocket._internal import aware_utc, canonical_origin, strict_text, websocket_policy_fingerprint
 
 __all__ = (
     "InMemoryWebSocketConnectTokenStore",
@@ -33,7 +40,9 @@ __all__ = (
     "WebSocketConnectTokenService",
     "WebSocketConnectTokenStore",
     "WebSocketConnectTokenUnavailableError",
+    "authenticate_connect_token",
     "issue_websocket_connect_token",
+    "merge_connect_token",
 )
 
 MAXIMUM_CONNECT_TOKEN_TTL = timedelta(minutes=2)
@@ -326,11 +335,12 @@ class WebSocketConnectTokenIssuer:
         if handler.name != route_name:
             message = f"WebSocket connect token route {route_name!r} does not match its registered handler name"
             raise ImproperlyConfiguredException(detail=message)
-        plan = handler.opt.get(RUNTIME_PLAN_OPT_KEY)
+        auth_module = import_module("litestar_security.authentication")
+        plan = handler.opt.get(auth_module.RUNTIME_PLAN_OPT_KEY)
         if plan is None:
             message = f"WebSocket connect token route {route_name!r} has no compiled security runtime plan"
             raise ImproperlyConfiguredException(detail=message)
-        runtime_plan_type = cast("type[object]", import_module("litestar_security.authentication").SecurityRuntimePlan)
+        runtime_plan_type = cast("type[object]", auth_module.SecurityRuntimePlan)
         if not isinstance(plan, runtime_plan_type):
             message = f"WebSocket connect token route {route_name!r} has an invalid compiled security runtime plan"
             raise ImproperlyConfiguredException(detail=message)
@@ -441,3 +451,99 @@ def _connect_token_proof(value: object) -> tuple[str, bytes] | None:
     ):
         return None
     return connect_token_id, _connect_token_digest(connect_token_id, secret)
+
+
+async def merge_connect_token(  # noqa: PLR0913
+    connect_token: WebSocketConnectAuthorization,
+    *,
+    principal: Principal[Any],
+    context: SecurityContext,
+    session: SessionHandle,
+    authorization_resolver: object = None,
+    connect_token_query_parameter: str = "connect_token",  # noqa: S107
+) -> tuple[Principal[Any], SecurityContext]:
+    """Merge an authenticated or anonymous principal with a consumed connect token."""
+    if principal.is_authenticated:
+        if principal.id != connect_token.subject_id:
+            raise NotAuthorizedException(detail="Authentication required")
+        authorization = resolve_authorization(context.authorization, (connect_token.restrictions,))
+    else:
+        principal = Principal(id=connect_token.subject_id)
+        if authorization_resolver is None:
+            authorization = AuthorizationSnapshot()
+        else:
+            try:
+                resolution = await cast("Any", authorization_resolver).resolve(principal)
+            except Exception:  # noqa: BLE001
+                raise ServiceUnavailableException(detail="Authentication service unavailable") from None
+            auth_module = import_module("litestar_security.authentication")
+            if isinstance(resolution, auth_module.VerificationUnavailable):
+                raise ServiceUnavailableException(detail="Authentication service unavailable")
+            if isinstance(resolution, auth_module.InvalidCredentials):
+                raise NotAuthorizedException(detail="Authentication required")
+            authorization = resolution
+        authorization = resolve_authorization(authorization, (connect_token.restrictions,))
+    evidence = AuthenticationEvidence(
+        mechanism="websocket-connect-token",
+        slot=connect_token_query_parameter,
+        authenticated_at=connect_token.issued_at,
+        expires_at=connect_token.expires_at,
+        methods=frozenset({"websocket-connect-token"}),
+    )
+    return principal, SecurityContext(
+        session=session,
+        evidence=(*context.evidence, evidence),
+        authorization=authorization,
+        restrictions=(*context.restrictions, connect_token.restrictions),
+    )
+
+
+async def authenticate_connect_token(  # noqa: PLR0913
+    *,
+    scope: Mapping[str, Any],
+    connection: ASGIConnection[Any, Any, Any, Any],
+    handshake: object,
+    session: SessionHandle,
+    plan: object,
+    extracted: Sequence[tuple[str, object]],
+    evaluator: object,
+    config: object,
+) -> tuple[Principal[Any], SecurityContext]:
+    """Authenticate a WebSocket connect token and evaluate remaining credentials."""
+    ws_config = cast("Any", config).websocket
+    connect_token_store = ws_config.connect_token_store
+    route_handler = cast("Mapping[str, object]", scope).get("route_handler")
+    route_name = cast("str | None", getattr(route_handler, "name", None)) or cast(
+        "str", getattr(route_handler, "handler_name", "")
+    )
+    handshake_obj = cast("Any", handshake)
+    if (
+        connect_token_store is None
+        or handshake_obj.origin is None
+        or not route_name
+        or handshake_obj.connect_token is None
+    ):
+        raise NotAuthorizedException(detail="Authentication required")
+    connect_token = await WebSocketConnectTokenService(
+        store=connect_token_store, ttl=ws_config.connect_token_ttl, clock=ws_config.clock
+    ).consume(
+        handshake_obj.connect_token,
+        route_name=route_name,
+        origin=handshake_obj.origin,
+        policy_fingerprint=websocket_policy_fingerprint(plan),
+        current_security_epoch=cast("Callable[[str], Awaitable[int | None]]", ws_config.current_security_epoch),
+    )
+    if connect_token is None:
+        raise NotAuthorizedException(detail="Authentication required")
+    non_connect_token_plan = replace(cast("Any", plan), required=False, alternatives=(), allow_anonymous=True)
+    principal, context = await cast("Any", evaluator).evaluate(
+        connection, session, plan=non_connect_token_plan, extracted=extracted
+    )
+    return await merge_connect_token(
+        connect_token,
+        principal=principal,
+        context=context,
+        session=session,
+        authorization_resolver=cast("Any", config).registry.authorization_resolver,
+        connect_token_query_parameter=ws_config.connect_token_query_parameter,
+    )

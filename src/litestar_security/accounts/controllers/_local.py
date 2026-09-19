@@ -28,7 +28,6 @@ from litestar.status_codes import (
 
 from litestar_security._docs import ROUTE_TAGS, apply_route_docs, raised_denial
 from litestar_security._dto import apply_wire_dtos
-from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa_login import MFARequired
 from litestar_security.accounts._rate_limits import RateLimited
@@ -60,7 +59,13 @@ from litestar_security.accounts.schemas import (
     LocalToken,
     OperationMessage,
 )
-from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
+from litestar_security.authentication import (
+    GENERATED_ROUTE_OPT_KEY,
+    InvalidCredentials,
+    VerificationUnavailable,
+    public,
+    required,
+)
 from litestar_security.context import Principal, SecurityContext
 from litestar_security.schema import WirePolicy
 

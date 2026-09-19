@@ -81,10 +81,10 @@ class RaisedErrorSchema:
             message = "Raised-error schema must be a type"
             raise ImproperlyConfiguredException(detail=message)
         media_type = cast("object", self.media_type)
-        if media_type.__class__ is not str or not cast("str", media_type).strip():  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
+        if type(media_type) is not str or not media_type.strip():
             message = "Raised-error media type must be a non-blank string"
             raise ImproperlyConfiguredException(detail=message)
-        object.__setattr__(self, "media_type", cast("str", media_type).strip())  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
+        object.__setattr__(self, "media_type", media_type.strip())
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,10 +97,10 @@ class ExternalCSRF:
     def __post_init__(self) -> None:
         """Normalize the integration name."""
         name_value = cast("object", self.name)
-        if name_value.__class__ is not str:
+        if type(name_value) is not str:
             message = "External CSRF integration name must be text"
             raise ImproperlyConfiguredException(detail=message)
-        name = cast("str", name_value).strip()  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
+        name = name_value.strip()
         if not name:
             message = "External CSRF integration name must not be blank"
             raise ImproperlyConfiguredException(detail=message)
@@ -163,14 +163,14 @@ class MFAConfig:
         )
         object.__setattr__(self, "route_prefix", _feature_route_prefix(self.route_prefix))
         register_routes_value = cast("object", self.register_routes)
-        if register_routes_value.__class__ is not bool:
+        if type(register_routes_value) is not bool:
             msg = "MFA route registration must be boolean"
             raise ImproperlyConfiguredException(detail=msg)
-        if self.docs.__class__ is not RouteDocs:
+        if type(self.docs) is not RouteDocs:
             msg = "MFA documentation metadata must be RouteDocs"
             raise ImproperlyConfiguredException(detail=msg)
         require_at_login_value = cast("object", self.require_at_login)
-        if require_at_login_value.__class__ is not bool and require_at_login_value != "enrolled":
+        if type(require_at_login_value) is not bool and require_at_login_value != "enrolled":
             msg = "MFA require_at_login must be boolean or 'enrolled'"
             raise ImproperlyConfiguredException(detail=msg)
         login_challenge_store = self.login_challenge_store if self.login_challenge_store is not None else self.store
@@ -240,10 +240,10 @@ class PasskeyConfig:
         )
         object.__setattr__(self, "route_prefix", _feature_route_prefix(self.route_prefix))
         register_routes_value = cast("object", self.register_routes)
-        if register_routes_value.__class__ is not bool:
+        if type(register_routes_value) is not bool:
             msg = "Passkey route registration must be boolean"
             raise ImproperlyConfiguredException(detail=msg)
-        if self.docs.__class__ is not RouteDocs:
+        if type(self.docs) is not RouteDocs:
             msg = "Passkey documentation metadata must be RouteDocs"
             raise ImproperlyConfiguredException(detail=msg)
         if self.register_routes and self.login_methods is None:

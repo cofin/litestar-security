@@ -3,7 +3,7 @@
 from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
-from litestar_security._lazy import import_optional_attribute
+from litestar_security._typing import import_optional_attribute
 from litestar_security.accounts._access_tokens import (
     LocalAccessToken,
     LocalAccessTokenIssuer,

@@ -44,9 +44,14 @@ from litestar.utils.scope.state import ScopeState
 
 from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
 from litestar_security._dto import apply_wire_dtos
-from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
 from litestar_security._typing import PYOTP_INSTALLED
-from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
+from litestar_security.authentication import (
+    GENERATED_ROUTE_OPT_KEY,
+    InvalidCredentials,
+    VerificationUnavailable,
+    public,
+    required,
+)
 from litestar_security.context import AuthenticationEvidence, Principal
 from litestar_security.providers.oauth._accounts import (
     AccountLinkError,

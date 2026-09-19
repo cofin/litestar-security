@@ -32,6 +32,7 @@ __all__ = (
     "dependency_flag",
     "import_optional",
     "import_optional_attr",
+    "import_optional_attribute",
     "module_available",
     "require_dependency",
     "reset_dependency_cache",
@@ -135,6 +136,23 @@ def import_optional_attr(module_name: str, attr: str) -> Any:  # noqa: ANN401 - 
     if module is None:
         return None
     return getattr(module, attr, None)
+
+
+def import_optional_attribute(
+    module_name: str, attribute_name: str, *, extras: str, dependencies: frozenset[str]
+) -> Any:  # noqa: ANN401
+    """Import one optional-feature attribute without masking unrelated failures.
+
+    Package lazy-export hooks resolve arbitrary public objects.
+    """
+    try:
+        module = import_module(module_name)
+    except ModuleNotFoundError as error:
+        if error.name not in dependencies:
+            raise
+        message = f"litestar-security feature requires the [{extras}] extra: pip install 'litestar-security[{extras}]'"
+        raise ImportError(message) from None
+    return getattr(module, attribute_name)
 
 
 def resolve_optional_attr(module_name: str, attr: "str | None", fallback: T) -> T:

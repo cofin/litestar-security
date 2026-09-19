@@ -119,10 +119,10 @@ class WorkerLimits:
     def __post_init__(self) -> None:
         """Build dedicated limiters once after validating finite bounds."""
         for value in (self.network_tokens, self.crypto_tokens):
-            if value.__class__ is not int or not 1 <= value <= _MAXIMUM_WORKER_TOKENS:
+            if type(value) is not int or not 1 <= value <= _MAXIMUM_WORKER_TOKENS:
                 msg = "Security worker limits must be positive bounded integers"
                 raise ImproperlyConfiguredException(detail=msg)
-        if self.timeout.__class__ not in {int, float} or not isfinite(self.timeout) or self.timeout <= 0:
+        if type(self.timeout) not in {int, float} or not isfinite(self.timeout) or self.timeout <= 0:
             msg = "Security worker timeout must be finite and positive"
             raise ImproperlyConfiguredException(detail=msg)
         object.__setattr__(self, "timeout", float(self.timeout))

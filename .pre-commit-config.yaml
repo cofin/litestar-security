@@ -32,7 +32,7 @@ repos:
     # Must match the locked ruff. A hook on a different release enables a
     # different set of rules, so the gate and `uv run ruff` would disagree
     # about the same file.
-    rev: v0.16.2
+    rev: v0.16.7
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -46,7 +46,7 @@ repos:
         exclude: ^(docs|src/tests|tools)/
 
   - repo: https://github.com/ariebovenberg/slotscheck
-    rev: v0.20.1
+    rev: v0.21.0
     hooks:
       - id: slotscheck
         files: ^src/litestar_security/

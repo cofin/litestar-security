@@ -5,7 +5,7 @@ import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Generic, TypeAlias, TypeVar, cast
+from typing import Any, Generic, TypeVar, cast
 from warnings import warn
 
 from click import Group as ClickGroup
@@ -45,7 +45,7 @@ __all__ = ("CurrentUser", "SecurityPlugin")
 UserT = TypeVar("UserT")
 
 
-CurrentUser: TypeAlias = NamedDependency[UserT]
+CurrentUser = NamedDependency[UserT]
 
 
 _RESERVED_DEPENDENCIES = ("principal", "security_context", "current_user", "websocket_connect_tokens")
@@ -477,7 +477,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if safe_methods != _SAFE_HTTP_METHODS:
             message = "Native CSRF safe methods must include GET, HEAD, and OPTIONS"
             raise ImproperlyConfiguredException(detail=message)
-        if config.exclude_from_csrf_key.__class__ is not str or not config.exclude_from_csrf_key.strip():
+        if type(config.exclude_from_csrf_key) is not str or not config.exclude_from_csrf_key.strip():
             message = "Native CSRF route exclusion opt key must be non-empty text"
             raise ImproperlyConfiguredException(detail=message)
 
@@ -703,9 +703,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             message = "Native session, CSRF, and binding cookie names must be distinct"
             raise ImproperlyConfiguredException(detail=message)
         backend_max_age = getattr(backend_config, "max_age", None)
-        if backend_max_age.__class__ is not int or binding.max_age > cast(  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
-            "int", backend_max_age
-        ):
+        if type(backend_max_age) is not int or binding.max_age > backend_max_age:
             message = "Session binding lifetime cannot exceed the native session lifetime"
             raise ImproperlyConfiguredException(detail=message)
         native_secure = getattr(backend_config, "secure", None)

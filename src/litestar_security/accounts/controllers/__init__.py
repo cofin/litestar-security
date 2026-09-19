@@ -6,7 +6,7 @@ services and wire schemas and nothing in the package depends back on them.
 
 from typing import TYPE_CHECKING, Any
 
-from litestar_security._lazy import import_optional_attribute
+from litestar_security._typing import import_optional_attribute
 
 if TYPE_CHECKING:
     from litestar_security.accounts.controllers._local import (

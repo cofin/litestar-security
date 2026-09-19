@@ -263,6 +263,7 @@ ban-relative-imports = "all"
 # the adapter rule is about what the distribution depends on and
 # tools/check_downstream_consumer.py enforces it against the built wheel instead.
 "examples/**/*.py" = ["TID251"]
+"src/litestar_security/testing/**/*.py" = ["C901", "EM101", "PLC0415", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY003", "TID251"]
 "src/tests/**/*.py" = ["ANN", "D", "PLR2004", "S101", "TID251"]
 "tools/**/*.py" = ["T201"]
 

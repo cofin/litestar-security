@@ -14,7 +14,6 @@ from litestar import Controller
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
 
 import litestar_security
-import litestar_security._lazy as lazy_module
 import litestar_security._openapi as openapi_module
 import litestar_security._typing as typing_module
 import litestar_security.authentication as authentication_module
@@ -610,10 +609,10 @@ def test_import_optional_attribute_only_translates_declared_missing_dependencies
     def raise_missing_module(_module_name: str) -> None:
         raise ModuleNotFoundError(name=missing_dependency)
 
-    monkeypatch.setattr(lazy_module, "import_module", raise_missing_module)
+    monkeypatch.setattr(typing_module, "import_module", raise_missing_module)
 
     with pytest.raises(expected_exception) as error:
-        lazy_module.import_optional_attribute("feature.module", "export", extras="feature", dependencies=dependencies)
+        typing_module.import_optional_attribute("feature.module", "export", extras="feature", dependencies=dependencies)
 
     if expected_exception is ImportError:
         expected_message = (
