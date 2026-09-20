@@ -281,14 +281,14 @@ def test_adbc_selects_sql_behavior_without_overriding_begin(dialect_name: str | 
     config_type = type("Config", (), {"__module__": "sqlspec.adapters.adbc.config"})
     sqlspec_config = config_type()
     sqlspec_config.statement_config = SimpleNamespace(dialect=dialect_name)
-    if dialect_name not in {"sqlite", "duckdb"}:
+    if dialect_name not in {"sqlite", "duckdb", "postgres"}:
         with pytest.raises(SecurityConfigurationError, match="ADBC"):
             create_security_dialect(sqlspec_config, SQLSpecSecurityBackendConfig())
         return
     dialect = create_security_dialect(sqlspec_config, SQLSpecSecurityBackendConfig())
     assert dialect.data_dictionary_dialect == dialect_name
     assert dialect.begin_statement is None
-    assert dialect.max_identifier_length is None
+    assert dialect.max_identifier_length == (63 if dialect_name == "postgres" else None)
     assert dialect.bind_datetime_as_text == (dialect_name == "sqlite")
     assert dialect.bind_datetime_as_naive_utc == (dialect_name == "duckdb")
 
@@ -324,3 +324,79 @@ def test_embedded_dialect_ddl_values_and_counter(adapter: str) -> None:
     )
     assert counter.returns_value is True
     assert parse(counter.sql, read=dialect.data_dictionary_dialect)
+
+
+@pytest.mark.parametrize(
+    ("adapter", "is_async", "expected_class"),
+    [
+        ("asyncpg", True, "AsyncpgSecurityDialect"),
+        ("psycopg", True, "PsycopgAsyncSecurityDialect"),
+        ("psycopg", False, "PsycopgSyncSecurityDialect"),
+        ("psqlpy", True, "PsqlpySecurityDialect"),
+        ("cockroach_asyncpg", True, "CockroachAsyncpgSecurityDialect"),
+        ("cockroach_psycopg", True, "CockroachPsycopgAsyncSecurityDialect"),
+        ("cockroach_psycopg", False, "CockroachPsycopgSyncSecurityDialect"),
+    ],
+)
+@pytest.mark.parametrize("subclass", [False, True])
+def test_postgres_family_resolution_and_sql(
+    adapter: str, expected_class: str, *, is_async: bool, subclass: bool
+) -> None:
+    config_type = type("Config", (), {"__module__": f"sqlspec.adapters.{adapter}.config", "is_async": is_async})
+    if subclass:
+        config_type = type("ApplicationConfig", (config_type,), {})
+    config = SQLSpecSecurityBackendConfig(column_map={"api_keys": {"revoked_at": "revoked"}})
+    dialect = create_security_dialect(config_type(), config)
+    assert type(dialect).__name__ == expected_class
+    assert dialect.retry_serialization == adapter.startswith("cockroach_")
+    assert dialect.max_identifier_length == 63
+    assert dialect.lock_clause() == " FOR UPDATE"
+    assert dialect.lock_table_hint() == ""
+    ddl = dialect.create_statements()
+    for statement in ddl:
+        assert parse(statement, read="postgres")
+    rendered = "\n".join(ddl)
+    assert '"id" UUID PRIMARY KEY' in rendered
+    assert '"digest" BYTEA' in rendered
+    assert '"created_at" TIMESTAMPTZ' in rendered
+    assert '"restrictions" JSONB' in rendered
+    assert 'WHERE "revoked" IS NULL' in rendered
+    assert "WHERE \"status\" = 'active'" in rendered
+    assert '("user_id", "expires_at" DESC)' in rendered
+    assert "ON DELETE CASCADE" in rendered
+    value = {"nested": [1, True]}
+    assert dialect.bind_json(value) is value
+    assert dialect.bind_bool(value=True) is True
+    moment = datetime(2026, 9, 20, tzinfo=timezone.utc)
+    assert dialect.bind_datetime(moment) == moment
+    assert dialect.read_datetime(moment) == moment
+    statement = dialect.increment_counter_sql("rate_limit_buckets", ("bucket_key", "window_start"), "count")
+    assert statement.sql == (
+        'INSERT INTO "user_account_rate_limit_bucket" ("bucket_key", "window_start", "count") '
+        'VALUES (:bucket_key, :window_start, :cost) ON CONFLICT ("bucket_key", "window_start") '
+        'DO UPDATE SET "count" = "user_account_rate_limit_bucket"."count" + :cost RETURNING "count";'
+    )
+    assert statement.returns_value is True
+    assert parse(statement.sql, read="postgres")
+    index = dialect.index_name(TABLE_SESSIONS, "é" * 60)
+    assert len(index.encode("utf-8")) <= 63
+    assert index.endswith(sha256(("idx_user_account_auth_session_" + "é" * 60).encode()).hexdigest()[:8])
+
+
+def test_postgres_indexes_respect_mapping_and_cached_ddl_is_isolated() -> None:
+    config_type = type("Config", (), {"__module__": "sqlspec.adapters.asyncpg.config"})
+    config = SQLSpecSecurityBackendConfig(
+        session_table_name="security.sessions",
+        column_map={"sessions": {"user_id": "subject", "expires_at": "expiry"}, "totp_methods": {"status": "state"}},
+    )
+    dialect = create_security_dialect(config_type(), config)
+    statements = dialect.create_statements()
+    session_indexes = [
+        statement for statement in statements if "CREATE INDEX" in statement and 'ON "security"."sessions"' in statement
+    ]
+    assert len(session_indexes) == 1
+    assert '("subject", "expiry" DESC)' in session_indexes[0]
+    assert any("WHERE \"state\" = 'active'" in statement for statement in statements)
+    assert dialect.create_statements() == statements
+    statements.clear()
+    assert dialect.create_statements()

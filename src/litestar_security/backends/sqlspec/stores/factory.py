@@ -5,8 +5,16 @@ from typing import TYPE_CHECKING
 from litestar_security.backends.sqlspec.schema import SecurityConfigurationError
 from litestar_security.backends.sqlspec.stores.adbc import create_adbc_dialect
 from litestar_security.backends.sqlspec.stores.aiosqlite import AiosqliteSecurityDialect
+from litestar_security.backends.sqlspec.stores.asyncpg import AsyncpgSecurityDialect
 from litestar_security.backends.sqlspec.stores.base import SecurityDialect
+from litestar_security.backends.sqlspec.stores.cockroach_asyncpg import CockroachAsyncpgSecurityDialect
+from litestar_security.backends.sqlspec.stores.cockroach_psycopg import (
+    CockroachPsycopgAsyncSecurityDialect,
+    CockroachPsycopgSyncSecurityDialect,
+)
 from litestar_security.backends.sqlspec.stores.duckdb import DuckDBSecurityDialect
+from litestar_security.backends.sqlspec.stores.psqlpy import PsqlpySecurityDialect
+from litestar_security.backends.sqlspec.stores.psycopg import PsycopgAsyncSecurityDialect, PsycopgSyncSecurityDialect
 from litestar_security.backends.sqlspec.stores.sqlite import SQLiteSecurityDialect
 
 if TYPE_CHECKING:
@@ -42,4 +50,9 @@ _DIALECTS: dict[str, type[SecurityDialect] | tuple[type[SecurityDialect], type[S
     "sqlite": SQLiteSecurityDialect,
     "aiosqlite": AiosqliteSecurityDialect,
     "duckdb": DuckDBSecurityDialect,
+    "asyncpg": AsyncpgSecurityDialect,
+    "psycopg": (PsycopgAsyncSecurityDialect, PsycopgSyncSecurityDialect),
+    "psqlpy": PsqlpySecurityDialect,
+    "cockroach_asyncpg": CockroachAsyncpgSecurityDialect,
+    "cockroach_psycopg": (CockroachPsycopgAsyncSecurityDialect, CockroachPsycopgSyncSecurityDialect),
 }

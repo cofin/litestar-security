@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING
 
 from litestar_security.backends.sqlspec.schema import SecurityConfigurationError
+from litestar_security.backends.sqlspec.stores._postgres import PostgresSecurityDialect
 from litestar_security.backends.sqlspec.stores.duckdb import DuckDBSecurityDialect
 from litestar_security.backends.sqlspec.stores.sqlite import SQLiteSecurityDialect
 
@@ -35,4 +36,13 @@ class _ADBCDuckDBDialect(DuckDBSecurityDialect):
     begin_statement = None
 
 
-_ADBC_DIALECTS: "dict[str, type[SecurityDialect]]" = {"sqlite": _ADBCSQLiteDialect, "duckdb": _ADBCDuckDBDialect}
+class _ADBCPostgresDialect(PostgresSecurityDialect):
+    __slots__ = ()
+    begin_statement = None
+
+
+_ADBC_DIALECTS: "dict[str, type[SecurityDialect]]" = {
+    "sqlite": _ADBCSQLiteDialect,
+    "duckdb": _ADBCDuckDBDialect,
+    "postgres": _ADBCPostgresDialect,
+}

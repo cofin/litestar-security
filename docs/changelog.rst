@@ -22,6 +22,10 @@ Changed (breaking)
 Added
 ~~~~~
 
+* Add internal PostgreSQL and CockroachDB dialects for asyncpg, psycopg, psqlpy,
+  and ADBC PostgreSQL selection. They render native types, partial security
+  indexes, descending session-expiry indexes, and row locks; CockroachDB keeps
+  a conservative 63-byte index-name budget and requests serialization retries.
 * Add internal SQLite, aiosqlite, DuckDB, and ADBC dialect selection with
   explicit rejection of unsupported adapters. ADBC keeps transaction initiation
   in its driver, and DuckDB schema rendering omits foreign keys that restrict
