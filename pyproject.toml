@@ -45,6 +45,7 @@ argon2 = ["argon2-cffi>=25.1,<26"]
 mfa = ["PyOTP>=2.10,<3"]
 oauth = []
 passkeys = ["webauthn>=3,<4"]
+sqlspec = ["sqlspec>=0.63.0"]
 
 [project.urls]
 Documentation = "https://cofin.github.io/litestar-security/"
@@ -125,7 +126,7 @@ dev = [
 ]
 docs = ["shibuya", "sphinx>=7.1.2", "sphinx-copybutton>=0.5.2", "sphinx-design>=0.5.0"]
 lint = ["codespell", "mypy", "prek", "pyright", "ruff", "slotscheck"]
-tests = ["coverage[toml]", "polyfactory", "pytest", "pytest-cov", "pytest-xdist"]
+tests = ["coverage[toml]", "polyfactory", "pytest", "pytest-cov", "pytest-xdist", "sqlspec>=0.63.0"]
 
 ###########
 # Testing #
@@ -250,7 +251,6 @@ ban-relative-imports = "all"
 "pymongo".msg = "Adapters belong in the consumer, not in runtime source."
 "redis".msg = "Adapters belong in the consumer, not in runtime source."
 "sqlalchemy".msg = "Adapters belong in the consumer, not in runtime source."
-"sqlspec".msg = "Adapters belong in the consumer, not in runtime source."
 
 [tool.ruff.lint.per-file-ignores]
 "docs/conf.py" = ["A001", "INP001"]
@@ -276,6 +276,7 @@ ban-relative-imports = "all"
 "src/litestar_security/websocket/_connect_tokens.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "S107", "TRY400"]
 "src/litestar_security/websocket/_lifecycle.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "TRY400"]
 "src/litestar_security/websocket/_transport.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "TRY400"]
+"src/litestar_security/backends/sqlspec/**/*.py" = ["B009", "BLE001", "C901", "PLC0415", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "S106", "S110", "S608", "TRY400", "TID251"]
 # The test tree and the examples import litestar_security.testing on purpose, and
 # banned-api offers no per-key waiver: silencing that one entry means silencing
 # TID251 wholesale here, adapter roots included. That is the right trade, because
@@ -283,7 +284,10 @@ ban-relative-imports = "all"
 # tools/check_downstream_consumer.py enforces it against the built wheel instead.
 "examples/**/*.py" = ["TID251"]
 "src/litestar_security/testing/**/*.py" = ["C901", "EM101", "PLC0415", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY003", "TID251"]
+"src/tests/unit/test_backends/**/*.py" = ["S105", "S106"]
+"src/tests/integration/test_sqlspec_conformance.py" = ["PLR0913", "S105", "S106"]
 "src/tests/**/*.py" = ["ANN", "D", "PLR2004", "S101", "TID251"]
+
 "tools/**/*.py" = ["T201"]
 
 ########

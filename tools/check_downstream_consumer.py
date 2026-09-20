@@ -23,7 +23,6 @@ FORBIDDEN_DEPENDENCIES = (
     "pymongo",
     "redis",
     "sqlalchemy",
-    "sqlspec",
 )
 
 
