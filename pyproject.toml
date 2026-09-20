@@ -126,7 +126,7 @@ dev = [
 ]
 docs = ["shibuya", "sphinx>=7.1.2", "sphinx-copybutton>=0.5.2", "sphinx-design>=0.5.0"]
 lint = ["codespell", "mypy", "prek", "pyright", "ruff", "slotscheck"]
-tests = ["coverage[toml]", "polyfactory", "pytest", "pytest-cov", "pytest-xdist", "sqlspec>=0.63.0"]
+tests = ["coverage[toml]", "litestar-mcp[a2a]>=0.14.0", "polyfactory", "pytest", "pytest-cov", "pytest-xdist", "sqlspec>=0.63.0"]
 
 ###########
 # Testing #
@@ -166,7 +166,11 @@ skip_covered = true
 exclude-newer = "2026-07-19T00:00:00Z"
 preview-features = ["index-exclude-newer"]
 
+[tool.uv.sources]
+litestar-mcp = { git = "https://github.com/cofin/litestar-mcp.git", rev = "93d6b26f7c123acbc32adef0049deb9f1bdc7fcb" }
+
 [tool.uv.exclude-newer-package]
+a2a-sdk = "2026-07-23T00:00:00Z"
 advanced-alchemy = "2099-01-01T00:00:00Z"
 litestar = "2099-01-01T00:00:00Z"
 litestar-asyncapi = "2099-01-01T00:00:00Z"

@@ -115,7 +115,8 @@ class TOTPPolicy:
 
     def __post_init__(self) -> None:
         """Reject ambiguous or resource-unbounded profiles."""
-        if type(self.digits) is not int or self.digits not in {6, 8}:
+        digits = cast("object", self.digits)
+        if type(digits) is not int or digits not in {6, 8}:
             message = "TOTP digits must be 6 or 8"
             raise ImproperlyConfiguredException(detail=message)
         if type(self.period_seconds) is not int or not 1 <= self.period_seconds <= _MAXIMUM_PERIOD_SECONDS:

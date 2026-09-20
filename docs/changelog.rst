@@ -27,6 +27,8 @@ Added
   retaining callable wall time and positive ``advance()``. Their new
   ``step_wall()`` method simulates clock adjustments without advancing
   monotonic time. Existing consumers need no configuration changes.
+* Integration coverage for native MCP and A2A authentication policies, tool
+  guards, and principal propagation, against pinned ``litestar-mcp`` 0.14.0 source.
 * :func:`~litestar_security.requires_tenant_role` evaluates role membership within a
   tenant identified by a parsed path parameter.
 * ``litestar security routes`` renders the compiled security posture of every
@@ -45,6 +47,8 @@ Added
 Fixed
 ~~~~~
 
+* Restore type checking for defensive TOTP digit validation while preserving
+  the public ``Literal[6, 8]`` type and rejection of non-integer digit counts.
 * Replace application-specific migration material with generic backend upgrade
   guidance. Existing application-provided stores remain supported; backend
   adoption and data migration are explicit application decisions.
