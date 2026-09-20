@@ -104,6 +104,9 @@ async def test_totp_counter_advance_allows_one_concurrent_use_and_rejects_replay
     ("policy_kwargs", "match"),
     [
         ({"digits": 7}, "digits"),
+        ({"digits": True}, "digits"),
+        ({"digits": 6.0}, "digits"),
+        ({"digits": "6"}, "digits"),
         ({"period_seconds": 0}, "period"),
         ({"algorithm": "MD5"}, "algorithm"),
         ({"allowed_drift_steps": -1}, "drift"),

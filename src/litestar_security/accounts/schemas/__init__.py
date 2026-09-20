@@ -31,8 +31,12 @@ from litestar_security.accounts.schemas._mfa import (
     StepUpGrant,
     StepUpVerification,
     TOTPEnrollment,
+    TOTPEnrollmentRequest,
+    TOTPEnrollmentResponse,
+    TOTPMethodSummary,
     TOTPProvisioning,
     TOTPVerification,
+    TOTPVerificationRequest,
 )
 
 __all__ = (
@@ -59,6 +63,10 @@ __all__ = (
     "StepUpGrant",
     "StepUpVerification",
     "TOTPEnrollment",
+    "TOTPEnrollmentRequest",
+    "TOTPEnrollmentResponse",
+    "TOTPMethodSummary",
     "TOTPProvisioning",
     "TOTPVerification",
+    "TOTPVerificationRequest",
 )

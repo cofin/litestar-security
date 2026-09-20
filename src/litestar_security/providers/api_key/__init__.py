@@ -1,16 +1,19 @@
 """Opaque API-key contracts and reveal-once key material."""
 
 from litestar_security.providers.api_key._api_key import (
+    APIKeyClaims,
     APIKeyCodec,
     APIKeyConfig,
     APIKeyGenerationError,
     APIKeyProof,
+    APIKeyService,
     APIKeyState,
     APIKeyStore,
     APIKeyUsageSink,
+    BufferedAPIKeyUsage,
     IssuedAPIKey,
+    build_api_key_runtime,
 )
-from litestar_security.providers.api_key._runtime import APIKeyClaims, APIKeyService, BufferedAPIKeyUsage
 
 __all__ = (
     "APIKeyClaims",
@@ -24,4 +27,5 @@ __all__ = (
     "APIKeyUsageSink",
     "BufferedAPIKeyUsage",
     "IssuedAPIKey",
+    "build_api_key_runtime",
 )

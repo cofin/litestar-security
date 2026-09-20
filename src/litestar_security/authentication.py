@@ -1,21 +1,14 @@
 """Typed authentication contracts and deterministic mechanism registration."""
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field, replace
-from secrets import token_urlsafe
+from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Generic, Literal, Protocol, TypeAlias, TypeVar, cast
+from typing import Any, Generic, Literal, Protocol, TypeVar, cast
 
 from litestar.connection import ASGIConnection
 from litestar.enums import ScopeType
-from litestar.exceptions import (
-    ImproperlyConfiguredException,
-    NotAuthorizedException,
-    PermissionDeniedException,
-    ServiceUnavailableException,
-    WebSocketException,
-)
+from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
 from litestar.middleware import DefineMiddleware
 from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
 from litestar.openapi.spec import SecurityScheme
@@ -23,7 +16,6 @@ from litestar.routes import HTTPRoute
 from litestar.types import ASGIApp, HTTPScope, Message, Receive, Scope, Send
 from typing_extensions import Self
 
-from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
 from litestar_security.context import (
     AuthenticationEvidence,
     AuthorizationSnapshot,
@@ -37,20 +29,16 @@ from litestar_security.context import (
     resolve_authorization,
 )
 from litestar_security.websocket import (
-    WebSocketBinding,
-    WebSocketCloseCoordinator,
     WebSocketConnectAuthorization,
-    WebSocketConnectTokenService,
-    WebSocketConnectTokenUnavailableError,
     WebSocketHandshake,
     WebSocketSecurityConfig,
-    close_websocket,
-    extract_websocket_handshake,
-    supervise_websocket_lifetime,
-    websocket_policy_fingerprint,
+    authenticate_connect_token,
+    handle_websocket,
+    merge_connect_token,
 )
 
 __all__ = (
+    "AUTH_POLICY_OPT_KEY",
     "CSRF_REQUIRED_OPT_KEY",
     "Authenticated",
     "AuthenticationMechanism",
@@ -88,15 +76,6 @@ ClaimsT = TypeVar("ClaimsT")
 UserT = TypeVar("UserT")
 
 
-_CredentialT = TypeVar("_CredentialT")
-
-
-_ClaimsT = TypeVar("_ClaimsT")
-
-
-_UserT = TypeVar("_UserT")
-
-
 _RequestCredentialT_contra = TypeVar("_RequestCredentialT_contra", contravariant=True)
 
 
@@ -113,6 +92,8 @@ AUTH_POLICY_OPT_KEY = "auth"
 
 
 CSRF_REQUIRED_OPT_KEY = "csrf_required"
+RUNTIME_PLAN_OPT_KEY = "litestar_security_plan"
+GENERATED_ROUTE_OPT_KEY = "litestar_security_generated_route"
 
 
 _SECURITY_RESPONSE_HEADERS_SCOPE_KEY = "_litestar_security_response_headers"
@@ -359,7 +340,7 @@ class InvalidCredentials:
     code: str = "invalid_credentials"
 
 
-CredentialExtraction: TypeAlias = NoCredentials | PresentedCredential[CredentialT] | InvalidCredentials
+CredentialExtraction = NoCredentials | PresentedCredential[CredentialT] | InvalidCredentials
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,21 +351,21 @@ class VerificationUnavailable:
     retry_after: int | None = None
 
 
-AuthenticationOutcome: TypeAlias = NoCredentials | Authenticated[ClaimsT] | InvalidCredentials | VerificationUnavailable
+AuthenticationOutcome = NoCredentials | Authenticated[ClaimsT] | InvalidCredentials | VerificationUnavailable
 
 
-IdentityResolution: TypeAlias = Principal[UserT] | InvalidCredentials | VerificationUnavailable
+IdentityResolution = Principal[UserT] | InvalidCredentials | VerificationUnavailable
 
 
-AuthorizationResolution: TypeAlias = AuthorizationSnapshot | InvalidCredentials | VerificationUnavailable
+AuthorizationResolution = AuthorizationSnapshot | InvalidCredentials | VerificationUnavailable
 
 
-class CredentialSlot(Protocol[_CredentialT]):
+class CredentialSlot(Protocol[CredentialT]):
     """Synchronous, non-blocking credential extraction boundary."""
 
     name: str
 
-    def extract(self, connection: ASGIConnection[Any, Any, Any, Any]) -> CredentialExtraction[_CredentialT]:
+    def extract(self, connection: ASGIConnection[Any, Any, Any, Any]) -> CredentialExtraction[CredentialT]:
         """Extract at most one credential from the connection.
 
         Runs synchronously on every request, so it must not block or perform I/O.
@@ -399,7 +380,7 @@ class CredentialSlot(Protocol[_CredentialT]):
         ...  # pragma: no cover
 
 
-class CredentialVerifier(Protocol[_RequestCredentialT_contra, _ClaimsT]):
+class CredentialVerifier(Protocol[_RequestCredentialT_contra, ClaimsT]):
     """Async credential verification boundary."""
 
     name: str
@@ -408,7 +389,7 @@ class CredentialVerifier(Protocol[_RequestCredentialT_contra, _ClaimsT]):
 
     async def authenticate(
         self, credential: _RequestCredentialT_contra, connection: ASGIConnection[Any, Any, Any, Any]
-    ) -> AuthenticationOutcome[_ClaimsT]:
+    ) -> AuthenticationOutcome[ClaimsT]:
         """Verify a credential without resolving application identity.
 
         Args:
@@ -422,10 +403,10 @@ class CredentialVerifier(Protocol[_RequestCredentialT_contra, _ClaimsT]):
         ...  # pragma: no cover
 
 
-class IdentityResolver(Protocol[_ResolverClaimsT_contra, _UserT]):
+class IdentityResolver(Protocol[_ResolverClaimsT_contra, UserT]):
     """Async mapping from verified claims to one application principal."""
 
-    async def resolve(self, claims: _ResolverClaimsT_contra) -> IdentityResolution[_UserT]:
+    async def resolve(self, claims: _ResolverClaimsT_contra) -> IdentityResolution[UserT]:
         """Resolve verified claims into a principal or sanitized resolution outcome.
 
         Args:
@@ -444,10 +425,10 @@ class IdentityResolver(Protocol[_ResolverClaimsT_contra, _UserT]):
         ...  # pragma: no cover
 
 
-class AuthorizationResolver(Protocol[_UserT]):
+class AuthorizationResolver(Protocol[UserT]):
     """Application-owned resolution of authorization for one verified principal."""
 
-    async def resolve(self, principal: Principal[_UserT]) -> AuthorizationResolution:
+    async def resolve(self, principal: Principal[UserT]) -> AuthorizationResolution:
         """Load one immutable application authorization snapshot.
 
         Args:
@@ -721,135 +702,21 @@ class SecurityMiddleware(Generic[UserT]):
             scope["auth"] = context
         await self.app(scope, receive, send)
 
-    async def _handle_websocket(  # noqa: C901, PLR0915 - handshake, hook, and close phases remain explicit
+    async def _handle_websocket(
         self, scope: Scope, receive: Receive, send: Send, *, session: SessionHandle, plan: SecurityRuntimePlan
     ) -> None:
-        if plan.bypass_authentication:
-            await self.app(scope, receive, send)
-            return
-        connection = ASGIConnection[Any, Principal[UserT], SecurityContext, Any](
-            scope=scope, receive=receive, send=send
+        await handle_websocket(
+            app=self.app,
+            config=self.config,
+            evaluator=self.evaluator,
+            scope=scope,
+            receive=receive,
+            send=send,
+            session=session,
+            plan=plan,
         )
-        extracted = self.evaluator.extract(connection)
-        uses_cookie_credentials = any(
-            isinstance(extraction, PresentedCredential)
-            and (mechanism := self.config.registry.get_mechanism_for_slot(slot_name)) is not None
-            and mechanism.session_capable
-            for slot_name, extraction in extracted
-        )
-        try:
-            handshake = extract_websocket_handshake(
-                connection, config=self.config.websocket, uses_cookie_credentials=uses_cookie_credentials
-            )
-            if handshake.connect_token is not None:
-                principal, context = await self._authenticate_connect_token(
-                    scope=scope,
-                    connection=connection,
-                    handshake=handshake,
-                    session=session,
-                    plan=plan,
-                    extracted=extracted,
-                )
-                scope["user"] = principal
-                scope["auth"] = context
-            elif plan.authenticate:
-                principal, context = await self.evaluator.evaluate(connection, session, plan=plan, extracted=extracted)
-                scope["user"] = principal
-                scope["auth"] = context
-        except WebSocketException as exc:
-            reason = (
-                "origin_denied"
-                if exc.code == self.config.websocket.close_codes.unauthorized
-                else "authentication_required"
-            )
-            await close_websocket(send, code=exc.code, reason=reason)
-            return
-        except NotAuthorizedException:
-            await close_websocket(
-                send, code=self.config.websocket.close_codes.unauthenticated, reason="authentication_required"
-            )
-            return
-        except (ServiceUnavailableException, WebSocketConnectTokenUnavailableError):
-            await close_websocket(
-                send, code=self.config.websocket.close_codes.verification_unavailable, reason="verification_unavailable"
-            )
-            return
-        coordinator = WebSocketCloseCoordinator(send)
-        current_context = cast("SecurityContext", scope["auth"])
-        route_name = _websocket_route_name(scope)
-        revocation_hook: Callable[[], Awaitable[None]] | None = None
-        refresh_hook: Callable[[], Awaitable[None]] | None = None
-        if (
-            self.config.websocket.revocation_source is not None
-            and cast("Principal[Any]", scope["user"]).is_authenticated
-        ):
-            source = self.config.websocket.revocation_source
-            binding = _websocket_binding(
-                principal=cast("Principal[Any]", scope["user"]), context=current_context, route_name=route_name
-            )
 
-            async def wait_for_revocation() -> None:
-                await source.wait(binding)
-
-            revocation_hook = wait_for_revocation
-
-        if self.config.websocket.snapshot_refresher is not None:
-            refresher = self.config.websocket.snapshot_refresher
-
-            async def refresh_authorization() -> None:
-                nonlocal current_context
-                principal = cast("Principal[UserT]", scope["user"])
-                snapshot = await refresher.refresh(
-                    principal=principal, previous=current_context.authorization, route_name=route_name
-                )
-                if snapshot.__class__ is not AuthorizationSnapshot:
-                    raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
-                current_context = replace(
-                    current_context, authorization=resolve_authorization(snapshot, current_context.restrictions)
-                )
-                scope["auth"] = current_context
-                route_handler = cast("Any", cast("Mapping[str, object]", scope).get("route_handler"))
-                if route_handler.resolve_guards():
-                    await route_handler.authorize_connection(connection=connection)
-
-            refresh_hook = refresh_authorization
-
-        async def send_with_guard_mapping(message: Message) -> None:
-            if (
-                message["type"] == "websocket.close"
-                and coordinator.state == "pending"
-                and message.get("code") == _LITESTAR_INTERNAL_ERROR_CLOSE
-                and message.get("reason") in {"Authentication required", "Permission denied"}
-            ):
-                message = {
-                    "type": "websocket.close",
-                    "code": self.config.websocket.close_codes.unauthorized,
-                    "reason": "authorization_denied",
-                }
-            await coordinator.send(message)
-
-        try:
-
-            async def handle() -> None:
-                await self.app(scope, receive, send_with_guard_mapping)
-
-            await supervise_websocket_lifetime(
-                handle,
-                expires_at=current_context.expires_at,
-                coordinator=coordinator,
-                unauthenticated_close_code=self.config.websocket.close_codes.unauthenticated,
-                unauthorized_close_code=self.config.websocket.close_codes.unauthorized,
-                unavailable_close_code=self.config.websocket.close_codes.verification_unavailable,
-                revocation_wait=revocation_hook,
-                refresh=refresh_hook,
-                refresh_interval=self.config.websocket.refresh_interval,
-                clock=self.config.websocket.clock,
-                sleeper=self.config.websocket.sleeper,
-            )
-        except (NotAuthorizedException, PermissionDeniedException):
-            await coordinator.close(code=self.config.websocket.close_codes.unauthorized, reason="authorization_denied")
-
-    async def _authenticate_connect_token(  # noqa: PLR0913 - explicit routed inputs prevent reparsing and hidden state
+    async def _authenticate_connect_token(  # noqa: PLR0913
         self,
         *,
         scope: Scope,
@@ -859,31 +726,19 @@ class SecurityMiddleware(Generic[UserT]):
         plan: SecurityRuntimePlan,
         extracted: Sequence[tuple[str, CredentialExtraction[Any]]],
     ) -> tuple[Principal[UserT], SecurityContext]:
-        connect_token_store = self.config.websocket.connect_token_store
-        route_handler = cast("Mapping[str, object]", scope).get("route_handler")
-        route_name = cast("str | None", getattr(route_handler, "name", None)) or cast(
-            "str", getattr(route_handler, "handler_name", "")
-        )
-        if connect_token_store is None or handshake.origin is None or not route_name or handshake.connect_token is None:
-            raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-        connect_token = await WebSocketConnectTokenService(
-            store=connect_token_store, ttl=self.config.websocket.connect_token_ttl, clock=self.config.websocket.clock
-        ).consume(
-            handshake.connect_token,
-            route_name=route_name,
-            origin=handshake.origin,
-            policy_fingerprint=websocket_policy_fingerprint(plan),
-            current_security_epoch=cast(
-                "Callable[[str], Awaitable[int | None]]", self.config.websocket.current_security_epoch
+        return cast(
+            "tuple[Principal[UserT], SecurityContext]",
+            await authenticate_connect_token(
+                scope=scope,
+                connection=connection,
+                handshake=handshake,
+                session=session,
+                plan=plan,
+                extracted=extracted,
+                evaluator=self.evaluator,
+                config=self.config,
             ),
         )
-        if connect_token is None:
-            raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-        non_connect_token_plan = replace(plan, required=False, alternatives=(), allow_anonymous=True)
-        principal, context = await self.evaluator.evaluate(
-            connection, session, plan=non_connect_token_plan, extracted=extracted
-        )
-        return await self._merge_connect_token(connect_token, principal=principal, context=context, session=session)
 
     async def _merge_connect_token(
         self,
@@ -893,38 +748,16 @@ class SecurityMiddleware(Generic[UserT]):
         context: SecurityContext,
         session: SessionHandle,
     ) -> tuple[Principal[UserT], SecurityContext]:
-        if principal.is_authenticated:
-            if principal.id != connect_token.subject_id:
-                raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-            authorization = resolve_authorization(context.authorization, (connect_token.restrictions,))
-        else:
-            principal = Principal(id=connect_token.subject_id)
-            resolver = self.config.registry.authorization_resolver
-            if resolver is None:
-                authorization = AuthorizationSnapshot()
-            else:
-                try:
-                    resolution = await resolver.resolve(principal)
-                except Exception:  # noqa: BLE001 - a raising authorization resolver fails closed as one 503
-                    raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
-                if isinstance(resolution, VerificationUnavailable):
-                    raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
-                if isinstance(resolution, InvalidCredentials):
-                    raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-                authorization = resolution
-            authorization = resolve_authorization(authorization, (connect_token.restrictions,))
-        evidence = AuthenticationEvidence(
-            mechanism="websocket-connect-token",
-            slot=self.config.websocket.connect_token_query_parameter,
-            authenticated_at=connect_token.issued_at,
-            expires_at=connect_token.expires_at,
-            methods=frozenset({"websocket-connect-token"}),
-        )
-        return principal, SecurityContext(
-            session=session,
-            evidence=(*context.evidence, evidence),
-            authorization=authorization,
-            restrictions=(*context.restrictions, connect_token.restrictions),
+        return cast(
+            "tuple[Principal[UserT], SecurityContext]",
+            await merge_connect_token(
+                connect_token,
+                principal=principal,
+                context=context,
+                session=session,
+                authorization_resolver=self.config.registry.authorization_resolver,
+                connect_token_query_parameter=self.config.websocket.connect_token_query_parameter,
+            ),
         )
 
 
@@ -1229,23 +1062,3 @@ def _is_generated_options(scope: Scope) -> bool:
         return False
     route_handler = cast("Mapping[str, object]", scope).get("route_handler")
     return is_generated_options_handler(getattr(route_handler, "fn", None))
-
-
-def _websocket_route_name(scope: Scope) -> str:
-    route_handler = cast("Mapping[str, object]", scope).get("route_handler")
-    return cast("str | None", getattr(route_handler, "name", None)) or cast(
-        "str", getattr(route_handler, "handler_name", "")
-    )
-
-
-def _websocket_binding(*, principal: Principal[Any], context: SecurityContext, route_name: str) -> WebSocketBinding:
-    session_value = context.session.get("_litestar_security")
-    session_mapping = cast("Mapping[str, object]", session_value) if isinstance(session_value, Mapping) else None
-    session_id = cast("str | None", session_mapping.get("session_id")) if session_mapping is not None else None
-    return WebSocketBinding(
-        connection_id=token_urlsafe(16),
-        subject_id=cast("str", principal.id),
-        credential_ids=frozenset(f"{evidence.mechanism}:{evidence.slot}" for evidence in context.evidence),
-        session_id=session_id,
-        route_name=route_name,
-    )

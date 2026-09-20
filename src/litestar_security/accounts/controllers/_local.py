@@ -28,7 +28,6 @@ from litestar.status_codes import (
 
 from litestar_security._docs import ROUTE_TAGS, apply_route_docs, raised_denial
 from litestar_security._dto import apply_wire_dtos
-from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
 from litestar_security.accounts._auth_service import LocalAuthService
 from litestar_security.accounts._mfa_login import MFARequired
 from litestar_security.accounts._rate_limits import RateLimited
@@ -60,14 +59,31 @@ from litestar_security.accounts.schemas import (
     LocalToken,
     OperationMessage,
 )
-from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
+from litestar_security.authentication import (
+    GENERATED_ROUTE_OPT_KEY,
+    InvalidCredentials,
+    VerificationUnavailable,
+    public,
+    required,
+)
 from litestar_security.context import Principal, SecurityContext
 from litestar_security.schema import WirePolicy
 
 if TYPE_CHECKING:
     from litestar_security.accounts._profiles import LocalAuthConfig
 
-__all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "require_local_bearer")
+__all__ = (
+    "LOCAL_AUTH_TAGS",
+    "LocalAuthController",
+    "LocalRegistrationController",
+    "LocalSessionController",
+    "LocalSessionMFAController",
+    "LocalTokenController",
+    "LocalTokenMFAController",
+    "MFALoginChallengeController",
+    "build_local_auth_routes",
+    "require_local_bearer",
+)
 
 
 _SESSIONS_TAG = ROUTE_TAGS["local.sessions"].name
@@ -843,3 +859,12 @@ def _password_change_response(result: object) -> Response[OperationMessage]:
     if isinstance(result, InvalidCredentials):
         _route_error(result)
     _route_error(result)
+
+
+LocalAuthController = _LocalSessionController
+LocalSessionController = _LocalSessionController
+LocalTokenController = _LocalTokenController
+LocalRegistrationController = _LocalRegistrationController
+MFALoginChallengeController = _LocalSessionMFAController
+LocalSessionMFAController = _LocalSessionMFAController
+LocalTokenMFAController = _LocalTokenMFAController

@@ -21,8 +21,6 @@ from litestar_security.accounts._access_tokens import (
 )
 from litestar_security.accounts._auth_service import LocalAuthService, trusted_client_key
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
-from litestar_security.accounts._mfa import MFAService
-from litestar_security.accounts._mfa_login import MFALoginChallengeStore, MFALoginService
 from litestar_security.accounts._passwords import Argon2PasswordHasher, PasswordHasher, PasswordPolicy
 from litestar_security.accounts._purpose_tokens import PurposeTokenCodec
 from litestar_security.accounts._rate_limits import RateLimiter, RateLimitGuard, StoreRateLimiter
@@ -33,17 +31,8 @@ from litestar_security.accounts._records import (
     RegistrationMode,
     SecurityEventSink,
 )
-from litestar_security.accounts._recovery import PasswordChangeService, RecoveryTokenService
 from litestar_security.accounts._refresh import RefreshTokenFamilyStore, RefreshTokenService
 from litestar_security.accounts._refresh_tokens import RefreshTokenCodec
-from litestar_security.accounts._registration import RegistrationService, VerificationTokenService
-from litestar_security.accounts._sessions import (
-    NativeSessionAuth,
-    NativeSessionStore,
-    SessionBindingConfig,
-    SessionRegistry,
-    UserAuthSessionResolver,
-)
 from litestar_security.accounts._stores import (
     AccountLookup,
     LocalAccountCapabilities,
@@ -56,6 +45,20 @@ from litestar_security.accounts._stores import (
     VerificationTokenStore,
 )
 from litestar_security.accounts.controllers import build_local_auth_routes
+from litestar_security.accounts.lifecycle import (
+    PasswordChangeService,
+    RecoveryTokenService,
+    RegistrationService,
+    VerificationTokenService,
+)
+from litestar_security.accounts.mfa import MFALoginChallengeStore, MFALoginService, MFAService
+from litestar_security.accounts.sessions import (
+    NativeSessionAuth,
+    NativeSessionStore,
+    SessionBindingConfig,
+    SessionRegistry,
+    UserAuthSessionResolver,
+)
 from litestar_security.providers.jwt import BearerSlotSelector, BearerTokenSlot, JWTValidationConfig, LocalKeyRing
 from litestar_security.schema import WirePolicy
 

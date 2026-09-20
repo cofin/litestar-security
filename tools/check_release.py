@@ -11,8 +11,8 @@ from zipfile import ZipFile
 ROOT = Path(__file__).parents[1]
 EXPECTED_VERSION = "0.6.0"
 SUPPORTED_PYTHONS = ("3.10", "3.11", "3.12", "3.13", "3.14")
-DIRECT_DEPENDENCIES = frozenset({"argon2-cffi", "httpx", "litestar", "pyotp", "pyjwt", "webauthn"})
-FORBIDDEN_DEPENDENCIES = frozenset({"advanced-alchemy", "litestar-mcp", "sqlalchemy", "sqlspec"})
+DIRECT_DEPENDENCIES = frozenset({"argon2-cffi", "httpx", "litestar", "pyjwt", "pyotp", "sqlspec", "webauthn"})
+FORBIDDEN_DEPENDENCIES = frozenset({"advanced-alchemy", "litestar-mcp", "sqlalchemy"})
 SMOKE_SCRIPT = r"""
 import asyncio
 import importlib
@@ -160,7 +160,7 @@ def smoke_wheel(
     python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if lower_bound:
         run("uv", "pip", "install", "--python", str(python), "litestar==2.24.0")
-    run("uv", "pip", "install", "--python", str(python), f"{wheel}[argon2,mfa,oauth,passkeys]")
+    run("uv", "pip", "install", "--python", str(python), f"{wheel}[argon2,mfa,oauth,passkeys,sqlspec]")
     run(str(python), "-I", "-c", SMOKE_SCRIPT, cwd=workspace, env=clean_environment)
     cli = environment / ("Scripts/litestar.exe" if os.name == "nt" else "bin/litestar")
     result = run(str(cli), "security", "--version", cwd=workspace, env=clean_environment)

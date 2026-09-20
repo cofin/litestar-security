@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from secrets import token_urlsafe
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from litestar.datastructures import ResponseHeader
 from litestar.di import NamedDependency, Provide
@@ -24,8 +24,8 @@ _NONCE_SCOPE_KEY = "litestar_security.csp_nonce"
 _ASCII_CONTROL_LIMIT = 32
 _ASCII_DELETE = 127
 
-csp_nonce: TypeAlias = NamedDependency[str]  # noqa: PYI042 - stable dependency name intentionally matches its DI key
-CSPHook: TypeAlias = Callable[[Message, Scope], Awaitable[None]]
+csp_nonce = NamedDependency[str]
+CSPHook = Callable[[Message, Scope], Awaitable[None]]
 
 
 class CSPMode(str, Enum):

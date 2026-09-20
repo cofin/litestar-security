@@ -1,45 +1,128 @@
-"""Discovery policy, validated metadata, and the discovery client.
-
-Metadata is validated against the requested issuer before it is returned, so a
-response can never redirect trust to an issuer the caller did not ask for.
-"""
+"""Discovery policy, validated metadata, URL normalization, and the discovery client."""
 
 import ipaddress
 import json
+import math
 from dataclasses import dataclass
-from typing import TypeAlias, cast
+from typing import NoReturn, TypeAlias, cast
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from litestar.status_codes import HTTP_200_OK, HTTP_300_MULTIPLE_CHOICES, HTTP_400_BAD_REQUEST
+from typing_extensions import Self
 
-from litestar_security.providers._internal import AddressResolver, public_address, raise_config, resolve_addresses
-from litestar_security.providers.oidc._internal import (
-    OIDCDiscoveryError,
-    load_document,
-    positive_finite,
-    raise_discovery,
+from litestar_security.providers._internal import (
+    AddressResolver,
+    JSONValue,
+    public_address,
+    raise_config,
+    reject_non_finite,
+    resolve_addresses,
+    unique_object,
+    validate_depth,
 )
-from litestar_security.providers.oidc._urls import NormalizedURL, normalize_url, optional_url_value
 
-__all__ = ("DiscoveryPolicy", "OIDCDiscoveryClient", "OIDCMetadata")
-
+__all__ = (
+    "DiscoveryPolicy",
+    "NormalizedURL",
+    "OIDCDiscoveryClient",
+    "OIDCDiscoveryError",
+    "OIDCMetadata",
+    "load_document",
+    "normalize_url",
+    "optional_url_value",
+    "positive_finite",
+    "raise_discovery",
+)
 
 JSONObject: TypeAlias = dict[str, object]
 
-
 _DEFAULT_HTTPS_PORT = 443
-
-
+_DEFAULT_HTTP_PORT = 80
 _MAXIMUM_CONFIGURED_DOCUMENT_BYTES = 1_048_576
-
-
 _MAXIMUM_TCP_PORT = 65_535
-
-
+_MAXIMUM_JSON_DEPTH = 64
 _POOL_CONNECTIONS = 10
-
-
 _SUPPORTED_SIGNING_ALGORITHMS = frozenset({"EdDSA", "ES256", "HS256", "RS256"})
+
+
+class OIDCDiscoveryError(RuntimeError):
+    """Sanitized operational or remote-metadata discovery failure."""
+
+
+def raise_discovery(detail: str) -> NoReturn:
+    """Raise one sanitized discovery exception."""
+    raise OIDCDiscoveryError(detail) from None
+
+
+def load_document(value: bytes) -> JSONObject:
+    """Safely decode and validate an OIDC discovery JSON document."""
+    decoded = json.loads(value, object_pairs_hook=unique_object, parse_constant=reject_non_finite)
+    if not isinstance(decoded, dict):
+        raise TypeError
+    validate_depth(cast("JSONValue", decoded), maximum=_MAXIMUM_JSON_DEPTH)
+    return cast("JSONObject", decoded)
+
+
+def positive_finite(value: object) -> bool:
+    """Check if a numeric configuration value is finite and strictly positive."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedURL:
+    """Normalized URL components for secure network boundaries."""
+
+    value: str
+    origin: str
+    host: str
+    port: int
+
+
+def normalize_url(
+    value: str, *, require_https: bool, allowed_ports: frozenset[int], allow_origin_only: bool
+) -> NormalizedURL:
+    """Normalize and validate a URL against scheme, port, and path constraints."""
+    val_obj = cast("object", value)
+    if not isinstance(val_obj, str) or not value or value != value.strip():
+        raise ValueError
+    split = urlsplit(value)
+    decoded_path = unquote(split.path)
+    if (
+        not split.scheme
+        or not split.netloc
+        or split.username is not None
+        or split.password is not None
+        or split.query
+        or split.fragment
+        or any(segment in {".", ".."} for segment in decoded_path.split("/"))
+        or "%2f" in split.path.lower()
+        or "%5c" in split.path.lower()
+        or (split.path not in {"", "/"} and split.path.endswith("/"))
+    ):
+        raise ValueError
+    url = httpx.URL(value)
+    scheme = url.scheme.lower()
+    if scheme not in {"http", "https"} or (require_https and scheme != "https"):
+        raise ValueError
+    default_port = _DEFAULT_HTTPS_PORT if scheme == "https" else _DEFAULT_HTTP_PORT
+    port = url.port or default_port
+    if port not in allowed_ports:
+        raise ValueError
+    host = url.raw_host.decode("ascii")
+    authority_host = f"[{host}]" if ":" in host else host
+    authority = authority_host if port == default_port else f"{authority_host}:{port}"
+    origin = f"{scheme}://{authority}"
+    raw_path = url.raw_path.decode("ascii")
+    path = "" if raw_path == "/" else raw_path
+    if allow_origin_only and path:
+        raise ValueError
+    return NormalizedURL(value=f"{origin}{path}", origin=origin, host=host, port=port)
+
+
+def optional_url_value(value: NormalizedURL | None) -> str | None:
+    """Return the raw URL string from an optional normalized URL."""
+    return value.value if value is not None else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,9 +143,7 @@ class DiscoveryPolicy:
         """Normalize configured trust anchors and reject unsafe bounds."""
         allowed_ports = frozenset(self.allowed_ports)
         if not allowed_ports or any(
-            isinstance(port, bool)
-            or not isinstance(port, int)  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
-            or not 1 <= port <= _MAXIMUM_TCP_PORT
+            isinstance(port, bool) or not isinstance(cast("object", port), int) or not 1 <= port <= _MAXIMUM_TCP_PORT
             for port in allowed_ports
         ):
             raise_config("OIDC discovery allowed_ports must contain valid TCP ports")
@@ -70,9 +151,7 @@ class DiscoveryPolicy:
             not positive_finite(self.connect_timeout)
             or not positive_finite(self.read_timeout)
             or isinstance(self.maximum_document_bytes, bool)
-            or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
-                self.maximum_document_bytes, int
-            )
+            or not isinstance(cast("object", self.maximum_document_bytes), int)
             or not 1 <= self.maximum_document_bytes <= _MAXIMUM_CONFIGURED_DOCUMENT_BYTES
         ):
             raise_config("OIDC discovery timeout and document limits must be positive and bounded")
@@ -136,9 +215,7 @@ class OIDCDiscoveryClient:
         if (
             not algorithms
             or any(
-                not isinstance(algorithm, str)  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
-                or not algorithm
-                or algorithm != algorithm.strip()
+                not isinstance(cast("object", algorithm), str) or not algorithm or algorithm != algorithm.strip()
                 for algorithm in algorithms
             )
             or not algorithms.issubset(_SUPPORTED_SIGNING_ALGORITHMS)
@@ -167,7 +244,7 @@ class OIDCDiscoveryClient:
         Args:
             issuer: The issuer to discover, matched against configured trust anchors.
             discovery_url: Where the metadata document lives, for a provider that
-                does not publish it at ``{issuer}/.well-known/openid-configuration``.
+                does not publish it at {issuer}/.well-known/openid-configuration.
                 It must share the issuer's exact origin, so an override changes the
                 path this client requests and never the host it reaches.
 
@@ -204,7 +281,7 @@ class OIDCDiscoveryClient:
             self._closed = True
             await self._client.aclose()
 
-    async def __aenter__(self) -> "OIDCDiscoveryClient":  # noqa: PYI034 - the fluent builder returns its own concrete type
+    async def __aenter__(self) -> Self:
         """Enter the owned-client context."""
         return self
 

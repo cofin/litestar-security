@@ -4,8 +4,9 @@ from typing import TYPE_CHECKING, Any
 
 from litestar_security.__metadata__ import __project__, __version__
 from litestar_security._docs import ROUTE_TAGS, RouteDocs
-from litestar_security._lazy import import_optional_attribute
+from litestar_security._typing import import_optional_attribute
 from litestar_security.authentication import (
+    AUTH_POLICY_OPT_KEY,
     CSRF_REQUIRED_OPT_KEY,
     Authenticated,
     AuthenticationMechanism,
@@ -32,6 +33,7 @@ from litestar_security.authentication import (
     public,
     required,
 )
+from litestar_security.clock import SecurityClock
 from litestar_security.config import (
     BlockingIntegration,
     ExternalCSRF,
@@ -74,7 +76,7 @@ from litestar_security.guards import (
 )
 from litestar_security.headers import ContentSecurityPolicy, CSPMode, SecurityHeadersConfig, csp_nonce
 from litestar_security.plugin import CurrentUser, SecurityPlugin
-from litestar_security.schema import ProblemDetail, RouteError, WireStruct
+from litestar_security.schema import ProblemDetail, RouteError, WirePolicy, WireStruct
 from litestar_security.websocket import (
     AuthorizationSnapshotRefresher,
     InMemoryWebSocketConnectTokenStore,
@@ -111,6 +113,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = (
+    "AUTH_POLICY_OPT_KEY",
     "CSRF_REQUIRED_OPT_KEY",
     "ROUTE_TAGS",
     "AESGCMOAuthTransactionProtector",
@@ -170,6 +173,7 @@ __all__ = (
     "RouteDocs",
     "RouteError",
     "SecureController",
+    "SecurityClock",
     "SecurityConfig",
     "SecurityContext",
     "SecurityHeadersConfig",
@@ -186,6 +190,7 @@ __all__ = (
     "WebSocketConnectTokenStore",
     "WebSocketRevocationSource",
     "WebSocketSecurityConfig",
+    "WirePolicy",
     "WireStruct",
     "__project__",
     "__version__",

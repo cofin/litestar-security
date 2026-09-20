@@ -46,12 +46,12 @@ def test_package_declares_account_feature_dependencies_only_through_extras() -> 
     assert "webauthn<4,>=3;extra=='passkeys'" in declared
     assert not any(";extra=='all'" in requirement for requirement in declared)
     assert not any(
-        requirement.startswith(("argon2-cffi", "pyotp", "webauthn")) and ";extra==" not in requirement
+        requirement.startswith(("argon2-cffi", "pyotp", "webauthn", "sqlspec")) and ";extra==" not in requirement
         for requirement in declared
     )
     assert all(
         not requirement.startswith(dependency)
-        for dependency in ("advanced-alchemy", "redis", "sqlalchemy", "sqlspec")
+        for dependency in ("advanced-alchemy", "redis", "sqlalchemy")
         for requirement in declared
     )
     assert import_module("argon2")

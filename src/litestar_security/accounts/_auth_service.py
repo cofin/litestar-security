@@ -17,7 +17,6 @@ from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts._internal import aware_utc_time
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
-from litestar_security.accounts._mfa_login import MFALoginChallenge, MFALoginService, MFARequired
 from litestar_security.accounts._operations import LOGIN_MFA
 from litestar_security.accounts._passwords import PasswordPolicyDecision
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
@@ -28,13 +27,18 @@ from litestar_security.accounts._records import (
     PasswordChangeStatus,
     PasswordReauthenticationProof,
 )
-from litestar_security.accounts._recovery import PasswordChangeService, RecoveryTokenService
 from litestar_security.accounts._refresh import RefreshTokenService
 from litestar_security.accounts._refresh_tokens import TokenPair
-from litestar_security.accounts._registration import RegistrationService, VerificationTokenService
-from litestar_security.accounts._sessions import NativeSessionAuth, SessionAuthentication
 from litestar_security.accounts._stores import LocalAccountCapabilities, LoginMethodStore
+from litestar_security.accounts.lifecycle import (
+    PasswordChangeService,
+    RecoveryTokenService,
+    RegistrationService,
+    VerificationTokenService,
+)
+from litestar_security.accounts.mfa import MFALoginChallenge, MFALoginService, MFARequired
 from litestar_security.accounts.schemas import LocalAccount, LocalCredentials, LocalPasswordChange
+from litestar_security.accounts.sessions import NativeSessionAuth, SessionAuthentication
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
 

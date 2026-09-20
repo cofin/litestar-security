@@ -6,19 +6,66 @@ services and wire schemas and nothing in the package depends back on them.
 
 from typing import TYPE_CHECKING, Any
 
-from litestar_security._lazy import import_optional_attribute
+from litestar_security._typing import import_optional_attribute
 
 if TYPE_CHECKING:
     from litestar_security.accounts.controllers._local import (
         LOCAL_AUTH_TAGS,
+        LocalAuthController,
+        LocalRegistrationController,
+        LocalSessionController,
+        LocalSessionMFAController,
+        LocalTokenController,
+        LocalTokenMFAController,
+        MFALoginChallengeController,
         build_local_auth_routes,
         require_local_bearer,
     )
-    from litestar_security.accounts.controllers._mfa import build_mfa_routes
+    from litestar_security.accounts.controllers._mfa import (
+        MFAController,
+        PasskeyController,
+        StepUpController,
+        TOTPController,
+        build_mfa_routes,
+    )
 
-__all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "build_mfa_routes", "require_local_bearer")
+__all__ = (
+    "LOCAL_AUTH_TAGS",
+    "LocalAuthController",
+    "LocalRegistrationController",
+    "LocalSessionController",
+    "LocalSessionMFAController",
+    "LocalTokenController",
+    "LocalTokenMFAController",
+    "MFAController",
+    "MFALoginChallengeController",
+    "PasskeyController",
+    "StepUpController",
+    "TOTPController",
+    "build_local_auth_routes",
+    "build_mfa_routes",
+    "require_local_bearer",
+)
 
-_LOCAL_EXPORTS = frozenset({"LOCAL_AUTH_TAGS", "build_local_auth_routes", "require_local_bearer"})
+_LOCAL_EXPORTS = frozenset({
+    "LOCAL_AUTH_TAGS",
+    "LocalAuthController",
+    "LocalRegistrationController",
+    "LocalSessionController",
+    "LocalSessionMFAController",
+    "LocalTokenController",
+    "LocalTokenMFAController",
+    "MFALoginChallengeController",
+    "build_local_auth_routes",
+    "require_local_bearer",
+})
+_MFA_EXPORTS = frozenset({
+    "MFAController",
+    "PasskeyController",
+    "StepUpController",
+    "TOTPController",
+    "build_mfa_routes",
+})
 
 
 def __getattr__(name: str) -> Any:  # noqa: ANN401 - module lazy-export hook is dynamically typed
@@ -30,7 +77,7 @@ def __getattr__(name: str) -> Any:  # noqa: ANN401 - module lazy-export hook is 
             extras="argon2,mfa",
             dependencies=frozenset({"argon2", "pyotp"}),
         )
-    if name == "build_mfa_routes":
+    if name in _MFA_EXPORTS:
         return import_optional_attribute(
             "litestar_security.accounts.controllers._mfa",
             name,

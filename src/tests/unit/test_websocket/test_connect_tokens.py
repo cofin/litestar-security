@@ -14,8 +14,7 @@ from litestar.handlers.http_handlers import HTTPRouteHandler
 
 import litestar_security.websocket as websocket_module
 import litestar_security.websocket._connect_tokens as connect_tokens_module
-from litestar_security._internal import RUNTIME_PLAN_OPT_KEY
-from litestar_security.authentication import SecurityRuntimePlan
+from litestar_security.authentication import RUNTIME_PLAN_OPT_KEY, SecurityRuntimePlan
 from litestar_security.context import CredentialRestrictions, NullSessionHandle, Principal, SecurityContext
 from litestar_security.websocket import (
     InMemoryWebSocketConnectTokenStore,

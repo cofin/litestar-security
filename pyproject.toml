@@ -45,6 +45,7 @@ argon2 = ["argon2-cffi>=25.1,<26"]
 mfa = ["PyOTP>=2.10,<3"]
 oauth = []
 passkeys = ["webauthn>=3,<4"]
+sqlspec = ["sqlspec>=0.63.0"]
 
 [project.urls]
 Documentation = "https://cofin.github.io/litestar-security/"
@@ -125,7 +126,7 @@ dev = [
 ]
 docs = ["shibuya", "sphinx>=7.1.2", "sphinx-copybutton>=0.5.2", "sphinx-design>=0.5.0"]
 lint = ["codespell", "mypy", "prek", "pyright", "ruff", "slotscheck"]
-tests = ["coverage[toml]", "polyfactory", "pytest", "pytest-cov", "pytest-xdist"]
+tests = ["coverage[toml]", "litestar-mcp[a2a]>=0.14.0", "polyfactory", "pytest", "pytest-cov", "pytest-xdist", "sqlspec>=0.63.0"]
 
 ###########
 # Testing #
@@ -165,7 +166,11 @@ skip_covered = true
 exclude-newer = "2026-07-19T00:00:00Z"
 preview-features = ["index-exclude-newer"]
 
+[tool.uv.sources]
+litestar-mcp = { git = "https://github.com/cofin/litestar-mcp.git", rev = "93d6b26f7c123acbc32adef0049deb9f1bdc7fcb" }
+
 [tool.uv.exclude-newer-package]
+a2a-sdk = "2026-07-23T00:00:00Z"
 advanced-alchemy = "2099-01-01T00:00:00Z"
 litestar = "2099-01-01T00:00:00Z"
 litestar-asyncapi = "2099-01-01T00:00:00Z"
@@ -250,20 +255,43 @@ ban-relative-imports = "all"
 "pymongo".msg = "Adapters belong in the consumer, not in runtime source."
 "redis".msg = "Adapters belong in the consumer, not in runtime source."
 "sqlalchemy".msg = "Adapters belong in the consumer, not in runtime source."
-"sqlspec".msg = "Adapters belong in the consumer, not in runtime source."
 
 [tool.ruff.lint.per-file-ignores]
 "docs/conf.py" = ["A001", "INP001"]
 # Every value in this module is an audit event name. S105 fires on each PASSWORD_*
-# constant because the name looks credential-bearing, but the module holds no secrets.
 "src/litestar_security/accounts/_operations.py" = ["S105"]
+"src/litestar_security/accounts/lifecycle.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/accounts/mfa.py" = ["B009", "BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/accounts/models.py" = ["BLE001", "S105", "TRY400"]
+"src/litestar_security/accounts/passwords.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "TRY400"]
+"src/litestar_security/accounts/protocols.py" = ["BLE001", "PLC0415", "PLR0913"]
+"src/litestar_security/accounts/sessions.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/accounts/tokens.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105"]
+"src/litestar_security/providers/api_key/_api_key.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/providers/jwks/_provider.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/providers/_transport.py" = ["EM101", "EM102", "TRY003"]
+"src/litestar_security/providers/jwks/_transport.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/providers/jwt/_keyring.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "SLF001", "TRY400"]
+"src/litestar_security/providers/jwt/_tokens.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "SLF001", "TRY400"]
+"src/litestar_security/providers/oauth/_routes.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/providers/oidc/_discovery.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/providers/oidc/_provider.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/websocket/_config.py" = ["S105"]
+"src/litestar_security/websocket/_connect_tokens.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "S107", "TRY400"]
+"src/litestar_security/websocket/_lifecycle.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "TRY400"]
+"src/litestar_security/websocket/_transport.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "TRY400"]
+"src/litestar_security/backends/sqlspec/**/*.py" = ["B009", "BLE001", "C901", "PLC0415", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "S106", "S110", "S608", "TRY400", "TID251"]
 # The test tree and the examples import litestar_security.testing on purpose, and
 # banned-api offers no per-key waiver: silencing that one entry means silencing
 # TID251 wholesale here, adapter roots included. That is the right trade, because
 # the adapter rule is about what the distribution depends on and
 # tools/check_downstream_consumer.py enforces it against the built wheel instead.
 "examples/**/*.py" = ["TID251"]
+"src/litestar_security/testing/**/*.py" = ["C901", "EM101", "PLC0415", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY003", "TID251"]
+"src/tests/unit/test_backends/**/*.py" = ["S105", "S106"]
+"src/tests/integration/test_sqlspec_conformance.py" = ["PLR0913", "S105", "S106"]
 "src/tests/**/*.py" = ["ANN", "D", "PLR2004", "S101", "TID251"]
+
 "tools/**/*.py" = ["T201"]
 
 ########

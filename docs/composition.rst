@@ -11,6 +11,10 @@ With mechanisms configured, a route that declares no policy compiles to implicit
 ``required()``. That includes routes this application did not write, so a
 freshly added static files router answers ``401`` until it is excluded.
 
+The :doc:`MCP and A2A integration guide <integrations/mcp>` shows how to apply
+explicit endpoint policies while preserving public agent-card discovery and
+authorizing individual tools.
+
 This is Litestar's behavior, not a Litestar Security quirk
 ==========================================================
 

@@ -28,6 +28,8 @@ guards, OpenAPI schema, and WebSocket lifecycle.
    jwt-and-jwks
    resource-server
    websockets
+   integrations/mcp
+   migrations/security-backends
    hardening
    customization
    examples

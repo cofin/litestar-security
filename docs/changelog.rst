@@ -22,6 +22,29 @@ Changed (breaking)
 Added
 ~~~~~
 
+* Add internal MySQL-family dialects with enforced table-level foreign keys,
+  microsecond UTC datetime binding, indexable unique digests, and atomic
+  counters without deprecated ``VALUES(column)`` accessors. Existing backend
+  runtime selection and database schemas remain unchanged.
+* Add internal PostgreSQL and CockroachDB dialects for asyncpg, psycopg, psqlpy,
+  and ADBC PostgreSQL selection. They render native types, partial security
+  indexes, descending session-expiry indexes, and row locks; CockroachDB keeps
+  a conservative 63-byte index-name budget and requests serialization retries.
+* Add internal SQLite, aiosqlite, DuckDB, and ADBC dialect selection with
+  explicit rejection of unsupported adapters. ADBC keeps transaction initiation
+  in its driver, and DuckDB schema rendering omits foreign keys that restrict
+  parent-row updates. Existing backend runtime selection is unchanged.
+* Add an internal SQLSpec dialect foundation with declarative table definitions,
+  quoted table and column resolution, byte-limited index names, and UTC value
+  binding. Existing stores and schema creation continue using their current
+  implementation; no database migration is required.
+* ``SecurityClock`` provides UTC wall time and monotonic readings for local
+  durations. ``FakeClock`` and ``FakeSecurityClock`` share its interface while
+  retaining callable wall time and positive ``advance()``. Their new
+  ``step_wall()`` method simulates clock adjustments without advancing
+  monotonic time. Existing consumers need no configuration changes.
+* Integration coverage for native MCP and A2A authentication policies, tool
+  guards, and principal propagation, against pinned ``litestar-mcp`` 0.14.0 source.
 * :func:`~litestar_security.requires_tenant_role` evaluates role membership within a
   tenant identified by a parsed path parameter.
 * ``litestar security routes`` renders the compiled security posture of every
@@ -40,6 +63,24 @@ Added
 Fixed
 ~~~~~
 
+* Render qualified SQLite schema indexes and foreign keys using SQLite's native
+  syntax. Reject foreign keys spanning attached databases instead of silently
+  referencing a table in the wrong database. This applies to the new internal
+  SQLite dialects; existing backend runtime selection is unchanged.
+* Correct MCP and A2A integration examples against the pinned 0.14.0 source:
+  endpoint configuration, tool guard enforcement, agent-card construction, and
+  async stdio bridge authentication. Clarify default-participant authentication
+  and distinguish advertised tool scopes from enforced authorization.
+* Restore package annotation and formatting checks while preserving deferred
+  type resolution, named exports, and optional dependency isolation. Wildcard
+  imports from ``backends.sqlspec.stores.accounts`` now expose only
+  ``SQLSpecAccountStore``; see :doc:`migrations/security-backends` for guidance.
+  No database migration is required.
+* Restore type checking for defensive TOTP digit validation while preserving
+  the public ``Literal[6, 8]`` type and rejection of non-integer digit counts.
+* Replace application-specific migration material with generic backend upgrade
+  guidance. Existing application-provided stores remain supported; backend
+  adoption and data migration are explicit application decisions.
 * ``exclude_from_auth`` is read by truthiness, as Litestar reads it. A falsy
   value means "authenticate this route" instead of raising at startup, so a
   handler can opt back in underneath an excluded router and configurations that

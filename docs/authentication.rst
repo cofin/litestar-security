@@ -13,6 +13,9 @@ security projection compile from the same normalized policy. Authentication
 failure is ``401``, guard denial is ``403``, and unavailable verification fails
 closed as ``503``.
 
+For native MCP and A2A endpoints, see :doc:`integrations/mcp` for explicit
+transport policies, tool guards, and authenticated stdio bridges.
+
 Native ownership
 ----------------
 

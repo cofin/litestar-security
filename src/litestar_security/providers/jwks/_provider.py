@@ -1,62 +1,162 @@
-"""The cached JWKS provider: lock-free reads and single-flight refresh.
-
-Fresh reads never take a lock; refreshes are owned by the provider and coalesced so
-concurrent misses issue one request. Unknown-key state is generation-scoped and
-bounded so a hostile issuer cannot grow it without limit.
-"""
+"""The cached JWKS provider: lock-free reads, single-flight refresh, and document parsing."""
 
 import asyncio
-from collections.abc import Sequence
+import json
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from time import perf_counter
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast, runtime_checkable
+from typing import Any, Protocol, TypeAlias, cast, runtime_checkable
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
+from jwt import PyJWK
 from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
-from litestar_security.providers._internal import raise_config, safe_increment, safe_observe
-from litestar_security.providers.jwks._cache import (
+from litestar_security.providers._internal import (
+    JSONValue,
+    raise_config,
+    reject_non_finite,
+    safe_increment,
+    safe_observe,
+    unique_object,
+    validate_depth,
+)
+from litestar_security.providers.jwks._transport import (
+    AsyncJWKSFetcher,
     InMemoryJWKSCache,
     JWKSCache,
     JWKSCacheCoordinator,
     JWKSCachePolicy,
-    JWKSSnapshot,
-    JWKSSource,
-    freshness,
-)
-from litestar_security.providers.jwks._documents import parse_document
-from litestar_security.providers.jwks._fetching import (
-    AsyncJWKSFetcher,
     JWKSFetchOutcome,
     JWKSFetchTarget,
+    JWKSSnapshot,
+    JWKSSource,
     SyncJWKSFetcher,
+    freshness,
     normalize_fetcher,
+    valid_selection_value,
 )
-from litestar_security.providers.jwks._internal import aware_utc, etag, valid_selection_value
-from litestar_security.providers.jwt import VerificationKey
+from litestar_security.providers.jwt import JWTAlgorithm, VerificationKey
 from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 
-if TYPE_CHECKING:
-    from collections import OrderedDict
-
-__all__ = ("CachedJWKSProvider", "JWKSProvider")
-
+__all__ = (
+    "CachedJWKSProvider",
+    "JWKSProvider",
+    "JWKSSelection",
+    "aware_utc",
+    "etag",
+    "negative_cache",
+    "parse_document",
+)
 
 JWKSSelection: TypeAlias = VerificationKey | InvalidCredentials | VerificationUnavailable
 
-
 _SelectionKey: TypeAlias = tuple[str, str]
-
-
 _EntryKey: TypeAlias = tuple[str, str]
-
+_NegativeKey: TypeAlias = tuple[int, str, str]
 
 _INVALID = InvalidCredentials()
-
-
 _UNAVAILABLE = VerificationUnavailable()
+
+_MAXIMUM_ETAG_LENGTH = 1_024
+_MAXIMUM_JSON_DEPTH = 64
+_ASCII_CONTROL_LIMIT = 32
+_SUPPORTED_REMOTE_ALGORITHMS = frozenset({"EdDSA", "ES256", "RS256"})
+_PRIVATE_JWK_MEMBERS = frozenset({"d", "dp", "dq", "k", "oth", "p", "q", "qi"})
+
+
+def negative_cache() -> OrderedDict[_NegativeKey, datetime]:
+    """Allocate an ordered dictionary for negative cache entries."""
+    return OrderedDict()
+
+
+def aware_utc(value: datetime) -> datetime:
+    """Ensure a datetime is timezone-aware and converted to UTC."""
+    time_value = cast("object", value)
+    if not isinstance(time_value, datetime) or time_value.tzinfo is None or time_value.utcoffset() is None:
+        raise_config("JWKS selection time must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def etag(value: str | None) -> str | None:
+    """Normalize and validate an ETag header value."""
+    if value is None:
+        return None
+    normalized = value.strip()
+    return (
+        normalized
+        if normalized
+        and len(normalized) <= _MAXIMUM_ETAG_LENGTH
+        and not any(ord(char) < _ASCII_CONTROL_LIMIT for char in normalized)
+        else None
+    )
+
+
+def parse_document(body: bytes, entry: JWKSSource, policy: JWKSCachePolicy) -> Mapping[_SelectionKey, VerificationKey]:
+    """Parse and validate a raw JWKS document into immutable verification keys."""
+    if len(body) > policy.maximum_document_bytes:
+        raise ValueError
+    decoded = cast("object", json.loads(body, object_pairs_hook=unique_object, parse_constant=reject_non_finite))
+    if not isinstance(decoded, dict):
+        raise TypeError
+    document = cast("dict[str, object]", decoded)
+    validate_depth(cast("JSONValue", document), maximum=_MAXIMUM_JSON_DEPTH)
+    raw_keys: object = document.get("keys")
+    if not isinstance(raw_keys, list) or not raw_keys:
+        raise ValueError
+    raw_key_values = cast("list[object]", raw_keys)
+    if len(raw_key_values) > policy.maximum_keys:
+        raise ValueError
+    keys: dict[_SelectionKey, VerificationKey] = {}
+    for raw_key in raw_key_values:
+        if not isinstance(raw_key, Mapping):
+            raise TypeError
+        key = _parse_key(cast("Mapping[str, JSONValue]", raw_key), entry)
+        selection = (key.key_id, key.algorithm)
+        if selection in keys:
+            raise ValueError
+        keys[selection] = key
+    return MappingProxyType(keys)
+
+
+def _parse_key(value: Mapping[str, JSONValue], entry: JWKSSource) -> VerificationKey:
+    if _PRIVATE_JWK_MEMBERS.intersection(value):
+        raise ValueError
+    algorithm = value.get("alg")
+    key_id = value.get("kid")
+    if (
+        not isinstance(algorithm, str)
+        or algorithm not in entry.algorithms
+        or algorithm not in _SUPPORTED_REMOTE_ALGORITHMS
+        or not isinstance(key_id, str)
+        or not valid_selection_value(key_id)
+        or value.get("use") not in {None, "sig"}
+    ):
+        raise ValueError
+    key_ops = value.get("key_ops")
+    if key_ops is not None and (
+        not isinstance(key_ops, list)
+        or "verify" not in key_ops
+        or any(not isinstance(operation, str) for operation in cast("list[object]", key_ops))
+    ):
+        raise ValueError
+    canonical = dict(value)
+    canonical["alg"] = algorithm
+    canonical["kid"] = key_id
+    canonical["use"] = "sig"
+    canonical["key_ops"] = ["verify"]
+    pyjwk = PyJWK.from_dict(cast("dict[str, object]", canonical), algorithm=algorithm)
+    prepared = pyjwk.key
+    if not isinstance(prepared, (rsa.RSAPublicKey, ec.EllipticCurvePublicKey, ed25519.Ed25519PublicKey)):
+        raise TypeError
+    pem = prepared.public_bytes(
+        encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return VerificationKey(key_id=key_id, algorithm=cast("JWTAlgorithm", algorithm), key=pem, public_jwk=canonical)
 
 
 @runtime_checkable
@@ -64,36 +164,16 @@ class JWKSProvider(Protocol):
     """Select remote verification keys without exposing cache internals."""
 
     async def select_key(self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime) -> JWKSSelection:
-        """Return a key or one stable authentication outcome.
-
-        Args:
-            issuer: The token issuer, matched against configured trust anchors.
-            jwks_uri: The key set to select from.
-            kid: The exact key identifier named by the token header.
-            algorithm: The algorithm named by the token header.
-            now: The selection timestamp, used for freshness decisions.
-
-        Returns:
-            The verification key, ``InvalidCredentials`` when no configured key
-            matches, or ``VerificationUnavailable`` when keys could not be reached.
-        """
-        ...  # pragma: no cover
+        """Return a key or one stable authentication outcome."""
+        ...
 
     async def warmup(self, *, now: datetime) -> VerificationUnavailable | None:
-        """Warm configured entries when enabled.
-
-        Args:
-            now: The warm-up timestamp.
-
-        Returns:
-            ``None`` when warming succeeded or is disabled, otherwise
-            ``VerificationUnavailable``.
-        """
-        ...  # pragma: no cover
+        """Warm configured entries when enabled."""
+        ...
 
     async def aclose(self) -> None:
         """Close owned runtime resources."""
-        ...  # pragma: no cover
+        ...
 
 
 class CachedJWKSProvider:
@@ -101,7 +181,7 @@ class CachedJWKSProvider:
 
     __slots__ = ("_cache", "_closed", "_entries", "_fetcher", "_fetcher_closed", "_fetcher_owned", "_metrics", "policy")
 
-    def __init__(  # noqa: PLR0913 - provider assembly keeps ownership, workers, policy, and metrics explicit
+    def __init__(
         self,
         entries: Sequence[JWKSSource],
         fetcher: AsyncJWKSFetcher | SyncJWKSFetcher,
@@ -115,10 +195,8 @@ class CachedJWKSProvider:
         """Allocate every exact cache entry at startup."""
         states: dict[_EntryKey, _EntryState] = {}
         for entry in entries:
-            entry_value: object = entry
-            if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
-                entry_value, JWKSSource
-            ):
+            entry_value = cast("object", entry)
+            if not isinstance(entry_value, JWKSSource):
                 raise_config("JWKS provider entries must be JWKSSource values")
             key = (entry_value.issuer, entry_value.jwks_uri)
             if key in states:
@@ -127,17 +205,18 @@ class CachedJWKSProvider:
         if not states:
             raise_config("JWKS provider requires at least one configured entry")
         workers = WorkerLimits() if worker_limits is None else worker_limits
-        if not isinstance(workers, WorkerLimits):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
+        workers_obj = cast("object", workers)
+        if not isinstance(workers_obj, WorkerLimits):
             raise_config("JWKS provider worker limits must be WorkerLimits")
         metric_sink = NoOpSecurityMetrics() if metrics is None else metrics
         if not callable(getattr(metric_sink, "increment", None)) or not callable(getattr(metric_sink, "observe", None)):
             raise_config("JWKS metrics must implement SecurityMetrics")
-        if not isinstance(fetcher_owned, bool):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
+        owned_obj = cast("object", fetcher_owned)
+        if not isinstance(owned_obj, bool):
             raise_config("JWKS fetcher ownership must be boolean")
         snapshots = InMemoryJWKSCache() if cache is None else cache
-        if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
-            snapshots, JWKSCache
-        ):
+        cache_obj = cast("object", snapshots)
+        if not isinstance(cache_obj, JWKSCache):
             raise_config("JWKS cache must implement JWKSCache")
         normalized_fetcher = normalize_fetcher(
             fetcher, limiter=workers.network_limiter, timeout=workers.timeout, metrics=metric_sink
@@ -155,23 +234,7 @@ class CachedJWKSProvider:
         self._closed = False
 
     async def select_key(self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime) -> JWKSSelection:
-        """Read a fresh snapshot directly or refresh one exact entry.
-
-        A fresh snapshot is read without locking. Only a refresh coordinates, and
-        the provider collapses concurrent refreshes of one entry into a single
-        fetch.
-
-        Args:
-            issuer: The token issuer, matched against configured trust anchors.
-            jwks_uri: The key set to select from.
-            kid: The exact key identifier named by the token header.
-            algorithm: The algorithm named by the token header.
-            now: The selection timestamp, used for freshness decisions.
-
-        Returns:
-            The verification key, ``InvalidCredentials`` when no configured key
-            matches, or ``VerificationUnavailable`` when keys could not be reached.
-        """
+        """Read a fresh snapshot directly or refresh one exact entry."""
         if self._closed:
             return _UNAVAILABLE
         normalized_now = aware_utc(now)
@@ -212,15 +275,7 @@ class CachedJWKSProvider:
         return selection_result
 
     async def warmup(self, *, now: datetime) -> VerificationUnavailable | None:
-        """Eagerly populate configured entries when startup warming is enabled.
-
-        Args:
-            now: The warm-up timestamp.
-
-        Returns:
-            ``None`` when warming succeeded or is disabled, otherwise
-            ``VerificationUnavailable``.
-        """
+        """Eagerly populate configured entries when startup warming is enabled."""
         if self._closed:
             return _UNAVAILABLE
         normalized_now = aware_utc(now)
@@ -246,11 +301,11 @@ class CachedJWKSProvider:
                 if coordination.refresh is not None:
                     refresh = cast("_Refresh", coordination.refresh)
                     task = refresh.task
-                    assert task is not None  # noqa: S101 - internal coordination invariant
-                    if coordination.users == 0:
-                        task.cancel()
-                    tasks.append(task)
-                    refreshes.append((state, refresh))
+                    if task is not None:
+                        if coordination.users == 0:
+                            task.cancel()
+                        tasks.append(task)
+                        refreshes.append((state, refresh))
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         for state, _refresh in refreshes:
@@ -286,7 +341,7 @@ class CachedJWKSProvider:
         if refresh is None:
             return immediate
         task = refresh.task
-        if task is None:  # pragma: no cover - assigned before coordination releases the entry lock
+        if task is None:
             return _UNAVAILABLE
         try:
             if refresh is not candidate:
@@ -415,7 +470,7 @@ class CachedJWKSProvider:
                 )
             else:
                 return _UNAVAILABLE
-        except Exception:  # noqa: BLE001 - custom fetcher and parser failures are one sanitized operational outcome
+        except Exception:
             return _UNAVAILABLE
         return snapshot
 
