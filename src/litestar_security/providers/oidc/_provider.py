@@ -1,24 +1,32 @@
-"""OIDC provider lifecycle layered over OAuth and a distinct JWT verifier."""
+"""OIDC provider lifecycle, Keycloak claims, logout tokens, and service workload tokens."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import compare_digest
+from types import MappingProxyType
 from typing import NoReturn, cast
 
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
 
 from litestar_security.authentication import (
     Authenticated,
+    AuthenticationMechanism,
     AuthenticationOutcome,
+    CredentialSlot,
+    IdentityResolution,
     InvalidCredentials,
     VerificationUnavailable,
 )
 from litestar_security.config import WorkerLimits
-from litestar_security.providers._internal import DynamicVerifierCache
+from litestar_security.context import AuthenticationEvidence, CredentialRestrictions, Principal, ResourcePermission
+from litestar_security.providers._internal import DynamicVerifierCache, JSONValue
 from litestar_security.providers.jwks import JWKSProvider
 from litestar_security.providers.jwt import (
+    BearerSlotSelector,
+    BearerTokenSlot,
+    CompositeBearerConfig,
     JWTClaims,
     JWTValidationConfig,
     JWTVerifier,
@@ -34,6 +42,7 @@ from litestar_security.providers.oauth import (
     OAuthProviderError,
     OAuthTransaction,
     OAuthTransactionStart,
+    OIDCLogoutIdentity,
     ProviderIdentity,
     ProviderTokenSet,
     SecretStr,
@@ -41,18 +50,23 @@ from litestar_security.providers.oauth import (
 from litestar_security.providers.oidc._discovery import OIDCDiscoveryClient, OIDCMetadata
 
 __all__ = (
+    "KeycloakClaims",
+    "OIDCJWTLogoutTokenConsumer",
     "OIDCProvider",
+    "ServiceTokenConfig",
     "discover_google_oidc_provider",
     "discover_oidc_provider",
     "google_oidc_provider",
     "keycloak_oidc_provider",
+    "map_keycloak_claims",
     "oidc_provider",
 )
-
 
 _GOOGLE_ISSUER = "https://accounts.google.com"
 _DEFAULT_SCOPES = frozenset({"openid", "email", "profile"})
 _ID_TOKEN_TYPES = frozenset({"jwt"})
+_LOGOUT_TOKEN_TYPES = frozenset({"logout+jwt"})
+_BACKCHANNEL_EVENT = "http://schemas.openid.net/event/backchannel-logout"
 _MAXIMUM_REAUTHENTICATION_AGE = 600
 _MAXIMUM_TIMESTAMP = 253_402_300_799
 _MAXIMUM_TOKEN_BYTES = 16_384
@@ -118,14 +132,14 @@ class OIDCProvider:
         return self.oauth.build_authorization_url(start)
 
     def build_reauthentication_url(self, start: OAuthTransactionStart, *, max_age: int) -> str:
-        """Build a forced-authentication request using OIDC ``max_age``.
+        """Build a forced-authentication request using OIDC max_age.
 
         Args:
             start: The bound authorization transaction.
             max_age: Maximum accepted signed authentication age, including zero.
 
         Returns:
-            The authorization URL with the reserved ``max_age`` parameter.
+            The authorization URL with the reserved max_age parameter.
 
         Raises:
             OAuthProviderError: If the age is invalid or provider state is inconsistent.
@@ -283,7 +297,7 @@ class _DiscoveredOIDCVerifier:
         return await verifier.verify(token, now=now)
 
 
-async def discover_oidc_provider(  # noqa: PLR0913 - discovery trust inputs remain explicit
+async def discover_oidc_provider(
     *,
     name: str,
     issuer: str,
@@ -317,9 +331,9 @@ async def discover_oidc_provider(  # noqa: PLR0913 - discovery trust inputs rema
         ImproperlyConfiguredException: If shared resources or trust inputs are invalid.
         OIDCDiscoveryError: If discovery fails.
     """
-    if not isinstance(cast("object", discovery), OIDCDiscoveryClient) or not isinstance(
-        cast("object", jwks), JWKSProvider
-    ):
+    disc_obj = cast("object", discovery)
+    jwks_obj = cast("object", jwks)
+    if not isinstance(disc_obj, OIDCDiscoveryClient) or not isinstance(jwks_obj, JWKSProvider):
         _raise_config("OIDC discovery factory requires shared discovery and JWKS resources")
     metadata = await discovery.discover(issuer)
     workers = WorkerLimits() if worker_limits is None else worker_limits
@@ -344,7 +358,7 @@ async def discover_oidc_provider(  # noqa: PLR0913 - discovery trust inputs rema
     )
 
 
-async def discover_google_oidc_provider(  # noqa: PLR0913 - discovery trust inputs remain explicit
+async def discover_google_oidc_provider(
     *,
     client_id: str,
     client_secret: SecretStr,
@@ -356,9 +370,9 @@ async def discover_google_oidc_provider(  # noqa: PLR0913 - discovery trust inpu
     http_policy: OAuthHTTPPolicy | None = None,
 ) -> OIDCProvider:
     """Discover Google's exact issuer using caller-owned shared resources."""
-    if not isinstance(cast("object", discovery), OIDCDiscoveryClient) or not isinstance(
-        cast("object", jwks), JWKSProvider
-    ):
+    disc_obj = cast("object", discovery)
+    jwks_obj = cast("object", jwks)
+    if not isinstance(disc_obj, OIDCDiscoveryClient) or not isinstance(jwks_obj, JWKSProvider):
         _raise_config("OIDC discovery factory requires shared discovery and JWKS resources")
     metadata = await discovery.discover(_GOOGLE_ISSUER)
     workers = WorkerLimits() if worker_limits is None else worker_limits
@@ -386,7 +400,7 @@ async def discover_google_oidc_provider(  # noqa: PLR0913 - discovery trust inpu
     )
 
 
-def oidc_provider(  # noqa: PLR0913 - constructor keeps every trust and transport input explicit
+def oidc_provider(
     *,
     name: str,
     client_id: str,
@@ -407,7 +421,7 @@ def oidc_provider(  # noqa: PLR0913 - constructor keeps every trust and transpor
         client_secret: Protected client secret, if required.
         metadata: Validated discovery result.
         verifier: Distinct verifier pinned to the issuer and client.
-        scopes: Allowed request scopes; ``openid`` is always required.
+        scopes: Allowed request scopes; openid is always required.
         client_auth: Token-endpoint client authentication method.
         revocation_endpoint: Optional fixed revocation endpoint.
         extra_authorization_parameters: Optional fixed authorization parameters.
@@ -442,7 +456,7 @@ def oidc_provider(  # noqa: PLR0913 - constructor keeps every trust and transpor
     return OIDCProvider(oauth=oauth, metadata=metadata, verifier=verifier)
 
 
-def google_oidc_provider(  # noqa: PLR0913 - constructor keeps the provider trust inputs explicit
+def google_oidc_provider(
     *,
     client_id: str,
     client_secret: SecretStr,
@@ -490,7 +504,7 @@ def google_oidc_provider(  # noqa: PLR0913 - constructor keeps the provider trus
     )
 
 
-def keycloak_oidc_provider(  # noqa: PLR0913 - constructor keeps realm trust and client inputs explicit
+def keycloak_oidc_provider(
     *,
     base_url: str,
     realm: str,
@@ -538,6 +552,338 @@ def keycloak_oidc_provider(  # noqa: PLR0913 - constructor keeps realm trust and
         scopes=scopes,
         client_auth=client_auth,
         http_policy=http_policy,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class KeycloakClaims:
+    """Deterministic authorization fields mapped from a verified Keycloak JWT."""
+
+    realm_roles: frozenset[str] = frozenset()
+    client_roles: Mapping[str, frozenset[str]] = field(
+        default_factory=lambda: cast("Mapping[str, frozenset[str]]", MappingProxyType({}))
+    )
+    scopes: frozenset[str] = frozenset()
+    permissions: frozenset[ResourcePermission] = frozenset()
+
+    def __post_init__(self) -> None:
+        """Freeze client namespaces and all mapped authorization values."""
+        object.__setattr__(self, "realm_roles", frozenset(self.realm_roles))
+        object.__setattr__(
+            self,
+            "client_roles",
+            MappingProxyType({client_id: frozenset(roles) for client_id, roles in self.client_roles.items()}),
+        )
+        object.__setattr__(self, "scopes", frozenset(self.scopes))
+        object.__setattr__(self, "permissions", frozenset(self.permissions))
+
+
+def map_keycloak_claims(claims: JWTClaims) -> KeycloakClaims | InvalidCredentials:
+    """Map verified Keycloak claims without discovery, HTTP, or token exchange.
+
+    Args:
+        claims: Claims returned by an already-successful JWT verifier.
+
+    Returns:
+        Validated Keycloak authorization fields or InvalidCredentials.
+    """
+    raw = claims.raw
+    realm_roles = _realm_roles(raw.get("realm_access"))
+    client_roles = _client_roles(raw.get("resource_access"))
+    scopes = _keycloak_scopes(raw)
+    permissions = _permissions(raw.get("authorization"))
+    if any(value is None for value in (realm_roles, client_roles, scopes, permissions)):
+        return InvalidCredentials()
+    return KeycloakClaims(
+        realm_roles=cast("frozenset[str]", realm_roles),
+        client_roles=cast("Mapping[str, frozenset[str]]", client_roles),
+        scopes=cast("frozenset[str]", scopes),
+        permissions=cast("frozenset[ResourcePermission]", permissions),
+    )
+
+
+def _realm_roles(value: JSONValue | None) -> frozenset[str] | None:
+    if value is None:
+        return frozenset()
+    if not isinstance(value, Mapping):
+        return None
+    return _string_set(value.get("roles"))
+
+
+def _client_roles(value: JSONValue | None) -> Mapping[str, frozenset[str]] | None:
+    if value is None:
+        return MappingProxyType({})
+    if not isinstance(value, Mapping):
+        return None
+    result: dict[str, frozenset[str]] = {}
+    for client_id, access in value.items():
+        if not client_id or not isinstance(access, Mapping):
+            return None
+        roles = _string_set(access.get("roles"))
+        if roles is None:
+            return None
+        result[client_id] = roles
+    return MappingProxyType(result)
+
+
+def _keycloak_scopes(raw: Mapping[str, JSONValue]) -> frozenset[str] | None:
+    scope = raw.get("scope")
+    if scope is not None:
+        if not isinstance(scope, str):
+            return None
+        values = scope.split()
+        return frozenset(values) if all(values) else frozenset()
+    scp = raw.get("scp")
+    return frozenset() if scp is None else _string_set(scp)
+
+
+def _permissions(value: JSONValue | None) -> frozenset[ResourcePermission] | None:
+    if value is None:
+        return frozenset()
+    if not isinstance(value, Mapping):
+        return None
+    items = value.get("permissions")
+    if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
+        return None
+    result: set[ResourcePermission] = set()
+    for item in items:
+        if not isinstance(item, Mapping):
+            return None
+        resource = item.get("rsid")
+        if resource is None:
+            resource = item.get("rsname")
+        scopes = item.get("scopes", ())
+        normalized_scopes = _string_set(scopes)
+        if not isinstance(resource, str) or not resource or normalized_scopes is None:
+            return None
+        result.add(ResourcePermission(resource=resource, scopes=normalized_scopes))
+    return frozenset(result)
+
+
+def _string_set(value: object) -> frozenset[str] | None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return None
+    items = cast("Sequence[object]", value)
+    if any(not isinstance(item, str) or not item for item in items):
+        return None
+    return frozenset(cast("Sequence[str]", items))
+
+
+@dataclass(frozen=True, slots=True)
+class OIDCJWTLogoutTokenConsumer:
+    """Verify logout-token JWTs for atomic application-side consumption."""
+
+    verifiers: Mapping[str, JWTVerifier[JWTClaims]]
+
+    def __post_init__(self) -> None:
+        """Require fixed logout-token verifier profiles."""
+        if not self.verifiers or any(
+            not provider.strip()
+            or not isinstance(cast("object", verifier), JWTVerifier)
+            or verifier.config.subject_required
+            or verifier.config.token_types != _LOGOUT_TOKEN_TYPES
+            for provider, verifier in self.verifiers.items()
+        ):
+            message = "OIDC logout token consumer configuration is invalid"
+            raise ImproperlyConfiguredException(detail=message)
+
+    async def consume(self, provider: str, logout_token: str, *, now: datetime) -> OIDCLogoutIdentity:
+        """Verify signature and logout claims, then atomically consume jti."""
+        verifier = self.verifiers.get(provider)
+        if verifier is None or not logout_token.strip():
+            raise NotAuthorizedException(detail="OIDC logout token is invalid")
+        outcome = await verifier.verify(logout_token, now=now)
+        if not isinstance(outcome, Authenticated):
+            raise NotAuthorizedException(detail="OIDC logout token is invalid")
+        claims = outcome.claims
+        events = claims.raw.get("events")
+        session_id = claims.raw.get("sid")
+        if (
+            claims.token_id is None
+            or "nonce" in claims.raw
+            or not isinstance(events, Mapping)
+            or set(events) != {_BACKCHANNEL_EVENT}
+            or not isinstance(events[_BACKCHANNEL_EVENT], Mapping)
+            or bool(events[_BACKCHANNEL_EVENT])
+            or (session_id is not None and (not isinstance(session_id, str) or not session_id.strip()))
+            or (claims.subject is None and session_id is None)
+        ):
+            raise NotAuthorizedException(detail="OIDC logout token is invalid")
+        return OIDCLogoutIdentity(
+            provider=provider,
+            issuer=claims.issuer,
+            subject=claims.subject,
+            session_id=session_id,
+            token_id=claims.token_id,
+            expires_at=claims.expires_at,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceTokenConfig:
+    """Pinned external workload-token trust and claim profile."""
+
+    issuer: str
+    audiences: frozenset[str]
+    allowed_algorithms: frozenset[str]
+    jwks: JWKSProvider
+    jwks_uri: str
+    scopes_claim: str = "scope"
+    actor_id_claim: str = "sub"
+    clock_skew: timedelta = timedelta(seconds=30)
+    worker_limits: WorkerLimits = field(default_factory=WorkerLimits, repr=False, compare=False)
+    _validation: JWTValidationConfig = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate the remote trust boundary and required claim names."""
+        jwks = cast("object", self.jwks)
+        worker_limits = cast("object", self.worker_limits)
+        if (
+            not isinstance(jwks, JWKSProvider)
+            or not isinstance(worker_limits, WorkerLimits)
+            or not self.jwks_uri.startswith("https://")
+            or not _claim_name(self.scopes_claim)
+            or not _claim_name(self.actor_id_claim)
+        ):
+            raise ImproperlyConfiguredException(detail="Service token configuration is invalid")
+        validation = JWTValidationConfig(
+            issuer=self.issuer,
+            audiences=self.audiences,
+            algorithms=self.allowed_algorithms,
+            required_claims=frozenset({"iss", "sub", "aud", "iat", "exp", self.actor_id_claim}),
+            access_token_profile=True,
+            subject_required=True,
+            clock_skew=self.clock_skew,
+        )
+        object.__setattr__(self, "_validation", validation)
+
+    def build(
+        self, *, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+    ) -> "tuple[CredentialSlot[str], AuthenticationMechanism[str, JWTClaims, object]]":
+        """Build one native bearer slot and external service mechanism.
+
+        Args:
+            clock: Time source used by the composite bearer verifier.
+
+        Returns:
+            The physical bearer slot and service authentication mechanism.
+        """
+        verifier = _ServiceJWTVerifier(owner=self, config=self._validation)
+        logical_slot = BearerTokenSlot(
+            name="service-jwt",
+            selector=BearerSlotSelector(issuers=frozenset({self.issuer}), audiences=self.audiences),
+            verifier=verifier,
+        )
+        return CompositeBearerConfig(mechanism_name="service-jwt", slots=(logical_slot,)).build(
+            _ServiceIdentityResolver(actor_id_claim=self.actor_id_claim), clock=clock
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ServiceJWTVerifier:
+    owner: ServiceTokenConfig
+    config: JWTValidationConfig
+    _verifiers: DynamicVerifierCache[PyJWTVerifier] = field(
+        default_factory=DynamicVerifierCache[PyJWTVerifier], init=False, repr=False, compare=False
+    )
+
+    async def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[JWTClaims]:
+        route = parse_unverified_jwt_route(token, maximum_token_bytes=_MAXIMUM_TOKEN_BYTES)
+        if isinstance(route, InvalidCredentials):
+            return route
+        algorithm = route.header.get("alg")
+        key_id = route.header.get("kid")
+        if not isinstance(algorithm, str) or algorithm not in self.config.algorithms:
+            return InvalidCredentials()
+        if not isinstance(key_id, str) or not key_id:
+            return InvalidCredentials()
+        selection = cast(
+            "object",
+            await self.owner.jwks.select_key(self.config.issuer, self.owner.jwks_uri, key_id, algorithm, now=now),
+        )
+        if isinstance(selection, (InvalidCredentials, VerificationUnavailable)):
+            return selection
+        if not isinstance(selection, VerificationKey):
+            return VerificationUnavailable()
+        cache_key = (key_id, algorithm)
+        verifier = self._verifiers.get_or_create(
+            cache_key,
+            selection.key,
+            lambda: PyJWTVerifier(
+                config=replace(self.config, algorithms=frozenset({algorithm})),
+                key=selection.key,
+                mechanism_name="service-jwt",
+                slot_name="authorization.bearer",
+                maximum_token_bytes=_MAXIMUM_TOKEN_BYTES,
+                limiter=self.owner.worker_limits.crypto_limiter,
+                worker_timeout=self.owner.worker_limits.timeout,
+            ),
+        )
+        outcome = await verifier.verify(token, now=now)
+        if not isinstance(outcome, Authenticated):
+            return outcome
+        claims = outcome.claims
+        scopes = _service_scopes(claims.raw.get(self.owner.scopes_claim))
+        acr = _service_optional_text(claims.raw.get("acr"))
+        amr = _service_methods(claims.raw.get("amr"))
+        if scopes is None or acr is False or amr is None:
+            return InvalidCredentials()
+        return Authenticated(
+            claims=claims,
+            evidence=AuthenticationEvidence(
+                mechanism="service-jwt",
+                slot="authorization.bearer",
+                authenticated_at=claims.issued_at,
+                expires_at=claims.expires_at,
+                methods=frozenset({"jwt"}),
+                traits=frozenset({"service"}),
+                acr=cast("str | None", acr),
+                amr=amr,
+            ),
+            restrictions=CredentialRestrictions(scopes=scopes),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ServiceIdentityResolver:
+    actor_id_claim: str
+
+    async def resolve(self, claims: JWTClaims) -> IdentityResolution[object]:
+        actor_id = claims.raw.get(self.actor_id_claim)
+        if not isinstance(actor_id, str) or not actor_id:
+            return InvalidCredentials()
+        return Principal(id=actor_id, display_name=claims.client_id or actor_id, user=None)
+
+
+def _service_scopes(value: JSONValue | None) -> frozenset[str] | None:
+    if isinstance(value, str):
+        return frozenset(value.split())
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return None
+    if any(not isinstance(item, str) or not item for item in value):
+        return None
+    return frozenset(cast("Sequence[str]", value))
+
+
+def _service_optional_text(value: JSONValue | None) -> str | bool | None:
+    if value is None:
+        return None
+    return value if isinstance(value, str) and value else False
+
+
+def _service_methods(value: JSONValue | None) -> tuple[str, ...] | None:
+    if value is None:
+        return ()
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return None
+    if any(not isinstance(item, str) or not item for item in value):
+        return None
+    return tuple(cast("Sequence[str]", value))
+
+
+def _claim_name(value: object) -> bool:
+    return (
+        isinstance(value, str) and bool(value) and all(character.isalnum() or character == "_" for character in value)
     )
 
 

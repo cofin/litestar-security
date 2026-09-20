@@ -1,18 +1,16 @@
-"""Local key ring, verification key sets, and the JWKS publication route.
-
-This is where key material, signers, and verifiers are composed. It sits above all
-three so that keys, protocols, and primitives stay independently testable.
-"""
+"""Local key ring, verification key sets, signing, capabilities, and JWKS route."""
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from functools import partial
+from inspect import iscoroutinefunction
 from math import isfinite
+from secrets import token_urlsafe
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Protocol, cast, runtime_checkable
 
 import jwt
 from anyio import CapacityLimiter
@@ -26,44 +24,362 @@ from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
 from litestar_security.authentication import AuthenticationOutcome, InvalidCredentials, VerificationUnavailable, public
 from litestar_security.providers._internal import JSONValue, raise_config
-from litestar_security.providers.jwt._capabilities import (
-    CAPABILITY_TOKEN_TYPE,
-    VerifiedCapability,
-    build_capability_claims,
-    normalize_capability_claims,
-    validate_capability_header,
-)
-from litestar_security.providers.jwt._claims import JWTClaims, JWTValidationConfig, validate_local_access_claims
-from litestar_security.providers.jwt._internal import aware_utc, strict_identifier
-from litestar_security.providers.jwt._keys import (
+from litestar_security.providers.jwt._tokens import (
+    JWTAlgorithm,
+    JWTClaims,
+    JWTValidationConfig,
+    JWTVerifier,
     LocalJWKSDocument,
     PreparedVerificationKey,
+    PyJWTVerifier,
     SigningKey,
     VerificationKey,
+    aware_utc,
+    freeze_json,
+    is_strict_identifier,
+    metric_sink,
+    parse_unverified_jwt_route,
     prepared_verification_key,
+    raise_value,
+    run_worker,
+    strict_identifier,
+    strict_identifier_value,
+    validate_limiter,
+    validate_local_access_claims,
 )
-from litestar_security.providers.jwt._signing import TokenSigner
-from litestar_security.providers.jwt._verification import JWTVerifier, PyJWTVerifier, parse_unverified_jwt_route
-from litestar_security.providers.jwt._workers import metric_sink, run_worker, validate_limiter
 from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 
-__all__ = ("LocalJWKSConfig", "LocalKeyRing", "VerificationKeySet", "build_local_jwks_handler")
+__all__ = (
+    "CAPABILITY_TOKEN_TYPE",
+    "LocalJWKSConfig",
+    "LocalKeyRing",
+    "SigningKey",
+    "SyncTokenSigner",
+    "TokenSigner",
+    "VerificationKey",
+    "VerificationKeySet",
+    "VerifiedCapability",
+    "build_capability_claims",
+    "build_local_jwks_handler",
+    "normalize_capability_claims",
+    "normalize_signer",
+    "validate_capability_header",
+)
 
 
 _ASCII_CONTROL_LIMIT = 32
-
-
 _MAXIMUM_LOCAL_JWKS_CACHE_AGE = 86_400
-
-
 _PUBLIC_JWK_FIELDS = {
     "EdDSA": frozenset({"alg", "crv", "key_ops", "kid", "kty", "use", "x"}),
     "ES256": frozenset({"alg", "crv", "key_ops", "kid", "kty", "use", "x", "y"}),
     "RS256": frozenset({"alg", "e", "key_ops", "kid", "kty", "n", "use"}),
 }
-
-
 _INVALID = InvalidCredentials()
+
+CAPABILITY_TOKEN_TYPE = "capability+jwt"
+_CAPABILITY_CLOCK_SKEW = timedelta(seconds=30)
+_CAPABILITY_MAXIMUM_LIFETIME = timedelta(hours=24)
+_MAXIMUM_APPLICATION_CLAIM_DEPTH = 32
+_RESERVED_CAPABILITY_CLAIMS = frozenset({"iss", "sub", "aud", "exp", "iat", "nbf", "purpose", "jti"})
+_REQUIRED_CAPABILITY_CLAIMS = _RESERVED_CAPABILITY_CLAIMS.difference({"nbf"})
+_FORBIDDEN_JOSE_HEADERS = frozenset({"b64", "crit", "jku", "jwk", "x5c", "x5t", "x5t#S256", "x5u"})
+_SUPPORTED_CAPABILITY_ALGORITHMS = frozenset({"EdDSA", "ES256", "RS256", "HS256"})
+
+
+@runtime_checkable
+class TokenSigner(Protocol):
+    """Sign caller-built local claims without owning application persistence.
+
+    Implementations emit access JWTs whose protected header has a non-empty
+    kid, a supported non-none alg, and typ='at+jwt'. Untrusted
+    caller claims must not choose those headers.
+    """
+
+    async def sign(self, claims: Mapping[str, JSONValue], *, now: datetime) -> str:
+        """Return one compact signed access token.
+
+        Args:
+            claims: The claim set to sign.
+            now: The signing timestamp.
+
+        Returns:
+            A compact access JWT with the required protected-header profile.
+
+        Raises:
+            Exception: When signing cannot produce that access JWT.
+        """
+        ...
+
+
+@runtime_checkable
+class SyncTokenSigner(Protocol):
+    """Blocking custom access-JWT signer normalized once into the crypto worker.
+
+    Implementations emit access JWTs whose protected header has a non-empty
+    kid, a supported non-none alg, and typ='at+jwt'. Untrusted
+    caller claims must not choose those headers.
+    """
+
+    def sign(self, claims: Mapping[str, JSONValue], *, now: datetime) -> str:
+        """Return one compact signed access token.
+
+        Args:
+            claims: The claim set to sign.
+            now: The signing timestamp.
+
+        Returns:
+            A compact access JWT with the required protected-header profile.
+
+        Raises:
+            Exception: When signing cannot produce that access JWT.
+        """
+        ...
+
+
+def normalize_signer(
+    signer: TokenSigner | SyncTokenSigner,
+    *,
+    worker_limits: WorkerLimits | None = None,
+    metrics: SecurityMetrics | None = None,
+) -> TokenSigner:
+    """Normalize one custom signer once without blocking the event loop.
+
+    Args:
+        signer: The application's signer, blocking or async.
+        worker_limits: The shared crypto-worker budget a blocking signer runs inside.
+        metrics: The sink offered signing measurements.
+
+    Returns:
+        An async signer.
+    """
+    sign_method = getattr(signer, "sign", None)
+    if not callable(sign_method):
+        raise_config("Token signer must define sign")
+    workers = WorkerLimits() if worker_limits is None else worker_limits
+    check_workers = cast("object", workers)
+    if not isinstance(check_workers, WorkerLimits):
+        raise_config("Token signer worker limits must be WorkerLimits")
+    sink = metric_sink(metrics)
+    if iscoroutinefunction(sign_method):
+        return cast("TokenSigner", signer)
+    return _WorkerTokenSigner(sign_sync=cast("Callable[..., str]", sign_method), workers=workers, metrics=sink)
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerTokenSigner:
+    sign_sync: Callable[..., str] = field(repr=False)
+    workers: WorkerLimits = field(repr=False)
+    metrics: SecurityMetrics = field(repr=False)
+
+    async def sign(self, claims: Mapping[str, JSONValue], *, now: datetime) -> str:
+        try:
+            return await run_worker(
+                partial(self.sign_sync, claims, now=now),
+                limiter=self.workers.crypto_limiter,
+                worker_timeout=self.workers.timeout,
+                metrics=self.metrics,
+                operation_metric="security.jwt.sign_duration",
+            )
+        except Exception:
+            message = "Token signing unavailable"
+            raise RuntimeError(message) from None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedCapability:
+    """Verified application capability claims without the compact credential.
+
+    Args:
+        purpose: The exact application-defined capability purpose.
+        subject: The principal the capability represents.
+        audience: The exact service or resource allowed to accept the capability.
+        issued_at: The timezone-aware timestamp at which the capability was issued.
+        expires_at: The timezone-aware timestamp at which the capability expires.
+        token_id: The unique capability identifier used for optional application-level consumption.
+        claims: The immutable application claims with reserved credential claims removed.
+
+    Returns:
+        A frozen capability projection that contains no compact credential.
+
+    Raises:
+        Never directly raises; invalid credentials are rejected before this value is created.
+    """
+
+    purpose: str
+    subject: str
+    audience: str
+    issued_at: datetime
+    expires_at: datetime
+    token_id: str
+    claims: Mapping[str, JSONValue]
+
+    def __post_init__(self) -> None:
+        """Freeze application claims at the verified boundary."""
+        object.__setattr__(self, "claims", cast("Mapping[str, JSONValue]", freeze_json(dict(self.claims))))
+
+
+def validate_capability_header(header: Mapping[str, JSONValue]) -> tuple[JWTAlgorithm, str] | InvalidCredentials:
+    """Validate immutable routing fields for one capability JWT.
+
+    Args:
+        header: The cryptographically untrusted JOSE header.
+
+    Returns:
+        The exact algorithm and key identifier to use for signature verification,
+        or a sanitized rejected outcome.
+    """
+    algorithm = header.get("alg")
+    token_type = header.get("typ")
+    key_id = header.get("kid")
+    if (
+        not isinstance(algorithm, str)
+        or algorithm not in _SUPPORTED_CAPABILITY_ALGORITHMS
+        or algorithm == "none"
+        or token_type != CAPABILITY_TOKEN_TYPE
+        or not isinstance(key_id, str)
+        or not is_strict_identifier(key_id)
+        or _FORBIDDEN_JOSE_HEADERS.intersection(header)
+    ):
+        return _INVALID
+    return cast("JWTAlgorithm", algorithm), key_id
+
+
+def build_capability_claims(
+    *,
+    issuer: str,
+    purpose: str,
+    subject: str,
+    audience: str,
+    lifetime: timedelta,
+    claims: Mapping[str, JSONValue],
+    now: datetime,
+) -> Mapping[str, JSONValue]:
+    """Build one bounded, single-purpose capability claim set."""
+    issuer = strict_identifier_value(issuer)
+    purpose = strict_identifier_value(purpose)
+    subject = strict_identifier_value(subject)
+    audience = strict_identifier_value(audience)
+    now = aware_utc(now)
+    if lifetime <= timedelta(0) or lifetime > _CAPABILITY_MAXIMUM_LIFETIME:
+        raise_value("Capability lifetime must be positive and no longer than 24 hours")
+    if any(key.__class__ is not str for key in claims):
+        raise_value("Capability application claims must use JSON object keys")
+    if _RESERVED_CAPABILITY_CLAIMS.intersection(claims):
+        raise_value("Capability application claims must not use reserved names")
+    expires_at = now + lifetime
+    issued_timestamp = int(now.timestamp())
+    expires_timestamp = int(expires_at.timestamp())
+    if expires_timestamp <= issued_timestamp:
+        raise_value("Capability lifetime must span at least one whole second")
+    payload = {key: _copy_json(value) for key, value in claims.items()}
+    payload.update({
+        "iss": issuer,
+        "sub": subject,
+        "aud": audience,
+        "exp": expires_timestamp,
+        "iat": issued_timestamp,
+        "purpose": purpose,
+        "jti": strict_identifier_value(token_urlsafe(32)),
+    })
+    return payload
+
+
+def normalize_capability_claims(
+    payload: Mapping[str, JSONValue], *, purpose: str, audience: str, issuer: str, now: datetime
+) -> VerifiedCapability | InvalidCredentials:
+    """Normalize verified capability claims into one sanitized outcome."""
+    try:
+        now = aware_utc(now)
+    except (AttributeError, TypeError, ValueError):
+        return _INVALID
+    if not _REQUIRED_CAPABILITY_CLAIMS.issubset(payload):
+        return _INVALID
+    claim_issuer = payload.get("iss")
+    claim_subject = payload.get("sub")
+    claim_audience = payload.get("aud")
+    claim_purpose = payload.get("purpose")
+    claim_token_id = payload.get("jti")
+    if (
+        not isinstance(claim_issuer, str)
+        or not is_strict_identifier(claim_issuer)
+        or not isinstance(claim_subject, str)
+        or not is_strict_identifier(claim_subject)
+        or not isinstance(claim_audience, str)
+        or not is_strict_identifier(claim_audience)
+        or not isinstance(claim_purpose, str)
+        or not is_strict_identifier(claim_purpose)
+        or not isinstance(claim_token_id, str)
+        or not is_strict_identifier(claim_token_id)
+        or claim_issuer != issuer
+        or claim_audience != audience
+        or claim_purpose != purpose
+    ):
+        return _INVALID
+    issued_at = _numeric_date(payload.get("iat"))
+    expires_at = _numeric_date(payload.get("exp"))
+    not_before_value = payload.get("nbf")
+    not_before = None if not_before_value is None else _numeric_date(not_before_value)
+    if issued_at is None or expires_at is None or (not_before_value is not None and not_before is None):
+        return _INVALID
+    if (
+        issued_at > now + _CAPABILITY_CLOCK_SKEW
+        or expires_at <= now - _CAPABILITY_CLOCK_SKEW
+        or (not_before is not None and not_before > now + _CAPABILITY_CLOCK_SKEW)
+    ):
+        return _INVALID
+    lifetime = expires_at - issued_at
+    if (
+        lifetime <= timedelta(0)
+        or lifetime > _CAPABILITY_MAXIMUM_LIFETIME
+        or (not_before is not None and not_before >= expires_at)
+    ):
+        return _INVALID
+    application_claims = {key: value for key, value in payload.items() if key not in _RESERVED_CAPABILITY_CLAIMS}
+    return VerifiedCapability(
+        purpose=claim_purpose,
+        subject=claim_subject,
+        audience=claim_audience,
+        issued_at=issued_at,
+        expires_at=expires_at,
+        token_id=claim_token_id,
+        claims=application_claims,
+    )
+
+
+def _numeric_date(value: JSONValue | None) -> datetime | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _copy_json(value: object, *, depth: int = 1) -> JSONValue:
+    if depth > _MAXIMUM_APPLICATION_CLAIM_DEPTH:
+        raise_value("Capability application claims must be bounded JSON values")
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise_value("Capability application claims must be finite JSON values")
+        return value
+    if isinstance(value, list):
+        return [_copy_json(item, depth=depth + 1) for item in cast("list[object]", value)]
+    if isinstance(value, dict):
+        copied: dict[str, JSONValue] = {}
+        for key, item in cast("dict[object, object]", value).items():
+            if not isinstance(key, str):
+                raise_value("Capability application claims must use JSON object keys")
+            copied[key] = _copy_json(item, depth=depth + 1)
+        return copied
+    return raise_value("Capability application claims must be JSON values")
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +428,8 @@ class VerificationKeySet:
         mechanism_name = strict_identifier(mechanism_name)
         slot_name = strict_identifier(slot_name)
         workers = WorkerLimits() if worker_limits is None else worker_limits
-        if not isinstance(workers, WorkerLimits):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
+        check_workers = cast("object", workers)
+        if not isinstance(check_workers, WorkerLimits):
             raise_config("JWT verifier worker limits must be WorkerLimits")
         sink = metric_sink(metrics)
         verifiers: dict[tuple[str, str], PyJWTVerifier] = {}
@@ -150,7 +467,8 @@ class LocalKeyRing:
         """Normalize the issuer and reject ambiguous rotation state."""
         issuer = strict_identifier(self.issuer)
         verification_keys = tuple(self.verification_keys)
-        if not isinstance(self.worker_limits, WorkerLimits):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
+        check_workers = cast("object", self.worker_limits)
+        if not isinstance(check_workers, WorkerLimits):
             raise_config("Local key ring worker limits must be WorkerLimits")
         metrics = metric_sink(self.metrics)
         key_set = VerificationKeySet(
@@ -230,7 +548,7 @@ class LocalKeyRing:
             claims: Optional JSON application claims, excluding reserved names.
 
         Returns:
-            A compact capability JWT with a hard-pinned ``capability+jwt`` type.
+            A compact capability JWT with a hard-pinned capability+jwt type.
 
         Raises:
             ValueError: If a capability input or lifetime is invalid.
@@ -249,7 +567,7 @@ class LocalKeyRing:
         sign = partial(
             jwt.encode,
             dict(payload),
-            cast("Any", self.active_signing_key)._prepared_key,  # noqa: SLF001 - read the prepared key material PyJWT exposes only privately
+            cast("Any", self.active_signing_key)._prepared_key,
             algorithm=self.active_signing_key.algorithm,
             headers={"kid": self.active_signing_key.key_id, "typ": CAPABILITY_TOKEN_TYPE},
         )
@@ -261,11 +579,11 @@ class LocalKeyRing:
                 metrics=self.metrics,
                 operation_metric="security.jwt.sign_duration",
             )
-        except Exception:  # noqa: BLE001 - fail closed
+        except Exception:
             message = "Capability minting unavailable"
             raise RuntimeError(message) from None
 
-    async def verify_capability(  # noqa: PLR0911 - preserve explicit sanitized outcomes at each security boundary
+    async def verify_capability(
         self, raw: str, *, purpose: str, audience: str, now: datetime
     ) -> VerifiedCapability | InvalidCredentials | VerificationUnavailable:
         """Verify one capability JWT against this key ring.
@@ -315,7 +633,7 @@ class LocalKeyRing:
             )
         except (PyJWTError, TypeError, ValueError):
             return _INVALID
-        except Exception:  # noqa: BLE001 - unexpected worker failures are unavailable verification
+        except Exception:
             return VerificationUnavailable()
         return normalize_capability_claims(
             route.payload, purpose=purpose, audience=audience, issuer=self.issuer, now=now
@@ -437,7 +755,7 @@ class _LocalKeyRingVerifier:
     verifiers: Mapping[tuple[str, str], PyJWTVerifier] = field(repr=False)
 
     async def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[JWTClaims]:
-        """Select only a configured local `(kid, alg)` tuple and verify once."""
+        """Select only a configured local (kid, alg) tuple and verify once."""
         route = parse_unverified_jwt_route(token)
         if isinstance(route, InvalidCredentials):
             return route
@@ -478,7 +796,7 @@ class _LocalJWTSigner:
         sign = partial(
             jwt.encode,
             payload,
-            cast("Any", self.signing_key)._prepared_key,  # noqa: SLF001 - read the prepared key material PyJWT exposes only privately
+            cast("Any", self.signing_key)._prepared_key,
             algorithm=self.signing_key.algorithm,
             headers={"kid": self.signing_key.key_id, "typ": "at+jwt"},
         )
@@ -490,7 +808,7 @@ class _LocalJWTSigner:
                 metrics=self.metrics,
                 operation_metric="security.jwt.sign_duration",
             )
-        except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
+        except Exception:
             message = "Token signing unavailable"
             raise RuntimeError(message) from None
         return token
@@ -508,7 +826,7 @@ def _verify_capability_signature(token: str, key: PreparedVerificationKey, algor
     """Verify only one selected capability JWT signature."""
     jwt.decode_complete(
         token,
-        key=key,  # pyright: ignore[reportArgumentType] - third-party signature is wider than its runtime contract
+        key=cast("Any", key),
         algorithms=[algorithm],
         options={
             "require": [],

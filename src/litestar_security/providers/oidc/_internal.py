@@ -1,36 +1,32 @@
-"""Discovery errors and bounded JSON loading local to OIDC.
+"""Compatibility shim for oidc internals.
 
-Discovery failures are their own error type so that a caller can distinguish a
-misconfigured issuer from an unreachable one without inspecting messages.
+All internal definitions have been consolidated into litestar_security.providers.oidc._discovery.
 """
 
-import json
-import math
-from typing import NoReturn, TypeAlias, cast
+import sys
+from types import ModuleType
 
-from litestar_security.providers._internal import JSONValue, reject_non_finite, unique_object, validate_depth
+from litestar_security.providers.oidc import _discovery as _canonical_module
+from litestar_security.providers.oidc._discovery import (
+    OIDCDiscoveryError,
+    load_document,
+    positive_finite,
+    raise_discovery,
+)
 
-__all__ = ("OIDCDiscoveryError",)
-
-JSONObject: TypeAlias = dict[str, object]
-_MAXIMUM_JSON_DEPTH = 64
-
-
-def raise_discovery(detail: str) -> NoReturn:
-    raise OIDCDiscoveryError(detail) from None
+__all__ = ("OIDCDiscoveryError", "load_document", "positive_finite", "raise_discovery")
 
 
-class OIDCDiscoveryError(RuntimeError):
-    """Sanitized operational or remote-metadata discovery failure."""
+class _ShimModule(ModuleType):
+    """Module proxy forwarding attribute mutations to the canonical module."""
+
+    def __setattr__(self, name: str, value: object) -> None:
+        super().__setattr__(name, value)
+        if hasattr(_canonical_module, name):
+            setattr(_canonical_module, name, value)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(_canonical_module, name)
 
 
-def load_document(value: bytes) -> JSONObject:
-    decoded = json.loads(value, object_pairs_hook=unique_object, parse_constant=reject_non_finite)
-    if not isinstance(decoded, dict):
-        raise TypeError
-    validate_depth(cast("JSONValue", decoded), maximum=_MAXIMUM_JSON_DEPTH)
-    return cast("JSONObject", decoded)
-
-
-def positive_finite(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+sys.modules[__name__].__class__ = _ShimModule

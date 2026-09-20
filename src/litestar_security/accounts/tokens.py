@@ -1370,7 +1370,7 @@ def _new_refresh_event_id() -> str:
     return f"event_{encode_random(token_bytes(LOOKUP_BYTES))}"
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class RefreshTokenService(Generic[UserT]):
     """Issue, strictly rotate, and revoke opaque local refresh families."""
 

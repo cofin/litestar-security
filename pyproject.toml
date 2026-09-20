@@ -263,6 +263,19 @@ ban-relative-imports = "all"
 "src/litestar_security/accounts/protocols.py" = ["BLE001", "PLC0415", "PLR0913"]
 "src/litestar_security/accounts/sessions.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
 "src/litestar_security/accounts/tokens.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105"]
+"src/litestar_security/providers/api_key/_api_key.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/providers/jwks/_provider.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/providers/_transport.py" = ["EM101", "EM102", "TRY003"]
+"src/litestar_security/providers/jwks/_transport.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/providers/jwt/_keyring.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "SLF001", "TRY400"]
+"src/litestar_security/providers/jwt/_tokens.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "SLF001", "TRY400"]
+"src/litestar_security/providers/oauth/_routes.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/providers/oidc/_discovery.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/providers/oidc/_provider.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/websocket/_config.py" = ["S105"]
+"src/litestar_security/websocket/_connect_tokens.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "S107", "TRY400"]
+"src/litestar_security/websocket/_lifecycle.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "TRY400"]
+"src/litestar_security/websocket/_transport.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "TRY400"]
 # The test tree and the examples import litestar_security.testing on purpose, and
 # banned-api offers no per-key waiver: silencing that one entry means silencing
 # TID251 wholesale here, adapter roots included. That is the right trade, because

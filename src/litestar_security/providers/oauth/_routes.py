@@ -45,6 +45,7 @@ from litestar.utils.scope.state import ScopeState
 from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
 from litestar_security._dto import apply_wire_dtos
 from litestar_security._typing import PYOTP_INSTALLED
+from litestar_security.accounts import LocalAccount, TokenPair
 from litestar_security.authentication import (
     GENERATED_ROUTE_OPT_KEY,
     InvalidCredentials,
@@ -107,6 +108,7 @@ __all__ = (
     "OAuthLifecycle",
     "OAuthLifecycleService",
     "OAuthLink",
+    "OAuthLocalAuthTransport",
     "OAuthLocalTransport",
     "OAuthLogout",
     "OAuthOperationSummary",
@@ -464,7 +466,7 @@ class OAuthStepUpAuthorizer(Protocol):
         """Return the current transport binding used by callback validation."""
         ...  # pragma: no cover
 
-    async def issue(  # noqa: PLR0913 - freshness evidence fields remain independently verified
+    async def issue(
         self,
         *,
         account_id: str,
@@ -519,7 +521,7 @@ class StepUpOAuthAuthorizer:
         security_epoch = await self.current_security_epoch(account_id)
         try:
             binding = self.transport_binding(request)
-        except Exception:  # noqa: BLE001 - application-owned binding failures fail closed
+        except Exception:
             raise _step_up_unavailable() from None
         if binding is None or binding.__class__ is not bytes or not binding:
             raise NotAuthorizedException(detail="Fresh step-up authentication required")
@@ -531,7 +533,7 @@ class StepUpOAuthAuthorizer:
                 purpose=purpose,
                 transport_binding=binding,
             )
-        except Exception:  # noqa: BLE001 - a service failure must not escape as an OAuth decision
+        except Exception:
             raise _step_up_unavailable() from None
         if isinstance(result, InvalidCredentials):
             raise NotAuthorizedException(detail="Fresh step-up authentication required")
@@ -539,7 +541,7 @@ class StepUpOAuthAuthorizer:
             raise _step_up_unavailable()
         try:
             session_binding = self.session_binding(request)
-        except Exception:  # noqa: BLE001 - application-owned binding failures fail closed
+        except Exception:
             raise _step_up_unavailable() from None
         if session_binding is not None and (session_binding.__class__ is not str or not session_binding):
             raise _step_up_unavailable()
@@ -559,7 +561,7 @@ class StepUpOAuthAuthorizer:
         """
         try:
             epoch = await self.current_epoch(account_id)
-        except Exception:  # noqa: BLE001 - epoch lookups are application-owned availability boundaries
+        except Exception:
             raise _step_up_unavailable() from None
         if not isinstance(epoch, int) or isinstance(epoch, bool):
             raise _step_up_unavailable()
@@ -567,7 +569,7 @@ class StepUpOAuthAuthorizer:
             raise _step_up_unavailable()
         return epoch
 
-    async def issue(  # noqa: PLR0913 - freshness evidence fields remain independently verified
+    async def issue(
         self,
         *,
         account_id: str,
@@ -581,7 +583,7 @@ class StepUpOAuthAuthorizer:
         epoch = await self.current_security_epoch(account_id)
         try:
             binding = self.transport_binding(request)
-        except Exception:  # noqa: BLE001 - application-owned binding failures fail closed
+        except Exception:
             raise _step_up_unavailable() from None
         if binding is None or binding.__class__ is not bytes or not binding:
             raise NotAuthorizedException(detail="Fresh step-up authentication required")
@@ -630,6 +632,94 @@ class OAuthLocalTransport(Protocol):
 
 
 @runtime_checkable
+class _SessionLogout(Protocol):
+    async def logout(self, request: Request[Any, Any, Any]) -> object: ...
+
+
+@runtime_checkable
+class _VerifiedLocalAuthService(Protocol):
+    session_auth: _SessionLogout | None
+    refresh_tokens: object | None
+
+    async def verified_login(
+        self,
+        request: Request[Any, Any, Any],
+        account_id: str,
+        *,
+        transport: str | None,
+        evidence: AuthenticationEvidence,
+    ) -> LocalAccount | TokenPair | VerificationUnavailable | object: ...
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthLocalAuthTransport:
+    """Establish session, token, or hybrid local credentials after OAuth login."""
+
+    local_auth_service: _VerifiedLocalAuthService = field(repr=False)
+    transport: str | None = None
+    token_logout: Callable[[str], Awaitable[None]] | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Require an explicit valid local transport selection."""
+        auth_service = cast("object", self.local_auth_service)
+        if (
+            not isinstance(auth_service, _VerifiedLocalAuthService)
+            or self.transport not in {None, "session", "tokens"}
+            or (self.token_logout is not None and not callable(self.token_logout))
+            or (self.transport == "session" and self.local_auth_service.session_auth is None)
+            or (self.transport == "tokens" and self.local_auth_service.refresh_tokens is None)
+            or (self.local_auth_service.refresh_tokens is not None and self.token_logout is None)
+        ):
+            message = "OAuth local authentication transport is invalid"
+            raise ImproperlyConfiguredException(detail=message)
+
+    async def establish(
+        self,
+        *,
+        account_id: str,
+        identity: ProviderIdentity,
+        request: Request[Any, Any, Any],
+        authenticated_at: datetime,
+    ) -> OAuthOperationSummary | Response[Any]:
+        """Establish the selected local transport with normalized OAuth evidence."""
+        result = await self.local_auth_service.verified_login(
+            request,
+            account_id,
+            transport=self.transport,
+            evidence=AuthenticationEvidence(
+                mechanism=f"oauth:{identity.provider}",
+                slot="oauth",
+                authenticated_at=authenticated_at,
+                methods=frozenset({"oauth"}),
+                traits=frozenset({"federated"}),
+                acr=identity.acr,
+                amr=identity.amr,
+            ),
+        )
+        if isinstance(result, LocalAccount):
+            return OAuthOperationSummary(detail="Authenticated.", account_id=account_id)
+        if isinstance(result, TokenPair):
+            return Response(content=result, status_code=HTTP_200_OK)
+        if isinstance(result, VerificationUnavailable):
+            raise ServiceUnavailableException(detail="Local authentication is unavailable")
+        raise NotAuthorizedException(detail="Local authentication was rejected")
+
+    async def logout(self, *, account_id: str, request: Request[Any, Any, Any]) -> None:
+        """Invalidate every configured local transport independently."""
+        unavailable = False
+        if self.local_auth_service.session_auth is not None:
+            result = await self.local_auth_service.session_auth.logout(request)
+            unavailable = isinstance(result, VerificationUnavailable)
+        if self.token_logout is not None:
+            try:
+                await self.token_logout(account_id)
+            except Exception:
+                unavailable = True
+        if unavailable:
+            raise ServiceUnavailableException(detail="Local logout is unavailable")
+
+
+@runtime_checkable
 class OAuthLifecycle(Protocol):
     """Application boundary used identically by generated or custom controllers."""
 
@@ -638,7 +728,7 @@ class OAuthLifecycle(Protocol):
         """Return the exact configured interactive provider names."""
         ...  # pragma: no cover
 
-    async def begin(  # noqa: PLR0913 - every transaction and request binding remains explicit
+    async def begin(
         self,
         *,
         provider: str,
@@ -705,7 +795,7 @@ class OAuthLifecycleService:
 
     __slots__ = ("_closed", "_registrations", "accounts", "clock", "local", "step_up", "transactions")
 
-    def __init__(  # noqa: PLR0913 - lifecycle dependencies remain explicit and independently replaceable
+    def __init__(
         self,
         *,
         registrations: tuple[OAuthProviderRegistration, ...],
@@ -746,7 +836,7 @@ class OAuthLifecycleService:
         """Return configured provider names."""
         return frozenset(self._registrations)
 
-    async def begin(  # noqa: PLR0913 - all transaction bindings remain explicit
+    async def begin(
         self,
         *,
         provider: str,
@@ -897,7 +987,7 @@ class OAuthLifecycleService:
             request=request,
         )
 
-    async def _begin_confirmation(  # noqa: PLR0913 - every trust binding is explicit
+    async def _begin_confirmation(
         self,
         *,
         provider: str,
@@ -1079,7 +1169,7 @@ class OAuthLifecycleService:
                 if linked is not None
                 else None
             )
-        except Exception:  # noqa: BLE001 - local logout remains successful when optional provider state is unavailable
+        except Exception:
             stored = None
         if stored is not None and stored.tokens.id_token is not None:
             parameters["id_token_hint"] = stored.tokens.id_token.get_secret_value()
@@ -1135,7 +1225,7 @@ class OIDCLogoutLifecycleService:
 
     __slots__ = ("client_key", "clock", "consumer", "provider_issuers", "rate_limits", "sessions")
 
-    def __init__(  # noqa: PLR0913 - logout dependencies remain explicit and independently replaceable
+    def __init__(
         self,
         *,
         provider_issuers: Mapping[str, str],
@@ -1245,7 +1335,7 @@ class OIDCLogoutLifecycleService:
         now = self._now()
         try:
             revoked = await self.sessions.revoke_frontchannel(provider, issuer, session_id, binding=binding, now=now)
-        except Exception:  # noqa: BLE001 - an unavailable store must answer 503 without leaking store internals
+        except Exception:
             raise ServiceUnavailableException(detail="OIDC logout is unavailable") from None
         if revoked is None:
             raise NotAuthorizedException(detail="OIDC logout request is invalid")
@@ -1262,8 +1352,8 @@ class OIDCLogoutLifecycleService:
         # the request, because the subject bucket still bounds the attempt.
         try:
             return self.client_key(request)
-        except Exception:  # noqa: BLE001 - application-supplied code may raise anything; degrade, do not fail
-            _LOGGER.error("OIDC logout client key extractor failed")  # noqa: TRY400 - omit untrusted details
+        except Exception:
+            _LOGGER.error("OIDC logout client key extractor failed")
             return None
 
     def _now(self) -> datetime:
@@ -1589,7 +1679,7 @@ class _OAuthController(Controller):
         responses=_OAUTH_AUTHENTICATED_RESPONSES,
         auth=required(),
     )
-    async def reauthenticate(  # noqa: PLR0913,PLR0917 - Litestar injects each explicit trust binding
+    async def reauthenticate(  # noqa: PLR0917 - Litestar injects each explicit trust binding
         self,
         provider: FromPath[str],
         purpose: FromPath[str],
@@ -1655,7 +1745,7 @@ class _OAuthController(Controller):
         responses=_OAUTH_AUTHENTICATED_RESPONSES,
         auth=required(),
     )
-    async def unlink(  # noqa: PLR0913 - Litestar injects each route binding explicitly
+    async def unlink(
         self,
         *,
         provider: FromPath[str],
