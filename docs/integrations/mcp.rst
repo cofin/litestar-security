@@ -1,164 +1,184 @@
-Model Context Protocol (MCP) & A2A
-===================================
+Model Context Protocol (MCP) and A2A
+========================================
 
-`Litestar Security` natively secures `Litestar MCP`_ (v0.14.0+) endpoints and
-tool execution without bespoke authorization wrappers or legacy authentication
-classes.
+Litestar Security authenticates native Litestar MCP endpoints through route
+options and authorizes tool execution through Litestar guards. This guide is
+verified against the ``litestar-mcp`` 0.14.0 source candidate at commit
+``93d6b26f7c123acbc32adef0049deb9f1bdc7fcb`` and A2A SDK 1.1.2. The integration
+tests install that Git revision; this is not a claim that a matching PyPI release
+is available. See the `verified MCP source`_.
 
-.. _Litestar MCP: https://github.com/litestar-org/litestar-mcp
+.. _verified MCP source: https://github.com/cofin/litestar-mcp/tree/93d6b26f7c123acbc32adef0049deb9f1bdc7fcb
 
-Architecture Overview
----------------------
+Authenticate the MCP endpoint
+----------------------------------------
 
-In `litestar-mcp` v0.14.0+, custom authentication backends were deprecated and
-removed in favor of first-class Litestar route options and guards. The MCP and
-A2A (Agent-to-Agent) endpoints are standard Litestar routers:
-
-* **Endpoint Security**: The MCP router at ``/mcp`` and A2A router at ``/a2a``
-  receive standard Litestar route options via ``route_opt`` and guards via
-  ``guards``.
-* **Preserved Request Scope**: During tool execution (``execute_tool``), the
-  caller's original ASGI scope is preserved (including ``scope["user"]``,
-  ``scope["auth"]``, ``scope["session"]``, and ``scope["state"]``).
-* **Tool Guard Evaluation**: Guards attached to individual MCP tool handlers
-  are evaluated against a synthesized request carrying the caller's
-  authenticated context before the tool body executes.
-* **Agent Card Exemption**: In A2A deployments, the agent discovery card
-  (``/.well-known/agent-card.json``) is automatically exempted from
-  authentication and CSRF checks by ``LitestarA2A``, ensuring open discovery
-  while strictly guarding operational agent task endpoints.
-
-Securing the MCP Endpoint
--------------------------
-
-To protect the MCP endpoint, pass the desired authentication policy in
-``route_opt`` and any required guards in ``guards`` when initializing
-``MCPConfig``:
+Configure an authentication mechanism before referencing its name in a route
+policy. This factory accepts your API-key store and identity resolver, and a
+pepper loaded from your secret configuration. The identity resolver loads the
+subject's current identity and returns its ``Principal``. The authorization
+resolver supplies an ``AuthorizationSnapshot`` containing the roles and scopes
+your guards require. API keys use the ``X-API-Key`` header by default.
 
 .. code-block:: python
 
    from litestar import Litestar
    from litestar_mcp import LitestarMCP, MCPConfig
-   from litestar_security import (
-       AUTH_POLICY_OPT_KEY,
-       SecurityConfig,
-       SecurityPlugin,
-       required,
-       requires_role,
-   )
+   from litestar_security import AUTH_POLICY_OPT_KEY, SecurityConfig, SecurityPlugin, required
+   from litestar_security.authentication import AuthorizationResolver, IdentityResolver
+   from litestar_security.providers.api_key import APIKeyClaims, APIKeyConfig, APIKeyStore
 
-   mcp_config = MCPConfig(
-       path="/mcp",
-       # Enforce authentication on all MCP routes (Streamable HTTP / SSE)
-       route_opt={AUTH_POLICY_OPT_KEY: required("api-key", "bearer")},
-       # Enforce organization or role access at the router boundary
-       guards=[requires_role("engineer")],
-   )
-
-   security_plugin = SecurityPlugin(
-       SecurityConfig(
-           # Standard security configuration...
+   def create_app(
+       store: APIKeyStore,
+       resolver: IdentityResolver[APIKeyClaims, object],
+       authorization_resolver: AuthorizationResolver[object],
+       pepper: bytes,
+   ) -> Litestar:
+       security = SecurityPlugin(
+           SecurityConfig(
+               api_key=APIKeyConfig(store=store, pepper=pepper, identity_resolver=resolver),
+               authorization_resolver=authorization_resolver,
+           )
        )
-   )
+       mcp = LitestarMCP(
+           MCPConfig(
+               base_path="/mcp",
+               route_opt={AUTH_POLICY_OPT_KEY: required("api-key")},
+           )
+       )
+       return Litestar(plugins=[security, mcp])
 
-   app = Litestar(
-       plugins=[security_plugin, LitestarMCP(mcp_config)],
-   )
+Missing or invalid credentials are rejected before MCP dispatch. Add a guard
+such as ``guards=[requires_role("engineer")]`` to ``MCPConfig`` when every
+request to the transport requires that role; import ``requires_role`` from
+``litestar_security``. A failed transport guard produces an HTTP 403 response.
 
-Tool-Level Authorization
-------------------------
+Use an explicit policy so the endpoint's requirement remains clear as other
+mechanisms are added. Without an explicit policy, default-participating
+mechanisms determine authentication. A configured API-key mechanism participates
+by default, so ``require_default=False`` does not make that application public.
+With no default participants, ``require_default=False`` permits implicit public
+routes; ``require_default=True`` rejects that configuration at startup.
 
-In addition to securing the entire ``/mcp`` endpoint, individual MCP tools can
-enforce granular permissions and role checks. When a client invokes a tool via
-``tools/call``, ``litestar-mcp`` evaluates the tool's configured guards against
-the authenticated request scope:
+The pinned MCP source implements stateless ``server/discover``, not an
+``initialize`` handshake. Raw HTTP clients must send the protocol metadata and
+headers required by that source's ``2026-07-28`` protocol. Authentication does
+not replace protocol validation; use a compatible client or the bridge below.
+
+Authorize individual tools
+---------------------------
+
+Attach guards to the Litestar handler decorator. ``mcp_tool(scopes=...)``
+advertises scope metadata; it does not enforce authorization. Use
+``requires_scope`` for that check, alongside any role requirement.
 
 .. code-block:: python
 
    from typing import Any
-   from litestar import Request
+
+   from litestar import Request, post
    from litestar_mcp import mcp_tool
-   from litestar_security import requires_scope, requires_role
+   from litestar_security import requires_role, requires_scope
 
-   @mcp_tool(
-       name="deploy_service",
-       description="Deploy a production service",
-       guards=[requires_role("admin"), requires_scope("services:write")],
-   )
-   async def deploy_service(service_id: str, request: Request[Any, Any, Any]) -> dict[str, str]:
-       # Caller identity is readily available on the request
-       user = request.user
-       return {
-           "status": "deployed",
-           "service_id": service_id,
-           "initiated_by": getattr(user, "email", str(user)),
-       }
+   @post("/deploy", guards=[requires_role("admin"), requires_scope("services:write")])
+   @mcp_tool(name="deploy_service", scopes=["services:write"])
+   async def deploy_service(request: Request[Any, Any, Any]) -> dict[str, str]:
+       return {"requested_by": request.user.id}
 
-If a caller lacks the required permissions, the guard raises
-``PermissionDeniedException`` (HTTP 403), which ``litestar-mcp`` converts into
-a standard MCP tool error response without disclosing unauthorized internal state.
+Register ``deploy_service`` in the application's ``route_handlers``. Replace the
+example response with your deployment operation. The tool request retains the
+authenticated caller's ASGI scope, and ``request.user`` is the resolved
+``Principal``. Guards run before the handler body. A failed tool guard produces
+an MCP result with ``isError=True`` inside an HTTP 200 response; the handler does
+not execute. This differs from a guard rejecting the transport itself.
 
-Securing Agent-to-Agent (A2A) Protocols
----------------------------------------
+Protect A2A operations
+----------------------
 
-The Agent-to-Agent protocol enables autonomous multi-agent discovery and task
-delegation. Because agents discover capabilities by reading the public Agent Card
-(RFC 8615 well-known URI), the discovery endpoint must remain accessible while
-task operations require strict workload authentication.
-
-``LitestarA2A`` handles this distinction automatically:
-
-1. The root A2A router applies ``route_opt`` and ``guards`` to task management,
-   message exchange, and streaming endpoints.
-2. The agent card route (``/.well-known/agent-card.json``) is mounted with
-   ``opt={"exclude_from_auth": True, "exclude_from_csrf": True}``, ensuring
-   it remains publicly discoverable by peer agents.
+Install the MCP package's ``a2a`` extra to use its optional A2A integration.
+Build the card with the A2A SDK protobuf types, and pass the card, request
+handler, and configuration separately to ``LitestarA2A``. The factory below
+accepts your SDK ``AgentExecutor`` implementation. Use it alongside the
+``SecurityPlugin`` configured above.
 
 .. code-block:: python
 
-   from litestar import Litestar
-   from litestar_mcp.a2a import LitestarA2A, A2AConfig, AgentCard
-   from litestar_security import (
-       AUTH_POLICY_OPT_KEY,
-       SecurityConfig,
-       SecurityPlugin,
-       required,
-       requires_scope,
-   )
+   from a2a.server.agent_execution import AgentExecutor
+   from a2a.server.request_handlers import DefaultRequestHandler
+   from a2a.server.tasks import InMemoryTaskStore
+   from a2a.types import AgentCard, AgentInterface
+   from litestar_mcp.a2a import A2AConfig, LitestarA2A
+   from litestar_security import AUTH_POLICY_OPT_KEY, required, requires_scope
 
-   card = AgentCard(
-       name="ResearchAgent",
-       description="Conducts automated literature and code reviews",
-       url="https://agent.example.com",
-       version="1.0.0",
-   )
+   def create_a2a(executor: AgentExecutor) -> LitestarA2A:
+       card = AgentCard(
+           name="Research agent",
+           description="Answers research requests",
+           version="1.0.0",
+           supported_interfaces=[
+               AgentInterface(
+                   url="https://agent.example.com/a2a",
+                   protocol_binding="JSONRPC",
+                   protocol_version="1.0",
+               )
+           ],
+       )
+       handler = DefaultRequestHandler(executor, InMemoryTaskStore(), card)
+       return LitestarA2A(
+           card,
+           handler,
+           A2AConfig(
+               path="/a2a",
+               route_opt={AUTH_POLICY_OPT_KEY: required("api-key")},
+               guards=[requires_scope("a2a:delegate")],
+           ),
+       )
 
-   a2a_config = A2AConfig(
-       path="/a2a",
-       card=card,
-       # Protect task dispatch and execution
-       route_opt={AUTH_POLICY_OPT_KEY: required("workload-jwt", "api-key")},
-       guards=[requires_scope("a2a:delegate")],
-   )
+Add the returned plugin to the application's ``plugins`` list. The example
+task store is process-local; select an SDK-compatible durable store when tasks
+must survive restarts. Clients targeting this protocol send
+``A2A-Version: 1.0`` in addition to their authentication header.
 
-   app = Litestar(
-       plugins=[SecurityPlugin(SecurityConfig(...)), LitestarA2A(a2a_config)],
-   )
+The default discovery card at ``/.well-known/agent-card.json`` is registered
+separately with authentication and CSRF exclusions. ``A2AConfig`` route options
+and guards apply to the operational endpoint, not the card. Anonymous card
+discovery and protected task access are verified with the native plugins.
+Application-level guards still apply according to Litestar's normal guard
+inheritance; the card's authentication exclusion does not bypass those guards.
 
-Stdio Bridge Authentication
----------------------------
+Authenticate a stdio bridge
+----------------------------------------
 
-When running CLI-based local agent bridges (such as the stdio-to-streamable-HTTP
-bridge in ``litestar_mcp.mcp.bridge``), client processes authenticate by passing
-an API key or bearer token via environment variables or CLI flags into the
-underlying HTTP client transport:
+The bridge is an async function whose first argument is the endpoint URL. This
+example supplies the same API-key header expected by the server. The provider
+is called for each request, allowing an application to substitute its own
+credential refresh mechanism.
 
 .. code-block:: python
 
+   import os
+   from functools import partial
+
+   import anyio
    from litestar_mcp.mcp.bridge import run_stdio_streamable_http_bridge
 
-   # Connect stdio to authenticated remote Litestar MCP server
-   run_stdio_streamable_http_bridge(
-       url="https://api.example.com/mcp",
-       headers={"Authorization": f"Bearer {auth_token}"},
-   )
+   def provider() -> str:
+       return os.environ["MCP_API_KEY"]
+
+   if __name__ == "__main__":
+       raise SystemExit(
+           anyio.run(
+               partial(
+                   run_stdio_streamable_http_bridge,
+                   "https://api.example.com/mcp",
+                   token_provider=provider,
+                   header_name="X-API-Key",
+                   token_prefix="",
+               )
+           )
+       )
+
+Inside an existing async application, await the bridge directly. For a bearer
+mechanism configured on the server, the bridge's default header and prefix are
+``Authorization`` and ``Bearer ``. Static headers can instead be supplied with
+``headers={...}``.

@@ -47,6 +47,10 @@ Added
 Fixed
 ~~~~~
 
+* Correct MCP and A2A integration examples against the pinned 0.14.0 source:
+  endpoint configuration, tool guard enforcement, agent-card construction, and
+  async stdio bridge authentication. Clarify default-participant authentication
+  and distinguish advertised tool scopes from enforced authorization.
 * Restore package annotation and formatting checks while preserving deferred
   type resolution, named exports, and optional dependency isolation. Wildcard
   imports from ``backends.sqlspec.stores.accounts`` now expose only
