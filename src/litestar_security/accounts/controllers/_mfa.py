@@ -73,7 +73,7 @@ from litestar_security.authentication import (
 from litestar_security.context import AuthenticationEvidence, Principal
 from litestar_security.schema import WirePolicy
 
-__all__ = ("build_mfa_routes",)
+__all__ = ("MFAController", "PasskeyController", "StepUpController", "TOTPController", "build_mfa_routes")
 
 _MFA_TAG = ROUTE_TAGS["mfa"].name
 _PASSKEY_TAG = ROUTE_TAGS["passkeys"].name
@@ -881,3 +881,9 @@ def _removal_response(result: RevokeLoginMethodOutcome | VerificationUnavailable
     if result.status is RevokeLoginMethodStatus.FINAL_METHOD:
         return _response(OperationMessage(detail="At least one viable login method is required."), HTTP_409_CONFLICT)
     return _response(OperationMessage(detail="The request is invalid."), HTTP_400_BAD_REQUEST)
+
+
+TOTPController = _MFAController
+MFAController = _MFAController
+PasskeyController = _PasskeyController
+StepUpController = _StepUpController

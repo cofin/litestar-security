@@ -72,7 +72,18 @@ from litestar_security.schema import WirePolicy
 if TYPE_CHECKING:
     from litestar_security.accounts._profiles import LocalAuthConfig
 
-__all__ = ("LOCAL_AUTH_TAGS", "build_local_auth_routes", "require_local_bearer")
+__all__ = (
+    "LOCAL_AUTH_TAGS",
+    "LocalAuthController",
+    "LocalRegistrationController",
+    "LocalSessionController",
+    "LocalSessionMFAController",
+    "LocalTokenController",
+    "LocalTokenMFAController",
+    "MFALoginChallengeController",
+    "build_local_auth_routes",
+    "require_local_bearer",
+)
 
 
 _SESSIONS_TAG = ROUTE_TAGS["local.sessions"].name
@@ -848,3 +859,12 @@ def _password_change_response(result: object) -> Response[OperationMessage]:
     if isinstance(result, InvalidCredentials):
         _route_error(result)
     _route_error(result)
+
+
+LocalAuthController = _LocalSessionController
+LocalSessionController = _LocalSessionController
+LocalTokenController = _LocalTokenController
+LocalRegistrationController = _LocalRegistrationController
+MFALoginChallengeController = _LocalSessionMFAController
+LocalSessionMFAController = _LocalSessionMFAController
+LocalTokenMFAController = _LocalTokenMFAController

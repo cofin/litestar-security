@@ -255,8 +255,14 @@ ban-relative-imports = "all"
 [tool.ruff.lint.per-file-ignores]
 "docs/conf.py" = ["A001", "INP001"]
 # Every value in this module is an audit event name. S105 fires on each PASSWORD_*
-# constant because the name looks credential-bearing, but the module holds no secrets.
 "src/litestar_security/accounts/_operations.py" = ["S105"]
+"src/litestar_security/accounts/lifecycle.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/accounts/mfa.py" = ["B009", "BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/accounts/models.py" = ["BLE001", "S105", "TRY400"]
+"src/litestar_security/accounts/passwords.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105", "TRY400"]
+"src/litestar_security/accounts/protocols.py" = ["BLE001", "PLC0415", "PLR0913"]
+"src/litestar_security/accounts/sessions.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "TRY400"]
+"src/litestar_security/accounts/tokens.py" = ["BLE001", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S105"]
 # The test tree and the examples import litestar_security.testing on purpose, and
 # banned-api offers no per-key waiver: silencing that one entry means silencing
 # TID251 wholesale here, adapter roots included. That is the right trade, because

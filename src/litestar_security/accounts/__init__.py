@@ -4,21 +4,6 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 from litestar_security._typing import import_optional_attribute
-from litestar_security.accounts._access_tokens import (
-    LocalAccessToken,
-    LocalAccessTokenIssuer,
-    LocalBearerIdentityResolver,
-)
-from litestar_security.accounts._purpose_tokens import (
-    NotificationCommand,
-    PendingTokenIssue,
-    PurposeTokenCodec,
-    PurposeTokenDelivery,
-    PurposeTokenGenerationError,
-    PurposeTokenProof,
-    RegistrationCommand,
-    TokenIssue,
-)
 from litestar_security.accounts._rate_limits import (
     DEFAULT_RATE_LIMIT_POLICIES,
     RATE_LIMIT_STORE_NAME,
@@ -31,13 +16,7 @@ from litestar_security.accounts._rate_limits import (
     StoreRateLimiter,
     UnlimitedRateLimiter,
 )
-from litestar_security.accounts._receipts import (
-    RefreshReceiptContext,
-    RefreshReceiptKey,
-    RefreshReceiptReplay,
-    RefreshReceiptSealer,
-)
-from litestar_security.accounts._records import (
+from litestar_security.accounts.models import (
     InvalidInvitation,
     LifecycleAccepted,
     LifecycleRejected,
@@ -65,47 +44,19 @@ from litestar_security.accounts._records import (
     VerificationStatus,
     normalize_identifier,
 )
-from litestar_security.accounts._refresh import (
-    REFRESH_RESPONSE_HEADERS,
-    CreateRefreshFamilyCommand,
-    RefreshPreflightOutcome,
-    RefreshRotationOutcome,
-    RefreshTokenFamilyStore,
-    RefreshTokenService,
-    RotateRefreshCommand,
-)
-from litestar_security.accounts._refresh_tokens import (
-    RefreshFamilyContext,
-    RefreshRotationStatus,
-    RefreshTokenCodec,
-    RefreshTokenIssue,
-    RefreshTokenProof,
-    TokenPair,
-)
-from litestar_security.accounts._sessions import (
-    CreateSessionCommand,
-    NativeSessionAuth,
-    NativeSessionStore,
-    ResolvedUserAuthSession,
-    SessionAuthentication,
-    SessionBindingConfig,
-    SessionBindingProof,
-    SessionRebindPlan,
-    SessionRegistry,
-    SessionSummary,
-    UserAuthSession,
-    UserAuthSessionResolver,
-)
-from litestar_security.accounts._stores import (
+from litestar_security.accounts.protocols import (
     AccountLookup,
     LocalAccountCapabilities,
     LoginMethodStore,
     PasswordCredentialStore,
+    RateLimiterStore,
     RecoveryTokenStore,
+    RefreshTokenFamilyStore,
     RegistrationPolicy,
     RegistrationStore,
     SecurityEpochStore,
     SecurityEpochValidator,
+    SessionStore,
     VerificationTokenStore,
 )
 from litestar_security.accounts.schemas import (
@@ -135,31 +86,53 @@ from litestar_security.accounts.schemas import (
     TOTPProvisioning,
     TOTPVerification,
 )
+from litestar_security.accounts.sessions import (
+    CreateSessionCommand,
+    NativeSessionAuth,
+    NativeSessionStore,
+    ResolvedUserAuthSession,
+    SessionAuthentication,
+    SessionBindingConfig,
+    SessionBindingProof,
+    SessionRebindPlan,
+    SessionRegistry,
+    SessionSummary,
+    UserAuthSession,
+    UserAuthSessionResolver,
+)
+from litestar_security.accounts.tokens import (
+    REFRESH_RESPONSE_HEADERS,
+    CreateRefreshFamilyCommand,
+    LocalAccessToken,
+    LocalAccessTokenIssuer,
+    LocalBearerIdentityResolver,
+    NotificationCommand,
+    PendingTokenIssue,
+    PurposeTokenCodec,
+    PurposeTokenDelivery,
+    PurposeTokenGenerationError,
+    PurposeTokenProof,
+    RefreshFamilyContext,
+    RefreshPreflightOutcome,
+    RefreshReceiptContext,
+    RefreshReceiptKey,
+    RefreshReceiptReplay,
+    RefreshReceiptSealer,
+    RefreshRotationOutcome,
+    RefreshRotationStatus,
+    RefreshTokenCodec,
+    RefreshTokenIssue,
+    RefreshTokenProof,
+    RefreshTokenService,
+    RegistrationCommand,
+    RotateRefreshCommand,
+    TokenIssue,
+    TokenPair,
+)
 from litestar_security.guards import AssuranceRequirement, AssuranceTrait
 
 if TYPE_CHECKING:
     from litestar_security.accounts._auth_service import LocalAuthService, forwarded_client_key, trusted_client_key
-    from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
-    from litestar_security.accounts._mfa import (
-        AESGCMSecretProtector,
-        MFAService,
-        MFAStore,
-        PendingTOTPEnrollment,
-        ProtectedSecret,
-        RecoveryCodeDigest,
-        RecoveryCodeGrant,
-        RecoveryCodePepper,
-        SecretProtector,
-        SecretProtectorKey,
-        StepUpCredential,
-        StepUpGrantState,
-        StepUpService,
-        StepUpStore,
-        TOTPMethod,
-        TOTPPolicy,
-        TOTPProvisioningGrant,
-    )
-    from litestar_security.accounts._mfa_login import MFALoginChallenge, MFALoginChallengeStore, MFARequired
     from litestar_security.accounts._passkeys import (
         AttestationTrustMapper,
         AuthenticationVerification,
@@ -178,22 +151,52 @@ if TYPE_CHECKING:
         WebAuthnVerificationError,
         WebAuthnVerifier,
     )
-    from litestar_security.accounts._passwords import (
-        Argon2PasswordHasher,
-        PasswordHasher,
-        PasswordHashingUnavailableError,
-        PasswordPolicy,
-        PasswordPolicyDecision,
-        PasswordVerificationOutcome,
-    )
     from litestar_security.accounts._profiles import LocalAuth, LocalAuthConfig, LocalAuthSecrets
-    from litestar_security.accounts._recovery import PasswordChangeService, RecoveryTokenService
-    from litestar_security.accounts._registration import RegistrationService, VerificationTokenService
     from litestar_security.accounts.controllers import (
         LOCAL_AUTH_TAGS,
         build_local_auth_routes,
         build_mfa_routes,
         require_local_bearer,
+    )
+    from litestar_security.accounts.lifecycle import (
+        PasswordChangeService,
+        RecoveryTokenService,
+        RegistrationService,
+        VerificationTokenService,
+    )
+    from litestar_security.accounts.mfa import (
+        AESGCMSecretProtector,
+        MFALoginChallenge,
+        MFALoginChallengeStore,
+        MFARequired,
+        MFAService,
+        MFAStore,
+        PendingTOTPEnrollment,
+        ProtectedSecret,
+        RecoveryCodeDigest,
+        RecoveryCodeGrant,
+        RecoveryCodePepper,
+        SecretProtector,
+        SecretProtectorKey,
+        StepUpCredential,
+        StepUpGrantState,
+        StepUpService,
+        StepUpStore,
+        TOTPMethod,
+        TOTPPolicy,
+        TOTPProvisioningGrant,
+        TOTPService,
+        TOTPStore,
+    )
+    from litestar_security.accounts.passwords import (
+        Argon2PasswordHasher,
+        PasswordHasher,
+        PasswordHashingUnavailableError,
+        PasswordLoginService,
+        PasswordPolicy,
+        PasswordPolicyDecision,
+        PasswordReauthenticationService,
+        PasswordVerificationOutcome,
     )
 
 __all__ = (
@@ -289,6 +292,7 @@ __all__ = (
     "RateLimitPolicy",
     "RateLimited",
     "RateLimiter",
+    "RateLimiterStore",
     "RecoveryCodeDigest",
     "RecoveryCodeGrant",
     "RecoveryCodePepper",
@@ -331,6 +335,7 @@ __all__ = (
     "SessionBindingProof",
     "SessionRebindPlan",
     "SessionRegistry",
+    "SessionStore",
     "SessionSummary",
     "StepUpAuthorization",
     "StepUpCredential",
@@ -345,6 +350,8 @@ __all__ = (
     "TOTPPolicy",
     "TOTPProvisioning",
     "TOTPProvisioningGrant",
+    "TOTPService",
+    "TOTPStore",
     "TOTPVerification",
     "TokenIssue",
     "TokenPair",
@@ -385,9 +392,11 @@ _MFA_EXPORTS = frozenset({
     "StepUpGrantState",
     "StepUpService",
     "StepUpStore",
-    "TOTPProvisioningGrant",
     "TOTPMethod",
     "TOTPPolicy",
+    "TOTPProvisioningGrant",
+    "TOTPService",
+    "TOTPStore",
 })
 _MFA_LOGIN_EXPORTS = frozenset({"MFALoginChallenge", "MFALoginChallengeStore", "MFARequired"})
 _PASSKEY_EXPORTS = frozenset({
@@ -428,15 +437,13 @@ _CONTROLLER_EXPORTS = frozenset({
     "require_local_bearer",
 })
 _OPTIONAL_EXPORTS = (
-    dict.fromkeys(_MFA_EXPORTS, ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})))
-    | dict.fromkeys(_MFA_LOGIN_EXPORTS, ("litestar_security.accounts._mfa_login", "mfa", frozenset({"pyotp"})))
+    dict.fromkeys(_MFA_EXPORTS, ("litestar_security.accounts.mfa", "mfa", frozenset({"pyotp"})))
+    | dict.fromkeys(_MFA_LOGIN_EXPORTS, ("litestar_security.accounts.mfa", "mfa", frozenset({"pyotp"})))
     | dict.fromkeys(_PASSKEY_EXPORTS, ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})))
-    | dict.fromkeys(_ARGON2_EXPORTS, ("litestar_security.accounts._passwords", "argon2", frozenset({"argon2"})))
-    | dict.fromkeys(_LOGIN_EXPORTS, ("litestar_security.accounts._login", "argon2", frozenset({"argon2"})))
-    | dict.fromkeys(
-        _REGISTRATION_EXPORTS, ("litestar_security.accounts._registration", "argon2", frozenset({"argon2"}))
-    )
-    | dict.fromkeys(_RECOVERY_EXPORTS, ("litestar_security.accounts._recovery", "argon2", frozenset({"argon2"})))
+    | dict.fromkeys(_ARGON2_EXPORTS, ("litestar_security.accounts.passwords", "argon2", frozenset({"argon2"})))
+    | dict.fromkeys(_LOGIN_EXPORTS, ("litestar_security.accounts.passwords", "argon2", frozenset({"argon2"})))
+    | dict.fromkeys(_REGISTRATION_EXPORTS, ("litestar_security.accounts.lifecycle", "argon2", frozenset({"argon2"})))
+    | dict.fromkeys(_RECOVERY_EXPORTS, ("litestar_security.accounts.lifecycle", "argon2", frozenset({"argon2"})))
     | dict.fromkeys(
         _AUTH_SERVICE_EXPORTS,
         ("litestar_security.accounts._auth_service", "argon2,mfa", frozenset({"argon2", "pyotp"})),

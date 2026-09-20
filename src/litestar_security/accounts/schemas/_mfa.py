@@ -15,8 +15,12 @@ __all__ = (
     "StepUpGrant",
     "StepUpVerification",
     "TOTPEnrollment",
+    "TOTPEnrollmentRequest",
+    "TOTPEnrollmentResponse",
+    "TOTPMethodSummary",
     "TOTPProvisioning",
     "TOTPVerification",
+    "TOTPVerificationRequest",
 )
 
 
@@ -157,3 +161,16 @@ class PasskeySummary(WireStruct, frozen=True):
     backup_eligible: bool
     backup_state: bool
     suspect: bool
+
+
+class TOTPMethodSummary(WireStruct, frozen=True):
+    """Secret-free metadata for the account's active TOTP method."""
+
+    method_id: str
+    created_at: datetime
+    last_used_at: datetime | None = None
+
+
+TOTPEnrollmentRequest = TOTPEnrollment
+TOTPEnrollmentResponse = TOTPProvisioning
+TOTPVerificationRequest = TOTPVerification
