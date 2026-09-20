@@ -59,6 +59,10 @@ Added
 Fixed
 ~~~~~
 
+* Render qualified SQLite schema indexes and foreign keys using SQLite's native
+  syntax. Reject foreign keys spanning attached databases instead of silently
+  referencing a table in the wrong database. This applies to the new internal
+  SQLite dialects; existing backend runtime selection is unchanged.
 * Correct MCP and A2A integration examples against the pinned 0.14.0 source:
   endpoint configuration, tool guard enforcement, agent-card construction, and
   async stdio bridge authentication. Clarify default-participant authentication

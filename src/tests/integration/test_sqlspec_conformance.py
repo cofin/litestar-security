@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import TYPE_CHECKING, cast
@@ -23,7 +24,12 @@ from litestar_security.accounts import (
     SecurityEvent,
 )
 from litestar_security.backends.sqlspec import SQLSpecSecurityBackend, SQLSpecSecurityBackendConfig
-from litestar_security.backends.sqlspec.schema import TABLE_ACCOUNTS, TABLE_API_KEYS, get_create_table_statements
+from litestar_security.backends.sqlspec.schema import (
+    TABLE_ACCOUNTS,
+    TABLE_API_KEYS,
+    SecurityConfigurationError,
+    get_create_table_statements,
+)
 from litestar_security.backends.sqlspec.stores import (
     SQLSpecAccountStore,
     SQLSpecAPIKeyStore,
@@ -35,6 +41,8 @@ from litestar_security.backends.sqlspec.stores import (
     SQLSpecStepUpStore,
     SQLSpecTOTPStore,
 )
+from litestar_security.backends.sqlspec.stores.aiosqlite import AiosqliteSecurityDialect
+from litestar_security.backends.sqlspec.stores.sqlite import SQLiteSecurityDialect
 from litestar_security.providers.oauth import ProtectedOAuthSecret
 from litestar_security.testing.conformance import (
     StoreConformanceFactories,
@@ -326,3 +334,48 @@ async def test_custom_prefix_and_column_map_conformance() -> None:
 
     api_key_store = backend.api_key_store
     assert api_key_store is not None
+
+
+@pytest.mark.parametrize("schema", ["main", "tenant"])
+@pytest.mark.parametrize("dialect_type", [SQLiteSecurityDialect, AiosqliteSecurityDialect])
+def test_sqlite_qualified_schema_lifecycle(schema: str, dialect_type: type[SQLiteSecurityDialect]) -> None:
+    """Qualified tables retain working indexes and mapped foreign keys."""
+    config = SQLSpecSecurityBackendConfig(
+        table_prefix=f"{schema}.",
+        account_table_name=f"{schema}.renamed_accounts",
+        session_table_name=f"{schema}.renamed_sessions",
+        column_map={"accounts": {"id": "account_key"}, "sessions": {"user_id": "owner_key"}},
+    )
+    dialect = dialect_type(config)
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        if schema == "tenant":
+            connection.execute("ATTACH DATABASE ':memory:' AS tenant")
+        for _ in range(2):
+            for statement in dialect.create_statements():
+                connection.execute(statement)
+        connection.execute(
+            f'INSERT INTO "{schema}".renamed_accounts (account_key, email) VALUES (?, ?)',  # noqa: S608 - schema is a fixed test parameter
+            ("account-1", "user@example.com"),
+        )
+        insert_key = f'INSERT INTO "{schema}".user_account_api_key (id, key_id, digest, user_id) VALUES (?, ?, ?, ?)'  # noqa: S608 - fixed test schema
+        connection.execute(insert_key, ("key-1", "public-1", b"digest", "account-1"))
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            connection.execute(insert_key, ("key-2", "public-2", b"digest", "missing-account"))
+        references = connection.execute(f'PRAGMA "{schema}".foreign_key_list("renamed_sessions")').fetchall()
+        assert [row[2:5] for row in references] == [("renamed_accounts", "owner_key", "account_key")]
+        indexes = connection.execute(f'PRAGMA "{schema}".index_list("renamed_sessions")').fetchall()
+        assert dialect.index_name("sessions", "user_exp") in {row[1] for row in indexes}
+        for statement in dialect.drop_statements():
+            connection.execute(statement)
+        count_sql = f'SELECT count(*) FROM "{schema}".sqlite_master WHERE type = ?'  # noqa: S608 - fixed test schema
+        assert connection.execute(count_sql, ("table",)).fetchone() == (0,)
+
+
+def test_sqlite_rejects_cross_database_foreign_keys() -> None:
+    """Never silently bind a cross-database reference to a local table."""
+    dialect = SQLiteSecurityDialect(
+        SQLSpecSecurityBackendConfig(table_prefix="tenant.", account_table_name="main.accounts")
+    )
+    with pytest.raises(SecurityConfigurationError, match="cross-database"):
+        dialect.create_statements()
