@@ -22,6 +22,10 @@ Changed (breaking)
 Added
 ~~~~~
 
+* Add internal SQLite, aiosqlite, DuckDB, and ADBC dialect selection with
+  explicit rejection of unsupported adapters. ADBC keeps transaction initiation
+  in its driver, and DuckDB schema rendering omits foreign keys that restrict
+  parent-row updates. Existing backend runtime selection is unchanged.
 * Add an internal SQLSpec dialect foundation with declarative table definitions,
   quoted table and column resolution, byte-limited index names, and UTC value
   binding. Existing stores and schema creation continue using their current

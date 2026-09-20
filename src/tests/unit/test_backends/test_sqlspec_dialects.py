@@ -5,8 +5,10 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
+from types import SimpleNamespace
 
 import pytest
+from sqlglot import parse
 
 from litestar_security.backends.sqlspec.config import SQLSpecSecurityBackendConfig
 from litestar_security.backends.sqlspec.schema import (
@@ -19,6 +21,7 @@ from litestar_security.backends.sqlspec.schema import (
     get_create_table_statements,
 )
 from litestar_security.backends.sqlspec.stores.base import SecurityDialect
+from litestar_security.backends.sqlspec.stores.factory import adapter_name, create_security_dialect
 
 _CREATE_TABLE = re.compile(r"CREATE TABLE(?: IF NOT EXISTS)? (?P<name>\S+) \((?P<body>.*?)\);", re.DOTALL)
 _CONSTRAINT_PREFIXES = ("PRIMARY KEY", "UNIQUE", "FOREIGN KEY", "CONSTRAINT", "CHECK")
@@ -251,3 +254,73 @@ class _UnlimitedDialect(SecurityDialect):
 class _MissingOffset(tzinfo):
     def utcoffset(self, dt: datetime | None) -> None:
         del dt
+
+
+@pytest.mark.parametrize("adapter", ["sqlite", "aiosqlite", "duckdb"])
+@pytest.mark.parametrize("subclass", [False, True])
+def test_factory_resolves_config_mro(adapter: str, *, subclass: bool) -> None:
+    config_type = type("Config", (), {"__module__": f"sqlspec.adapters.{adapter}.config"})
+    if subclass:
+        config_type = type("ApplicationConfig", (config_type,), {})
+    sqlspec_config = config_type()
+    dialect = create_security_dialect(sqlspec_config, SQLSpecSecurityBackendConfig())
+    assert adapter_name(sqlspec_config) == adapter
+    assert dialect.data_dictionary_dialect == ("sqlite" if adapter == "aiosqlite" else adapter)
+    assert dialect.begin_statement == ("BEGIN IMMEDIATE" if adapter == "sqlite" else None)
+
+
+@pytest.mark.parametrize("adapter", ["bigquery", "", "made_up"])
+def test_factory_rejects_unsupported_adapter(adapter: str) -> None:
+    config_type = type("Config", (), {"__module__": f"sqlspec.adapters.{adapter}.config" if adapter else "application"})
+    with pytest.raises(SecurityConfigurationError, match="Supported adapters"):
+        create_security_dialect(config_type(), SQLSpecSecurityBackendConfig())
+
+
+@pytest.mark.parametrize("dialect_name", ["sqlite", "duckdb", "mysql", "postgres", "unknown", None])
+def test_adbc_selects_sql_behavior_without_overriding_begin(dialect_name: str | None) -> None:
+    config_type = type("Config", (), {"__module__": "sqlspec.adapters.adbc.config"})
+    sqlspec_config = config_type()
+    sqlspec_config.statement_config = SimpleNamespace(dialect=dialect_name)
+    if dialect_name not in {"sqlite", "duckdb"}:
+        with pytest.raises(SecurityConfigurationError, match="ADBC"):
+            create_security_dialect(sqlspec_config, SQLSpecSecurityBackendConfig())
+        return
+    dialect = create_security_dialect(sqlspec_config, SQLSpecSecurityBackendConfig())
+    assert dialect.data_dictionary_dialect == dialect_name
+    assert dialect.begin_statement is None
+    assert dialect.max_identifier_length is None
+    assert dialect.bind_datetime_as_text == (dialect_name == "sqlite")
+    assert dialect.bind_datetime_as_naive_utc == (dialect_name == "duckdb")
+
+
+@pytest.mark.parametrize("adapter", ["sqlite", "aiosqlite", "duckdb"])
+def test_embedded_dialect_ddl_values_and_counter(adapter: str) -> None:
+    config_type = type("Config", (), {"__module__": f"sqlspec.adapters.{adapter}.config"})
+    config = SQLSpecSecurityBackendConfig(table_prefix="long_tenant_" * 12)
+    dialect = create_security_dialect(config_type(), config)
+    assert dialect.index_name(TABLE_SESSIONS, "user") == f"idx_{config.table_name(TABLE_SESSIONS)}_user"
+    statements = dialect.create_statements()
+    for statement in statements:
+        assert parse(statement, read=dialect.data_dictionary_dialect)
+    ddl = "\n".join(statements)
+    assert ("REFERENCES" in ddl) == (adapter != "duckdb")
+    assert ("ON DELETE" in ddl) == (adapter != "duckdb")
+    assert ('"id" UUID PRIMARY KEY' if adapter == "duckdb" else '"id" TEXT PRIMARY KEY') in ddl
+    assert ('"is_active" BOOLEAN' if adapter == "duckdb" else '"is_active" INTEGER') in ddl
+    assert dialect.lock_clause() == dialect.lock_table_hint() == ""
+    moment = datetime(2026, 9, 20, tzinfo=timezone(timedelta(hours=2)))
+    bound = dialect.bind_datetime(moment)
+    assert isinstance(bound, datetime if adapter == "duckdb" else str)
+    assert dialect.read_datetime(bound) == moment.astimezone(timezone.utc)
+    assert dialect.read_json(dialect.bind_json({"key": [1, True]})) == {"key": [1, True]}
+    for value in (True, False):
+        assert dialect.read_bool(dialect.bind_bool(value)) is value
+    counter = dialect.increment_counter_sql("rate_limit_buckets", ("bucket_key", "window_start"), "count")
+    table = dialect.table("rate_limit_buckets")
+    assert counter.sql == (
+        f'INSERT INTO {table} ("bucket_key", "window_start", "count") '  # noqa: S608 - expected quoted SQL snapshot
+        'VALUES (:bucket_key, :window_start, :cost) ON CONFLICT ("bucket_key", "window_start") '
+        f'DO UPDATE SET "count" = {table}."count" + :cost RETURNING "count";'
+    )
+    assert counter.returns_value is True
+    assert parse(counter.sql, read=dialect.data_dictionary_dialect)
