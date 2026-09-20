@@ -22,6 +22,10 @@ Changed (breaking)
 Added
 ~~~~~
 
+* Add internal MySQL-family dialects with enforced table-level foreign keys,
+  microsecond UTC datetime binding, indexable unique digests, and atomic
+  counters without deprecated ``VALUES(column)`` accessors. Existing backend
+  runtime selection and database schemas remain unchanged.
 * Add internal PostgreSQL and CockroachDB dialects for asyncpg, psycopg, psqlpy,
   and ADBC PostgreSQL selection. They render native types, partial security
   indexes, descending session-expiry indexes, and row locks; CockroachDB keeps

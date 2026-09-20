@@ -4,7 +4,9 @@ from typing import TYPE_CHECKING
 
 from litestar_security.backends.sqlspec.schema import SecurityConfigurationError
 from litestar_security.backends.sqlspec.stores.adbc import create_adbc_dialect
+from litestar_security.backends.sqlspec.stores.aiomysql import AiomysqlSecurityDialect
 from litestar_security.backends.sqlspec.stores.aiosqlite import AiosqliteSecurityDialect
+from litestar_security.backends.sqlspec.stores.asyncmy import AsyncmySecurityDialect
 from litestar_security.backends.sqlspec.stores.asyncpg import AsyncpgSecurityDialect
 from litestar_security.backends.sqlspec.stores.base import SecurityDialect
 from litestar_security.backends.sqlspec.stores.cockroach_asyncpg import CockroachAsyncpgSecurityDialect
@@ -13,8 +15,13 @@ from litestar_security.backends.sqlspec.stores.cockroach_psycopg import (
     CockroachPsycopgSyncSecurityDialect,
 )
 from litestar_security.backends.sqlspec.stores.duckdb import DuckDBSecurityDialect
+from litestar_security.backends.sqlspec.stores.mysqlconnector import (
+    MysqlConnectorAsyncSecurityDialect,
+    MysqlConnectorSyncSecurityDialect,
+)
 from litestar_security.backends.sqlspec.stores.psqlpy import PsqlpySecurityDialect
 from litestar_security.backends.sqlspec.stores.psycopg import PsycopgAsyncSecurityDialect, PsycopgSyncSecurityDialect
+from litestar_security.backends.sqlspec.stores.pymysql import PymysqlSecurityDialect
 from litestar_security.backends.sqlspec.stores.sqlite import SQLiteSecurityDialect
 
 if TYPE_CHECKING:
@@ -55,4 +62,8 @@ _DIALECTS: dict[str, type[SecurityDialect] | tuple[type[SecurityDialect], type[S
     "psqlpy": PsqlpySecurityDialect,
     "cockroach_asyncpg": CockroachAsyncpgSecurityDialect,
     "cockroach_psycopg": (CockroachPsycopgAsyncSecurityDialect, CockroachPsycopgSyncSecurityDialect),
+    "asyncmy": AsyncmySecurityDialect,
+    "aiomysql": AiomysqlSecurityDialect,
+    "pymysql": PymysqlSecurityDialect,
+    "mysqlconnector": (MysqlConnectorAsyncSecurityDialect, MysqlConnectorSyncSecurityDialect),
 }

@@ -400,3 +400,75 @@ def test_postgres_indexes_respect_mapping_and_cached_ddl_is_isolated() -> None:
     assert dialect.create_statements() == statements
     statements.clear()
     assert dialect.create_statements()
+
+
+@pytest.mark.parametrize(
+    ("adapter", "is_async", "expected_class"),
+    [
+        ("asyncmy", True, "AsyncmySecurityDialect"),
+        ("aiomysql", True, "AiomysqlSecurityDialect"),
+        ("pymysql", False, "PymysqlSecurityDialect"),
+        ("mysqlconnector", True, "MysqlConnectorAsyncSecurityDialect"),
+        ("mysqlconnector", False, "MysqlConnectorSyncSecurityDialect"),
+    ],
+)
+@pytest.mark.parametrize("subclass", [False, True])
+def test_mysql_family_sql_and_binding(adapter: str, expected_class: str, *, is_async: bool, subclass: bool) -> None:
+    config_type = type("Config", (), {"__module__": f"sqlspec.adapters.{adapter}.config", "is_async": is_async})
+    if subclass:
+        config_type = type("ApplicationConfig", (config_type,), {})
+    config = SQLSpecSecurityBackendConfig(
+        account_table_name="security.accounts",
+        column_map={"accounts": {"id": "account_id"}, "sessions": {"user_id": "owner_id"}},
+    )
+    dialect = create_security_dialect(config_type(), config)
+    assert type(dialect).__name__ == expected_class
+    assert dialect.max_identifier_length == 64
+    assert dialect.lock_clause() == " FOR UPDATE"
+    assert dialect.lock_table_hint() == ""
+    ddl = dialect.create_statements()
+    for statement in ddl:
+        assert parse(statement, read="mysql")
+        if statement.startswith("CREATE TABLE"):
+            assert statement.startswith("CREATE TABLE IF NOT EXISTS")
+            assert statement.endswith("ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;")
+        else:
+            assert "IF NOT EXISTS" not in statement
+        for line in statement.splitlines():
+            if "REFERENCES" in line:
+                assert line.strip().startswith("FOREIGN KEY (")
+                assert "ON DELETE CASCADE" in line
+            if " JSON" in line:
+                assert "DEFAULT" not in line
+    rendered = "\n".join(ddl)
+    assert "FOREIGN KEY (`owner_id`) REFERENCES `security`.`accounts` (`account_id`) ON DELETE CASCADE" in rendered
+    assert "`created_at` DATETIME(6)" in rendered
+    assert "`digest` VARBINARY(255) NOT NULL UNIQUE" in rendered
+    assert "`secret_ciphertext` BLOB" in rendered
+    assert "`restrictions` JSON NOT NULL" in rendered
+    assert rendered.count("FOREIGN KEY (") == sum(
+        column.references is not None for table in SECURITY_TABLES for column in table.columns
+    )
+    moment = datetime(2026, 9, 20, tzinfo=timezone(timedelta(hours=2)))
+    bound = dialect.bind_datetime(moment)
+    assert isinstance(bound, datetime)
+    assert bound.tzinfo is None
+    assert dialect.read_datetime(bound) == moment.astimezone(timezone.utc)
+    value = {"nested": [1, True]}
+    assert dialect.bind_json(value) is value
+    assert dialect.read_json(dialect.bind_json(value)) == value
+    for boolean in (True, False):
+        assert dialect.read_bool(dialect.bind_bool(boolean)) is boolean
+    counter = dialect.increment_counter_sql("rate_limit_buckets", ("bucket_key", "window_start"), "count")
+    assert counter.sql == (
+        "INSERT INTO `user_account_rate_limit_bucket` (`bucket_key`, `window_start`, `count`) "
+        "VALUES (:bucket_key, :window_start, :cost) ON DUPLICATE KEY UPDATE `count` = `count` + :cost;"
+    )
+    assert counter.followup_select == (
+        "SELECT `count` FROM `user_account_rate_limit_bucket` "
+        "WHERE `bucket_key` = :bucket_key AND `window_start` = :window_start;"
+    )
+    assert counter.returns_value is False
+    assert parse(counter.sql, read="mysql")
+    assert parse(counter.followup_select, read="mysql")
+    assert len(dialect.index_name(TABLE_SESSIONS, "é" * 80).encode()) <= 64

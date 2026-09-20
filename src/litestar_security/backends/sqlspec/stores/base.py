@@ -445,6 +445,11 @@ class SecurityDialect:
             return "'[]'"
         return f"'{column.default}'"
 
+    def _table_constraints(self, table: "TableSpec") -> tuple[str, ...]:
+        """Return additional table-level constraints required by the dialect."""
+        del table
+        return ()
+
     def _digest_suffix(self, value: str) -> str:
         """Return a stable 8-character hexadecimal digest of an identifier.
 
@@ -555,6 +560,7 @@ class SecurityDialect:
         for unique_columns in table.unique:
             columns = ", ".join(self.column(table.key, name) for name in unique_columns)
             entries.append(f"UNIQUE ({columns})")
+        entries.extend(self._table_constraints(table))
 
         body = ",\n    ".join(entries)
         statement = f"CREATE TABLE {self._if_not_exists_fragment()}{self.table(table.key)} (\n    {body}\n);"
