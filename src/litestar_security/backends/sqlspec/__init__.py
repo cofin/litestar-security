@@ -1,7 +1,5 @@
 """SQLSpec persistence backend and extensions for Litestar Security."""
 
-from __future__ import annotations
-
 from litestar_security.backends.sqlspec.backend import SQLSpecSecurityBackend, bridge_session
 from litestar_security.backends.sqlspec.config import SQLSpecSecurityBackendConfig
 from litestar_security.backends.sqlspec.extension import (

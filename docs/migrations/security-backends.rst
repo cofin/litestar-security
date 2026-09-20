@@ -16,3 +16,14 @@ Plan data conversion and rollback before switching the configured stores.
 
 See :doc:`../composition` for application composition and
 :doc:`../reference` for the public contracts.
+
+SQLSpec account store imports
+-----------------------------
+
+Prefer the named import
+``from litestar_security.backends.sqlspec.stores import SQLSpecAccountStore``.
+Wildcard imports from the implementation module
+``litestar_security.backends.sqlspec.stores.accounts`` now expose only that
+store class. If your application relied on incidental helper imports from that
+module, import those helpers directly from their defining public modules.
+Named store imports and database schemas are unchanged.

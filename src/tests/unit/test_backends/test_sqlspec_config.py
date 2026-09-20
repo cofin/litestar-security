@@ -61,9 +61,7 @@ def test_table_prefix_applies_to_defaults() -> None:
 def test_explicit_table_override_takes_precedence() -> None:
     """Verify individual table overrides take precedence over prefix and defaults."""
     config = SQLSpecSecurityBackendConfig(
-        table_prefix="app_",
-        account_table_name="custom_users",
-        session_table_name="custom_sessions",
+        table_prefix="app_", account_table_name="custom_users", session_table_name="custom_sessions"
     )
     assert config.table_name(TABLE_ACCOUNTS) == "custom_users"
     assert config.table_name(TABLE_SESSIONS) == "custom_sessions"
@@ -97,14 +95,7 @@ def test_schema_qualified_table_names_accepted() -> None:
 
 def test_column_mapping_resolution() -> None:
     """Verify custom column mappings resolve properly with fallback."""
-    config = SQLSpecSecurityBackendConfig(
-        column_map={
-            TABLE_ACCOUNTS: {
-                "id": "account_id",
-                "email": "contact_email",
-            }
-        }
-    )
+    config = SQLSpecSecurityBackendConfig(column_map={TABLE_ACCOUNTS: {"id": "account_id", "email": "contact_email"}})
     assert config.column_name(TABLE_ACCOUNTS, "id") == "account_id"
     assert config.column_name(TABLE_ACCOUNTS, "email") == "contact_email"
     assert config.column_name(TABLE_ACCOUNTS, "is_active") == "is_active"

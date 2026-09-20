@@ -47,6 +47,11 @@ Added
 Fixed
 ~~~~~
 
+* Restore package annotation and formatting checks while preserving deferred
+  type resolution, named exports, and optional dependency isolation. Wildcard
+  imports from ``backends.sqlspec.stores.accounts`` now expose only
+  ``SQLSpecAccountStore``; see :doc:`migrations/security-backends` for guidance.
+  No database migration is required.
 * Restore type checking for defensive TOTP digit validation while preserving
   the public ``Literal[6, 8]`` type and rejection of non-integer digit counts.
 * Replace application-specific migration material with generic backend upgrade

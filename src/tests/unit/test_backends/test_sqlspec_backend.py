@@ -36,7 +36,6 @@ class _SyncSqliteDriver:
         return cast("object | None", cursor.fetchone())
 
 
-
 class _AsyncMockDriver:
     """Async mock driver fulfilling SQLSpecDriver protocol."""
 
@@ -136,4 +135,3 @@ async def test_backend_create_schema_in_memory_sqlite() -> None:
             if not str(cast("tuple[object, ...]", r)[0]).startswith("sqlite_")
         ]
         assert len(table_names) == 14
-

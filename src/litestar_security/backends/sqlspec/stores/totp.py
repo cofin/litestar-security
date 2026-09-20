@@ -1,7 +1,5 @@
 """SQLSpec persistence adapter for TOTP lifecycle and recovery codes."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
@@ -33,7 +31,7 @@ if TYPE_CHECKING:
 __all__ = ("SQLSpecTOTPStore",)
 
 
-def _row_val(row: object, idx: int, key: str) -> object:
+def _row_val(row: "object", idx: "int", key: "str") -> "object":
     """Safely extract field from tuple or dict row representation."""
     if isinstance(row, (tuple, list)):
         seq = cast("Sequence[object]", row)
@@ -44,7 +42,7 @@ def _row_val(row: object, idx: int, key: str) -> object:
     return None
 
 
-def _parse_datetime(val: object) -> datetime:
+def _parse_datetime(val: "object") -> "datetime":
     """Parse ISO8601 string or datetime into UTC-aware datetime."""
     if isinstance(val, datetime):
         return val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
@@ -52,11 +50,11 @@ def _parse_datetime(val: object) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
-_DEFAULT_DIGITS: Literal[6] = 6
-_EIGHT_DIGITS: Literal[8] = 8
+_DEFAULT_DIGITS: "Literal[6]" = 6
+_EIGHT_DIGITS: "Literal[8]" = 8
 
 
-def _parse_policy(val: object) -> TOTPPolicy:
+def _parse_policy(val: "object") -> "TOTPPolicy":
     """Parse JSON or dict representation into a validated TOTPPolicy."""
     data: dict[str, object]
     if isinstance(val, dict):
@@ -94,14 +92,14 @@ class SQLSpecTOTPStore:
 
     __slots__ = ("_backend", "_lock", "_t_recovery_codes", "_t_totp_methods")
 
-    def __init__(self, backend: SQLSpecSecurityBackend) -> None:
+    def __init__(self, backend: "SQLSpecSecurityBackend") -> "None":
         """Initialize store with parent backend and configured table names."""
         self._backend = backend
         self._lock = asyncio.Lock()
         self._t_totp_methods = resolve_table_name(backend.config, TABLE_TOTP_METHODS)
         self._t_recovery_codes = resolve_table_name(backend.config, TABLE_MFA_RECOVERY_CODES)
 
-    async def create_totp_enrollment(self, enrollment: PendingTOTPEnrollment) -> None:
+    async def create_totp_enrollment(self, enrollment: "PendingTOTPEnrollment") -> "None":
         """Store one pending enrollment."""
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_TOTP_METHODS, "id"))
         col_method_id = quote_identifier(resolve_column(self._backend.config, TABLE_TOTP_METHODS, "method_id"))
@@ -147,7 +145,7 @@ class SQLSpecTOTPStore:
                 enrollment.expires_at.isoformat(),
             )
 
-    async def get_totp_enrollment(self, enrollment_id: str) -> PendingTOTPEnrollment | None:
+    async def get_totp_enrollment(self, enrollment_id: "str") -> "PendingTOTPEnrollment | None":
         """Load one pending enrollment by its opaque identifier."""
         col_enrollment_id = quote_identifier(resolve_column(self._backend.config, TABLE_TOTP_METHODS, "enrollment_id"))
         col_method_id = quote_identifier(resolve_column(self._backend.config, TABLE_TOTP_METHODS, "method_id"))
@@ -192,14 +190,14 @@ class SQLSpecTOTPStore:
 
     async def activate_totp(
         self,
-        account_id: str,
-        enrollment_id: str,
+        account_id: "str",
+        enrollment_id: "str",
         *,
-        accepted_counter: int,
-        login_method: LoginMethod,
-        event: SecurityEvent,
-        now: datetime,
-    ) -> TOTPMethod | None:
+        accepted_counter: "int",
+        login_method: "LoginMethod",
+        event: "SecurityEvent",
+        now: "datetime",
+    ) -> "TOTPMethod | None":
         """Atomically consume an enrollment and register its active login method."""
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_TOTP_METHODS, "id"))
         col_enrollment_id = quote_identifier(resolve_column(self._backend.config, TABLE_TOTP_METHODS, "enrollment_id"))
@@ -245,14 +243,7 @@ class SQLSpecTOTPStore:
             key_version = str(_row_val(row, 3, "key_version"))
             raw_policy = _row_val(row, 4, "policy")
 
-            await session.execute(
-                update_query,
-                accepted_counter,
-                now_iso,
-                now_iso,
-                now_iso,
-                row_id,
-            )
+            await session.execute(update_query, accepted_counter, now_iso, now_iso, now_iso, row_id)
 
             await self._backend.account_store.register_login_method(account_id, login_method, event=event)
 
@@ -267,15 +258,15 @@ class SQLSpecTOTPStore:
 
     async def activate_totp_with_recovery_codes(
         self,
-        account_id: str,
-        enrollment_id: str,
+        account_id: "str",
+        enrollment_id: "str",
         *,
-        accepted_counter: int,
-        codes: tuple[RecoveryCodeDigest, ...],
-        login_method: LoginMethod,
-        event: SecurityEvent,
-        now: datetime,
-    ) -> TOTPMethod | None:
+        accepted_counter: "int",
+        codes: "tuple[RecoveryCodeDigest, ...]",
+        login_method: "LoginMethod",
+        event: "SecurityEvent",
+        now: "datetime",
+    ) -> "TOTPMethod | None":
         """Atomically activate TOTP and replace the complete recovery-code set."""
         method = await self.activate_totp(
             account_id,
@@ -290,7 +281,7 @@ class SQLSpecTOTPStore:
         await self.replace_recovery_codes(account_id, codes, now=now)
         return method
 
-    async def get_totp_method(self, account_id: str, method_id: str) -> TOTPMethod | None:
+    async def get_totp_method(self, account_id: "str", method_id: "str") -> "TOTPMethod | None":
         """Load an active method only for its owner."""
         col_method_id = quote_identifier(resolve_column(self._backend.config, TABLE_TOTP_METHODS, "method_id"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_TOTP_METHODS, "user_id"))
@@ -333,7 +324,7 @@ class SQLSpecTOTPStore:
                 last_used_at=_parse_datetime(raw_used) if raw_used is not None else None,
             )
 
-    async def advance_totp_counter(self, method_id: str, *, accepted_counter: int, now: datetime) -> bool:
+    async def advance_totp_counter(self, method_id: "str", *, accepted_counter: "int", now: "datetime") -> "bool":
         """Atomically advance only to a strictly greater accepted counter."""
         col_method_id = quote_identifier(resolve_column(self._backend.config, TABLE_TOTP_METHODS, "method_id"))
         col_status = quote_identifier(resolve_column(self._backend.config, TABLE_TOTP_METHODS, "status"))
@@ -364,14 +355,12 @@ class SQLSpecTOTPStore:
             return True
 
     async def replace_recovery_codes(
-        self, account_id: str, codes: tuple[RecoveryCodeDigest, ...], *, now: datetime
-    ) -> None:
+        self, account_id: "str", codes: "tuple[RecoveryCodeDigest, ...]", *, now: "datetime"
+    ) -> "None":
         """Atomically replace every recovery code for an account."""
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_MFA_RECOVERY_CODES, "id"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_MFA_RECOVERY_CODES, "user_id"))
-        col_pepper = quote_identifier(
-            resolve_column(self._backend.config, TABLE_MFA_RECOVERY_CODES, "pepper_version")
-        )
+        col_pepper = quote_identifier(resolve_column(self._backend.config, TABLE_MFA_RECOVERY_CODES, "pepper_version"))
         col_digest = quote_identifier(resolve_column(self._backend.config, TABLE_MFA_RECOVERY_CODES, "digest"))
         col_created_at = quote_identifier(resolve_column(self._backend.config, TABLE_MFA_RECOVERY_CODES, "created_at"))
 
@@ -389,16 +378,9 @@ class SQLSpecTOTPStore:
             for code in codes:
                 if code.account_id == account_id:
                     code_id = str(uuid4())
-                    await session.execute(
-                        insert_query,
-                        code_id,
-                        account_id,
-                        code.pepper_version,
-                        code.digest,
-                        now_iso,
-                    )
+                    await session.execute(insert_query, code_id, account_id, code.pepper_version, code.digest, now_iso)
 
-    async def consume_recovery_code(self, account_id: str, digest: bytes, *, now: datetime) -> bool:
+    async def consume_recovery_code(self, account_id: "str", digest: "bytes", *, now: "datetime") -> "bool":
         """Atomically compare in constant time and consume one digest."""
         del now
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_MFA_RECOVERY_CODES, "id"))
@@ -423,7 +405,7 @@ class SQLSpecTOTPStore:
             await session.execute(delete_query, match_id)
             return True
 
-    async def delete_totp_method(self, account_id: str, method_id: str) -> bool:
+    async def delete_totp_method(self, account_id: "str", method_id: "str") -> "bool":
         """Delete an active TOTP method by identifier."""
         col_method_id = quote_identifier(resolve_column(self._backend.config, TABLE_TOTP_METHODS, "method_id"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_TOTP_METHODS, "user_id"))

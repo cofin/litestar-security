@@ -104,9 +104,7 @@ class _SyncSqliteDriver:
             return cast("object | None", row[0])
 
 
-def _create_isolated_backend(
-    config: SQLSpecSecurityBackendConfig | None = None,
-) -> SQLSpecSecurityBackend:
+def _create_isolated_backend(config: SQLSpecSecurityBackendConfig | None = None) -> SQLSpecSecurityBackend:
     """Create an isolated in-memory SQLite backend with initialized schema."""
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     driver = _SyncSqliteDriver(conn)
@@ -153,12 +151,7 @@ class _ConformanceSQLSpecRefreshStore(RefreshTokenFamilyStore, RegistrationStore
         event: SecurityEvent,
     ) -> RegistrationOutcome[object]:
         return await self._account.register(
-            command,
-            password_hash,
-            invitation_digest=invitation_digest,
-            verification=verification,
-            now=now,
-            event=event,
+            command, password_hash, invitation_digest=invitation_digest, verification=verification, now=now, event=event
         )
 
     async def get_password_state(self, account_id: str) -> PasswordCredentialState | None:
@@ -175,12 +168,7 @@ class _ConformanceSQLSpecRefreshStore(RefreshTokenFamilyStore, RegistrationStore
         return await self._refresh.create_family(command, event=event)
 
     async def prepare_rotation(
-        self,
-        proof: RefreshTokenProof,
-        idempotency_digest: bytes | None,
-        *,
-        now: datetime,
-        event: SecurityEvent,
+        self, proof: RefreshTokenProof, idempotency_digest: bytes | None, *, now: datetime, event: SecurityEvent
     ) -> RefreshFamilyContext | RefreshReceiptReplay | RefreshPreflightOutcome:
         return await self._refresh.prepare_rotation(proof, idempotency_digest, now=now, event=event)
 
@@ -317,9 +305,7 @@ async def test_security_backend_conformance_suite() -> None:
         mfa_login_challenge_store=lambda: _create_isolated_backend().mfa_login_challenge_store,
         mfa_store=lambda: _create_isolated_backend().totp_store,
         step_up_store=lambda: _create_isolated_backend().step_up_store,
-        oauth_transaction_store=lambda: SQLSpecOAuthTransactionStore(
-            _create_isolated_backend(), protector=protector
-        ),
+        oauth_transaction_store=lambda: SQLSpecOAuthTransactionStore(_create_isolated_backend(), protector=protector),
         oauth_account_store=lambda: SQLSpecOAuthAccountStore(_create_isolated_backend()),
     )
 
@@ -331,10 +317,7 @@ async def test_custom_prefix_and_column_map_conformance() -> None:
     """Verify backend supports customized table prefix and column mapping."""
     config = SQLSpecSecurityBackendConfig(
         table_prefix="app_",
-        column_map={
-            TABLE_ACCOUNTS: {"email": "account_email"},
-            TABLE_API_KEYS: {"key_id": "public_key_id"},
-        },
+        column_map={TABLE_ACCOUNTS: {"email": "account_email"}, TABLE_API_KEYS: {"key_id": "public_key_id"}},
     )
     backend = _create_isolated_backend(config)
 

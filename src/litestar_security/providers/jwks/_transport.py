@@ -490,11 +490,7 @@ class HttpxJWKSFetcher:
         ):
             raise_config("JWKS HTTPX timeout must be finite and positive")
         resp_bytes_val = cast("object", self.maximum_response_bytes)
-        if (
-            isinstance(resp_bytes_val, bool)
-            or not isinstance(resp_bytes_val, int)
-            or self.maximum_response_bytes <= 0
-        ):
+        if isinstance(resp_bytes_val, bool) or not isinstance(resp_bytes_val, int) or self.maximum_response_bytes <= 0:
             raise_config("JWKS HTTPX maximum_response_bytes must be a positive integer")
         self._resolve = self.resolver or resolve_addresses
         self._client = httpx.AsyncClient(

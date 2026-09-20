@@ -1,7 +1,5 @@
 """Schema, table, and column resolution helpers for the SQLSpec backend."""
 
-from __future__ import annotations
-
 import re
 from typing import TYPE_CHECKING
 
@@ -53,7 +51,7 @@ TABLE_ROLES = "roles"
 TABLE_AUDIT_LOGS = "audit_logs"
 TABLE_REFRESH_TOKENS = "refresh_tokens"
 
-DEFAULT_TABLE_NAMES: dict[str, str] = {
+DEFAULT_TABLE_NAMES: "dict[str, str]" = {
     TABLE_ACCOUNTS: "user_account",
     TABLE_SESSIONS: "user_account_auth_session",
     TABLE_API_KEYS: "user_account_api_key",
@@ -77,7 +75,7 @@ class SecurityConfigurationError(ValueError):
     """Raised when backend configuration or schema naming is invalid."""
 
 
-def validate_table_name(name: str) -> str:
+def validate_table_name(name: "str") -> "str":
     """Validate that a table identifier conforms to safe SQL naming conventions.
 
     Args:
@@ -96,7 +94,7 @@ def validate_table_name(name: str) -> str:
     return stripped
 
 
-def resolve_table_name(config: SQLSpecSecurityBackendConfig, table_key: str) -> str:
+def resolve_table_name(config: "SQLSpecSecurityBackendConfig", table_key: "str") -> "str":
     """Resolve physical table name honoring configuration overrides, prefix, and defaults.
 
     Args:
@@ -134,7 +132,7 @@ def resolve_table_name(config: SQLSpecSecurityBackendConfig, table_key: str) -> 
     return base_name
 
 
-def resolve_column(config: SQLSpecSecurityBackendConfig, table_key: str, logical_column: str) -> str:
+def resolve_column(config: "SQLSpecSecurityBackendConfig", table_key: "str", logical_column: "str") -> "str":
     """Resolve physical column name using configured column mappings.
 
     Args:
@@ -151,7 +149,7 @@ def resolve_column(config: SQLSpecSecurityBackendConfig, table_key: str, logical
     return logical_column
 
 
-def get_create_table_statements(config: SQLSpecSecurityBackendConfig, dialect: str = "sqlite") -> list[str]:
+def get_create_table_statements(config: "SQLSpecSecurityBackendConfig", dialect: "str" = "sqlite") -> "list[str]":
     """Generate dialect-aware CREATE TABLE and CREATE INDEX DDL statements for all security tables.
 
     Args:
@@ -372,8 +370,7 @@ def get_create_table_statements(config: SQLSpecSecurityBackendConfig, dialect: s
     return statements
 
 
-
-def get_drop_table_statements(config: SQLSpecSecurityBackendConfig, dialect: str = "sqlite") -> list[str]:
+def get_drop_table_statements(config: "SQLSpecSecurityBackendConfig", dialect: "str" = "sqlite") -> "list[str]":
     """Generate DROP TABLE DDL statements in reverse foreign key order.
 
     Args:
@@ -403,4 +400,3 @@ def get_drop_table_statements(config: SQLSpecSecurityBackendConfig, dialect: str
         TABLE_ACCOUNTS,
     )
     return [f"DROP TABLE IF EXISTS {config.table_name(key)}{cascade};" for key in ordered_keys]
-

@@ -1,7 +1,5 @@
 """Multi-factor authentication (MFA) orchestration and TOTP factor services."""
 
-from __future__ import annotations
-
 from base64 import b32decode, urlsafe_b64encode
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -107,13 +105,13 @@ _LOGGER = getLogger(__name__)
 class TOTPPolicy:
     """Validated interoperable TOTP profile."""
 
-    digits: Literal[6, 8] = 6
-    period_seconds: int = 30
-    algorithm: Literal["SHA1", "SHA256", "SHA512"] = "SHA1"
-    allowed_drift_steps: int = 1
-    enrollment_ttl: timedelta = timedelta(minutes=10)
+    digits: "Literal[6, 8]" = 6
+    period_seconds: "int" = 30
+    algorithm: "Literal['SHA1', 'SHA256', 'SHA512']" = "SHA1"
+    allowed_drift_steps: "int" = 1
+    enrollment_ttl: "timedelta" = timedelta(minutes=10)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Reject ambiguous or resource-unbounded profiles."""
         digits = cast("object", self.digits)
         if type(digits) is not int or digits not in {6, 8}:
@@ -125,10 +123,7 @@ class TOTPPolicy:
         if self.algorithm not in _ALGORITHMS:
             message = "TOTP algorithm must be SHA1, SHA256, or SHA512"
             raise ImproperlyConfiguredException(detail=message)
-        if (
-            type(self.allowed_drift_steps) is not int
-            or not 0 <= self.allowed_drift_steps <= _MAXIMUM_DRIFT_STEPS
-        ):
+        if type(self.allowed_drift_steps) is not int or not 0 <= self.allowed_drift_steps <= _MAXIMUM_DRIFT_STEPS:
             message = "TOTP drift must be a bounded non-negative integer"
             raise ImproperlyConfiguredException(detail=message)
         if not timedelta() < self.enrollment_ttl <= _MAXIMUM_ENROLLMENT_TTL:
@@ -140,10 +135,10 @@ class TOTPPolicy:
 class ProtectedSecret:
     """Opaque application-protected secret envelope."""
 
-    ciphertext: bytes = field(repr=False)
-    key_version: str
+    ciphertext: "bytes" = field(repr=False)
+    key_version: "str"
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Require non-empty ciphertext and a stable key version."""
         ciphertext = cast("object", self.ciphertext)
         if not isinstance(ciphertext, bytes) or not ciphertext or not strict_context_text(self.key_version):
@@ -156,11 +151,11 @@ class SecretProtector(Protocol):
     """Protect MFA secrets with application-owned versioned key material."""
 
     @property
-    def active_key_version(self) -> str:
+    def active_key_version(self) -> "str":
         """Return the stable version used by the next protection operation."""
         ...
 
-    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedSecret:
+    async def protect(self, secret: "bytes", *, associated_data: "bytes") -> "ProtectedSecret":
         """Protect a secret under exact associated data.
 
         Args:
@@ -172,7 +167,7 @@ class SecretProtector(Protocol):
         """
         ...
 
-    async def unprotect(self, protected: ProtectedSecret, *, associated_data: bytes) -> bytes:
+    async def unprotect(self, protected: "ProtectedSecret", *, associated_data: "bytes") -> "bytes":
         """Recover a secret only under the original associated data.
 
         Args:
@@ -189,10 +184,10 @@ class SecretProtector(Protocol):
 class SecretProtectorKey:
     """One AES-256-GCM MFA-secret key selected by a non-secret version."""
 
-    key_version: str
-    key: bytes = field(repr=False)
+    key_version: "str"
+    key: "bytes" = field(repr=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Require a stable version and exact AES-256 key material."""
         if (
             not strict_context_text(self.key_version)
@@ -207,12 +202,12 @@ class SecretProtectorKey:
 class AESGCMSecretProtector:
     """Protect MFA secrets with AES-256-GCM under application-owned keys."""
 
-    active_key: SecretProtectorKey = field(repr=False)
-    retained_keys: tuple[SecretProtectorKey, ...] = field(default=(), repr=False)
-    entropy: Callable[[int], bytes] = field(default=token_bytes, repr=False, compare=False)
-    _keys: Mapping[str, SecretProtectorKey] = field(init=False, repr=False, compare=False)
+    active_key: "SecretProtectorKey" = field(repr=False)
+    retained_keys: "tuple[SecretProtectorKey, ...]" = field(default=(), repr=False)
+    entropy: "Callable[[int], bytes]" = field(default=token_bytes, repr=False, compare=False)
+    _keys: "Mapping[str, SecretProtectorKey]" = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Compile a unique versioned key ring and validate the entropy source."""
         keys = (self.active_key, *self.retained_keys)
         if (
@@ -225,11 +220,11 @@ class AESGCMSecretProtector:
         object.__setattr__(self, "_keys", {key.key_version: key for key in keys})
 
     @property
-    def active_key_version(self) -> str:
+    def active_key_version(self) -> "str":
         """Return the version used by the next protection operation."""
         return self.active_key.key_version
 
-    async def protect(self, secret: bytes, *, associated_data: bytes) -> ProtectedSecret:
+    async def protect(self, secret: "bytes", *, associated_data: "bytes") -> "ProtectedSecret":
         """Encrypt one secret under exact associated data.
 
         Args:
@@ -249,7 +244,7 @@ class AESGCMSecretProtector:
         ciphertext = nonce + AESGCM(self.active_key.key).encrypt(nonce, secret, associated_data)
         return ProtectedSecret(ciphertext=ciphertext, key_version=self.active_key.key_version)
 
-    async def unprotect(self, protected: ProtectedSecret, *, associated_data: bytes) -> bytes:
+    async def unprotect(self, protected: "ProtectedSecret", *, associated_data: "bytes") -> "bytes":
         """Decrypt one envelope only under its original associated data.
 
         Args:
@@ -275,15 +270,15 @@ class AESGCMSecretProtector:
 class PendingTOTPEnrollment:
     """Stored one-time enrollment containing no recoverable plaintext."""
 
-    enrollment_id: str
-    method_id: str
-    account_id: str
-    protected_secret: ProtectedSecret = field(repr=False)
-    policy: TOTPPolicy
-    created_at: datetime
-    expires_at: datetime
+    enrollment_id: "str"
+    method_id: "str"
+    account_id: "str"
+    protected_secret: "ProtectedSecret" = field(repr=False)
+    policy: "TOTPPolicy"
+    created_at: "datetime"
+    expires_at: "datetime"
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate enrollment identity and bounded UTC lifetime."""
         created_at = aware_utc_time(self.created_at)
         expires_at = aware_utc_time(self.expires_at)
@@ -304,15 +299,15 @@ class PendingTOTPEnrollment:
 class TOTPMethod:
     """Active TOTP method with a monotonic accepted counter."""
 
-    method_id: str
-    account_id: str
-    protected_secret: ProtectedSecret = field(repr=False)
-    policy: TOTPPolicy
-    last_accepted_counter: int
-    created_at: datetime
-    last_used_at: datetime | None = None
+    method_id: "str"
+    account_id: "str"
+    protected_secret: "ProtectedSecret" = field(repr=False)
+    policy: "TOTPPolicy"
+    last_accepted_counter: "int"
+    created_at: "datetime"
+    last_used_at: "datetime | None" = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate identity, counter, and UTC timestamps."""
         created_at = aware_utc_time(self.created_at)
         last_used_at = aware_utc_time(self.last_used_at) if self.last_used_at is not None else None
@@ -332,20 +327,20 @@ class TOTPMethod:
 class TOTPProvisioningGrant:
     """Reveal-once enrollment URI response."""
 
-    enrollment_id: str
-    method_id: str
-    provisioning_uri: str = field(repr=False)
-    expires_at: datetime
+    enrollment_id: "str"
+    method_id: "str"
+    provisioning_uri: "str" = field(repr=False)
+    expires_at: "datetime"
 
 
 @dataclass(frozen=True, slots=True)
 class RecoveryCodePepper:
     """Versioned HMAC key for non-recoverable recovery-code digests."""
 
-    key_version: str
-    key: bytes = field(repr=False)
+    key_version: "str"
+    key: "bytes" = field(repr=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Require a stable version and at least 256 bits of key material."""
         key = cast("object", self.key)
         if (
@@ -363,11 +358,11 @@ class RecoveryCodePepper:
 class RecoveryCodeDigest:
     """Stored recovery-code digest carrying no recoverable credential."""
 
-    account_id: str
-    pepper_version: str
-    digest: bytes = field(repr=False)
+    account_id: "str"
+    pepper_version: "str"
+    digest: "bytes" = field(repr=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Require exact HMAC-SHA-256 output and stable bindings."""
         digest = cast("object", self.digest)
         if (
@@ -384,17 +379,17 @@ class RecoveryCodeDigest:
 class RecoveryCodeGrant:
     """Reveal-once recovery-code response."""
 
-    codes: tuple[str, ...] = field(repr=False)
+    codes: "tuple[str, ...]" = field(repr=False)
 
 
 class StepUpCredential(WireStruct, frozen=True, kw_only=True):
     """Reveal-once transport-bound step-up credential."""
 
-    token: str
-    purpose: str
-    expires_at: datetime
+    token: "str"
+    purpose: "str"
+    expires_at: "datetime"
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> "str":
         """Redact the reveal-once credential."""
         return f"{type(self).__name__}(token=<redacted>, purpose={self.purpose!r}, expires_at={self.expires_at!r})"
 
@@ -403,17 +398,17 @@ class StepUpCredential(WireStruct, frozen=True, kw_only=True):
 class StepUpGrantState:
     """Digest-only one-time step-up state."""
 
-    grant_digest: bytes = field(repr=False)
-    transport_digest: bytes = field(repr=False)
-    principal_id: str
-    security_epoch: int
-    purpose: str
-    methods: frozenset[str]
-    traits: frozenset[str]
-    authenticated_at: datetime
-    expires_at: datetime
+    grant_digest: "bytes" = field(repr=False)
+    transport_digest: "bytes" = field(repr=False)
+    principal_id: "str"
+    security_epoch: "int"
+    purpose: "str"
+    methods: "frozenset[str]"
+    traits: "frozenset[str]"
+    authenticated_at: "datetime"
+    expires_at: "datetime"
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate exact bindings and a bounded UTC lifetime."""
         authenticated_at = aware_utc_time(self.authenticated_at)
         expires_at = aware_utc_time(self.expires_at)
@@ -436,7 +431,7 @@ class StepUpGrantState:
 class StepUpStore(Protocol):
     """Persist and atomically consume digest-only step-up grants."""
 
-    async def put(self, record: StepUpGrantState) -> None:
+    async def put(self, record: "StepUpGrantState") -> "None":
         """Persist one unconsumed grant.
 
         Args:
@@ -446,14 +441,14 @@ class StepUpStore(Protocol):
 
     async def consume(
         self,
-        grant_digest: bytes,
+        grant_digest: "bytes",
         *,
-        principal_id: str,
-        security_epoch: int,
-        purpose: str,
-        transport_digest: bytes,
-        now: datetime,
-    ) -> StepUpGrantState | None:
+        principal_id: "str",
+        security_epoch: "int",
+        purpose: "str",
+        transport_digest: "bytes",
+        now: "datetime",
+    ) -> "StepUpGrantState | None":
         """Atomically consume only an exact, current binding match.
 
         Args:
@@ -474,7 +469,7 @@ class StepUpStore(Protocol):
 class TOTPStore(Protocol):
     """Persist TOTP lifecycle through atomic replay boundaries."""
 
-    async def create_totp_enrollment(self, enrollment: PendingTOTPEnrollment) -> None:
+    async def create_totp_enrollment(self, enrollment: "PendingTOTPEnrollment") -> "None":
         """Store one pending enrollment.
 
         Args:
@@ -482,7 +477,7 @@ class TOTPStore(Protocol):
         """
         ...
 
-    async def get_totp_enrollment(self, enrollment_id: str) -> PendingTOTPEnrollment | None:
+    async def get_totp_enrollment(self, enrollment_id: "str") -> "PendingTOTPEnrollment | None":
         """Load one pending enrollment by its opaque identifier.
 
         Args:
@@ -495,14 +490,14 @@ class TOTPStore(Protocol):
 
     async def activate_totp(
         self,
-        account_id: str,
-        enrollment_id: str,
+        account_id: "str",
+        enrollment_id: "str",
         *,
-        accepted_counter: int,
-        login_method: LoginMethod,
-        event: SecurityEvent,
-        now: datetime,
-    ) -> TOTPMethod | None:
+        accepted_counter: "int",
+        login_method: "LoginMethod",
+        event: "SecurityEvent",
+        now: "datetime",
+    ) -> "TOTPMethod | None":
         """Atomically consume an enrollment and register its active login method.
 
         Args:
@@ -520,15 +515,15 @@ class TOTPStore(Protocol):
 
     async def activate_totp_with_recovery_codes(
         self,
-        account_id: str,
-        enrollment_id: str,
+        account_id: "str",
+        enrollment_id: "str",
         *,
-        accepted_counter: int,
-        codes: tuple[RecoveryCodeDigest, ...],
-        login_method: LoginMethod,
-        event: SecurityEvent,
-        now: datetime,
-    ) -> TOTPMethod | None:
+        accepted_counter: "int",
+        codes: "tuple[RecoveryCodeDigest, ...]",
+        login_method: "LoginMethod",
+        event: "SecurityEvent",
+        now: "datetime",
+    ) -> "TOTPMethod | None":
         """Atomically activate TOTP and replace the complete recovery-code set.
 
         Implementations must consume the enrollment, create the active method,
@@ -549,7 +544,7 @@ class TOTPStore(Protocol):
         """
         ...
 
-    async def get_totp_method(self, account_id: str, method_id: str) -> TOTPMethod | None:
+    async def get_totp_method(self, account_id: "str", method_id: "str") -> "TOTPMethod | None":
         """Load an active method only for its owner.
 
         Args:
@@ -561,7 +556,7 @@ class TOTPStore(Protocol):
         """
         ...
 
-    async def advance_totp_counter(self, method_id: str, *, accepted_counter: int, now: datetime) -> bool:
+    async def advance_totp_counter(self, method_id: "str", *, accepted_counter: "int", now: "datetime") -> "bool":
         """Atomically advance only to a strictly greater accepted counter.
 
         Args:
@@ -575,8 +570,8 @@ class TOTPStore(Protocol):
         ...
 
     async def replace_recovery_codes(
-        self, account_id: str, codes: tuple[RecoveryCodeDigest, ...], *, now: datetime
-    ) -> None:
+        self, account_id: "str", codes: "tuple[RecoveryCodeDigest, ...]", *, now: "datetime"
+    ) -> "None":
         """Atomically replace every recovery code for an account.
 
         Args:
@@ -586,7 +581,7 @@ class TOTPStore(Protocol):
         """
         ...
 
-    async def consume_recovery_code(self, account_id: str, digest: bytes, *, now: datetime) -> bool:
+    async def consume_recovery_code(self, account_id: "str", digest: "bytes", *, now: "datetime") -> "bool":
         """Atomically compare in constant time and consume one digest.
 
         Implementations must compare the supplied digest in constant time and
@@ -610,23 +605,23 @@ MFAStore = TOTPStore
 class TOTPService:
     """Issue, enroll, and verify time-based one-time password (TOTP) credentials."""
 
-    store: TOTPStore
-    secret_protector: SecretProtector
-    policy: TOTPPolicy = field(default_factory=TOTPPolicy)
-    issuer: str = "Litestar Security"
-    clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
-    secret_generator: Callable[[], str] = field(
+    store: "TOTPStore"
+    secret_protector: "SecretProtector"
+    policy: "TOTPPolicy" = field(default_factory=TOTPPolicy)
+    issuer: "str" = "Litestar Security"
+    clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
+    secret_generator: "Callable[[], str]" = field(
         default=lambda: pyotp.random_base32(length=32), repr=False, compare=False
     )
-    identifiers: Callable[[], str] = field(default=lambda: token_urlsafe(18), repr=False, compare=False)
-    login_methods: LoginMethodStore | None = field(default=None, repr=False, compare=False)
-    recovery_peppers: tuple[RecoveryCodePepper, ...] = field(default=(), repr=False)
-    recovery_code_count: int = _RECOVERY_CODE_COUNT
-    recovery_entropy: Callable[[int], bytes] = field(default=token_bytes, repr=False, compare=False)
-    events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
-    event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
+    identifiers: "Callable[[], str]" = field(default=lambda: token_urlsafe(18), repr=False, compare=False)
+    login_methods: "LoginMethodStore | None" = field(default=None, repr=False, compare=False)
+    recovery_peppers: "tuple[RecoveryCodePepper, ...]" = field(default=(), repr=False)
+    recovery_code_count: "int" = _RECOVERY_CODE_COUNT
+    recovery_entropy: "Callable[[int], bytes]" = field(default=token_bytes, repr=False, compare=False)
+    events: "SecurityEventSink" = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
+    event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate structural capabilities and stable issuer configuration."""
         store = cast("object", self.store)
         secret_protector = cast("object", self.secret_protector)
@@ -646,8 +641,8 @@ class TOTPService:
         self.recovery_peppers = tuple(self.recovery_peppers)
 
     async def begin_totp_enrollment(
-        self, account_id: str, *, label: str
-    ) -> TOTPProvisioningGrant | VerificationUnavailable:
+        self, account_id: "str", *, label: "str"
+    ) -> "TOTPProvisioningGrant | VerificationUnavailable":
         """Create and persist one reveal-once TOTP enrollment.
 
         Args:
@@ -678,9 +673,7 @@ class TOTPService:
                 expires_at=now + self.policy.enrollment_ttl,
             )
             totp = _totp(secret, self.policy)
-            provisioning_uri = cast(
-                "Callable[[str | None, str | None], str]", getattr(totp, "provisioning_uri")
-            )
+            provisioning_uri = cast("Callable[[str | None, str | None], str]", getattr(totp, "provisioning_uri"))
             uri = provisioning_uri(label, self.issuer)
             await self.store.create_totp_enrollment(pending)
         except Exception:
@@ -693,8 +686,8 @@ class TOTPService:
         )
 
     async def activate_totp(
-        self, account_id: str, enrollment_id: str, code: str
-    ) -> TOTPMethod | InvalidCredentials | VerificationUnavailable:
+        self, account_id: "str", enrollment_id: "str", code: "str"
+    ) -> "TOTPMethod | InvalidCredentials | VerificationUnavailable":
         """Verify and atomically consume a pending enrollment.
 
         Args:
@@ -736,8 +729,8 @@ class TOTPService:
         return method
 
     async def activate_totp_with_recovery_codes(
-        self, account_id: str, enrollment_id: str, code: str
-    ) -> RecoveryCodeGrant | InvalidCredentials | VerificationUnavailable:
+        self, account_id: "str", enrollment_id: "str", code: "str"
+    ) -> "RecoveryCodeGrant | InvalidCredentials | VerificationUnavailable":
         """Activate one enrollment and replace recovery codes in one atomic commit.
 
         Args:
@@ -797,8 +790,8 @@ class TOTPService:
         return RecoveryCodeGrant(codes=codes)
 
     async def verify_totp(
-        self, account_id: str, method_id: str, code: str
-    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        self, account_id: "str", method_id: "str", code: "str"
+    ) -> "AuthenticationEvidence | InvalidCredentials | VerificationUnavailable":
         """Verify a TOTP and atomically prevent counter replay.
 
         Args:
@@ -827,7 +820,7 @@ class TOTPService:
         )
         return AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=now, methods=frozenset({"totp"}))
 
-    async def generate_recovery_codes(self, account_id: str) -> RecoveryCodeGrant | VerificationUnavailable:
+    async def generate_recovery_codes(self, account_id: "str") -> "RecoveryCodeGrant | VerificationUnavailable":
         """Atomically replace and reveal one set of recovery codes.
 
         Args:
@@ -858,8 +851,8 @@ class TOTPService:
         return RecoveryCodeGrant(codes=codes)
 
     async def consume_recovery_code(
-        self, account_id: str, code: str
-    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        self, account_id: "str", code: "str"
+    ) -> "AuthenticationEvidence | InvalidCredentials | VerificationUnavailable":
         """Verify and atomically consume one recovery code.
 
         Args:
@@ -890,8 +883,8 @@ class TOTPService:
         )
 
     async def remove_totp_method(
-        self, account_id: str, method_id: str
-    ) -> RevokeLoginMethodOutcome | VerificationUnavailable:
+        self, account_id: "str", method_id: "str"
+    ) -> "RevokeLoginMethodOutcome | VerificationUnavailable":
         """Remove a TOTP method through the shared final-method-safe operation.
 
         Args:
@@ -917,14 +910,16 @@ class TOTPService:
         except Exception:
             return VerificationUnavailable()
 
-    async def _recover_secret(self, account_id: str, method_id: str, protected: ProtectedSecret) -> str:
+    async def _recover_secret(self, account_id: "str", method_id: "str", protected: "ProtectedSecret") -> "str":
         associated_data = _totp_associated_data(account_id, method_id, protected.key_version)
         plaintext = await self.secret_protector.unprotect(protected, associated_data=associated_data)
         secret = plaintext.decode("ascii")
         _validate_secret(secret)
         return secret
 
-    async def _emit_event(self, *, operation: str, outcome: str, account_id: str, occurred_at: datetime) -> None:
+    async def _emit_event(
+        self, *, operation: "str", outcome: "str", account_id: "str", occurred_at: "datetime"
+    ) -> "None":
         try:
             await self.events.emit(
                 SecurityEvent(
@@ -946,12 +941,12 @@ MFAService = TOTPService
 class StepUpService:
     """Issue and consume opaque grants bound to one authenticated transport."""
 
-    store: StepUpStore
-    ttl: timedelta = _DEFAULT_STEP_UP_TTL
-    clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
-    entropy: Callable[[int], bytes] = field(default=token_bytes, repr=False, compare=False)
+    store: "StepUpStore"
+    ttl: "timedelta" = _DEFAULT_STEP_UP_TTL
+    clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
+    entropy: "Callable[[int], bytes]" = field(default=token_bytes, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate the atomic store and bounded grant lifetime."""
         if not isinstance(cast("object", self.store), StepUpStore):
             message = "Step-up service store must implement StepUpStore"
@@ -963,12 +958,12 @@ class StepUpService:
     async def issue(
         self,
         *,
-        principal_id: str,
-        security_epoch: int,
-        purpose: str,
-        transport_binding: bytes,
-        evidence: AuthenticationEvidence,
-    ) -> StepUpCredential | InvalidCredentials | VerificationUnavailable:
+        principal_id: "str",
+        security_epoch: "int",
+        purpose: "str",
+        transport_binding: "bytes",
+        evidence: "AuthenticationEvidence",
+    ) -> "StepUpCredential | InvalidCredentials | VerificationUnavailable":
         """Issue one opaque grant from freshly verified factor evidence.
 
         Args:
@@ -1016,8 +1011,8 @@ class StepUpService:
         return StepUpCredential(token=token, purpose=purpose, expires_at=expires_at)
 
     async def consume(
-        self, token: str, *, principal_id: str, security_epoch: int, purpose: str, transport_binding: bytes
-    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        self, token: "str", *, principal_id: "str", security_epoch: "int", purpose: "str", transport_binding: "bytes"
+    ) -> "AuthenticationEvidence | InvalidCredentials | VerificationUnavailable":
         """Consume one exact principal, epoch, purpose, and transport binding.
 
         Args:
@@ -1062,7 +1057,7 @@ class StepUpService:
         )
 
 
-def _validate_secret(secret: str) -> None:
+def _validate_secret(secret: "str") -> "None":
     secret_value = cast("object", secret)
     if not isinstance(secret_value, str) or secret_value.__class__ is not str:
         raise ValueError
@@ -1074,13 +1069,13 @@ def _validate_secret(secret: str) -> None:
         raise ValueError
 
 
-def _totp(secret: str, policy: TOTPPolicy) -> pyotp.TOTP:
+def _totp(secret: "str", policy: "TOTPPolicy") -> "pyotp.TOTP":
     return pyotp.TOTP(
         secret, digits=policy.digits, digest=_ALGORITHMS[policy.algorithm], interval=policy.period_seconds
     )
 
 
-def _accepted_counter(secret: str, code: str, now: datetime, policy: TOTPPolicy) -> int | None:
+def _accepted_counter(secret: "str", code: "str", now: "datetime", policy: "TOTPPolicy") -> "int | None":
     code_value = cast("object", code)
     if (
         not isinstance(code_value, str)
@@ -1101,7 +1096,7 @@ def _accepted_counter(secret: str, code: str, now: datetime, policy: TOTPPolicy)
     return accepted
 
 
-def _totp_associated_data(account_id: str, method_id: str, key_version: str) -> bytes:
+def _totp_associated_data(account_id: "str", method_id: "str", key_version: "str") -> "bytes":
     values = (account_id, method_id, "totp", key_version)
     if not all(strict_context_text(value) and "\x00" not in value for value in values):
         raise ValueError
@@ -1109,8 +1104,8 @@ def _totp_associated_data(account_id: str, method_id: str, key_version: str) -> 
 
 
 def _validate_recovery_configuration(
-    peppers: tuple[RecoveryCodePepper, ...], count: int
-) -> tuple[RecoveryCodePepper, ...]:
+    peppers: "tuple[RecoveryCodePepper, ...]", count: "int"
+) -> "tuple[RecoveryCodePepper, ...]":
     if (
         not peppers
         or len({pepper.key_version for pepper in peppers}) != len(peppers)
@@ -1121,7 +1116,7 @@ def _validate_recovery_configuration(
     return peppers
 
 
-def _generate_recovery_codes(key_version: str, count: int, entropy: Callable[[int], bytes]) -> tuple[str, ...]:
+def _generate_recovery_codes(key_version: "str", count: "int", entropy: "Callable[[int], bytes]") -> "tuple[str, ...]":
     codes: list[str] = []
     attempts = 0
     while len(codes) < count and attempts < count * 4:
@@ -1138,7 +1133,7 @@ def _generate_recovery_codes(key_version: str, count: int, entropy: Callable[[in
     return tuple(codes)
 
 
-def _recovery_code_version(code: str) -> str:
+def _recovery_code_version(code: "str") -> "str":
     code_value = cast("object", code)
     if not isinstance(code_value, str) or code_value.__class__ is not str:
         raise TypeError
@@ -1155,7 +1150,7 @@ def _recovery_code_version(code: str) -> str:
     return parts[1]
 
 
-def _recovery_digest(pepper: RecoveryCodePepper, account_id: str, code: str) -> bytes:
+def _recovery_digest(pepper: "RecoveryCodePepper", account_id: "str", code: "str") -> "bytes":
     _recovery_code_version(code)
     if not strict_context_text(account_id) or "\x00" in account_id:
         raise ValueError
@@ -1163,7 +1158,7 @@ def _recovery_digest(pepper: RecoveryCodePepper, account_id: str, code: str) -> 
     return new_hmac(pepper.key, payload, sha256).digest()
 
 
-MFA_LOGIN_METHODS: frozenset[str] = frozenset({"totp", "recovery-code"})
+MFA_LOGIN_METHODS: "frozenset[str]" = frozenset({"totp", "recovery-code"})
 """Second-factor methods the initial local-login challenge can request."""
 
 
@@ -1171,25 +1166,25 @@ MFA_LOGIN_METHODS: frozenset[str] = frozenset({"totp", "recovery-code"})
 class MFARequired:
     """Sanitized outcome: the password verified but a second factor is owed."""
 
-    challenge: str = field(repr=False)
-    account_id: str
-    expires_at: datetime
-    methods: frozenset[str]
-    code: str = "mfa_required"
+    challenge: "str" = field(repr=False)
+    account_id: "str"
+    expires_at: "datetime"
+    methods: "frozenset[str]"
+    code: "str" = "mfa_required"
 
 
 @dataclass(frozen=True, slots=True)
 class MFALoginChallenge:
     """Digest-only pending second-factor state for one password login."""
 
-    challenge_digest: bytes = field(repr=False)
-    account_id: str
-    security_epoch: int
-    client_key: str | None
-    issued_at: datetime
-    expires_at: datetime
+    challenge_digest: "bytes" = field(repr=False)
+    account_id: "str"
+    security_epoch: "int"
+    client_key: "str | None"
+    issued_at: "datetime"
+    expires_at: "datetime"
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Require exact digest, context, and bounded UTC lifetime bindings."""
         challenge_digest = cast("object", self.challenge_digest)
         issued_at = aware_utc_time(self.issued_at)
@@ -1214,13 +1209,13 @@ class MFALoginChallenge:
 class MFALoginChallengeStore(Protocol):
     """Persist and atomically consume digest-only MFA login challenges."""
 
-    async def put(self, challenge: MFALoginChallenge) -> None:
+    async def put(self, challenge: "MFALoginChallenge") -> "None":
         """Persist one pending challenge."""
         ...
 
     async def consume(
-        self, challenge_digest: bytes, *, account_id: str, security_epoch: int, now: datetime
-    ) -> MFALoginChallenge | None:
+        self, challenge_digest: "bytes", *, account_id: "str", security_epoch: "int", now: "datetime"
+    ) -> "MFALoginChallenge | None":
         """Atomically burn and return one exact, unexpired challenge binding.
 
         Implementations must remove and return exactly one record in one transaction
@@ -1235,15 +1230,15 @@ class MFALoginChallengeStore(Protocol):
 class MFALoginService:
     """Issue and consume opaque, account-bound MFA login challenges."""
 
-    store: MFALoginChallengeStore = field(repr=False)
-    mfa: MFAService = field(repr=False)
-    pepper: bytes = field(repr=False)
-    methods: frozenset[str] = MFA_LOGIN_METHODS
-    ttl: timedelta = _DEFAULT_MFA_LOGIN_TTL
-    clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
-    entropy: Callable[[int], bytes] = field(default=token_bytes, repr=False, compare=False)
+    store: "MFALoginChallengeStore" = field(repr=False)
+    mfa: "MFAService" = field(repr=False)
+    pepper: "bytes" = field(repr=False)
+    methods: "frozenset[str]" = MFA_LOGIN_METHODS
+    ttl: "timedelta" = _DEFAULT_MFA_LOGIN_TTL
+    clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
+    entropy: "Callable[[int], bytes]" = field(default=token_bytes, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Require an atomic store and bounded, explicit cryptographic inputs."""
         store = cast("object", self.store)
         mfa = cast("object", self.mfa)
@@ -1276,8 +1271,8 @@ class MFALoginService:
             raise ImproperlyConfiguredException(detail=message)
 
     async def issue(
-        self, account: LocalAccountState[object], *, client_key: str | None
-    ) -> MFARequired | VerificationUnavailable:
+        self, account: "LocalAccountState[object]", *, client_key: "str | None"
+    ) -> "MFARequired | VerificationUnavailable":
         """Persist and reveal one short-lived MFA challenge for a verified password login."""
         try:
             now = aware_utc_time(self.clock())
@@ -1311,8 +1306,8 @@ class MFALoginService:
         return MFARequired(challenge=token, account_id=account.account_id, expires_at=expires_at, methods=self.methods)
 
     async def consume(
-        self, challenge: str, *, account_id: str, security_epoch: int, client_key: str | None
-    ) -> MFALoginChallenge | InvalidCredentials | VerificationUnavailable:
+        self, challenge: "str", *, account_id: "str", security_epoch: "int", client_key: "str | None"
+    ) -> "MFALoginChallenge | InvalidCredentials | VerificationUnavailable":
         """Atomically burn one challenge before checking its client binding."""
         if (
             not _strict_ascii_context(challenge)
@@ -1332,8 +1327,8 @@ class MFALoginService:
         return record
 
     async def verify(
-        self, record: MFALoginChallenge, *, method: str, method_id: str | None, code: str
-    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        self, record: "MFALoginChallenge", *, method: "str", method_id: "str | None", code: "str"
+    ) -> "AuthenticationEvidence | InvalidCredentials | VerificationUnavailable":
         """Verify the selected factor for a consumed login challenge."""
         if method.__class__ is not str or method not in self.methods:
             return InvalidCredentials()
@@ -1349,12 +1344,12 @@ class MFALoginService:
         return InvalidCredentials()
 
 
-def _challenge_digest(pepper: bytes, challenge: str) -> bytes:
+def _challenge_digest(pepper: "bytes", challenge: "str") -> "bytes":
     """Return the domain-separated digest for one strict-ASCII challenge."""
     return new_hmac(pepper, challenge.encode("ascii"), sha256).digest()
 
 
-def _strict_ascii_context(value: object) -> bool:
+def _strict_ascii_context(value: "object") -> "bool":
     """Accept only exact, nonblank, control-free ASCII context text."""
     try:
         return strict_context_text(value) and cast("str", value).isascii()
@@ -1362,7 +1357,7 @@ def _strict_ascii_context(value: object) -> bool:
         return False
 
 
-def _valid_client_key(value: object) -> bool:
+def _valid_client_key(value: "object") -> "bool":
     """Allow no client binding or one strict client context value."""
     try:
         return value is None or strict_context_text(value)
@@ -1370,7 +1365,7 @@ def _valid_client_key(value: object) -> bool:
         return False
 
 
-def _valid_methods(value: object) -> bool:
+def _valid_methods(value: "object") -> "bool":
     """Require a concrete non-empty subset of the supported MFA methods."""
     if type(value) is not frozenset:
         return False
@@ -1378,7 +1373,7 @@ def _valid_methods(value: object) -> bool:
     return bool(methods) and all(type(method) is str and method in MFA_LOGIN_METHODS for method in methods)
 
 
-def _client_keys_match(expected: str | None, actual: object) -> bool:
+def _client_keys_match(expected: "str | None", actual: "object") -> "bool":
     """Compare optional stored and presented client bindings without shortcuts."""
     if expected is None or actual is None:
         return expected is None and actual is None

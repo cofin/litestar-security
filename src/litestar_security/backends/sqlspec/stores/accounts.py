@@ -1,7 +1,5 @@
 """SQLSpec persistence adapter for local accounts and credentials."""
 
-from __future__ import annotations
-
 from datetime import datetime, timezone
 from hmac import compare_digest
 from typing import TYPE_CHECKING, cast
@@ -40,13 +38,15 @@ if TYPE_CHECKING:
     from litestar_security.accounts import PurposeTokenDelivery
     from litestar_security.backends.sqlspec.backend import SQLSpecSecurityBackend
 
+__all__ = ("SQLSpecAccountStore",)
 
-def _default_identifier(_: str) -> str:
+
+def _default_identifier(_: "str") -> "str":
     """Generate a random UUID4 identifier."""
     return str(uuid4())
 
 
-def _row_val(row: object, idx: int, key: str) -> object:
+def _row_val(row: "object", idx: "int", key: "str") -> "object":
     """Safely extract field from tuple or dict row representation."""
     if isinstance(row, (tuple, list)):
         seq = cast("Sequence[object]", row)
@@ -57,7 +57,7 @@ def _row_val(row: object, idx: int, key: str) -> object:
     return None
 
 
-def _extract_rowcount(result: object) -> int | None:
+def _extract_rowcount(result: "object") -> "int | None":
     """Safely extract affected rowcount from driver execution result."""
     if result is None:
         return None
@@ -76,23 +76,15 @@ def _extract_rowcount(result: object) -> int | None:
 class SQLSpecAccountStore:
     """SQLSpec-backed atomic account and credential store."""
 
-    __slots__ = (
-        "_backend",
-        "_clock",
-        "_identifiers",
-        "_login_methods",
-        "_purpose_store",
-        "_t_accounts",
-        "_t_tokens",
-    )
+    __slots__ = ("_backend", "_clock", "_identifiers", "_login_methods", "_purpose_store", "_t_accounts", "_t_tokens")
 
     def __init__(
         self,
-        backend: SQLSpecSecurityBackend,
+        backend: "SQLSpecSecurityBackend",
         *,
-        clock: Callable[[], datetime] | None = None,
-        identifiers: Callable[[str], str] | None = None,
-    ) -> None:
+        clock: "Callable[[], datetime] | None" = None,
+        identifiers: "Callable[[str], str] | None" = None,
+    ) -> "None":
         """Initialize with parent backend, optional clock, and identifier generator."""
         self._backend = backend
         self._t_accounts = resolve_table_name(backend.config, TABLE_ACCOUNTS)
@@ -102,7 +94,7 @@ class SQLSpecAccountStore:
         self._purpose_store = SQLSpecPurposeTokenStore(backend)
         self._login_methods: dict[str, dict[str, LoginMethod]] = {}
 
-    async def find_for_login(self, normalized_identifier: str) -> LocalAccountState[object] | None:
+    async def find_for_login(self, normalized_identifier: "str") -> "LocalAccountState[object] | None":
         """Find an account by normalized identifier."""
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "id"))
         col_email = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "email"))
@@ -122,7 +114,7 @@ class SQLSpecAccountStore:
                 return None
             return self._row_to_account(row)
 
-    async def get_by_id(self, account_id: str) -> LocalAccountState[object] | None:
+    async def get_by_id(self, account_id: "str") -> "LocalAccountState[object] | None":
         """Resolve an account by stable identifier."""
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "id"))
         col_email = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "email"))
@@ -142,7 +134,7 @@ class SQLSpecAccountStore:
                 return None
             return self._row_to_account(row)
 
-    async def current_epoch(self, account_id: str) -> int | None:
+    async def current_epoch(self, account_id: "str") -> "int | None":
         """Return the authoritative security epoch."""
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "id"))
         col_epoch = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "security_epoch"))
@@ -156,7 +148,7 @@ class SQLSpecAccountStore:
             val = _row_val(row, 0, "security_epoch")
             return int(cast("int | str", val)) if val is not None else None
 
-    async def get_password_state(self, account_id: str) -> PasswordCredentialState | None:
+    async def get_password_state(self, account_id: "str") -> "PasswordCredentialState | None":
         """Return one atomic password, account-state, and epoch snapshot."""
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "id"))
         col_pass = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "password_hash"))
@@ -165,8 +157,7 @@ class SQLSpecAccountStore:
         col_verified = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "is_verified"))
 
         query = (
-            f"SELECT {col_pass}, {col_epoch}, {col_active}, {col_verified} "
-            f"FROM {self._t_accounts} WHERE {col_id} = ?"
+            f"SELECT {col_pass}, {col_epoch}, {col_active}, {col_verified} FROM {self._t_accounts} WHERE {col_id} = ?"
         )
 
         async with self._backend.session() as session:
@@ -181,25 +172,19 @@ class SQLSpecAccountStore:
             verified_val = bool(_row_val(row, 3, "is_verified"))
 
             return PasswordCredentialState(
-                password_hash=str(pass_val),
-                security_epoch=epoch_val,
-                active=active_val,
-                verified=verified_val,
+                password_hash=str(pass_val), security_epoch=epoch_val, active=active_val, verified=verified_val
             )
 
     async def compare_and_replace_password(
-        self, account_id: str, expected_hash: str, password_hash: str, *, event: SecurityEvent
-    ) -> bool:
+        self, account_id: "str", expected_hash: "str", password_hash: "str", *, event: "SecurityEvent"
+    ) -> "bool":
         """Atomically replace password hash if expected hash matches."""
         del event
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "id"))
         col_pass = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "password_hash"))
 
         check_query = f"SELECT {col_pass} FROM {self._t_accounts} WHERE {col_id} = ?"
-        update_query = (
-            f"UPDATE {self._t_accounts} SET {col_pass} = ? "
-            f"WHERE {col_id} = ? AND {col_pass} = ?"
-        )
+        update_query = f"UPDATE {self._t_accounts} SET {col_pass} = ? WHERE {col_id} = ? AND {col_pass} = ?"
 
         async with self._backend.session() as session:
             row = await session.select_one_or_none(check_query, account_id)
@@ -218,8 +203,8 @@ class SQLSpecAccountStore:
             return str(_row_val(check_after, 0, "password_hash") or "") == password_hash
 
     async def replace_password_and_bump_epoch(
-        self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
-    ) -> PasswordChangeOutcome:
+        self, account_id: "str", password_hash: "str", *, expected_epoch: "int", event: "SecurityEvent"
+    ) -> "PasswordChangeOutcome":
         """Atomically replace password and increment security epoch."""
         del event
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "id"))
@@ -252,18 +237,20 @@ class SQLSpecAccountStore:
                         return PasswordChangeOutcome(PasswordChangeStatus.CONFLICT)
             return PasswordChangeOutcome(PasswordChangeStatus.CHANGED, expected_epoch + 1)
 
-    async def list_methods(self, account_id: str) -> tuple[LoginMethod, ...]:
+    async def list_methods(self, account_id: "str") -> "tuple[LoginMethod, ...]":
         """Return every login method recorded for an account."""
         return tuple(self._login_methods.get(account_id, {}).values())
 
-    async def register_login_method(self, account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
+    async def register_login_method(
+        self, account_id: "str", method: "LoginMethod", *, event: "SecurityEvent"
+    ) -> "None":
         """Record one login method for an existing account."""
         del event
         self._login_methods.setdefault(account_id, {})[method.method_id] = method
 
     async def revoke_login_method(
-        self, account_id: str, method_id: str, *, require_remaining: bool = True, event: SecurityEvent
-    ) -> RevokeLoginMethodOutcome:
+        self, account_id: "str", method_id: "str", *, require_remaining: "bool" = True, event: "SecurityEvent"
+    ) -> "RevokeLoginMethodOutcome":
         """Revoke one login method preserving final method invariant."""
         del event
         methods = self._login_methods.get(account_id)
@@ -276,14 +263,14 @@ class SQLSpecAccountStore:
 
     async def register(
         self,
-        command: RegistrationCommand,
-        password_hash: str,
+        command: "RegistrationCommand",
+        password_hash: "str",
         *,
-        invitation_digest: bytes | None,
-        verification: PurposeTokenDelivery | None,
-        now: datetime,
-        event: SecurityEvent,
-    ) -> RegistrationOutcome[object]:
+        invitation_digest: "bytes | None",
+        verification: "PurposeTokenDelivery | None",
+        now: "datetime",
+        event: "SecurityEvent",
+    ) -> "RegistrationOutcome[object]":
         """Atomically create account and handle optional invitation and verification."""
         col_acc_id = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "id"))
         col_email = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "email"))
@@ -299,21 +286,15 @@ class SQLSpecAccountStore:
         col_tok_id = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "id"))
         col_tok_digest = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "digest"))
         col_tok_purpose = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "purpose"))
-        col_tok_expires = quote_identifier(
-            resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "expires_at")
-        )
-        col_tok_consumed = quote_identifier(
-            resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "consumed_at")
-        )
+        col_tok_expires = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "expires_at"))
+        col_tok_consumed = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "consumed_at"))
 
         check_email = f"SELECT 1 FROM {self._t_accounts} WHERE {col_email} = ?"
         select_invitation = (
             f"SELECT {col_tok_id}, {col_tok_digest}, {col_tok_expires}, {col_tok_consumed} "
             f"FROM {self._t_tokens} WHERE {col_tok_purpose} = ? AND {col_tok_consumed} IS NULL"
         )
-        consume_invitation = (
-            f"UPDATE {self._t_tokens} SET {col_tok_consumed} = ? WHERE {col_tok_id} = ?"
-        )
+        consume_invitation = f"UPDATE {self._t_tokens} SET {col_tok_consumed} = ? WHERE {col_tok_id} = ?"
         insert_account = (
             f"INSERT INTO {self._t_accounts} ("
             f"{col_acc_id}, {col_email}, {col_name}, {col_pass}, {col_active}, {col_verified}, "
@@ -342,7 +323,6 @@ class SQLSpecAccountStore:
                 if inv_exp <= now:
                     return RegistrationOutcome(RegistrationStatus.INVALID_INVITATION)
                 invitation_row_id = str(_row_val(matched, 0, "id") or "")
-
 
             account_id = self._identifiers("account")
             is_verified = 1 if verification is None else 0
@@ -388,29 +368,29 @@ class SQLSpecAccountStore:
             )
             return RegistrationOutcome(RegistrationStatus.CREATED, account)
 
-    async def issue(self, issue: TokenIssue, notification: NotificationCommand, *, event: SecurityEvent) -> None:
+    async def issue(
+        self, issue: "TokenIssue", notification: "NotificationCommand", *, event: "SecurityEvent"
+    ) -> "None":
         """Issue a verification or recovery token."""
         await self._purpose_store.issue(issue, notification, event=event)
 
-    async def issue_absent(self) -> None:
+    async def issue_absent(self) -> "None":
         """Perform durable round trip without committing state."""
         await self._purpose_store.issue_absent()
 
     async def consume_and_verify(
-        self, token_id: str, digest: bytes, *, now: datetime, event: SecurityEvent
-    ) -> VerificationOutcome:
+        self, token_id: "str", digest: "bytes", *, now: "datetime", event: "SecurityEvent"
+    ) -> "VerificationOutcome":
         """Consume verification token and mark account verified."""
         return await self._purpose_store.consume_and_verify(token_id, digest, now=now, event=event)
 
     async def consume_and_reset(
-        self, token_id: str, digest: bytes, new_password_hash: str, *, now: datetime, event: SecurityEvent
-    ) -> PasswordResetOutcome:
+        self, token_id: "str", digest: "bytes", new_password_hash: "str", *, now: "datetime", event: "SecurityEvent"
+    ) -> "PasswordResetOutcome":
         """Consume recovery token and reset password advancing epoch."""
-        return await self._purpose_store.consume_and_reset(
-            token_id, digest, new_password_hash, now=now, event=event
-        )
+        return await self._purpose_store.consume_and_reset(token_id, digest, new_password_hash, now=now, event=event)
 
-    def _row_to_account(self, row: object) -> LocalAccountState[object]:
+    def _row_to_account(self, row: "object") -> "LocalAccountState[object]":
         mapping: dict[str, object]
         if isinstance(row, dict):
             mapping = cast("dict[str, object]", row)
@@ -435,7 +415,7 @@ class SQLSpecAccountStore:
         )
 
     @staticmethod
-    def _parse_dt(val: object) -> datetime:
+    def _parse_dt(val: "object") -> "datetime":
         if isinstance(val, datetime):
             return val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
         if isinstance(val, str):

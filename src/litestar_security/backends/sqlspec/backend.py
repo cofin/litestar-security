@@ -1,7 +1,5 @@
 """SQLSpec persistence backend and session bridging for Litestar Security."""
 
-from __future__ import annotations
-
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from inspect import iscoroutinefunction
@@ -28,10 +26,7 @@ if TYPE_CHECKING:
     from litestar_security.backends.sqlspec.stores.tokens import SQLSpecPurposeTokenStore, SQLSpecRefreshTokenStore
     from litestar_security.backends.sqlspec.stores.totp import SQLSpecTOTPStore
 
-__all__ = (
-    "SQLSpecSecurityBackend",
-    "bridge_session",
-)
+__all__ = ("SQLSpecSecurityBackend", "bridge_session")
 
 
 class _ManagedAsyncDriver:
@@ -39,17 +34,17 @@ class _ManagedAsyncDriver:
 
     __slots__ = ("_driver", "_executor", "_transaction_finalized")
 
-    def __init__(self, driver: object, executor: ThreadPoolExecutor) -> None:
+    def __init__(self, driver: "object", executor: "ThreadPoolExecutor") -> "None":
         self._driver = driver
         self._executor = executor
         self._transaction_finalized = False
 
     @property
-    def transaction_finalized(self) -> bool:
+    def transaction_finalized(self) -> "bool":
         """Whether the session explicitly committed or rolled back."""
         return self._transaction_finalized
 
-    async def begin(self) -> object:
+    async def begin(self) -> "object":
         """Begin a transaction."""
         self._transaction_finalized = False
         begin_func = getattr(self._driver, "begin", None)
@@ -60,7 +55,7 @@ class _ManagedAsyncDriver:
                 return begin_func()
         return None
 
-    async def commit(self) -> object:
+    async def commit(self) -> "object":
         """Commit the active transaction."""
         commit_func = getattr(self._driver, "commit", None)
         result: object = None
@@ -72,7 +67,7 @@ class _ManagedAsyncDriver:
         self._transaction_finalized = True
         return result
 
-    async def rollback(self) -> object:
+    async def rollback(self) -> "object":
         """Rollback the active transaction."""
         rollback_func = getattr(self._driver, "rollback", None)
         result: object = None
@@ -84,29 +79,31 @@ class _ManagedAsyncDriver:
         self._transaction_finalized = True
         return result
 
-    async def execute(self, statement: object, *parameters: object, **kwargs: object) -> object:
+    async def execute(self, statement: "object", *parameters: "object", **kwargs: "object") -> "object":
         """Execute a SQL statement."""
         exec_func = getattr(self._driver, "execute")
         return await async_(exec_func, executor=self._executor)(statement, *parameters, **kwargs)
 
-    async def execute_script(self, statement: str) -> object:
+    async def execute_script(self, statement: "str") -> "object":
         """Execute a raw SQL script."""
         script_func = getattr(self._driver, "execute_script")
         return await async_(script_func, executor=self._executor)(statement)
 
-    async def select(self, statement: object, *parameters: object, **kwargs: object) -> list[object]:
+    async def select(self, statement: "object", *parameters: "object", **kwargs: "object") -> "list[object]":
         """Execute a query returning rows."""
         select_func = getattr(self._driver, "select")
         result = await async_(select_func, executor=self._executor)(statement, *parameters, **kwargs)
         return list(cast("list[object]", result))
 
-    async def select_one_or_none(self, statement: object, *parameters: object, **kwargs: object) -> object | None:
+    async def select_one_or_none(
+        self, statement: "object", *parameters: "object", **kwargs: "object"
+    ) -> "object | None":
         """Execute a query returning at most one row."""
         select_one_func = getattr(self._driver, "select_one_or_none")
         result = await async_(select_one_func, executor=self._executor)(statement, *parameters, **kwargs)
         return cast("object | None", result)
 
-    async def select_value(self, statement: object, *parameters: object, **kwargs: object) -> object | None:
+    async def select_value(self, statement: "object", *parameters: "object", **kwargs: "object") -> "object | None":
         """Execute a query returning a single scalar value."""
         select_val_func = getattr(self._driver, "select_value", None)
         if callable(select_val_func):
@@ -132,13 +129,10 @@ class _ManagedAsyncDriver:
         return None
 
 
-
 @asynccontextmanager
 async def bridge_session(
-    driver_or_provider: object,
-    *,
-    executor: ThreadPoolExecutor | None = None,
-) -> AsyncGenerator[SQLSpecDriver, None]:
+    driver_or_provider: "object", *, executor: "ThreadPoolExecutor | None" = None
+) -> "AsyncGenerator[SQLSpecDriver, None]":
     """Yield an awaitable SQLSpecDriver from a sync or async driver or context manager.
 
     Args:
@@ -187,12 +181,12 @@ class SQLSpecSecurityBackend:
 
     def __init__(
         self,
-        driver: object,
-        config: SQLSpecSecurityBackendConfig | None = None,
+        driver: "object",
+        config: "SQLSpecSecurityBackendConfig | None" = None,
         *,
-        dialect: str | None = None,
-        executor: ThreadPoolExecutor | None = None,
-    ) -> None:
+        dialect: "str | None" = None,
+        executor: "ThreadPoolExecutor | None" = None,
+    ) -> "None":
         """Initialize the SQLSpec security persistence backend.
 
         Args:
@@ -212,17 +206,17 @@ class SQLSpecSecurityBackend:
         self._executor = executor
 
     @property
-    def config(self) -> SQLSpecSecurityBackendConfig:
+    def config(self) -> "SQLSpecSecurityBackendConfig":
         """Return the active backend configuration."""
         return self._config
 
     @property
-    def dialect(self) -> str:
+    def dialect(self) -> "str":
         """Return the target database dialect."""
         return self._dialect
 
     @asynccontextmanager
-    async def session(self) -> AsyncGenerator[SQLSpecDriver, None]:
+    async def session(self) -> "AsyncGenerator[SQLSpecDriver, None]":
         """Provide an active, awaitable driver session for database operations.
 
         Yields:
@@ -231,7 +225,7 @@ class SQLSpecSecurityBackend:
         async with bridge_session(self._driver, executor=self._executor) as driver:
             yield driver
 
-    async def create_schema(self, *, drop_existing: bool = False) -> None:
+    async def create_schema(self, *, drop_existing: "bool" = False) -> "None":
         """Bootstrap the security schema immediately via DDL execution.
 
         Args:
@@ -246,77 +240,76 @@ class SQLSpecSecurityBackend:
                 await driver.execute(create_stmt)
 
     @property
-    def account_store(self) -> SQLSpecAccountStore:
+    def account_store(self) -> "SQLSpecAccountStore":
         """Return a SQLSpec account and credential store."""
         from litestar_security.backends.sqlspec.stores.accounts import SQLSpecAccountStore
 
         return SQLSpecAccountStore(self)
 
     @property
-    def session_store(self) -> SQLSpecSessionStore:
+    def session_store(self) -> "SQLSpecSessionStore":
         """Return a SQLSpec session store and registry."""
         from litestar_security.backends.sqlspec.stores.sessions import SQLSpecSessionStore
 
         return SQLSpecSessionStore(self)
 
     @property
-    def api_key_store(self) -> SQLSpecAPIKeyStore:
+    def api_key_store(self) -> "SQLSpecAPIKeyStore":
         """Return a SQLSpec API-key store."""
         from litestar_security.backends.sqlspec.stores.api_keys import SQLSpecAPIKeyStore
 
         return SQLSpecAPIKeyStore(self)
 
     @property
-    def rate_limiter(self) -> SQLSpecRateLimiter:
+    def rate_limiter(self) -> "SQLSpecRateLimiter":
         """Return a SQLSpec atomic fixed-window rate limiter."""
         from litestar_security.backends.sqlspec.stores.rate_limits import SQLSpecRateLimiter
 
         return SQLSpecRateLimiter(self)
 
     @property
-    def refresh_token_store(self) -> SQLSpecRefreshTokenStore:
+    def refresh_token_store(self) -> "SQLSpecRefreshTokenStore":
         """Return a SQLSpec refresh token family store."""
         from litestar_security.backends.sqlspec.stores.tokens import SQLSpecRefreshTokenStore
 
         return SQLSpecRefreshTokenStore(self)
 
     @property
-    def purpose_token_store(self) -> SQLSpecPurposeTokenStore:
+    def purpose_token_store(self) -> "SQLSpecPurposeTokenStore":
         """Return a SQLSpec purpose token store."""
         from litestar_security.backends.sqlspec.stores.tokens import SQLSpecPurposeTokenStore
 
         return SQLSpecPurposeTokenStore(self)
 
     @property
-    def totp_store(self) -> SQLSpecTOTPStore:
+    def totp_store(self) -> "SQLSpecTOTPStore":
         """Return a SQLSpec TOTP and MFA store."""
         from litestar_security.backends.sqlspec.stores.totp import SQLSpecTOTPStore
 
         return SQLSpecTOTPStore(self)
 
     @property
-    def mfa_store(self) -> SQLSpecTOTPStore:
+    def mfa_store(self) -> "SQLSpecTOTPStore":
         """Return a SQLSpec MFA store (alias for totp_store)."""
         return self.totp_store
 
     @property
-    def mfa_login_challenge_store(self) -> SQLSpecMFALoginChallengeStore:
+    def mfa_login_challenge_store(self) -> "SQLSpecMFALoginChallengeStore":
         """Return a SQLSpec MFA login challenge store."""
         from litestar_security.backends.sqlspec.stores.mfa import SQLSpecMFALoginChallengeStore
 
         return SQLSpecMFALoginChallengeStore(self)
 
     @property
-    def step_up_store(self) -> SQLSpecStepUpStore:
+    def step_up_store(self) -> "SQLSpecStepUpStore":
         """Return a SQLSpec step-up grant store."""
         from litestar_security.backends.sqlspec.stores.mfa import SQLSpecStepUpStore
 
         return SQLSpecStepUpStore(self)
 
     @property
-    def recovery_code_store(self) -> SQLSpecRecoveryCodeStore:
+    def recovery_code_store(self) -> "SQLSpecRecoveryCodeStore":
         """Return a SQLSpec recovery code store."""
         from litestar_security.backends.sqlspec.stores.mfa import SQLSpecRecoveryCodeStore
 
         return SQLSpecRecoveryCodeStore(self)
-

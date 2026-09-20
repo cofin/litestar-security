@@ -1,7 +1,5 @@
 """Configuration structures for the SQLSpec persistence backend."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -18,7 +16,7 @@ if TYPE_CHECKING:
 __all__ = ("SQLSpecSecurityBackendConfig",)
 
 
-def _default_column_map() -> dict[str, Mapping[str, str]]:
+def _default_column_map() -> "dict[str, Mapping[str, str]]":
     """Return an empty column mapping dictionary."""
     return {}
 
@@ -27,27 +25,27 @@ def _default_column_map() -> dict[str, Mapping[str, str]]:
 class SQLSpecSecurityBackendConfig:
     """Configuration for the SQLSpec security persistence backend."""
 
-    table_prefix: str = ""
-    account_table_name: str | None = None
-    session_table_name: str | None = None
-    api_key_table_name: str | None = None
-    purpose_token_table_name: str | None = None
-    totp_method_table_name: str | None = None
-    mfa_recovery_code_table_name: str | None = None
-    mfa_login_challenge_table_name: str | None = None
-    step_up_grant_table_name: str | None = None
-    rate_limit_bucket_table_name: str | None = None
-    oauth_account_table_name: str | None = None
-    user_role_table_name: str | None = None
-    role_table_name: str | None = None
-    audit_log_table_name: str | None = None
-    refresh_token_table_name: str | None = None
-    column_map: Mapping[str, Mapping[str, str]] = field(default_factory=_default_column_map)
-    manage_schema: bool = True
-    native_json_columns: bool = True
-    statement_timeout_seconds: float = 30.0
+    table_prefix: "str" = ""
+    account_table_name: "str | None" = None
+    session_table_name: "str | None" = None
+    api_key_table_name: "str | None" = None
+    purpose_token_table_name: "str | None" = None
+    totp_method_table_name: "str | None" = None
+    mfa_recovery_code_table_name: "str | None" = None
+    mfa_login_challenge_table_name: "str | None" = None
+    step_up_grant_table_name: "str | None" = None
+    rate_limit_bucket_table_name: "str | None" = None
+    oauth_account_table_name: "str | None" = None
+    user_role_table_name: "str | None" = None
+    role_table_name: "str | None" = None
+    audit_log_table_name: "str | None" = None
+    refresh_token_table_name: "str | None" = None
+    column_map: "Mapping[str, Mapping[str, str]]" = field(default_factory=_default_column_map)
+    manage_schema: "bool" = True
+    native_json_columns: "bool" = True
+    statement_timeout_seconds: "float" = 30.0
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate configured table overrides and prefix."""
         if self.table_prefix:
             validate_table_name(f"{self.table_prefix}test")
@@ -70,7 +68,7 @@ class SQLSpecSecurityBackendConfig:
             if key is not None:
                 validate_table_name(key)
 
-    def table_name(self, table_key: str) -> str:
+    def table_name(self, table_key: "str") -> "str":
         """Resolve the physical table name for the specified logical table key.
 
         Args:
@@ -81,7 +79,7 @@ class SQLSpecSecurityBackendConfig:
         """
         return resolve_table_name(self, table_key)
 
-    def column_name(self, table_key: str, logical_column: str) -> str:
+    def column_name(self, table_key: "str", logical_column: "str") -> "str":
         """Resolve the physical column name for a given table and logical column.
 
         Args:
@@ -93,7 +91,7 @@ class SQLSpecSecurityBackendConfig:
         """
         return resolve_column(self, table_key, logical_column)
 
-    def all_table_names(self) -> dict[str, str]:
+    def all_table_names(self) -> "dict[str, str]":
         """Resolve all physical table names configured for the backend.
 
         Returns:

@@ -1,7 +1,5 @@
 """SQLSpec persistence adapter for user sessions."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -30,35 +28,28 @@ class SQLSpecSessionStore:
 
     __slots__ = ("_backend", "_clock", "_lock", "_table_name")
 
-    def __init__(
-        self,
-        backend: SQLSpecSecurityBackend,
-        *,
-        clock: Callable[[], datetime] | None = None,
-    ) -> None:
+    def __init__(self, backend: "SQLSpecSecurityBackend", *, clock: "Callable[[], datetime] | None" = None) -> "None":
         """Initialize with parent security backend and optional clock."""
         self._backend = backend
         self._table_name = resolve_table_name(backend.config, TABLE_SESSIONS)
         self._clock = clock if clock is not None else (lambda: datetime.now(timezone.utc))
         self._lock = asyncio.Lock()
 
-    async def get_by_id(self, account_id: str) -> LocalAccountState[object] | None:
+    async def get_by_id(self, account_id: "str") -> "LocalAccountState[object] | None":
         """Load one local account projection delegating to account store."""
         return await self._backend.account_store.get_by_id(account_id)
 
-    async def current_epoch(self, account_id: str) -> int | None:
+    async def current_epoch(self, account_id: "str") -> "int | None":
         """Load the authoritative account security epoch delegating to account store."""
         return await self._backend.account_store.current_epoch(account_id)
 
-    async def create(self, command: CreateSessionCommand, *, event: SecurityEvent) -> UserAuthSession:
+    async def create(self, command: "CreateSessionCommand", *, event: "SecurityEvent") -> "UserAuthSession":
         """Atomically persist one new session."""
         del event
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "id"))
         col_session_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "session_id"))
         col_binding_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "binding_id"))
-        col_binding_digest = quote_identifier(
-            resolve_column(self._backend.config, TABLE_SESSIONS, "binding_digest")
-        )
+        col_binding_digest = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "binding_digest"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "user_id"))
         col_epoch = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "security_epoch"))
         col_created_at = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "created_at"))
@@ -67,10 +58,7 @@ class SQLSpecSessionStore:
         col_expires_at = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "expires_at"))
         col_metadata = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "display_metadata"))
 
-        check_query = (
-            f"SELECT 1 FROM {self._table_name} "
-            f"WHERE {col_session_id} = ? OR {col_binding_id} = ?"
-        )
+        check_query = f"SELECT 1 FROM {self._table_name} WHERE {col_session_id} = ? OR {col_binding_id} = ?"
         insert_query = (
             f"INSERT INTO {self._table_name} ("
             f"{col_id}, {col_session_id}, {col_binding_id}, {col_binding_digest}, {col_user_id}, "
@@ -114,13 +102,11 @@ class SQLSpecSessionStore:
             display_metadata=command.display_metadata,
         )
 
-    async def get(self, session_id: str) -> UserAuthSession | None:
+    async def get(self, session_id: "str") -> "UserAuthSession | None":
         """Load one current session record."""
         col_session_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "session_id"))
         col_binding_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "binding_id"))
-        col_binding_digest = quote_identifier(
-            resolve_column(self._backend.config, TABLE_SESSIONS, "binding_digest")
-        )
+        col_binding_digest = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "binding_digest"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "user_id"))
         col_epoch = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "security_epoch"))
         col_created_at = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "created_at"))
@@ -145,13 +131,11 @@ class SQLSpecSessionStore:
                 return None
             return record
 
-    async def list_for_account(self, account_id: str) -> Sequence[UserAuthSession]:
+    async def list_for_account(self, account_id: "str") -> "Sequence[UserAuthSession]":
         """List active sessions owned by an account."""
         col_session_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "session_id"))
         col_binding_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "binding_id"))
-        col_binding_digest = quote_identifier(
-            resolve_column(self._backend.config, TABLE_SESSIONS, "binding_digest")
-        )
+        col_binding_digest = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "binding_digest"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "user_id"))
         col_epoch = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "security_epoch"))
         col_created_at = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "created_at"))
@@ -176,15 +160,13 @@ class SQLSpecSessionStore:
                     results.append(rec)
             return tuple(results)
 
-    async def touch(self, session_id: str, *, now: datetime) -> UserAuthSession | None:
+    async def touch(self, session_id: "str", *, now: "datetime") -> "UserAuthSession | None":
         """Update session last seen timestamp."""
         col_session_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "session_id"))
         col_last_seen = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "last_seen_at"))
 
         select_query = f"SELECT 1 FROM {self._table_name} WHERE {col_session_id} = ?"
-        update_query = (
-            f"UPDATE {self._table_name} SET {col_last_seen} = ? WHERE {col_session_id} = ?"
-        )
+        update_query = f"UPDATE {self._table_name} SET {col_last_seen} = ? WHERE {col_session_id} = ?"
 
         async with self._lock:
             async with self._backend.session() as session:
@@ -194,18 +176,16 @@ class SQLSpecSessionStore:
                 await session.execute(update_query, now.isoformat(), session_id)
             return await self.get(session_id)
 
-    async def revoke_session_for_account(self, account_id: str, session_id: str, *, event: SecurityEvent) -> bool:
+    async def revoke_session_for_account(
+        self, account_id: "str", session_id: "str", *, event: "SecurityEvent"
+    ) -> "bool":
         """Revoke one session only when owned by the specified account."""
         del event
         col_session_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "session_id"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "user_id"))
 
-        select_query = (
-            f"SELECT 1 FROM {self._table_name} WHERE {col_session_id} = ? AND {col_user_id} = ?"
-        )
-        delete_query = (
-            f"DELETE FROM {self._table_name} WHERE {col_session_id} = ? AND {col_user_id} = ?"
-        )
+        select_query = f"SELECT 1 FROM {self._table_name} WHERE {col_session_id} = ? AND {col_user_id} = ?"
+        delete_query = f"DELETE FROM {self._table_name} WHERE {col_session_id} = ? AND {col_user_id} = ?"
 
         async with self._lock, self._backend.session() as session:
             row = await session.select_one_or_none(select_query, session_id, account_id)
@@ -214,7 +194,7 @@ class SQLSpecSessionStore:
             await session.execute(delete_query, session_id, account_id)
             return True
 
-    async def revoke_sessions_for_account(self, account_id: str, *, event: SecurityEvent) -> int:
+    async def revoke_sessions_for_account(self, account_id: "str", *, event: "SecurityEvent") -> "int":
         """Revoke all sessions owned by an account."""
         del event
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "user_id"))
@@ -227,17 +207,13 @@ class SQLSpecSessionStore:
             await session.execute(delete_query, account_id)
             return count
 
-    async def revoke_other_sessions(self, account_id: str, session_id: str, *, event: SecurityEvent) -> int:
+    async def revoke_other_sessions(self, account_id: "str", session_id: "str", *, event: "SecurityEvent") -> "int":
         """Revoke all account sessions other than the current session."""
         del event
         col_session_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "session_id"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "user_id"))
-        count_query = (
-            f"SELECT COUNT(*) FROM {self._table_name} WHERE {col_user_id} = ? AND {col_session_id} != ?"
-        )
-        delete_query = (
-            f"DELETE FROM {self._table_name} WHERE {col_user_id} = ? AND {col_session_id} != ?"
-        )
+        count_query = f"SELECT COUNT(*) FROM {self._table_name} WHERE {col_user_id} = ? AND {col_session_id} != ?"
+        delete_query = f"DELETE FROM {self._table_name} WHERE {col_user_id} = ? AND {col_session_id} != ?"
 
         async with self._lock, self._backend.session() as session:
             count_val = await session.select_value(count_query, account_id, session_id)
@@ -246,16 +222,14 @@ class SQLSpecSessionStore:
             return count
 
     async def rebind(
-        self, prior_session_id: str, command: CreateSessionCommand, *, event: SecurityEvent
-    ) -> UserAuthSession | None:
+        self, prior_session_id: "str", command: "CreateSessionCommand", *, event: "SecurityEvent"
+    ) -> "UserAuthSession | None":
         """Atomically replace a prior session with its successor."""
         del event
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "id"))
         col_session_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "session_id"))
         col_binding_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "binding_id"))
-        col_binding_digest = quote_identifier(
-            resolve_column(self._backend.config, TABLE_SESSIONS, "binding_digest")
-        )
+        col_binding_digest = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "binding_digest"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "user_id"))
         col_epoch = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "security_epoch"))
         col_created_at = quote_identifier(resolve_column(self._backend.config, TABLE_SESSIONS, "created_at"))
@@ -309,7 +283,7 @@ class SQLSpecSessionStore:
             display_metadata=command.display_metadata,
         )
 
-    def _row_to_session(self, row: object) -> UserAuthSession:
+    def _row_to_session(self, row: "object") -> "UserAuthSession":
         mapping: dict[str, object]
         if isinstance(row, dict):
             mapping = cast("dict[str, object]", row)
@@ -363,7 +337,7 @@ class SQLSpecSessionStore:
         )
 
     @staticmethod
-    def _parse_dt(val: object) -> datetime:
+    def _parse_dt(val: "object") -> "datetime":
         if isinstance(val, datetime):
             return val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
         if isinstance(val, str):

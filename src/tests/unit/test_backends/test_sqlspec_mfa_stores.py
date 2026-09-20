@@ -69,9 +69,7 @@ class _SyncSqliteDriver:
         return cast("object | None", row[0])
 
 
-def _create_isolated_backend(
-    config: SQLSpecSecurityBackendConfig | None = None,
-) -> SQLSpecSecurityBackend:
+def _create_isolated_backend(config: SQLSpecSecurityBackendConfig | None = None) -> SQLSpecSecurityBackend:
     """Create an isolated in-memory SQLite backend with pre-initialized schema."""
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     driver = _SyncSqliteDriver(conn)

@@ -71,9 +71,7 @@ class _SyncSqliteDriver:
         return cast("object | None", row[0])
 
 
-async def _create_sqlite_backend(
-    config: SQLSpecSecurityBackendConfig | None = None,
-) -> SQLSpecSecurityBackend:
+async def _create_sqlite_backend(config: SQLSpecSecurityBackendConfig | None = None) -> SQLSpecSecurityBackend:
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     driver = _SyncSqliteDriver(conn)
     backend = SQLSpecSecurityBackend(driver, config=config)
@@ -175,11 +173,7 @@ async def test_rate_limiter_operations() -> None:
     """Verify SQLSpecRateLimiter handles atomic counting and rate-limit violations."""
     backend = await _create_sqlite_backend()
     policy = RateLimitPolicy(limit=3, window=timedelta(minutes=1))
-    limiter = SQLSpecRateLimiter(
-        backend,
-        policies={"login": policy},
-        clock=lambda: _NOW,
-    )
+    limiter = SQLSpecRateLimiter(backend, policies={"login": policy}, clock=lambda: _NOW)
 
     attempt1 = RateLimitAttempt(operation="login", cost=1, client_key="127.0.0.1", subject_digest=None)
     decision1 = await limiter.acquire(attempt1)
@@ -207,12 +201,7 @@ async def test_refresh_token_store_lifecycle() -> None:
     event = SecurityEvent(event_id="evt-1", occurred_at=_NOW, operation="refresh.create", outcome="accepted")
     reg_cmd = RegistrationCommand(normalized_identifier="refresh-test@example.com", display_name="Test")
     reg_outcome = await account_store.register(
-        reg_cmd,
-        "hash",
-        invitation_digest=None,
-        verification=None,
-        now=_NOW,
-        event=event,
+        reg_cmd, "hash", invitation_digest=None, verification=None, now=_NOW, event=event
     )
     assert reg_outcome.status is RegistrationStatus.CREATED
     assert reg_outcome.account is not None
@@ -271,12 +260,7 @@ async def test_account_store_credentials_and_login_methods() -> None:
 
     reg_cmd = RegistrationCommand(normalized_identifier="user@example.com", display_name="User")
     outcome = await store.register(
-        reg_cmd,
-        "initial-hash",
-        invitation_digest=None,
-        verification=None,
-        now=_NOW,
-        event=event,
+        reg_cmd, "initial-hash", invitation_digest=None, verification=None, now=_NOW, event=event
     )
     assert outcome.status is RegistrationStatus.CREATED
     assert outcome.account is not None
@@ -292,23 +276,17 @@ async def test_account_store_credentials_and_login_methods() -> None:
     assert pw_state.password_hash == "initial-hash"
     assert pw_state.security_epoch == 1
 
-    cas_fail = await store.compare_and_replace_password(
-        account_id, "wrong-hash", "new-hash", event=event
-    )
+    cas_fail = await store.compare_and_replace_password(account_id, "wrong-hash", "new-hash", event=event)
     assert cas_fail is False
 
-    cas_ok = await store.compare_and_replace_password(
-        account_id, "initial-hash", "new-hash", event=event
-    )
+    cas_ok = await store.compare_and_replace_password(account_id, "initial-hash", "new-hash", event=event)
     assert cas_ok is True
 
     pw_state2 = await store.get_password_state(account_id)
     assert pw_state2 is not None
     assert pw_state2.password_hash == "new-hash"
 
-    bump_outcome = await store.replace_password_and_bump_epoch(
-        account_id, "bumped-hash", expected_epoch=1, event=event
-    )
+    bump_outcome = await store.replace_password_and_bump_epoch(account_id, "bumped-hash", expected_epoch=1, event=event)
     assert bump_outcome.status.value == "changed"
     assert bump_outcome.security_epoch == 2
 
@@ -320,14 +298,10 @@ async def test_account_store_credentials_and_login_methods() -> None:
     assert len(methods) == 1
     assert methods[0].method_id == "method-1"
 
-    revoke_final = await store.revoke_login_method(
-        account_id, "method-1", require_remaining=True, event=event
-    )
+    revoke_final = await store.revoke_login_method(account_id, "method-1", require_remaining=True, event=event)
     assert revoke_final.status.value == "final_method"
 
     method2 = LoginMethod("method-2", "totp", _NOW)
     await store.register_login_method(account_id, method2, event=event)
-    revoke_ok = await store.revoke_login_method(
-        account_id, "method-1", require_remaining=True, event=event
-    )
+    revoke_ok = await store.revoke_login_method(account_id, "method-1", require_remaining=True, event=event)
     assert revoke_ok.status.value == "revoked"

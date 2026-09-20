@@ -1,7 +1,5 @@
 """SQLSpec persistence adapter for API keys."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -30,19 +28,14 @@ class SQLSpecAPIKeyStore:
 
     __slots__ = ("_backend", "_clock", "_lock", "_table_name")
 
-    def __init__(
-        self,
-        backend: SQLSpecSecurityBackend,
-        *,
-        clock: Callable[[], datetime] | None = None,
-    ) -> None:
+    def __init__(self, backend: "SQLSpecSecurityBackend", *, clock: "Callable[[], datetime] | None" = None) -> "None":
         """Initialize with parent security backend and optional clock."""
         self._backend = backend
         self._table_name = resolve_table_name(backend.config, TABLE_API_KEYS)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._lock = asyncio.Lock()
 
-    async def get(self, key_id: str) -> APIKeyState | None:
+    async def get(self, key_id: "str") -> "APIKeyState | None":
         """Return one record by its public lookup."""
         col_key_id = quote_identifier(resolve_column(self._backend.config, TABLE_API_KEYS, "key_id"))
         col_digest = quote_identifier(resolve_column(self._backend.config, TABLE_API_KEYS, "digest"))
@@ -66,7 +59,7 @@ class SQLSpecAPIKeyStore:
                 return None
             return self._row_to_state(row)
 
-    async def create(self, record: APIKeyState) -> None:
+    async def create(self, record: "APIKeyState") -> "None":
         """Persist one new record and reject duplicate key_id atomically."""
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_API_KEYS, "id"))
         col_key_id = quote_identifier(resolve_column(self._backend.config, TABLE_API_KEYS, "key_id"))
@@ -109,8 +102,8 @@ class SQLSpecAPIKeyStore:
             )
 
     async def rotate(
-        self, *, current_key_id: str, replacement: APIKeyState, overlap_until: datetime | None, now: datetime
-    ) -> None:
+        self, *, current_key_id: "str", replacement: "APIKeyState", overlap_until: "datetime | None", now: "datetime"
+    ) -> "None":
         """Atomically revoke the current record and create its replacement."""
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_API_KEYS, "id"))
         col_key_id = quote_identifier(resolve_column(self._backend.config, TABLE_API_KEYS, "key_id"))
@@ -160,12 +153,7 @@ class SQLSpecAPIKeyStore:
                 if overlap_until is not None and current.expires_at is not None
                 else overlap_until
             )
-            await session.execute(
-                update_query,
-                self._format_dt(now),
-                self._format_dt(bounded_overlap),
-                current_key_id,
-            )
+            await session.execute(update_query, self._format_dt(now), self._format_dt(bounded_overlap), current_key_id)
             row_id = str(uuid4())
             await session.execute(
                 insert_query,
@@ -181,7 +169,7 @@ class SQLSpecAPIKeyStore:
                 None,
             )
 
-    async def revoke(self, *, key_id: str, now: datetime) -> None:
+    async def revoke(self, *, key_id: "str", now: "datetime") -> "None":
         """Atomically revoke one key."""
         col_key_id = quote_identifier(resolve_column(self._backend.config, TABLE_API_KEYS, "key_id"))
         col_revoked_at = quote_identifier(resolve_column(self._backend.config, TABLE_API_KEYS, "revoked_at"))
@@ -189,8 +177,7 @@ class SQLSpecAPIKeyStore:
 
         select_query = f"SELECT 1 FROM {self._table_name} WHERE {col_key_id} = ?"
         update_query = (
-            f"UPDATE {self._table_name} SET {col_revoked_at} = ?, {col_overlap_until} = NULL "
-            f"WHERE {col_key_id} = ?"
+            f"UPDATE {self._table_name} SET {col_revoked_at} = ?, {col_overlap_until} = NULL WHERE {col_key_id} = ?"
         )
 
         async with self._lock, self._backend.session() as session:
@@ -201,7 +188,7 @@ class SQLSpecAPIKeyStore:
             await session.execute(update_query, self._format_dt(now), key_id)
 
     @staticmethod
-    def _format_dt(dt: datetime | None) -> str | None:
+    def _format_dt(dt: "datetime | None") -> "str | None":
         if dt is None:
             return None
         if dt.tzinfo is None:
@@ -209,7 +196,7 @@ class SQLSpecAPIKeyStore:
         return dt.isoformat()
 
     @staticmethod
-    def _parse_dt(val: object) -> datetime | None:
+    def _parse_dt(val: "object") -> "datetime | None":
         if val is None:
             return None
         if isinstance(val, datetime):
@@ -220,7 +207,7 @@ class SQLSpecAPIKeyStore:
         return None
 
     @staticmethod
-    def _serialize_restrictions(restrictions: CredentialRestrictions | None) -> str:
+    def _serialize_restrictions(restrictions: "CredentialRestrictions | None") -> "str":
         if restrictions is None:
             return "{}"
         data: dict[str, list[str]] = {}
@@ -235,7 +222,7 @@ class SQLSpecAPIKeyStore:
         return json.dumps(data)
 
     @staticmethod
-    def _deserialize_restrictions(val: object) -> CredentialRestrictions:
+    def _deserialize_restrictions(val: "object") -> "CredentialRestrictions":
         if isinstance(val, str):
             try:
                 data = json.loads(val)
@@ -255,7 +242,7 @@ class SQLSpecAPIKeyStore:
                 pass
         return CredentialRestrictions()
 
-    def _row_to_state(self, row: object) -> APIKeyState:
+    def _row_to_state(self, row: "object") -> "APIKeyState":
         mapping: dict[str, object]
         if isinstance(row, dict):
             mapping = cast("dict[str, object]", row)

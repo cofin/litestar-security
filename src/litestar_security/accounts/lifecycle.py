@@ -1,7 +1,5 @@
 """Account lifecycle ceremonies: registration, email verification, password change, and recovery."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from hmac import compare_digest
@@ -104,20 +102,20 @@ _LOGGER = getLogger(__name__)
 class RegistrationService(Generic[UserT]):
     """Apply policy and commit one atomic enumeration-resistant registration."""
 
-    accounts: RegistrationStore[UserT] = field(repr=False)
-    hasher: PasswordHasher = field(repr=False)
-    tokens: PurposeTokenCodec = field(repr=False)
-    registration: RegistrationPolicy
-    password_policy: PasswordPolicy = field(default_factory=PasswordPolicy)
-    verification_lifetime: timedelta = _VERIFICATION_TOKEN_LIFETIME
-    verification_attempts: int = _DEFAULT_TOKEN_ATTEMPTS
-    verification_return_url: str | None = None
-    clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
-    normalizer: Callable[[str], str] = field(default=normalize_identifier, repr=False, compare=False)
-    event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
-    rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
+    accounts: "RegistrationStore[UserT]" = field(repr=False)
+    hasher: "PasswordHasher" = field(repr=False)
+    tokens: "PurposeTokenCodec" = field(repr=False)
+    registration: "RegistrationPolicy"
+    password_policy: "PasswordPolicy" = field(default_factory=PasswordPolicy)
+    verification_lifetime: "timedelta" = _VERIFICATION_TOKEN_LIFETIME
+    verification_attempts: "int" = _DEFAULT_TOKEN_ATTEMPTS
+    verification_return_url: "str | None" = None
+    clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
+    normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
+    event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
+    rate_limits: "RateLimitGuard | None" = field(default=None, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate the selected registration policy and injected boundaries."""
         validate_rate_limits(self.rate_limits, name="Registration service")
         accounts_value: object = object.__getattribute__(self, "accounts")
@@ -147,21 +145,17 @@ class RegistrationService(Generic[UserT]):
 
     async def register(
         self,
-        identifier: str,
-        password: str,
+        identifier: "str",
+        password: "str",
         *,
-        display_name: str | None = None,
-        invitation_token: str | None = None,
-        now: datetime | None = None,
-        client_key: str | None = None,
-    ) -> (
-        LifecycleAccepted
-        | InvalidInvitation
-        | LifecycleRejected
-        | PasswordPolicyDecision
-        | RateLimited
-        | VerificationUnavailable
-    ):
+        display_name: "str | None" = None,
+        invitation_token: "str | None" = None,
+        now: "datetime | None" = None,
+        client_key: "str | None" = None,
+    ) -> """(
+        LifecycleAccepted | InvalidInvitation | LifecycleRejected
+        | PasswordPolicyDecision | RateLimited | VerificationUnavailable
+    )""":
         """Hash and pass one complete candidate registration to the atomic store.
 
         The hash and the atomic ``register`` call both run unconditionally, so
@@ -223,14 +217,14 @@ class RegistrationService(Generic[UserT]):
         return LifecycleAccepted()
 
     async def _check_rate_limit(
-        self, normalized_identifier: str, client_key: str | None
-    ) -> RateLimited | VerificationUnavailable | None:
+        self, normalized_identifier: "str", client_key: "str | None"
+    ) -> "RateLimited | VerificationUnavailable | None":
         rate_limits = self.rate_limits
         if rate_limits is None:
             return None
         return await rate_limits.check(REGISTRATION, client_key=client_key, identifier=normalized_identifier)
 
-    def _verification_plan(self, destination: str, occurred_at: datetime) -> PurposeTokenDelivery | None:
+    def _verification_plan(self, destination: "str", occurred_at: "datetime") -> "PurposeTokenDelivery | None":
         if not self.registration.require_verification:
             return None
         return self.tokens.issue(
@@ -248,18 +242,18 @@ class RegistrationService(Generic[UserT]):
 class VerificationTokenService(Generic[UserT]):
     """Issue generic verification resends and atomically consume confirmations."""
 
-    accounts: AccountLookup[UserT] = field(repr=False)
-    store: VerificationTokenStore = field(repr=False)
-    tokens: PurposeTokenCodec = field(repr=False)
-    lifetime: timedelta = _VERIFICATION_TOKEN_LIFETIME
-    maximum_attempts: int = _DEFAULT_TOKEN_ATTEMPTS
-    return_url: str | None = None
-    clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
-    normalizer: Callable[[str], str] = field(default=normalize_identifier, repr=False, compare=False)
-    event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
-    rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
+    accounts: "AccountLookup[UserT]" = field(repr=False)
+    store: "VerificationTokenStore" = field(repr=False)
+    tokens: "PurposeTokenCodec" = field(repr=False)
+    lifetime: "timedelta" = _VERIFICATION_TOKEN_LIFETIME
+    maximum_attempts: "int" = _DEFAULT_TOKEN_ATTEMPTS
+    return_url: "str | None" = None
+    clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
+    normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
+    event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
+    rate_limits: "RateLimitGuard | None" = field(default=None, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate lookup, atomic token store, and deterministic hooks."""
         validate_rate_limits(self.rate_limits, name="Verification token service")
         if not isinstance(object.__getattribute__(self, "accounts"), AccountLookup):
@@ -282,8 +276,8 @@ class VerificationTokenService(Generic[UserT]):
         )
 
     async def resend(
-        self, identifier: str, *, now: datetime | None = None, client_key: str | None = None
-    ) -> LifecycleAccepted | RateLimited | VerificationUnavailable:
+        self, identifier: "str", *, now: "datetime | None" = None, client_key: "str | None" = None
+    ) -> "LifecycleAccepted | RateLimited | VerificationUnavailable":
         """Always return the shared response after one token-HMAC work class.
 
         Denial is safe to report here even though every other outcome is
@@ -341,8 +335,8 @@ class VerificationTokenService(Generic[UserT]):
         return LifecycleAccepted()
 
     async def consume(
-        self, token: object, *, now: datetime | None = None, client_key: str | None = None
-    ) -> VerificationOutcome | RateLimited | VerificationUnavailable:
+        self, token: "object", *, now: "datetime | None" = None, client_key: "str | None" = None
+    ) -> "VerificationOutcome | RateLimited | VerificationUnavailable":
         """Verify purpose locally and delegate single-use mutation atomically.
 
         The budget is keyed on the client bucket only: the route consumes a
@@ -381,8 +375,8 @@ class VerificationTokenService(Generic[UserT]):
             return VerificationUnavailable()
 
     async def _check_rate_limit(
-        self, identifier: str, client_key: str | None
-    ) -> RateLimited | VerificationUnavailable | None:
+        self, identifier: "str", client_key: "str | None"
+    ) -> "RateLimited | VerificationUnavailable | None":
         rate_limits = self.rate_limits
         if rate_limits is None:
             return None
@@ -397,16 +391,16 @@ class VerificationTokenService(Generic[UserT]):
 class PasswordChangeService:
     """Apply authenticated or administrative password changes and epoch invalidation."""
 
-    accounts: PasswordCredentialStore = field(repr=False)
-    hasher: PasswordHasher = field(repr=False)
-    password_policy: PasswordPolicy = field(default_factory=PasswordPolicy, repr=False)
-    sessions: SessionRegistry | None = field(default=None, repr=False)
-    refresh_tokens: RefreshTokenFamilyStore | None = field(default=None, repr=False)
-    evidence_ttl: timedelta = _DEFAULT_REAUTHENTICATION_TTL
-    clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
-    event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
+    accounts: "PasswordCredentialStore" = field(repr=False)
+    hasher: "PasswordHasher" = field(repr=False)
+    password_policy: "PasswordPolicy" = field(default_factory=PasswordPolicy, repr=False)
+    sessions: "SessionRegistry | None" = field(default=None, repr=False)
+    refresh_tokens: "RefreshTokenFamilyStore | None" = field(default=None, repr=False)
+    evidence_ttl: "timedelta" = _DEFAULT_REAUTHENTICATION_TTL
+    clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
+    event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate atomic mutation, hashing, and optional transport cleanup ports."""
         if not isinstance(object.__getattribute__(self, "accounts"), PasswordCredentialStore):
             msg = "Password change accounts must implement PasswordCredentialStore"
@@ -437,22 +431,19 @@ class PasswordChangeService:
 
     async def change(
         self,
-        account_id: str,
-        password: str,
+        account_id: "str",
+        password: "str",
         *,
-        proof: PasswordReauthenticationProof,
-        normalized_identifier: str | None = None,
-        current_session_id: str | None = None,
-        replacement_session: CreateSessionCommand | None = None,
-        compromise: bool = False,
-        now: datetime | None = None,
-    ) -> (
-        PasswordChangeOutcome
-        | PasswordPolicyDecision
-        | InvalidCredentials
-        | LifecycleRejected
-        | VerificationUnavailable
-    ):
+        proof: "PasswordReauthenticationProof",
+        normalized_identifier: "str | None" = None,
+        current_session_id: "str | None" = None,
+        replacement_session: "CreateSessionCommand | None" = None,
+        compromise: "bool" = False,
+        now: "datetime | None" = None,
+    ) -> """(
+        PasswordChangeOutcome | PasswordPolicyDecision | InvalidCredentials
+        | LifecycleRejected | VerificationUnavailable
+    )""":
         """Change a password after recent proof and preserve only an explicitly rebound session.
 
         Args:
@@ -490,13 +481,13 @@ class PasswordChangeService:
 
     async def force_reset(
         self,
-        account_id: str,
-        password: str,
+        account_id: "str",
+        password: "str",
         *,
-        expected_epoch: int,
-        normalized_identifier: str | None = None,
-        now: datetime | None = None,
-    ) -> PasswordChangeOutcome | PasswordPolicyDecision | LifecycleRejected | VerificationUnavailable:
+        expected_epoch: "int",
+        normalized_identifier: "str | None" = None,
+        now: "datetime | None" = None,
+    ) -> "PasswordChangeOutcome | PasswordPolicyDecision | LifecycleRejected | VerificationUnavailable":
         """Perform an application-authorized reset without registering an admin route.
 
         No generated route reaches this. The library ships no administrative
@@ -531,17 +522,17 @@ class PasswordChangeService:
 
     async def _replace(
         self,
-        account_id: str,
-        password: str,
+        account_id: "str",
+        password: "str",
         *,
-        expected_epoch: int,
-        normalized_identifier: str | None,
-        current_session_id: str | None,
-        replacement_session: CreateSessionCommand | None,
-        compromise: bool,
-        occurred_at: datetime,
-        operation: str,
-    ) -> PasswordChangeOutcome | PasswordPolicyDecision | LifecycleRejected | VerificationUnavailable:
+        expected_epoch: "int",
+        normalized_identifier: "str | None",
+        current_session_id: "str | None",
+        replacement_session: "CreateSessionCommand | None",
+        compromise: "bool",
+        occurred_at: "datetime",
+        operation: "str",
+    ) -> "PasswordChangeOutcome | PasswordPolicyDecision | LifecycleRejected | VerificationUnavailable":
         if (
             not strict_text(account_id)
             or not valid_security_epoch(expected_epoch)
@@ -592,13 +583,13 @@ class PasswordChangeService:
 
     def _valid_rebind(
         self,
-        account_id: str,
-        occurred_at: datetime,
+        account_id: "str",
+        occurred_at: "datetime",
         *,
-        current_session_id: str | None,
-        replacement_session: CreateSessionCommand | None,
-        compromise: bool,
-    ) -> bool:
+        current_session_id: "str | None",
+        replacement_session: "CreateSessionCommand | None",
+        compromise: "bool",
+    ) -> "bool":
         if compromise and (current_session_id is not None or replacement_session is not None):
             return False
         if (current_session_id is None) != (replacement_session is None):
@@ -619,7 +610,7 @@ class PasswordChangeService:
             and expires_at > occurred_at
         )
 
-    def _recent_password_proof(self, account_id: str, proof: object, occurred_at: datetime) -> bool:
+    def _recent_password_proof(self, account_id: "str", proof: "object", occurred_at: "datetime") -> "bool":
         if (
             not isinstance(proof, PasswordReauthenticationProof)
             or proof.__class__ is not PasswordReauthenticationProof
@@ -635,14 +626,14 @@ class PasswordChangeService:
 
     async def _cleanup_after_change(
         self,
-        account_id: str,
-        security_epoch: int,
-        occurred_at: datetime,
+        account_id: "str",
+        security_epoch: "int",
+        occurred_at: "datetime",
         *,
-        current_session_id: str | None,
-        replacement_session: CreateSessionCommand | None,
-        compromise: bool,
-    ) -> None:
+        current_session_id: "str | None",
+        replacement_session: "CreateSessionCommand | None",
+        compromise: "bool",
+    ) -> "None":
         if self.refresh_tokens is not None:
             try:
                 await self.refresh_tokens.revoke_for_account(
@@ -696,22 +687,22 @@ class PasswordChangeService:
 class RecoveryTokenService(Generic[UserT]):
     """Issue enumeration-resistant password-recovery notification commands."""
 
-    accounts: AccountLookup[UserT] = field(repr=False)
-    store: RecoveryTokenStore = field(repr=False)
-    tokens: PurposeTokenCodec = field(repr=False)
-    hasher: PasswordHasher = field(repr=False)
-    password_policy: PasswordPolicy = field(default_factory=PasswordPolicy, repr=False)
-    sessions: SessionRegistry | None = field(default=None, repr=False)
-    refresh_tokens: RefreshTokenFamilyStore | None = field(default=None, repr=False)
-    lifetime: timedelta = _RECOVERY_TOKEN_LIFETIME
-    maximum_attempts: int = _DEFAULT_TOKEN_ATTEMPTS
-    return_url: str | None = None
-    clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
-    normalizer: Callable[[str], str] = field(default=normalize_identifier, repr=False, compare=False)
-    event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
-    rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
+    accounts: "AccountLookup[UserT]" = field(repr=False)
+    store: "RecoveryTokenStore" = field(repr=False)
+    tokens: "PurposeTokenCodec" = field(repr=False)
+    hasher: "PasswordHasher" = field(repr=False)
+    password_policy: "PasswordPolicy" = field(default_factory=PasswordPolicy, repr=False)
+    sessions: "SessionRegistry | None" = field(default=None, repr=False)
+    refresh_tokens: "RefreshTokenFamilyStore | None" = field(default=None, repr=False)
+    lifetime: "timedelta" = _RECOVERY_TOKEN_LIFETIME
+    maximum_attempts: "int" = _DEFAULT_TOKEN_ATTEMPTS
+    return_url: "str | None" = None
+    clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
+    normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
+    event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
+    rate_limits: "RateLimitGuard | None" = field(default=None, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate lookup, atomic recovery store, and deterministic hooks."""
         validate_rate_limits(self.rate_limits, name="Recovery token service")
         if not isinstance(object.__getattribute__(self, "accounts"), AccountLookup):
@@ -748,8 +739,8 @@ class RecoveryTokenService(Generic[UserT]):
         )
 
     async def request(
-        self, identifier: str, *, now: datetime | None = None, client_key: str | None = None
-    ) -> LifecycleAccepted | RateLimited | VerificationUnavailable:
+        self, identifier: "str", *, now: "datetime | None" = None, client_key: "str | None" = None
+    ) -> "LifecycleAccepted | RateLimited | VerificationUnavailable":
         """Always return the shared response after one token-HMAC work class.
 
         Denial is safe to report here even though every other outcome is
@@ -806,8 +797,8 @@ class RecoveryTokenService(Generic[UserT]):
         return LifecycleAccepted()
 
     async def reset(
-        self, token: object, password: str, *, now: datetime | None = None, client_key: str | None = None
-    ) -> PasswordResetOutcome | PasswordPolicyDecision | RateLimited | VerificationUnavailable:
+        self, token: "object", password: "str", *, now: "datetime | None" = None, client_key: "str | None" = None
+    ) -> "PasswordResetOutcome | PasswordPolicyDecision | RateLimited | VerificationUnavailable":
         """Apply policy and delegate token consumption and password replacement atomically.
 
         Only the client bucket applies: the presented value is a recovery token,
@@ -862,8 +853,8 @@ class RecoveryTokenService(Generic[UserT]):
         return result
 
     async def _check_request_rate_limit(
-        self, identifier: str, client_key: str | None
-    ) -> RateLimited | VerificationUnavailable | None:
+        self, identifier: "str", client_key: "str | None"
+    ) -> "RateLimited | VerificationUnavailable | None":
         rate_limits = self.rate_limits
         if rate_limits is None:
             return None
@@ -873,7 +864,7 @@ class RecoveryTokenService(Generic[UserT]):
             normalized_identifier = None
         return await rate_limits.check(RECOVERY, client_key=client_key, identifier=normalized_identifier)
 
-    async def _check_reset_rate_limit(self, client_key: str | None) -> RateLimited | VerificationUnavailable | None:
+    async def _check_reset_rate_limit(self, client_key: "str | None") -> "RateLimited | VerificationUnavailable | None":
         rate_limits = self.rate_limits
         if rate_limits is None:
             return None
@@ -882,14 +873,14 @@ class RecoveryTokenService(Generic[UserT]):
 
 def validate_lifecycle_configuration(
     *,
-    lifetime: timedelta,
-    attempts: int,
-    return_url: str | None,
-    clock: object,
-    normalizer: object,
-    event_ids: object,
-    name: str,
-) -> None:
+    lifetime: "timedelta",
+    attempts: "int",
+    return_url: "str | None",
+    clock: "object",
+    normalizer: "object",
+    event_ids: "object",
+    name: "str",
+) -> "None":
     """Validate common lifecycle service parameters."""
     if lifetime.__class__ is not timedelta or lifetime <= timedelta(0):
         msg = f"{name} lifetime must be positive"
@@ -906,13 +897,13 @@ def validate_lifecycle_configuration(
 
 
 async def _revoke_all_sessions(
-    sessions: SessionRegistry,
-    account_id: str,
-    occurred_at: datetime,
-    event_ids: Callable[[], str],
+    sessions: "SessionRegistry",
+    account_id: "str",
+    occurred_at: "datetime",
+    event_ids: "Callable[[], str]",
     *,
-    operation: str = "local.password.session_revoke_all",
-) -> None:
+    operation: "str" = "local.password.session_revoke_all",
+) -> "None":
     try:
         await sessions.revoke_sessions_for_account(
             account_id,
@@ -926,13 +917,13 @@ async def _revoke_all_sessions(
 
 async def _revoke_all_credentials(
     *,
-    account_id: str,
-    sessions: SessionRegistry | None,
-    refresh_tokens: RefreshTokenFamilyStore | None,
-    occurred_at: datetime,
-    event_ids: Callable[[], str],
-    operation: str,
-) -> None:
+    account_id: "str",
+    sessions: "SessionRegistry | None",
+    refresh_tokens: "RefreshTokenFamilyStore | None",
+    occurred_at: "datetime",
+    event_ids: "Callable[[], str]",
+    operation: "str",
+) -> "None":
     if sessions is not None:
         await _revoke_all_sessions(
             sessions, account_id, occurred_at, event_ids, operation=f"{operation}{SESSION_REVOKE_ALL_SUFFIX}"

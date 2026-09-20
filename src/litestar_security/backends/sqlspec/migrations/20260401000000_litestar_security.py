@@ -4,8 +4,6 @@ This revision is discoverable when the security extension is registered with
 SQLSpec's migration engine.
 """
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING, Any
 
 from litestar_security.backends.sqlspec.config import SQLSpecSecurityBackendConfig
@@ -18,7 +16,7 @@ if TYPE_CHECKING:
 __all__ = ("down", "up")
 
 
-def _resolve_config_and_dialect(context: MigrationContext | None) -> tuple[SQLSpecSecurityBackendConfig, str]:
+def _resolve_config_and_dialect(context: "MigrationContext | None") -> "tuple[SQLSpecSecurityBackendConfig, str]":
     """Resolve backend config and target dialect from migration context.
 
     Args:
@@ -60,7 +58,7 @@ def _resolve_config_and_dialect(context: MigrationContext | None) -> tuple[SQLSp
     return SQLSpecSecurityBackendConfig(), dialect
 
 
-async def up(context: MigrationContext | None = None) -> list[str]:
+async def up(context: "MigrationContext | None" = None) -> "list[str]":
     """Return SQL DDL statements that provision all security tables.
 
     Args:
@@ -73,7 +71,7 @@ async def up(context: MigrationContext | None = None) -> list[str]:
     return get_create_table_statements(config, dialect=dialect)
 
 
-async def down(context: MigrationContext | None = None) -> list[str]:
+async def down(context: "MigrationContext | None" = None) -> "list[str]":
     """Return SQL DDL statements that drop all security tables.
 
     Args:

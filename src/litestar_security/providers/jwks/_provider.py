@@ -77,11 +77,7 @@ def negative_cache() -> OrderedDict[_NegativeKey, datetime]:
 def aware_utc(value: datetime) -> datetime:
     """Ensure a datetime is timezone-aware and converted to UTC."""
     time_value = cast("object", value)
-    if (
-        not isinstance(time_value, datetime)
-        or time_value.tzinfo is None
-        or time_value.utcoffset() is None
-    ):
+    if not isinstance(time_value, datetime) or time_value.tzinfo is None or time_value.utcoffset() is None:
         raise_config("JWKS selection time must be timezone-aware")
     return value.astimezone(timezone.utc)
 

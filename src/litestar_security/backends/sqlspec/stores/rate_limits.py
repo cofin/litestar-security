@@ -1,7 +1,5 @@
 """SQLSpec persistence adapter for atomic rate limiting."""
 
-from __future__ import annotations
-
 from datetime import datetime, timezone
 from hashlib import sha256
 from math import ceil
@@ -24,7 +22,6 @@ if TYPE_CHECKING:
 __all__ = ("SQLSpecRateLimiter",)
 
 
-
 class SQLSpecRateLimiter:
     """Fixed-window rate limiter with atomic cross-process accounting via SQLSpec."""
 
@@ -32,18 +29,18 @@ class SQLSpecRateLimiter:
 
     def __init__(
         self,
-        backend: SQLSpecSecurityBackend,
+        backend: "SQLSpecSecurityBackend",
         *,
-        policies: Mapping[str, RateLimitPolicy] | None = None,
-        clock: Callable[[], datetime] | None = None,
-    ) -> None:
+        policies: "Mapping[str, RateLimitPolicy] | None" = None,
+        clock: "Callable[[], datetime] | None" = None,
+    ) -> "None":
         """Initialize with backend, policies, and clock."""
         self._backend = backend
         self._table_name = resolve_table_name(backend.config, TABLE_RATE_LIMIT_BUCKETS)
         self._policies = MappingProxyType(dict(DEFAULT_RATE_LIMIT_POLICIES if policies is None else policies))
         self._clock = clock if clock is not None else (lambda: datetime.now(timezone.utc))
 
-    async def acquire(self, request: RateLimitAttempt) -> RateLimitDecision:
+    async def acquire(self, request: "RateLimitAttempt") -> "RateLimitDecision":
         """Consume one attempt's cost from each applicable bucket atomically."""
         policy = self._policies.get(request.operation)
         if policy is None:
@@ -64,14 +61,8 @@ class SQLSpecRateLimiter:
         return RateLimitDecision(allowed=True)
 
     async def _consume(
-        self,
-        *,
-        request: RateLimitAttempt,
-        policy: RateLimitPolicy,
-        kind: str,
-        value: str,
-        now: datetime,
-    ) -> int | None:
+        self, *, request: "RateLimitAttempt", policy: "RateLimitPolicy", kind: "str", value: "str", now: "datetime"
+    ) -> "int | None":
         window = int(policy.window.total_seconds())
         elapsed = now.timestamp()
         slot = int(elapsed // window)
@@ -79,9 +70,7 @@ class SQLSpecRateLimiter:
         window_start_dt = datetime.fromtimestamp(slot * window, tz=timezone.utc)
         window_start_str = window_start_dt.isoformat()
 
-        col_bucket_key = quote_identifier(
-            resolve_column(self._backend.config, TABLE_RATE_LIMIT_BUCKETS, "bucket_key")
-        )
+        col_bucket_key = quote_identifier(resolve_column(self._backend.config, TABLE_RATE_LIMIT_BUCKETS, "bucket_key"))
         col_window_start = quote_identifier(
             resolve_column(self._backend.config, TABLE_RATE_LIMIT_BUCKETS, "window_start")
         )
@@ -97,18 +86,11 @@ class SQLSpecRateLimiter:
 
         async with self._backend.session() as session:
             try:
-                val = await session.select_value(
-                    upsert_query,
-                    bucket_key,
-                    window_start_str,
-                    request.cost,
-                    request.cost,
-                )
+                val = await session.select_value(upsert_query, bucket_key, window_start_str, request.cost, request.cost)
                 used = int(cast("int | str", val)) if val is not None else 1
             except Exception:
                 select_query = (
-                    f"SELECT {col_count} FROM {self._table_name} "
-                    f"WHERE {col_bucket_key} = ? AND {col_window_start} = ?"
+                    f"SELECT {col_count} FROM {self._table_name} WHERE {col_bucket_key} = ? AND {col_window_start} = ?"
                 )
                 row = await session.select_one_or_none(select_query, bucket_key, window_start_str)
                 if row is None:

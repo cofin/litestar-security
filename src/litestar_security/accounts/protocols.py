@@ -1,7 +1,5 @@
 """Consolidated account storage contracts and capability protocols."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
@@ -47,19 +45,19 @@ UserT = TypeVar("UserT")
 class RegistrationPolicy:
     """Explicit self-service registration policy."""
 
-    mode: RegistrationMode
-    require_verification: bool = True
-    password_policy: PasswordPolicy | None = None
+    mode: "RegistrationMode"
+    require_verification: "bool" = True
+    password_policy: "PasswordPolicy | None" = None
 
     @classmethod
-    def disabled(cls) -> RegistrationPolicy:
+    def disabled(cls) -> "RegistrationPolicy":
         """Disable self-service registration."""
         return cls(mode=RegistrationMode.DISABLED)
 
     @classmethod
     def public(
-        cls, *, require_verification: bool = True, password_policy: PasswordPolicy | None = None
-    ) -> RegistrationPolicy:
+        cls, *, require_verification: "bool" = True, password_policy: "PasswordPolicy | None" = None
+    ) -> "RegistrationPolicy":
         """Enable public self-service registration."""
         return cls(
             mode=RegistrationMode.PUBLIC, require_verification=require_verification, password_policy=password_policy
@@ -67,8 +65,8 @@ class RegistrationPolicy:
 
     @classmethod
     def invite_only(
-        cls, *, require_verification: bool = True, password_policy: PasswordPolicy | None = None
-    ) -> RegistrationPolicy:
+        cls, *, require_verification: "bool" = True, password_policy: "PasswordPolicy | None" = None
+    ) -> "RegistrationPolicy":
         """Require an atomic invitation consume during registration."""
         return cls(
             mode=RegistrationMode.INVITE_ONLY,
@@ -81,11 +79,11 @@ class RegistrationPolicy:
 class AccountLookup(Protocol[UserT]):
     """Resolve the minimal application account projection."""
 
-    async def find_for_login(self, normalized_identifier: str) -> LocalAccountState[UserT] | None:
+    async def find_for_login(self, normalized_identifier: "str") -> "LocalAccountState[UserT] | None":
         """Find an account through an already-normalized identifier."""
         ...
 
-    async def get_by_id(self, account_id: str) -> LocalAccountState[UserT] | None:
+    async def get_by_id(self, account_id: "str") -> "LocalAccountState[UserT] | None":
         """Resolve an account by its stable security identifier."""
         ...
 
@@ -94,19 +92,19 @@ class AccountLookup(Protocol[UserT]):
 class PasswordCredentialStore(Protocol):
     """Store password credentials through atomic security operations."""
 
-    async def get_password_state(self, account_id: str) -> PasswordCredentialState | None:
+    async def get_password_state(self, account_id: "str") -> "PasswordCredentialState | None":
         """Load one atomic password hash, account-state, and security-epoch snapshot."""
         ...
 
     async def compare_and_replace_password(
-        self, account_id: str, expected_hash: str, password_hash: str, *, event: SecurityEvent
-    ) -> bool:
+        self, account_id: "str", expected_hash: "str", password_hash: "str", *, event: "SecurityEvent"
+    ) -> "bool":
         """Atomically replace a hash only when its expected value is current."""
         ...
 
     async def replace_password_and_bump_epoch(
-        self, account_id: str, password_hash: str, *, expected_epoch: int, event: SecurityEvent
-    ) -> PasswordChangeOutcome:
+        self, account_id: "str", password_hash: "str", *, expected_epoch: "int", event: "SecurityEvent"
+    ) -> "PasswordChangeOutcome":
         """Atomically replace a password and increment the security epoch."""
         ...
 
@@ -115,17 +113,19 @@ class PasswordCredentialStore(Protocol):
 class LoginMethodStore(Protocol):
     """Maintain viable login methods through guarded atomic operations."""
 
-    async def list_methods(self, account_id: str) -> tuple[LoginMethod, ...]:
+    async def list_methods(self, account_id: "str") -> "tuple[LoginMethod, ...]":
         """Return every login method currently viable for one account."""
         ...
 
-    async def register_login_method(self, account_id: str, method: LoginMethod, *, event: SecurityEvent) -> None:
+    async def register_login_method(
+        self, account_id: "str", method: "LoginMethod", *, event: "SecurityEvent"
+    ) -> "None":
         """Register one login method and its durable event."""
         ...
 
     async def revoke_login_method(
-        self, account_id: str, method_id: str, *, require_remaining: bool = True, event: SecurityEvent
-    ) -> RevokeLoginMethodOutcome:
+        self, account_id: "str", method_id: "str", *, require_remaining: "bool" = True, event: "SecurityEvent"
+    ) -> "RevokeLoginMethodOutcome":
         """Revoke a method without removing the final viable method by default."""
         ...
 
@@ -136,14 +136,14 @@ class RegistrationStore(Protocol[UserT]):
 
     async def register(
         self,
-        command: RegistrationCommand,
-        password_hash: str,
+        command: "RegistrationCommand",
+        password_hash: "str",
         *,
-        invitation_digest: bytes | None,
-        verification: PurposeTokenDelivery | None,
-        now: datetime,
-        event: SecurityEvent,
-    ) -> RegistrationOutcome[UserT]:
+        invitation_digest: "bytes | None",
+        verification: "PurposeTokenDelivery | None",
+        now: "datetime",
+        event: "SecurityEvent",
+    ) -> "RegistrationOutcome[UserT]":
         """Commit registration, invitation, verification, notification, and event."""
         ...
 
@@ -152,17 +152,19 @@ class RegistrationStore(Protocol[UserT]):
 class VerificationTokenStore(Protocol):
     """Issue and atomically consume account-verification tokens."""
 
-    async def issue(self, issue: TokenIssue, notification: NotificationCommand, *, event: SecurityEvent) -> None:
+    async def issue(
+        self, issue: "TokenIssue", notification: "NotificationCommand", *, event: "SecurityEvent"
+    ) -> "None":
         """Commit a verification issue, notification, and durable event."""
         ...
 
-    async def issue_absent(self) -> None:
+    async def issue_absent(self) -> "None":
         """Perform one durable round trip that commits nothing."""
         ...
 
     async def consume_and_verify(
-        self, token_id: str, digest: bytes, *, now: datetime, event: SecurityEvent
-    ) -> VerificationOutcome:
+        self, token_id: "str", digest: "bytes", *, now: "datetime", event: "SecurityEvent"
+    ) -> "VerificationOutcome":
         """Consume a verification token and verify its account atomically."""
         ...
 
@@ -171,17 +173,19 @@ class VerificationTokenStore(Protocol):
 class RecoveryTokenStore(Protocol):
     """Issue and atomically consume password-recovery tokens."""
 
-    async def issue(self, issue: TokenIssue, notification: NotificationCommand, *, event: SecurityEvent) -> None:
+    async def issue(
+        self, issue: "TokenIssue", notification: "NotificationCommand", *, event: "SecurityEvent"
+    ) -> "None":
         """Commit a recovery issue, notification, and durable event."""
         ...
 
-    async def issue_absent(self) -> None:
+    async def issue_absent(self) -> "None":
         """Perform one durable round trip that commits nothing."""
         ...
 
     async def consume_and_reset(
-        self, token_id: str, digest: bytes, new_password_hash: str, *, now: datetime, event: SecurityEvent
-    ) -> PasswordResetOutcome:
+        self, token_id: "str", digest: "bytes", new_password_hash: "str", *, now: "datetime", event: "SecurityEvent"
+    ) -> "PasswordResetOutcome":
         """Consume only at its issued epoch, then reset password and advance epoch atomically."""
         ...
 
@@ -190,7 +194,7 @@ class RecoveryTokenStore(Protocol):
 class SecurityEpochStore(Protocol):
     """Resolve the exact current account security epoch."""
 
-    async def current_epoch(self, account_id: str) -> int | None:
+    async def current_epoch(self, account_id: "str") -> "int | None":
         """Return the current epoch or None for an absent account."""
         ...
 
@@ -212,17 +216,17 @@ class LocalAccountCapabilities(
 class SecurityEpochValidator:
     """Validate one presented epoch against authoritative application state."""
 
-    store: SecurityEpochStore = field(repr=False)
+    store: "SecurityEpochStore" = field(repr=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Require the exact epoch lookup capability."""
         if not isinstance(object.__getattribute__(self, "store"), SecurityEpochStore):
             msg = "Security epoch validator store must implement SecurityEpochStore"
             raise ImproperlyConfiguredException(detail=msg)
 
     async def validate(
-        self, account_id: str, presented_epoch: int
-    ) -> InvalidCredentials | VerificationUnavailable | None:
+        self, account_id: "str", presented_epoch: "int"
+    ) -> "InvalidCredentials | VerificationUnavailable | None":
         """Return None only when the exact current epoch matches."""
         if not strict_text(account_id) or not valid_security_epoch(presented_epoch):
             return InvalidCredentials()
@@ -265,7 +269,7 @@ __all__ = (
     "WebAuthnChallengeStore",
 )
 
-_OPTIONAL_PROTOCOLS: Mapping[str, tuple[str, str, frozenset[str]]] = {
+_OPTIONAL_PROTOCOLS: "Mapping[str, tuple[str, str, frozenset[str]]]" = {
     "TOTPStore": ("litestar_security.accounts.mfa", "mfa", frozenset({"pyotp"})),
     "MFAStore": ("litestar_security.accounts.mfa", "mfa", frozenset({"pyotp"})),
     "StepUpStore": ("litestar_security.accounts.mfa", "mfa", frozenset({"pyotp"})),
@@ -276,7 +280,7 @@ _OPTIONAL_PROTOCOLS: Mapping[str, tuple[str, str, frozenset[str]]] = {
 }
 
 
-def __getattr__(name: str) -> object:
+def __getattr__(name: "str") -> "object":
     """Resolve optional storage protocols only when feature dependencies are available."""
     if name == "RefreshTokenFamilyStore":
         from litestar_security.accounts.tokens import RefreshTokenFamilyStore

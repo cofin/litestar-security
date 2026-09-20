@@ -1,7 +1,5 @@
 """SQLSpec persistence adapters for refresh tokens and purpose tokens."""
 
-from __future__ import annotations
-
 import json
 from datetime import datetime, timezone
 from hmac import compare_digest
@@ -40,13 +38,10 @@ if TYPE_CHECKING:
 
     from litestar_security.backends.sqlspec.backend import SQLSpecSecurityBackend
 
-__all__ = (
-    "SQLSpecPurposeTokenStore",
-    "SQLSpecRefreshTokenStore",
-)
+__all__ = ("SQLSpecPurposeTokenStore", "SQLSpecRefreshTokenStore")
 
 
-def _extract_epoch(row: object) -> int:
+def _extract_epoch(row: "object") -> "int":
     """Safely extract security epoch integer from driver row representation."""
     if isinstance(row, (tuple, list)):
         seq = cast("Sequence[object]", row)
@@ -58,7 +53,7 @@ def _extract_epoch(row: object) -> int:
     return 1
 
 
-def _extract_rowcount(result: object) -> int | None:
+def _extract_rowcount(result: "object") -> "int | None":
     """Safely extract affected rowcount from driver execution result."""
     if result is None:
         return None
@@ -79,13 +74,13 @@ class SQLSpecRefreshTokenStore:
 
     __slots__ = ("_backend", "_t_accounts", "_t_refresh")
 
-    def __init__(self, backend: SQLSpecSecurityBackend) -> None:
+    def __init__(self, backend: "SQLSpecSecurityBackend") -> "None":
         """Initialize with parent security backend."""
         self._backend = backend
         self._t_refresh = resolve_table_name(backend.config, TABLE_REFRESH_TOKENS)
         self._t_accounts = resolve_table_name(backend.config, TABLE_ACCOUNTS)
 
-    async def create_family(self, command: CreateRefreshFamilyCommand, *, event: SecurityEvent) -> bool:
+    async def create_family(self, command: "CreateRefreshFamilyCommand", *, event: "SecurityEvent") -> "bool":
         """Atomically create a new refresh token family."""
         del event
         col_acc_id = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "id"))
@@ -93,15 +88,11 @@ class SQLSpecRefreshTokenStore:
 
         col_ref_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "id"))
         col_token_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_id"))
-        col_token_digest = quote_identifier(
-            resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_digest")
-        )
+        col_token_digest = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_digest"))
         col_family_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "family_id"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "user_id"))
         col_epoch = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "security_epoch"))
-        col_token_exp = quote_identifier(
-            resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_expires_at")
-        )
+        col_token_exp = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_expires_at"))
         col_family_exp = quote_identifier(
             resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "family_expires_at")
         )
@@ -111,9 +102,7 @@ class SQLSpecRefreshTokenStore:
         col_created_at = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "created_at"))
 
         account_query = f"SELECT {col_acc_epoch} FROM {self._t_accounts} WHERE {col_acc_id} = ?"
-        check_query = (
-            f"SELECT 1 FROM {self._t_refresh} WHERE {col_token_id} = ? OR {col_family_id} = ?"
-        )
+        check_query = f"SELECT 1 FROM {self._t_refresh} WHERE {col_token_id} = ? OR {col_family_id} = ?"
         insert_query = (
             f"INSERT INTO {self._t_refresh} ("
             f"{col_ref_id}, {col_token_id}, {col_token_digest}, {col_family_id}, {col_user_id}, "
@@ -121,7 +110,6 @@ class SQLSpecRefreshTokenStore:
             f"{col_consumed}, {col_revoked}, {col_created_at}"
             f") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)"
         )
-
 
         async with self._backend.session() as session:
             acc_row = await session.select_one_or_none(account_query, command.account_id)
@@ -154,35 +142,27 @@ class SQLSpecRefreshTokenStore:
             return True
 
     async def prepare_rotation(
-        self, proof: RefreshTokenProof, idempotency_digest: bytes | None, *, now: datetime, event: SecurityEvent
-    ) -> RefreshFamilyContext | RefreshReceiptReplay | RefreshPreflightOutcome:
+        self, proof: "RefreshTokenProof", idempotency_digest: "bytes | None", *, now: "datetime", event: "SecurityEvent"
+    ) -> "RefreshFamilyContext | RefreshReceiptReplay | RefreshPreflightOutcome":
         """Resolve and validate a refresh token before rotation."""
         del event
         col_acc_id = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "id"))
         col_acc_epoch = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "security_epoch"))
 
         col_token_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_id"))
-        col_token_digest = quote_identifier(
-            resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_digest")
-        )
+        col_token_digest = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_digest"))
         col_family_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "family_id"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "user_id"))
         col_epoch = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "security_epoch"))
-        col_token_exp = quote_identifier(
-            resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_expires_at")
-        )
+        col_token_exp = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_expires_at"))
         col_family_exp = quote_identifier(
             resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "family_expires_at")
         )
         col_scopes = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "scopes"))
         col_consumed = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "consumed"))
         col_revoked = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "revoked"))
-        col_idemp = quote_identifier(
-            resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "idempotency_digest")
-        )
-        col_receipt = quote_identifier(
-            resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "sealed_receipt")
-        )
+        col_idemp = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "idempotency_digest"))
+        col_receipt = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "sealed_receipt"))
 
         select_query = (
             f"SELECT {col_token_id}, {col_token_digest}, {col_family_id}, {col_user_id}, {col_epoch}, "
@@ -190,9 +170,7 @@ class SQLSpecRefreshTokenStore:
             f"{col_idemp}, {col_receipt} "
             f"FROM {self._t_refresh} WHERE {col_token_id} = ?"
         )
-        revoke_family_query = (
-            f"UPDATE {self._t_refresh} SET {col_revoked} = 1 WHERE {col_family_id} = ?"
-        )
+        revoke_family_query = f"UPDATE {self._t_refresh} SET {col_revoked} = 1 WHERE {col_family_id} = ?"
         account_query = f"SELECT {col_acc_epoch} FROM {self._t_accounts} WHERE {col_acc_id} = ?"
 
         async with self._backend.session() as session:
@@ -233,7 +211,6 @@ class SQLSpecRefreshTokenStore:
                 await session.execute(revoke_family_query, str(d["family_id"]))
                 return RefreshPreflightOutcome(RefreshRotationStatus.REPLAY_DETECTED, family_revoked=True)
 
-
             if token_exp <= now or family_exp <= now:
                 return RefreshPreflightOutcome(RefreshRotationStatus.EXPIRED)
 
@@ -247,8 +224,8 @@ class SQLSpecRefreshTokenStore:
             return context
 
     async def rotate(
-        self, command: RotateRefreshCommand, *, now: datetime, event: SecurityEvent
-    ) -> RefreshRotationOutcome:
+        self, command: "RotateRefreshCommand", *, now: "datetime", event: "SecurityEvent"
+    ) -> "RefreshRotationOutcome":
         """Atomically consume predecessor and register successor refresh token."""
         del event
         col_acc_id = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "id"))
@@ -256,27 +233,19 @@ class SQLSpecRefreshTokenStore:
 
         col_ref_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "id"))
         col_token_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_id"))
-        col_token_digest = quote_identifier(
-            resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_digest")
-        )
+        col_token_digest = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_digest"))
         col_family_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "family_id"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "user_id"))
         col_epoch = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "security_epoch"))
-        col_token_exp = quote_identifier(
-            resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_expires_at")
-        )
+        col_token_exp = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_expires_at"))
         col_family_exp = quote_identifier(
             resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "family_expires_at")
         )
         col_scopes = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "scopes"))
         col_consumed = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "consumed"))
         col_revoked = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "revoked"))
-        col_idemp = quote_identifier(
-            resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "idempotency_digest")
-        )
-        col_receipt = quote_identifier(
-            resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "sealed_receipt")
-        )
+        col_idemp = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "idempotency_digest"))
+        col_receipt = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "sealed_receipt"))
         col_created_at = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "created_at"))
 
         select_query = (
@@ -341,8 +310,7 @@ class SQLSpecRefreshTokenStore:
                 return RefreshRotationOutcome(RefreshRotationStatus.INVALID)
             if affected is None:
                 verify_row = await session.select_one_or_none(
-                    f"SELECT {col_receipt} FROM {self._t_refresh} WHERE {col_token_id} = ?",
-                    command.token_id,
+                    f"SELECT {col_receipt} FROM {self._t_refresh} WHERE {col_token_id} = ?", command.token_id
                 )
                 if verify_row is not None:
                     db_dict = self._row_to_refresh_dict(verify_row)
@@ -380,28 +348,22 @@ class SQLSpecRefreshTokenStore:
                 raise
             return RefreshRotationOutcome(RefreshRotationStatus.ROTATED, command.sealed_receipt)
 
-    async def revoke_family(self, family_id: str, *, event: SecurityEvent) -> bool:
+    async def revoke_family(self, family_id: "str", *, event: "SecurityEvent") -> "bool":
         """Revoke all refresh tokens in a family."""
         del event
         col_family_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "family_id"))
         col_revoked = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "revoked"))
-        update_query = (
-            f"UPDATE {self._t_refresh} SET {col_revoked} = 1 WHERE {col_family_id} = ?"
-        )
+        update_query = f"UPDATE {self._t_refresh} SET {col_revoked} = 1 WHERE {col_family_id} = ?"
         async with self._backend.session() as session:
             await session.execute(update_query, family_id)
             return True
 
-    async def revoke_token(self, token_id: str, token_digest: bytes, *, event: SecurityEvent) -> bool:
+    async def revoke_token(self, token_id: "str", token_digest: "bytes", *, event: "SecurityEvent") -> "bool":
         """Revoke the family owning a presented token."""
         col_token_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_id"))
-        col_token_digest = quote_identifier(
-            resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_digest")
-        )
+        col_token_digest = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_digest"))
         col_family_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "family_id"))
-        select_query = (
-            f"SELECT {col_family_id}, {col_token_digest} FROM {self._t_refresh} WHERE {col_token_id} = ?"
-        )
+        select_query = f"SELECT {col_family_id}, {col_token_digest} FROM {self._t_refresh} WHERE {col_token_id} = ?"
         async with self._backend.session() as session:
             row = await session.select_one_or_none(select_query, token_id)
             if row is None:
@@ -421,13 +383,11 @@ class SQLSpecRefreshTokenStore:
             return await self.revoke_family(family_id, event=event)
 
     async def revoke_token_for_account(
-        self, account_id: str, token_id: str, token_digest: bytes, *, event: SecurityEvent
-    ) -> bool:
+        self, account_id: "str", token_id: "str", token_digest: "bytes", *, event: "SecurityEvent"
+    ) -> "bool":
         """Revoke one exact token only when its family belongs to the caller account."""
         col_token_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_id"))
-        col_token_digest = quote_identifier(
-            resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_digest")
-        )
+        col_token_digest = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "token_digest"))
         col_family_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "family_id"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "user_id"))
         select_query = (
@@ -455,7 +415,7 @@ class SQLSpecRefreshTokenStore:
                 return False
             return await self.revoke_family(family_id, event=event)
 
-    async def revoke_for_account(self, account_id: str, *, event: SecurityEvent) -> int:
+    async def revoke_for_account(self, account_id: "str", *, event: "SecurityEvent") -> "int":
         """Revoke every refresh family for an account."""
         del event
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_REFRESH_TOKENS, "user_id"))
@@ -465,19 +425,15 @@ class SQLSpecRefreshTokenStore:
             f"SELECT COUNT(DISTINCT {col_family_id}) FROM {self._t_refresh} "
             f"WHERE {col_user_id} = ? AND {col_revoked} = 0"
         )
-        update_query = (
-            f"UPDATE {self._t_refresh} SET {col_revoked} = 1 "
-            f"WHERE {col_user_id} = ? AND {col_revoked} = 0"
-        )
+        update_query = f"UPDATE {self._t_refresh} SET {col_revoked} = 1 WHERE {col_user_id} = ? AND {col_revoked} = 0"
         async with self._backend.session() as session:
             val = await session.select_value(count_query, account_id)
             count = int(cast("int | str", val)) if val is not None else 0
             await session.execute(update_query, account_id)
             return count
 
-
     @staticmethod
-    def _parse_dt(val: object) -> datetime:
+    def _parse_dt(val: "object") -> "datetime":
         if isinstance(val, datetime):
             return val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
         if isinstance(val, str):
@@ -486,7 +442,7 @@ class SQLSpecRefreshTokenStore:
         return datetime.now(timezone.utc)
 
     @staticmethod
-    def _parse_scopes(val: object) -> frozenset[str]:
+    def _parse_scopes(val: "object") -> "frozenset[str]":
         if isinstance(val, (list, tuple, set, frozenset)):
             seq = cast("Sequence[object]", val)
             return frozenset(str(x) for x in seq)
@@ -501,7 +457,7 @@ class SQLSpecRefreshTokenStore:
         return frozenset()
 
     @staticmethod
-    def _row_to_refresh_dict(row: object) -> dict[str, object]:
+    def _row_to_refresh_dict(row: "object") -> "dict[str, object]":
         if isinstance(row, dict):
             return cast("dict[str, object]", row)
         if isinstance(row, (tuple, list)):
@@ -530,13 +486,15 @@ class SQLSpecPurposeTokenStore:
 
     __slots__ = ("_backend", "_t_accounts", "_t_tokens")
 
-    def __init__(self, backend: SQLSpecSecurityBackend) -> None:
+    def __init__(self, backend: "SQLSpecSecurityBackend") -> "None":
         """Initialize with parent security backend."""
         self._backend = backend
         self._t_tokens = resolve_table_name(backend.config, TABLE_PURPOSE_TOKENS)
         self._t_accounts = resolve_table_name(backend.config, TABLE_ACCOUNTS)
 
-    async def issue(self, issue: TokenIssue, notification: NotificationCommand, *, event: SecurityEvent) -> None:
+    async def issue(
+        self, issue: "TokenIssue", notification: "NotificationCommand", *, event: "SecurityEvent"
+    ) -> "None":
         """Persist one purpose token issue."""
         del notification, event
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "id"))
@@ -547,12 +505,8 @@ class SQLSpecPurposeTokenStore:
         col_epoch = quote_identifier(
             resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "issued_security_epoch")
         )
-        col_max_att = quote_identifier(
-            resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "maximum_attempts")
-        )
-        col_fail_att = quote_identifier(
-            resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "failed_attempts")
-        )
+        col_max_att = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "maximum_attempts"))
+        col_fail_att = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "failed_attempts"))
         col_created_at = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "created_at"))
         col_expires_at = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "expires_at"))
 
@@ -584,7 +538,7 @@ class SQLSpecPurposeTokenStore:
                 issue.expires_at.isoformat(),
             )
 
-    async def issue_absent(self) -> None:
+    async def issue_absent(self) -> "None":
         """Perform durable round trip without committing state."""
         col_id = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "id"))
         query = f"SELECT 1 FROM {self._t_tokens} WHERE {col_id} = ?"
@@ -592,8 +546,8 @@ class SQLSpecPurposeTokenStore:
             await session.select_one_or_none(query, "absent")
 
     async def consume_and_verify(
-        self, token_id: str, digest: bytes, *, now: datetime, event: SecurityEvent
-    ) -> VerificationOutcome:
+        self, token_id: "str", digest: "bytes", *, now: "datetime", event: "SecurityEvent"
+    ) -> "VerificationOutcome":
         """Atomically consume verification token and mark account verified."""
         del event
         col_acc_id = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "id"))
@@ -604,12 +558,8 @@ class SQLSpecPurposeTokenStore:
         col_digest = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "digest"))
         col_purpose = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "purpose"))
         col_user_id = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "user_id"))
-        col_max_att = quote_identifier(
-            resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "maximum_attempts")
-        )
-        col_fail_att = quote_identifier(
-            resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "failed_attempts")
-        )
+        col_max_att = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "maximum_attempts"))
+        col_fail_att = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "failed_attempts"))
         col_epoch = quote_identifier(
             resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "issued_security_epoch")
         )
@@ -621,19 +571,12 @@ class SQLSpecPurposeTokenStore:
             f"{col_expires_at}, {col_consumed_at} "
             f"FROM {self._t_tokens} WHERE {col_token_id} = ?"
         )
-        bump_fail_query = (
-            f"UPDATE {self._t_tokens} SET {col_fail_att} = {col_fail_att} + 1 WHERE {col_token_id} = ?"
-        )
+        bump_fail_query = f"UPDATE {self._t_tokens} SET {col_fail_att} = {col_fail_att} + 1 WHERE {col_token_id} = ?"
         consume_query = (
-            f"UPDATE {self._t_tokens} SET {col_consumed_at} = ? "
-            f"WHERE {col_token_id} = ? AND {col_consumed_at} IS NULL"
+            f"UPDATE {self._t_tokens} SET {col_consumed_at} = ? WHERE {col_token_id} = ? AND {col_consumed_at} IS NULL"
         )
-        account_query = (
-            f"SELECT {col_acc_epoch} FROM {self._t_accounts} WHERE {col_acc_id} = ?"
-        )
-        update_account_query = (
-            f"UPDATE {self._t_accounts} SET {col_acc_verified} = 1 WHERE {col_acc_id} = ?"
-        )
+        account_query = f"SELECT {col_acc_epoch} FROM {self._t_accounts} WHERE {col_acc_id} = ?"
+        update_account_query = f"UPDATE {self._t_accounts} SET {col_acc_verified} = 1 WHERE {col_acc_id} = ?"
 
         async with self._backend.session() as session:
             row = await session.select_one_or_none(select_query, token_id)
@@ -681,8 +624,8 @@ class SQLSpecPurposeTokenStore:
             return VerificationOutcome(VerificationStatus.CONSUMED, user_id, epoch)
 
     async def consume_and_reset(
-        self, token_id: str, digest: bytes, new_password_hash: str, *, now: datetime, event: SecurityEvent
-    ) -> PasswordResetOutcome:
+        self, token_id: "str", digest: "bytes", new_password_hash: "str", *, now: "datetime", event: "SecurityEvent"
+    ) -> "PasswordResetOutcome":
         """Atomically consume recovery token and reset account password advancing epoch."""
         del event
         col_acc_id = quote_identifier(resolve_column(self._backend.config, TABLE_ACCOUNTS, "id"))
@@ -696,12 +639,8 @@ class SQLSpecPurposeTokenStore:
         col_epoch = quote_identifier(
             resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "issued_security_epoch")
         )
-        col_max_att = quote_identifier(
-            resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "maximum_attempts")
-        )
-        col_fail_att = quote_identifier(
-            resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "failed_attempts")
-        )
+        col_max_att = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "maximum_attempts"))
+        col_fail_att = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "failed_attempts"))
         col_expires_at = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "expires_at"))
         col_consumed_at = quote_identifier(resolve_column(self._backend.config, TABLE_PURPOSE_TOKENS, "consumed_at"))
 
@@ -710,16 +649,11 @@ class SQLSpecPurposeTokenStore:
             f"{col_expires_at}, {col_consumed_at} "
             f"FROM {self._t_tokens} WHERE {col_token_id} = ?"
         )
-        bump_fail_query = (
-            f"UPDATE {self._t_tokens} SET {col_fail_att} = {col_fail_att} + 1 WHERE {col_token_id} = ?"
-        )
+        bump_fail_query = f"UPDATE {self._t_tokens} SET {col_fail_att} = {col_fail_att} + 1 WHERE {col_token_id} = ?"
         consume_query = (
-            f"UPDATE {self._t_tokens} SET {col_consumed_at} = ? "
-            f"WHERE {col_token_id} = ? AND {col_consumed_at} IS NULL"
+            f"UPDATE {self._t_tokens} SET {col_consumed_at} = ? WHERE {col_token_id} = ? AND {col_consumed_at} IS NULL"
         )
-        account_query = (
-            f"SELECT {col_acc_epoch} FROM {self._t_accounts} WHERE {col_acc_id} = ?"
-        )
+        account_query = f"SELECT {col_acc_epoch} FROM {self._t_accounts} WHERE {col_acc_id} = ?"
         update_account_query = (
             f"UPDATE {self._t_accounts} SET {col_acc_pass} = ?, {col_acc_epoch} = {col_acc_epoch} + 1 "
             f"WHERE {col_acc_id} = ? AND {col_acc_epoch} = ?"
@@ -772,7 +706,7 @@ class SQLSpecPurposeTokenStore:
             return PasswordResetOutcome(PasswordResetStatus.RESET, user_id, next_epoch)
 
     @staticmethod
-    def _parse_dt(val: object) -> datetime:
+    def _parse_dt(val: "object") -> "datetime":
         if isinstance(val, datetime):
             return val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
         if isinstance(val, str):
@@ -781,7 +715,7 @@ class SQLSpecPurposeTokenStore:
         return datetime.now(timezone.utc)
 
     @staticmethod
-    def _row_to_token_dict(row: object) -> dict[str, object]:
+    def _row_to_token_dict(row: "object") -> "dict[str, object]":
         if isinstance(row, dict):
             return cast("dict[str, object]", row)
         if isinstance(row, (tuple, list)):

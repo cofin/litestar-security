@@ -3,8 +3,6 @@
 This module is deprecated in favor of litestar_security.accounts.sessions.
 """
 
-from __future__ import annotations
-
 import sys
 from types import ModuleType
 
@@ -45,12 +43,12 @@ __all__ = (
 class _SessionsModule(ModuleType):
     """Module proxy forwarding monkeypatched attributes to canonical sessions.py."""
 
-    def __setattr__(self, name: str, value: object) -> None:
+    def __setattr__(self, name: "str", value: "object") -> "None":
         super().__setattr__(name, value)
         if hasattr(_sessions, name):
             setattr(_sessions, name, value)
 
-    def __getattr__(self, name: str) -> object:
+    def __getattr__(self, name: "str") -> "object":
         return getattr(_sessions, name)
 
 

@@ -1,7 +1,5 @@
 """SQLSpec persistence store adapters for Litestar Security."""
 
-from __future__ import annotations
-
 from litestar_security.backends.sqlspec.stores.accounts import SQLSpecAccountStore
 from litestar_security.backends.sqlspec.stores.api_keys import SQLSpecAPIKeyStore
 from litestar_security.backends.sqlspec.stores.mfa import (

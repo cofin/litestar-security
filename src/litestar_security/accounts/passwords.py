@@ -1,7 +1,5 @@
 """Password policy evaluation, Argon2id hashing, and login authentication services."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import partial
@@ -81,10 +79,10 @@ _LOGGER = getLogger(__name__)
 class PasswordPolicyDecision:
     """Secret-free immutable password-policy decision."""
 
-    violations: frozenset[PasswordPolicyViolation] = frozenset()
+    violations: "frozenset[PasswordPolicyViolation]" = frozenset()
 
     @property
-    def accepted(self) -> bool:
+    def accepted(self) -> "bool":
         """Return whether no policy violation was found."""
         return not self.violations
 
@@ -93,13 +91,13 @@ class PasswordPolicyDecision:
 class PasswordPolicy:
     """Length-first password policy without composition or rotation rules."""
 
-    minimum_length: int = 12
-    maximum_length: int = 128
-    maximum_bytes: int = _MAXIMUM_PASSWORD_BYTES
-    normalizer: Callable[[str], str] = field(default=normalize_identifier, repr=False, compare=False)
-    compromised: Callable[[str], bool] | None = field(default=None, repr=False, compare=False)
+    minimum_length: "int" = 12
+    maximum_length: "int" = 128
+    maximum_bytes: "int" = _MAXIMUM_PASSWORD_BYTES
+    normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
+    compromised: "Callable[[str], bool] | None" = field(default=None, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Reject contradictory bounds and invalid customization hooks."""
         normalizer_value: object = object.__getattribute__(self, "normalizer")
         compromised_value: object = object.__getattribute__(self, "compromised")
@@ -120,7 +118,7 @@ class PasswordPolicy:
             msg = "Password policy compromised-password predicate must be callable"
             raise ImproperlyConfiguredException(detail=msg)
 
-    def check(self, password: str, *, normalized_identifier: str | None = None) -> PasswordPolicyDecision:
+    def check(self, password: "str", *, normalized_identifier: "str | None" = None) -> "PasswordPolicyDecision":
         """Evaluate one candidate without retaining or rendering it.
 
         Args:
@@ -156,17 +154,17 @@ class PasswordPolicy:
 class PasswordVerificationOutcome:
     """Sanitized verification decision with an optional secret rehash value."""
 
-    status: PasswordVerificationStatus
-    replacement_hash: str | None = field(default=None, repr=False)
+    status: "PasswordVerificationStatus"
+    replacement_hash: "str | None" = field(default=None, repr=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Allow a replacement hash only after successful verification."""
         if self.replacement_hash is not None and self.status is not PasswordVerificationStatus.VERIFIED:
             msg = "Only verified passwords may carry a replacement hash"
             raise ValueError(msg)
 
     @property
-    def verified(self) -> bool:
+    def verified(self) -> "bool":
         """Return whether the password matched the stored hash."""
         return self.status is PasswordVerificationStatus.VERIFIED
 
@@ -174,7 +172,7 @@ class PasswordVerificationOutcome:
 class PasswordHashingUnavailableError(RuntimeError):
     """Indicate that bounded password hashing could not complete."""
 
-    def __init__(self) -> None:
+    def __init__(self) -> "None":
         """Initialize the stable secret-free error."""
         super().__init__("Password hashing unavailable")
 
@@ -183,7 +181,7 @@ class PasswordHashingUnavailableError(RuntimeError):
 class PasswordHasher(Protocol):
     """Async password hashing boundary suitable for custom implementations."""
 
-    async def hash(self, password: str) -> str:
+    async def hash(self, password: "str") -> "str":
         """Return one encoded password hash.
 
         Args:
@@ -194,7 +192,7 @@ class PasswordHasher(Protocol):
         """
         ...
 
-    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationOutcome:
+    async def verify(self, encoded_hash: "str | None", password: "str") -> "PasswordVerificationOutcome":
         """Verify one password with constant work for absent credentials.
 
         Spend the same work on a malformed or absent hash as on a real one, so
@@ -215,16 +213,16 @@ class PasswordHasher(Protocol):
 class Argon2PasswordHasher:
     """Argon2id password hasher using one bounded crypto-worker budget."""
 
-    memory_cost: int = 19_456
-    time_cost: int = 2
-    parallelism: int = 1
-    salt_len: int = 16
-    hash_len: int = 32
-    worker_limits: WorkerLimits = field(default_factory=WorkerLimits, repr=False, compare=False)
-    dummy_hash: str = field(default=_DEFAULT_DUMMY_HASH, repr=False, compare=False)
-    _engine: _Argon2Engine = field(init=False, repr=False, compare=False)
+    memory_cost: "int" = 19_456
+    time_cost: "int" = 2
+    parallelism: "int" = 1
+    salt_len: "int" = 16
+    hash_len: "int" = 32
+    worker_limits: "WorkerLimits" = field(default_factory=WorkerLimits, repr=False, compare=False)
+    dummy_hash: "str" = field(default=_DEFAULT_DUMMY_HASH, repr=False, compare=False)
+    _engine: "_Argon2Engine" = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate bounded parameters and one policy-matched precomputed dummy."""
         _validate_argon2_configuration(
             memory_cost=self.memory_cost,
@@ -244,13 +242,13 @@ class Argon2PasswordHasher:
     async def create(
         cls,
         *,
-        memory_cost: int = 19_456,
-        time_cost: int = 2,
-        parallelism: int = 1,
-        salt_len: int = 16,
-        hash_len: int = 32,
-        worker_limits: WorkerLimits | None = None,
-    ) -> Argon2PasswordHasher:
+        memory_cost: "int" = 19_456,
+        time_cost: "int" = 2,
+        parallelism: "int" = 1,
+        salt_len: "int" = 16,
+        hash_len: "int" = 32,
+        worker_limits: "WorkerLimits | None" = None,
+    ) -> "Argon2PasswordHasher":
         """Create a strengthened policy while generating its dummy in a worker.
 
         Args:
@@ -296,7 +294,7 @@ class Argon2PasswordHasher:
             dummy_hash=dummy_hash,
         )
 
-    async def hash(self, password: str) -> str:
+    async def hash(self, password: "str") -> "str":
         """Hash one bounded UTF-8 password in the dedicated crypto worker.
 
         Args:
@@ -308,7 +306,7 @@ class Argon2PasswordHasher:
         password_bytes = _password_bytes(password)
         return await self._hash_bytes(password_bytes)
 
-    async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationOutcome:
+    async def verify(self, encoded_hash: "str | None", password: "str") -> "PasswordVerificationOutcome":
         """Verify with equal Argon2 work for absent, mismatched, and malformed hashes.
 
         Args:
@@ -337,13 +335,13 @@ class Argon2PasswordHasher:
         replacement = await self._hash_bytes(password_bytes) if needs_rehash else None
         return PasswordVerificationOutcome(PasswordVerificationStatus.VERIFIED, replacement_hash=replacement)
 
-    async def _hash_bytes(self, password: bytes) -> str:
+    async def _hash_bytes(self, password: "bytes") -> "str":
         try:
             return await _run_password_worker(partial(self._engine.hash, password), self.worker_limits)
         except Exception:
             raise PasswordHashingUnavailableError from None
 
-    async def _match_candidate(self, candidate_hash: str, password: bytes) -> bool | PasswordVerificationOutcome:
+    async def _match_candidate(self, candidate_hash: "str", password: "bytes") -> "bool | PasswordVerificationOutcome":
         try:
             return await self._verify_once(candidate_hash, password)
         except VerifyMismatchError:
@@ -356,10 +354,10 @@ class Argon2PasswordHasher:
         except Exception:
             raise PasswordHashingUnavailableError from None
 
-    async def _verify_once(self, encoded_hash: str, password: bytes) -> bool:
+    async def _verify_once(self, encoded_hash: "str", password: "bytes") -> "bool":
         return await _run_password_worker(partial(self._engine.verify, encoded_hash, password), self.worker_limits)
 
-    async def _verify_dummy(self, password: bytes) -> None:
+    async def _verify_dummy(self, password: "bytes") -> "None":
         try:
             await self._verify_once(self.dummy_hash, password)
         except VerifyMismatchError:
@@ -372,7 +370,7 @@ class _PasswordTooLongError(ValueError):
     pass
 
 
-def _password_shape_violations(password: str, policy: PasswordPolicy) -> set[PasswordPolicyViolation]:
+def _password_shape_violations(password: "str", policy: "PasswordPolicy") -> "set[PasswordPolicyViolation]":
     violations: set[PasswordPolicyViolation] = set()
     if len(password) < policy.minimum_length:
         violations.add(PasswordPolicyViolation.TOO_SHORT)
@@ -388,13 +386,15 @@ def _password_shape_violations(password: str, policy: PasswordPolicy) -> set[Pas
     return violations
 
 
-def _password_matches_identifier(password: str, normalized_identifier: str, normalizer: Callable[[str], str]) -> bool:
+def _password_matches_identifier(
+    password: "str", normalized_identifier: "str", normalizer: "Callable[[str], str]"
+) -> "bool":
     candidate = normalizer(password).encode("utf-8")
     expected = normalizer(normalized_identifier).encode("utf-8")
     return compare_digest(candidate, expected)
 
 
-def _password_bytes(password: str) -> bytes:
+def _password_bytes(password: "str") -> "bytes":
     if password.__class__ is not str:
         msg = "Password must be text"
         raise ValueError(msg)
@@ -409,7 +409,7 @@ def _password_bytes(password: str) -> bytes:
     return value
 
 
-def _password_verification_input(password: str) -> bytes | PasswordVerificationOutcome:
+def _password_verification_input(password: "str") -> "bytes | PasswordVerificationOutcome":
     try:
         return _password_bytes(password)
     except _PasswordTooLongError:
@@ -418,7 +418,7 @@ def _password_verification_input(password: str) -> bytes | PasswordVerificationO
         return PasswordVerificationOutcome(PasswordVerificationStatus.INVALID)
 
 
-async def _run_password_worker(operation: Callable[[], UserT], workers: WorkerLimits) -> UserT:
+async def _run_password_worker(operation: "Callable[[], UserT]", workers: "WorkerLimits") -> "UserT":
     started = perf_counter()
     result = await to_thread.run_sync(operation, abandon_on_cancel=False, limiter=workers.crypto_limiter)
     if perf_counter() - started > workers.timeout:
@@ -427,8 +427,14 @@ async def _run_password_worker(operation: Callable[[], UserT], workers: WorkerLi
 
 
 def _validate_argon2_configuration(
-    *, memory_cost: int, time_cost: int, parallelism: int, salt_len: int, hash_len: int, worker_limits: WorkerLimits
-) -> None:
+    *,
+    memory_cost: "int",
+    time_cost: "int",
+    parallelism: "int",
+    salt_len: "int",
+    hash_len: "int",
+    worker_limits: "WorkerLimits",
+) -> "None":
     values = (
         (memory_cost, 19_456, _MAXIMUM_ARGON2_MEMORY_COST),
         (time_cost, 2, _MAXIMUM_ARGON2_TIME_COST),
@@ -447,7 +453,7 @@ def _validate_argon2_configuration(
         raise ImproperlyConfiguredException(detail=msg)
 
 
-def _build_argon2_engine(hasher: Argon2PasswordHasher) -> _Argon2Engine:
+def _build_argon2_engine(hasher: "Argon2PasswordHasher") -> "_Argon2Engine":
     try:
         return _Argon2Engine(
             memory_cost=hasher.memory_cost,
@@ -462,7 +468,7 @@ def _build_argon2_engine(hasher: Argon2PasswordHasher) -> _Argon2Engine:
         raise ImproperlyConfiguredException(detail=msg) from None
 
 
-def _safe_argon2_parameters(encoded_hash: object, worker_limits: WorkerLimits) -> Parameters | None:
+def _safe_argon2_parameters(encoded_hash: "object", worker_limits: "WorkerLimits") -> "Parameters | None":
     if not isinstance(encoded_hash, str):
         return None
     try:
@@ -486,7 +492,7 @@ def _safe_argon2_parameters(encoded_hash: object, worker_limits: WorkerLimits) -
     return parameters
 
 
-def _parameters_match_hasher(parameters: Parameters, hasher: Argon2PasswordHasher) -> bool:
+def _parameters_match_hasher(parameters: "Parameters", hasher: "Argon2PasswordHasher") -> "bool":
     return (
         parameters.memory_cost,
         parameters.time_cost,
@@ -500,14 +506,14 @@ def _parameters_match_hasher(parameters: Parameters, hasher: Argon2PasswordHashe
 class PasswordReauthenticationService:
     """Verify a current password and emit short-lived password evidence."""
 
-    accounts: PasswordCredentialStore = field(repr=False)
-    hasher: PasswordHasher = field(repr=False)
-    evidence_ttl: timedelta = _DEFAULT_REAUTHENTICATION_TTL
-    clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
-    events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
-    event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
+    accounts: "PasswordCredentialStore" = field(repr=False)
+    hasher: "PasswordHasher" = field(repr=False)
+    evidence_ttl: "timedelta" = _DEFAULT_REAUTHENTICATION_TTL
+    clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
+    events: "SecurityEventSink" = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
+    event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate structural ports and the bounded evidence lifetime."""
         accounts_value: object = object.__getattribute__(self, "accounts")
         hasher_value: object = object.__getattribute__(self, "hasher")
@@ -539,8 +545,8 @@ class PasswordReauthenticationService:
             raise ImproperlyConfiguredException(detail=msg)
 
     async def verify(
-        self, account_id: str, password: str, *, now: datetime | None = None
-    ) -> PasswordReauthenticationProof | InvalidCredentials | VerificationUnavailable:
+        self, account_id: "str", password: "str", *, now: "datetime | None" = None
+    ) -> "PasswordReauthenticationProof | InvalidCredentials | VerificationUnavailable":
         """Return an account- and epoch-bound proof or one sanitized domain outcome.
 
         Args:
@@ -590,7 +596,9 @@ class PasswordReauthenticationService:
             expires_at=authenticated_at + self.evidence_ttl,
         )
 
-    async def _rehash(self, account_id: str, expected_hash: str, replacement_hash: str, occurred_at: datetime) -> bool:
+    async def _rehash(
+        self, account_id: "str", expected_hash: "str", replacement_hash: "str", occurred_at: "datetime"
+    ) -> "bool":
         try:
             event = self._event(account_id, occurred_at, operation=PASSWORD_REHASH, outcome=OUTCOME_UPDATED)
             replaced: object = await self.accounts.compare_and_replace_password(
@@ -600,7 +608,9 @@ class PasswordReauthenticationService:
             return False
         return replaced is True
 
-    def _event(self, account_id: str, occurred_at: datetime, *, operation: str, outcome: str) -> SecurityEvent:
+    def _event(
+        self, account_id: "str", occurred_at: "datetime", *, operation: "str", outcome: "str"
+    ) -> "SecurityEvent":
         event_id = self.event_ids().strip()
         if not event_id:
             raise ValueError
@@ -613,7 +623,7 @@ class PasswordReauthenticationService:
             mechanism="password",
         )
 
-    async def _emit_malformed(self, account_id: str, occurred_at: datetime) -> None:
+    async def _emit_malformed(self, account_id: "str", occurred_at: "datetime") -> "None":
         try:
             event = self._event(account_id, occurred_at, operation=PASSWORD_VERIFY, outcome=OUTCOME_MALFORMED_HASH)
         except ValueError:
@@ -626,16 +636,16 @@ class PasswordReauthenticationService:
 class PasswordLoginService(Generic[UserT]):
     """Authenticate one normalized identifier with exactly one password-work class."""
 
-    accounts: AccountLookup[UserT] = field(repr=False)
-    hasher: PasswordHasher = field(repr=False)
-    normalizer: Callable[[str], str] = field(default=normalize_identifier, repr=False, compare=False)
-    rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
-    clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
-    events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
-    event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
-    _reauthentication: PasswordReauthenticationService = field(init=False, repr=False, compare=False)
+    accounts: "AccountLookup[UserT]" = field(repr=False)
+    hasher: "PasswordHasher" = field(repr=False)
+    normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
+    rate_limits: "RateLimitGuard | None" = field(default=None, repr=False, compare=False)
+    clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
+    events: "SecurityEventSink" = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
+    event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
+    _reauthentication: "PasswordReauthenticationService" = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> "None":
         """Validate the minimal lookup, password, limiting, and audit capabilities once."""
         accounts_value: object = object.__getattribute__(self, "accounts")
         hasher_value: object = object.__getattribute__(self, "hasher")
@@ -675,8 +685,8 @@ class PasswordLoginService(Generic[UserT]):
         )
 
     async def authenticate(
-        self, identifier: str, password: str, *, now: datetime | None = None, client_key: str | None = None
-    ) -> LocalAccountState[UserT] | RateLimited | InvalidCredentials | VerificationUnavailable:
+        self, identifier: "str", password: "str", *, now: "datetime | None" = None, client_key: "str | None" = None
+    ) -> "LocalAccountState[UserT] | RateLimited | InvalidCredentials | VerificationUnavailable":
         """Return an active verified account after limiting, lookup, and constant password work.
 
         The limiter runs before the store lookup and before Argon2, so a denied
@@ -724,8 +734,8 @@ class PasswordLoginService(Generic[UserT]):
         return account
 
     async def _find_account(
-        self, normalized_identifier: str, *, unavailable: bool
-    ) -> tuple[LocalAccountState[UserT] | None, bool]:
+        self, normalized_identifier: "str", *, unavailable: "bool"
+    ) -> "tuple[LocalAccountState[UserT] | None, bool]":
         if unavailable or not normalized_identifier:
             return None, unavailable
         try:
@@ -734,8 +744,8 @@ class PasswordLoginService(Generic[UserT]):
             return None, True
 
     async def _absent_account_outcome(
-        self, password: str, *, unavailable: bool
-    ) -> InvalidCredentials | VerificationUnavailable:
+        self, password: "str", *, unavailable: "bool"
+    ) -> "InvalidCredentials | VerificationUnavailable":
         try:
             await self.hasher.verify(None, password)
         except Exception:
@@ -746,14 +756,14 @@ class PasswordLoginService(Generic[UserT]):
         return InvalidCredentials()
 
     async def _check_rate_limit(
-        self, client_key: str | None, normalized_identifier: str
-    ) -> RateLimited | VerificationUnavailable | None:
+        self, client_key: "str | None", normalized_identifier: "str"
+    ) -> "RateLimited | VerificationUnavailable | None":
         rate_limits = self.rate_limits
         if rate_limits is None:
             return None
         return await rate_limits.check(LOGIN, client_key=client_key, identifier=normalized_identifier or None)
 
-    async def _emit_decision(self, account_id: str | None, outcome: str) -> None:
+    async def _emit_decision(self, account_id: "str | None", outcome: "str") -> "None":
         try:
             event = SecurityEvent(
                 event_id=self.event_ids(),
