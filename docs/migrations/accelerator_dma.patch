@@ -1,0 +1,209 @@
+diff --git a/src/py/dma/config.py b/src/py/dma/config.py
+index 5ef0553a0..dfe8750cc 100644
+--- a/src/py/dma/config.py
++++ b/src/py/dma/config.py
+@@ -117,15 +117,18 @@ def _build_mcp_config(settings: "Settings", channels: "ChannelsPlugin") -> "MCPC
+     PostgreSQL-backed channels plugin.
+     """
+     from litestar_mcp import MCPConfig
++    from litestar_security.authentication import AUTH_POLICY_OPT_KEY, required
+ 
+     from dma.server.mcp.audit import mcp_audit_after_tool_call
+ 
++    policy = required("api-key", "google-iap") if settings.auth.IAP_ENABLED else required("api-key")
++
+     return MCPConfig(
+         base_path=settings.mcp.BASE_PATH,
+         include_in_schema=False,
+         name="DMA MCP Server",
+         allowed_origins=settings.mcp.ALLOWED_ORIGINS or None,
+-        auth=settings.mcp.get_auth_config(settings.auth),
++        route_opt={AUTH_POLICY_OPT_KEY: policy},
+         cache_ttl_ms=settings.mcp.CACHE_TTL_MS,
+         cache_scope=settings.mcp.CACHE_SCOPE,
+         subscription_max_streams=settings.mcp.SUBSCRIPTION_MAX_STREAMS,
+diff --git a/src/py/dma/domain/iam/_config.py b/src/py/dma/domain/iam/_config.py
+index f2499650b..448fe4310 100644
+--- a/src/py/dma/domain/iam/_config.py
++++ b/src/py/dma/domain/iam/_config.py
+@@ -8,14 +8,14 @@ from litestar_security.accounts import (
+     AESGCMSecretProtector,
+     LocalAuth,
+     LocalAuthSecrets,
++    RecoveryCodePepper,
+     RegistrationMode,
+     RegistrationPolicy,
+     SecretProtectorKey,
+     SessionBindingConfig,
+     forwarded_client_key,
++    trusted_client_key,
+ )
+-from litestar_security.accounts._mfa import RecoveryCodePepper
+-from litestar_security.accounts._profiles import trusted_client_key
+ from litestar_security.providers import (
+     APIKeyConfig,
+     CachedJWKSProvider,
+diff --git a/src/py/dma/lib/settings.py b/src/py/dma/lib/settings.py
+index a57224fe2..d37631129 100644
+--- a/src/py/dma/lib/settings.py
++++ b/src/py/dma/lib/settings.py
+@@ -29,7 +29,6 @@ if TYPE_CHECKING:
+     from litestar.plugins.problem_details import ProblemDetailsConfig
+     from litestar.plugins.structlog import StructlogConfig
+     from litestar_email import EmailConfig
+-    from litestar_mcp.auth import MCPAuthConfig
+     from litestar_vite import ViteConfig
+ 
+     from dma.lib.channels import ChannelsPlugin
+@@ -1343,26 +1342,6 @@ class MCPSettings:
+     ALLOWED_ORIGINS: list[str] = field(default_factory=get_env("DMA_MCP_ALLOWED_ORIGINS", [], list[str]))
+     """Optional Origin allowlist for browser-capable MCP clients."""
+ 
+-    def get_auth_config(self, auth: "AuthSettings") -> "MCPAuthConfig":
+-        """Create the MCP bearer policy from the IAP deployment settings.
+-
+-        Returns:
+-            MCPAuthConfig enforcing IAP-issued bearers when IAP is enabled.
+-        """
+-        from litestar_mcp.auth import MCPAuthConfig
+-
+-        return MCPAuthConfig(
+-            issuer=IAP_ISSUER if auth.IAP_ENABLED else None,
+-            audience=auth.IAP_AUDIENCE if auth.IAP_ENABLED and auth.IAP_AUDIENCE else None,
+-            scopes={
+-                "mcp:tools": "Invoke MCP tools",
+-                "read:system": "Read system health and public settings",
+-                "read:workspaces": "Read workspace data (lists, details, files, collections)",
+-                "write:workspaces": "Mutate workspace data (create, update, file upload)",
+-                "admin:workspaces": "Delete workspaces; administrative operations",
+-            },
+-        )
+-
+     def __post_init__(self) -> None:
+         """Fail fast on cache or subscription misconfiguration."""
+         if self.CACHE_SCOPE not in {"private", "public"}:
+diff --git a/src/py/dma/server/core.py b/src/py/dma/server/core.py
+index 7266aa87a..b2bf6a9bf 100644
+--- a/src/py/dma/server/core.py
++++ b/src/py/dma/server/core.py
+@@ -21,7 +21,6 @@ from litestar.router import Router
+ from litestar.routes import HTTPRoute
+ from litestar.security.jwt import OAuth2Login, Token
+ from litestar_security import SecurityPlugin
+-from litestar_security.authentication import AUTH_POLICY_OPT_KEY, required
+ from sqlspec import SQLSpec
+ from sqlspec.adapters.asyncpg import AsyncpgConfig
+ from sqlspec.exceptions import SQLSpecError
+@@ -35,35 +34,6 @@ logger = structlog.get_logger()
+ T = TypeVar("T")
+ 
+ 
+-class MCPRoutePolicy(InitPluginProtocol):
+-    """Restrict ``/mcp`` to machine authentication mechanisms.
+-
+-    ``/mcp`` is a machine surface: clients authenticate with an API key (or the
+-    IAP assertion when IAP fronts the deployment) and have no cookie to pair
+-    with a CSRF header. Compiling the route policy to the non-session
+-    mechanisms makes the security plugin derive the CSRF exemption itself —
+-    session cookies simply cannot satisfy the policy.
+-    """
+-
+-    __slots__ = ("base_path", "iap_enabled")
+-
+-    def __init__(self, *, base_path: str, iap_enabled: bool) -> None:
+-        self.base_path = base_path
+-        self.iap_enabled = iap_enabled
+-
+-    def on_app_init(self, app_config: AppConfig) -> AppConfig:
+-        policy = required("api-key", "google-iap") if self.iap_enabled else required("api-key")
+-        for registered in app_config.route_handlers:
+-            if not (isinstance(registered, Router) and registered.path == self.base_path):
+-                continue
+-            for route in registered.routes:
+-                if not isinstance(route, HTTPRoute):
+-                    continue
+-                for handler in route.route_handlers:
+-                    handler.opt[AUTH_POLICY_OPT_KEY] = policy
+-        return app_config
+-
+-
+ class ApplicationCore(InitPluginProtocol, CLIPluginProtocol):
+     """Application core configuration plugin.
+ 
+@@ -178,7 +148,6 @@ class ApplicationCore(InitPluginProtocol, CLIPluginProtocol):
+             plugins.worker,
+             plugins.domain,
+             plugins.mcp,
+-            MCPRoutePolicy(base_path=settings.mcp.BASE_PATH, iap_enabled=settings.auth.IAP_ENABLED),
+             plugins.vite,
+         ]
+         app_config.plugins.extend(core_plugins)
+diff --git a/src/py/tests/unit/server/mcp/test_config.py b/src/py/tests/unit/server/mcp/test_config.py
+index a6c414c38..23dc10b20 100644
+--- a/src/py/tests/unit/server/mcp/test_config.py
++++ b/src/py/tests/unit/server/mcp/test_config.py
+@@ -63,14 +63,10 @@ def test_build_mcp_config_reflects_settings(monkeypatch: pytest.MonkeyPatch) ->
+     assert cfg.subscription_keepalive_seconds == 5.0
+     assert cfg.subscription_channels is channels
+     assert cfg.allowed_origins == ["https://claude.ai", "https://chat.openai.com"]
+-    assert cfg.auth is not None
+-    assert cfg.auth.scopes == {
+-        "mcp:tools": "Invoke MCP tools",
+-        "read:system": "Read system health and public settings",
+-        "read:workspaces": "Read workspace data (lists, details, files, collections)",
+-        "write:workspaces": "Mutate workspace data (create, update, file upload)",
+-        "admin:workspaces": "Delete workspaces; administrative operations",
+-    }
++    from litestar_security.authentication import AUTH_POLICY_OPT_KEY
++
++    assert cfg.route_opt is not None
++    assert AUTH_POLICY_OPT_KEY in cfg.route_opt
+ 
+ 
+ def test_build_mcp_config_defaults_disable_caching(monkeypatch: pytest.MonkeyPatch) -> None:
+@@ -85,7 +81,9 @@ def test_build_mcp_config_defaults_disable_caching(monkeypatch: pytest.MonkeyPat
+ 
+ 
+ def test_build_mcp_config_advertises_iap_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+-    """IAP-enabled installs expose iss/aud at /.well-known/oauth-protected-resource."""
++    """IAP-enabled installs require API key or Google IAP."""
++    from litestar_security.authentication import AUTH_POLICY_OPT_KEY
++
+     _clear(monkeypatch)
+     monkeypatch.setenv("AUTH_IAP_ENABLED", "true")
+     monkeypatch.setenv("AUTH_LOCAL_ENABLED", "false")
+@@ -93,21 +91,27 @@ def test_build_mcp_config_advertises_iap_when_enabled(monkeypatch: pytest.Monkey
+ 
+     cfg = _build_mcp_config(Settings.from_env(), _channels())
+ 
+-    assert cfg.auth is not None
+-    assert cfg.auth.issuer == "https://cloud.google.com/iap"
+-    assert cfg.auth.audience == "iap-aud-123"
++    assert cfg.route_opt is not None
++    policy = cfg.route_opt[AUTH_POLICY_OPT_KEY]
++    mechanisms = {req.name for req in policy.requirements}
++    assert "google-iap" in mechanisms
++    assert "api-key" in mechanisms
+ 
+ 
+ def test_build_mcp_config_omits_iap_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+-    """IAP-off installs leave issuer/audience unset so clients don't misadvertise."""
++    """IAP-off installs restrict to API key only."""
++    from litestar_security.authentication import AUTH_POLICY_OPT_KEY
++
+     _clear(monkeypatch)
+ 
+     cfg = _build_mcp_config(Settings.from_env(), _channels())
+ 
+     assert cfg.allowed_origins is None
+-    assert cfg.auth is not None
+-    assert cfg.auth.issuer is None
+-    assert cfg.auth.audience is None
++    assert cfg.route_opt is not None
++    policy = cfg.route_opt[AUTH_POLICY_OPT_KEY]
++    mechanisms = {req.name for req in policy.requirements}
++    assert "google-iap" not in mechanisms
++    assert "api-key" in mechanisms
+ 
+ 
+ def test_config_mcp_always_populated(monkeypatch: pytest.MonkeyPatch) -> None:
