@@ -1,7 +1,8 @@
 """Schema, table, and column resolution helpers for the SQLSpec backend."""
 
 import re
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 from sqlspec.utils.text import quote_identifier, split_qualified_identifier
 
@@ -12,12 +13,14 @@ if TYPE_CHECKING:
 
 __all__ = (
     "DEFAULT_TABLE_NAMES",
+    "SECURITY_TABLES",
     "TABLE_ACCOUNTS",
     "TABLE_API_KEYS",
     "TABLE_AUDIT_LOGS",
     "TABLE_MFA_LOGIN_CHALLENGES",
     "TABLE_MFA_RECOVERY_CODES",
     "TABLE_OAUTH_ACCOUNTS",
+    "TABLE_OVERRIDE_FIELDS",
     "TABLE_PURPOSE_TOKENS",
     "TABLE_RATE_LIMIT_BUCKETS",
     "TABLE_REFRESH_TOKENS",
@@ -26,7 +29,9 @@ __all__ = (
     "TABLE_STEP_UP_GRANTS",
     "TABLE_TOTP_METHODS",
     "TABLE_USER_ROLES",
+    "ColumnSpec",
     "SecurityConfigurationError",
+    "TableSpec",
     "get_create_table_statements",
     "get_drop_table_statements",
     "quote_identifier",
@@ -68,6 +73,262 @@ DEFAULT_TABLE_NAMES: "dict[str, str]" = {
     TABLE_REFRESH_TOKENS: "refresh_token",
 }
 
+TABLE_OVERRIDE_FIELDS: dict[str, str] = {
+    TABLE_ACCOUNTS: "account_table_name",
+    TABLE_SESSIONS: "session_table_name",
+    TABLE_API_KEYS: "api_key_table_name",
+    TABLE_PURPOSE_TOKENS: "purpose_token_table_name",
+    TABLE_TOTP_METHODS: "totp_method_table_name",
+    TABLE_MFA_RECOVERY_CODES: "mfa_recovery_code_table_name",
+    TABLE_MFA_LOGIN_CHALLENGES: "mfa_login_challenge_table_name",
+    TABLE_STEP_UP_GRANTS: "step_up_grant_table_name",
+    TABLE_RATE_LIMIT_BUCKETS: "rate_limit_bucket_table_name",
+    TABLE_OAUTH_ACCOUNTS: "oauth_account_table_name",
+    TABLE_USER_ROLES: "user_role_table_name",
+    TABLE_ROLES: "role_table_name",
+    TABLE_AUDIT_LOGS: "audit_log_table_name",
+    TABLE_REFRESH_TOKENS: "refresh_token_table_name",
+}
+
+ColumnKind = Literal["uuid", "id", "string", "text", "int", "bigint", "bool", "binary", "json", "timestamp"]
+ColumnDefault = Literal["now", "true", "false", "zero", "one", "five", "empty_object", "empty_array", "v1", "pending"]
+
+
+@dataclass(frozen=True, slots=True)
+class ColumnSpec:
+    """One logical column of a security table, independent of any dialect."""
+
+    name: str
+    kind: ColumnKind
+    length: int | None = None
+    nullable: bool = True
+    default: ColumnDefault | None = None
+    unique: bool = False
+    primary_key: bool = False
+    references: str | None = None
+    """Logical table key; always ON DELETE CASCADE where the dialect supports it."""
+
+
+@dataclass(frozen=True, slots=True)
+class TableSpec:
+    """One security table declared independently of any dialect."""
+
+    key: str
+    columns: tuple[ColumnSpec, ...]
+    primary_key: tuple[str, ...] = ()
+    unique: tuple[tuple[str, ...], ...] = ()
+    indexes: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+SECURITY_TABLES: tuple[TableSpec, ...] = (
+    TableSpec(
+        key=TABLE_ACCOUNTS,
+        columns=(
+            ColumnSpec("id", "uuid", primary_key=True),
+            ColumnSpec("email", "string", length=255, nullable=False, unique=True),
+            ColumnSpec("name", "string", length=255),
+            ColumnSpec("avatar_url", "string", length=1024),
+            ColumnSpec("is_active", "bool", nullable=False, default="true"),
+            ColumnSpec("is_verified", "bool", nullable=False, default="false"),
+            ColumnSpec("is_superuser", "bool", nullable=False, default="false"),
+            ColumnSpec("password_hash", "string", length=255),
+            ColumnSpec("security_epoch", "int", nullable=False, default="one"),
+            ColumnSpec("login_count", "int", nullable=False, default="zero"),
+            ColumnSpec("last_login_at", "timestamp"),
+            ColumnSpec("joined_at", "timestamp", nullable=False, default="now"),
+            ColumnSpec("created_at", "timestamp", nullable=False, default="now"),
+            ColumnSpec("updated_at", "timestamp", nullable=False, default="now"),
+        ),
+    ),
+    TableSpec(
+        key=TABLE_SESSIONS,
+        columns=(
+            ColumnSpec("id", "id", primary_key=True),
+            ColumnSpec("session_id", "string", length=128, nullable=False, unique=True),
+            ColumnSpec("binding_id", "string", length=128, nullable=False, unique=True),
+            ColumnSpec("binding_digest", "binary", nullable=False),
+            ColumnSpec("user_id", "uuid", nullable=False, references=TABLE_ACCOUNTS),
+            ColumnSpec("security_epoch", "int", nullable=False, default="one"),
+            ColumnSpec("created_at", "timestamp", nullable=False, default="now"),
+            ColumnSpec("authenticated_at", "timestamp", nullable=False, default="now"),
+            ColumnSpec("last_seen_at", "timestamp", nullable=False, default="now"),
+            ColumnSpec("expires_at", "timestamp", nullable=False),
+            ColumnSpec("display_metadata", "json", nullable=False, default="empty_object"),
+        ),
+        indexes=(("user_exp", ("user_id", "expires_at")),),
+    ),
+    TableSpec(
+        key=TABLE_API_KEYS,
+        columns=(
+            ColumnSpec("id", "id", primary_key=True),
+            ColumnSpec("key_id", "string", length=64, nullable=False, unique=True),
+            ColumnSpec("digest", "binary", nullable=False),
+            ColumnSpec("user_id", "uuid", nullable=False, references=TABLE_ACCOUNTS),
+            ColumnSpec("restrictions", "json", nullable=False, default="empty_object"),
+            ColumnSpec("created_at", "timestamp", nullable=False, default="now"),
+            ColumnSpec("expires_at", "timestamp"),
+            ColumnSpec("revoked_at", "timestamp"),
+            ColumnSpec("overlap_until", "timestamp"),
+            ColumnSpec("last_used_at", "timestamp"),
+        ),
+        indexes=(("user", ("user_id",)),),
+    ),
+    TableSpec(
+        key=TABLE_PURPOSE_TOKENS,
+        columns=(
+            ColumnSpec("id", "id", primary_key=True),
+            ColumnSpec("token_id", "string", length=64, nullable=False, unique=True),
+            ColumnSpec("digest", "binary", nullable=False),
+            ColumnSpec("purpose", "string", length=64, nullable=False),
+            ColumnSpec("user_id", "uuid", nullable=False, references=TABLE_ACCOUNTS),
+            ColumnSpec("issued_security_epoch", "int"),
+            ColumnSpec("maximum_attempts", "int", nullable=False, default="five"),
+            ColumnSpec("failed_attempts", "int", nullable=False, default="zero"),
+            ColumnSpec("payload", "json"),
+            ColumnSpec("created_at", "timestamp", nullable=False, default="now"),
+            ColumnSpec("expires_at", "timestamp", nullable=False),
+            ColumnSpec("consumed_at", "timestamp"),
+        ),
+        indexes=(("user_purpose", ("user_id", "purpose")),),
+    ),
+    TableSpec(
+        key=TABLE_TOTP_METHODS,
+        columns=(
+            ColumnSpec("id", "id", primary_key=True),
+            ColumnSpec("method_id", "string", length=64, nullable=False, unique=True),
+            ColumnSpec("user_id", "uuid", nullable=False, references=TABLE_ACCOUNTS),
+            ColumnSpec("secret_ciphertext", "binary", nullable=False),
+            ColumnSpec("key_version", "string", length=32, nullable=False, default="v1"),
+            ColumnSpec("status", "string", length=32, nullable=False, default="pending"),
+            ColumnSpec("enrollment_id", "string", length=64, unique=True),
+            ColumnSpec("policy", "json", nullable=False, default="empty_object"),
+            ColumnSpec("last_counter", "bigint", nullable=False, default="zero"),
+            ColumnSpec("confirmed_at", "timestamp"),
+            ColumnSpec("created_at", "timestamp", nullable=False, default="now"),
+            ColumnSpec("updated_at", "timestamp", nullable=False, default="now"),
+            ColumnSpec("expires_at", "timestamp"),
+            ColumnSpec("last_used_at", "timestamp"),
+        ),
+        indexes=(("user", ("user_id",)),),
+    ),
+    TableSpec(
+        key=TABLE_MFA_RECOVERY_CODES,
+        columns=(
+            ColumnSpec("id", "id", primary_key=True),
+            ColumnSpec("user_id", "uuid", nullable=False, references=TABLE_ACCOUNTS),
+            ColumnSpec("pepper_version", "string", length=32, nullable=False, default="v1"),
+            ColumnSpec("digest", "binary", nullable=False, unique=True),
+            ColumnSpec("consumed_at", "timestamp"),
+            ColumnSpec("created_at", "timestamp", nullable=False, default="now"),
+        ),
+        indexes=(("user", ("user_id",)),),
+    ),
+    TableSpec(
+        key=TABLE_MFA_LOGIN_CHALLENGES,
+        columns=(
+            ColumnSpec("id", "id", primary_key=True),
+            ColumnSpec("challenge_digest", "binary", nullable=False, unique=True),
+            ColumnSpec("user_id", "uuid", nullable=False, references=TABLE_ACCOUNTS),
+            ColumnSpec("security_epoch", "int", nullable=False, default="one"),
+            ColumnSpec("client_key", "string", length=255),
+            ColumnSpec("issued_at", "timestamp", nullable=False, default="now"),
+            ColumnSpec("expires_at", "timestamp", nullable=False),
+            ColumnSpec("consumed_at", "timestamp"),
+        ),
+        indexes=(("user", ("user_id",)),),
+    ),
+    TableSpec(
+        key=TABLE_STEP_UP_GRANTS,
+        columns=(
+            ColumnSpec("id", "id", primary_key=True),
+            ColumnSpec("grant_digest", "binary", nullable=False, unique=True),
+            ColumnSpec("transport_digest", "binary", nullable=False),
+            ColumnSpec("user_id", "uuid", nullable=False, references=TABLE_ACCOUNTS),
+            ColumnSpec("security_epoch", "int", nullable=False, default="one"),
+            ColumnSpec("purpose", "string", length=255, nullable=False),
+            ColumnSpec("methods", "json", nullable=False, default="empty_array"),
+            ColumnSpec("traits", "json", nullable=False, default="empty_array"),
+            ColumnSpec("authenticated_at", "timestamp", nullable=False, default="now"),
+            ColumnSpec("expires_at", "timestamp", nullable=False),
+        ),
+        indexes=(("user", ("user_id",)),),
+    ),
+    TableSpec(
+        key=TABLE_RATE_LIMIT_BUCKETS,
+        columns=(
+            ColumnSpec("bucket_key", "string", length=255, nullable=False),
+            ColumnSpec("window_start", "timestamp", nullable=False),
+            ColumnSpec("count", "int", nullable=False, default="one"),
+        ),
+        primary_key=("bucket_key", "window_start"),
+    ),
+    TableSpec(
+        key=TABLE_OAUTH_ACCOUNTS,
+        columns=(
+            ColumnSpec("id", "id", primary_key=True),
+            ColumnSpec("user_id", "uuid", nullable=False, references=TABLE_ACCOUNTS),
+            ColumnSpec("provider", "string", length=64, nullable=False),
+            ColumnSpec("subject_id", "string", length=255, nullable=False),
+            ColumnSpec("profile_data", "json"),
+            ColumnSpec("created_at", "timestamp", nullable=False, default="now"),
+            ColumnSpec("updated_at", "timestamp", nullable=False, default="now"),
+        ),
+        unique=(("provider", "subject_id"),),
+        indexes=(("user", ("user_id",)),),
+    ),
+    TableSpec(
+        key=TABLE_ROLES,
+        columns=(
+            ColumnSpec("id", "id", primary_key=True),
+            ColumnSpec("name", "string", length=64, nullable=False, unique=True),
+            ColumnSpec("description", "string", length=255),
+            ColumnSpec("permissions", "json", nullable=False, default="empty_array"),
+        ),
+    ),
+    TableSpec(
+        key=TABLE_USER_ROLES,
+        columns=(
+            ColumnSpec("user_id", "uuid", nullable=False, references=TABLE_ACCOUNTS),
+            ColumnSpec("role_id", "id", nullable=False, references=TABLE_ROLES),
+        ),
+        primary_key=("user_id", "role_id"),
+    ),
+    TableSpec(
+        key=TABLE_AUDIT_LOGS,
+        columns=(
+            ColumnSpec("id", "id", primary_key=True),
+            ColumnSpec("event_type", "string", length=128, nullable=False),
+            ColumnSpec("actor_id", "id"),
+            ColumnSpec("target_id", "id"),
+            ColumnSpec("ip_address", "string", length=45),
+            ColumnSpec("user_agent", "string", length=512),
+            ColumnSpec("data", "json"),
+            ColumnSpec("occurred_at", "timestamp", nullable=False, default="now"),
+        ),
+        indexes=(("event", ("event_type", "occurred_at")),),
+    ),
+    TableSpec(
+        key=TABLE_REFRESH_TOKENS,
+        columns=(
+            ColumnSpec("id", "id", primary_key=True),
+            ColumnSpec("token_id", "string", length=64, nullable=False, unique=True),
+            ColumnSpec("token_digest", "binary", nullable=False),
+            ColumnSpec("family_id", "string", length=64, nullable=False),
+            ColumnSpec("user_id", "uuid", nullable=False, references=TABLE_ACCOUNTS),
+            ColumnSpec("security_epoch", "int", nullable=False, default="one"),
+            ColumnSpec("token_expires_at", "timestamp", nullable=False),
+            ColumnSpec("family_expires_at", "timestamp", nullable=False),
+            ColumnSpec("scopes", "json", nullable=False, default="empty_array"),
+            ColumnSpec("consumed", "bool", nullable=False, default="false"),
+            ColumnSpec("revoked", "bool", nullable=False, default="false"),
+            ColumnSpec("idempotency_digest", "binary"),
+            ColumnSpec("sealed_receipt", "binary"),
+            ColumnSpec("created_at", "timestamp", nullable=False, default="now"),
+        ),
+        indexes=(("family", ("family_id",)), ("user", ("user_id",))),
+    ),
+)
+
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
 
 
@@ -107,16 +368,11 @@ def resolve_table_name(config: "SQLSpecSecurityBackendConfig", table_key: "str")
     Raises:
         SecurityConfigurationError: If the table key is unknown or the configured name is invalid.
     """
-    override = getattr(config, f"{table_key.removesuffix('s')}_table_name", None)
-    if override is None and table_key == TABLE_TOTP_METHODS:
-        override = config.totp_method_table_name
-    elif override is None and table_key == TABLE_AUDIT_LOGS:
-        override = config.audit_log_table_name
-    elif override is None and table_key == TABLE_REFRESH_TOKENS:
-        override = config.refresh_token_table_name
-
-    if override is not None:
-        return validate_table_name(override)
+    override_field = TABLE_OVERRIDE_FIELDS.get(table_key)
+    if override_field is not None:
+        override = getattr(config, override_field, None)
+        if override is not None:
+            return validate_table_name(override)
 
     if table_key not in DEFAULT_TABLE_NAMES:
         msg = f"Unknown SQLSpec security table key: {table_key!r}. Expected one of {sorted(DEFAULT_TABLE_NAMES)}."

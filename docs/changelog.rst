@@ -22,6 +22,10 @@ Changed (breaking)
 Added
 ~~~~~
 
+* Add an internal SQLSpec dialect foundation with declarative table definitions,
+  quoted table and column resolution, byte-limited index names, and UTC value
+  binding. Existing stores and schema creation continue using their current
+  implementation; no database migration is required.
 * ``SecurityClock`` provides UTC wall time and monotonic readings for local
   durations. ``FakeClock`` and ``FakeSecurityClock`` share its interface while
   retaining callable wall time and positive ``advance()``. Their new
