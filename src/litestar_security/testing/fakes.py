@@ -12,6 +12,7 @@ import httpx
 from anyio import Event
 
 from litestar_security.authentication import AuthorizationResolution, IdentityResolution
+from litestar_security.clock import SecurityClock
 from litestar_security.context import AuthorizationSnapshot, Principal
 from litestar_security.providers.oauth import (
     OAuthTransaction,
@@ -126,16 +127,17 @@ class FakeOAuthProvider:
         self.calls.append("revoke")
 
 
-class FakeClock:
-    """Mutable UTC clock owned by one test."""
+class FakeClock(SecurityClock):
+    """Deterministic wall and monotonic clock owned by one test."""
 
-    __slots__ = ("_now",)
+    __slots__ = ("_monotonic", "_now")
 
-    def __init__(self, now: datetime) -> None:
+    def __init__(self, now: datetime, monotonic_start: float = 0.0) -> None:
         """Initialize at one timezone-aware instant.
 
         Args:
             now: Initial time.
+            monotonic_start: Initial monotonic reading in seconds.
 
         Raises:
             ValueError: If ``now`` is naive.
@@ -144,6 +146,7 @@ class FakeClock:
             message = "FakeClock requires a timezone-aware datetime"
             raise ValueError(message)
         self._now = now.astimezone(timezone.utc)
+        self._monotonic = float(monotonic_start)
 
     def __call__(self) -> datetime:
         """Return the current instant.
@@ -154,7 +157,7 @@ class FakeClock:
         return self._now
 
     def advance(self, delta: timedelta) -> datetime:
-        """Advance by a positive duration.
+        """Advance both sources by a positive duration.
 
         Args:
             delta: Positive duration to add.
@@ -169,64 +172,42 @@ class FakeClock:
             message = "FakeClock advance must be positive"
             raise ValueError(message)
         self._now += delta
-        return self._now
-
-
-class FakeSecurityClock:
-    """Deterministic dual clock pairing UTC wall clock and monotonic ticks.
-
-    Maintains synchronization between wall-clock timestamps and monotonic interval
-    durations to prevent test-time jitter, drift, and leap second edge cases.
-    """
-
-    __slots__ = ("_monotonic", "_now")
-
-    def __init__(self, now: datetime, monotonic_start: float = 0.0) -> None:
-        """Initialize with synchronized UTC wall time and monotonic origin.
-
-        Args:
-            now: Initial timezone-aware UTC datetime.
-            monotonic_start: Initial monotonic floating-point timestamp.
-
-        Raises:
-            ValueError: If ``now`` is naive.
-        """
-        if now.tzinfo is None or now.utcoffset() is None:
-            message = "FakeSecurityClock requires a timezone-aware datetime"
-            raise ValueError(message)
-        self._now = now.astimezone(timezone.utc)
-        self._monotonic = float(monotonic_start)
-
-    def __call__(self) -> datetime:
-        """Return the current UTC wall clock instant."""
+        self._monotonic += delta.total_seconds()
         return self._now
 
     def now(self) -> datetime:
-        """Return the current UTC wall clock instant."""
+        """Return the current UTC wall clock instant.
+
+        Returns:
+            The deterministic UTC datetime.
+        """
         return self._now
 
     def monotonic(self) -> float:
-        """Return the current monotonic timestamp."""
+        """Return the current monotonic reading.
+
+        Returns:
+            Deterministic elapsed seconds plus the initial reading.
+        """
         return self._monotonic
 
-    def advance(self, delta: timedelta) -> datetime:
-        """Advance both wall clock and monotonic time by a positive duration.
+    def step_wall(self, delta: timedelta) -> datetime:
+        """Adjust wall time without changing the monotonic reading.
 
         Args:
-            delta: Positive duration to add.
+            delta: Signed adjustment, including zero or a backward step.
 
         Returns:
             The updated UTC wall clock datetime.
-
-        Raises:
-            ValueError: If ``delta`` is not positive.
         """
-        if delta <= timedelta():
-            message = "FakeSecurityClock advance must be positive"
-            raise ValueError(message)
         self._now += delta
-        self._monotonic += delta.total_seconds()
         return self._now
+
+
+class FakeSecurityClock(FakeClock):
+    """Named dual-clock fake retaining the existing testing API."""
+
+    __slots__ = ()
 
 
 @dataclass(frozen=True, slots=True)

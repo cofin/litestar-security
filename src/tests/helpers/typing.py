@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, Protocol, cast
 
 from litestar import Controller, Litestar, Router, get
 from litestar.di import NamedDependency  # noqa: TC002 - Litestar resolves handler annotations at runtime
@@ -19,6 +19,7 @@ from litestar_security import (
     Principal,
     PublicController,
     SecureController,
+    SecurityClock,
     SecurityContext,
     all_of,
     any_of,
@@ -33,7 +34,26 @@ from litestar_security import (
 )
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from litestar.types import Scope
+
+    from litestar_security.testing import FakeClock, FakeSecurityClock
+
+
+class ClockSurface(Protocol):
+    """Structural clock surface accepted by duration-aware consumers."""
+
+    def now(self) -> datetime: ...
+
+    def monotonic(self) -> float: ...
+
+
+def clock_implementations(
+    production: SecurityClock, fake: FakeClock, security_fake: FakeSecurityClock
+) -> tuple[ClockSurface, ClockSurface, ClockSurface]:
+    """Check production and both public fakes against the same protocol."""
+    return production, fake, security_fake
 
 
 @dataclass(frozen=True)

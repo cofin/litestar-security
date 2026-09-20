@@ -9,6 +9,7 @@ import pytest
 from anyio import Event, create_task_group, fail_after
 
 import litestar_security.testing as testing_module
+from litestar_security import SecurityClock
 from litestar_security.accounts import AESGCMSecretProtector, SecretProtectorKey
 from litestar_security.providers.api_key import APIKeyState, APIKeyStore
 from litestar_security.providers.oauth import (
@@ -24,6 +25,7 @@ from litestar_security.providers.oauth import (
 )
 from litestar_security.testing import (
     FakeClock,
+    FakeSecurityClock,
     InMemorySecurityBackend,
     InMemoryWebSocketConnectTokenStore,
     StoreConformanceFactories,
@@ -40,6 +42,51 @@ from litestar_security.websocket import WebSocketConnectAuthorization
 
 _NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
 _CONFORMANCE_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def test_security_clock_uses_utc_and_monotonic_time() -> None:
+    clock = SecurityClock()
+    before = datetime.now(timezone.utc)
+    observed = clock.now()
+    after = datetime.now(timezone.utc)
+    assert before <= observed <= after
+    assert observed.tzinfo is timezone.utc
+    first = clock.monotonic()
+    assert clock.monotonic() >= first
+
+
+@pytest.mark.parametrize("clock_type", [FakeClock, FakeSecurityClock])
+def test_fake_clocks_advance_both_sources_and_step_only_wall_time(clock_type: type[FakeClock]) -> None:
+    origin = _NOW.astimezone(timezone(timedelta(hours=5)))
+    clock = clock_type(origin, monotonic_start=17.5)
+    assert clock() == clock.now() == _NOW
+    assert clock.now().tzinfo is timezone.utc
+    assert clock.monotonic() == 17.5
+    assert clock.advance(timedelta(seconds=2.5)) == _NOW + timedelta(seconds=2.5)
+    assert clock.monotonic() == 20.0
+    assert clock.step_wall(timedelta(days=-1)) == _NOW + timedelta(days=-1, seconds=2.5)
+    assert clock.monotonic() == 20.0
+    assert clock.step_wall(timedelta(days=2)) == _NOW + timedelta(days=1, seconds=2.5)
+    assert clock.step_wall(timedelta()) == clock.now() == clock()
+    assert clock.monotonic() == 20.0
+
+
+@pytest.mark.parametrize("clock_type", [FakeClock, FakeSecurityClock])
+@pytest.mark.parametrize("delta", [timedelta(), timedelta(seconds=-1)])
+def test_fake_clocks_reject_nonpositive_advancement_without_mutation(
+    clock_type: type[FakeClock], delta: timedelta
+) -> None:
+    clock = clock_type(_NOW)
+    with pytest.raises(ValueError, match="positive"):
+        clock.advance(delta)
+    assert clock() == _NOW
+    assert clock.monotonic() == 0.0
+
+
+@pytest.mark.parametrize("clock_type", [FakeClock, FakeSecurityClock])
+def test_fake_clocks_reject_naive_initial_time(clock_type: type[FakeClock]) -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        clock_type(_NOW.replace(tzinfo=None))
 
 
 @dataclass(frozen=True, slots=True)

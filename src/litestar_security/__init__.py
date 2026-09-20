@@ -33,6 +33,7 @@ from litestar_security.authentication import (
     public,
     required,
 )
+from litestar_security.clock import SecurityClock
 from litestar_security.config import (
     BlockingIntegration,
     ExternalCSRF,
@@ -172,6 +173,7 @@ __all__ = (
     "RouteDocs",
     "RouteError",
     "SecureController",
+    "SecurityClock",
     "SecurityConfig",
     "SecurityContext",
     "SecurityHeadersConfig",

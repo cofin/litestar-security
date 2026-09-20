@@ -22,6 +22,11 @@ Changed (breaking)
 Added
 ~~~~~
 
+* ``SecurityClock`` provides UTC wall time and monotonic readings for local
+  durations. ``FakeClock`` and ``FakeSecurityClock`` share its interface while
+  retaining callable wall time and positive ``advance()``. Their new
+  ``step_wall()`` method simulates clock adjustments without advancing
+  monotonic time. Existing consumers need no configuration changes.
 * :func:`~litestar_security.requires_tenant_role` evaluates role membership within a
   tenant identified by a parsed path parameter.
 * ``litestar security routes`` renders the compiled security posture of every
