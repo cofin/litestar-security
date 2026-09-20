@@ -29,6 +29,7 @@ guards, OpenAPI schema, and WebSocket lifecycle.
    resource-server
    websockets
    integrations/mcp
+   migrations/security-backends
    hardening
    customization
    examples

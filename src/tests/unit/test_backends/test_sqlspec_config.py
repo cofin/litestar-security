@@ -26,8 +26,8 @@ from litestar_security.backends.sqlspec import (
 )
 
 
-def test_default_table_names_match_accelerator() -> None:
-    """Verify default table names match Accelerator DMA naming scheme."""
+def test_default_table_names() -> None:
+    """Verify the default application table naming scheme."""
     config = SQLSpecSecurityBackendConfig()
     expected = {
         TABLE_ACCOUNTS: "user_account",

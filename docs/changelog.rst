@@ -40,6 +40,9 @@ Added
 Fixed
 ~~~~~
 
+* Replace application-specific migration material with generic backend upgrade
+  guidance. Existing application-provided stores remain supported; backend
+  adoption and data migration are explicit application decisions.
 * ``exclude_from_auth`` is read by truthiness, as Litestar reads it. A falsy
   value means "authenticate this route" instead of raising at startup, so a
   handler can opt back in underneath an excluded router and configurations that
