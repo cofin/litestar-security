@@ -1,6 +1,7 @@
 """Unit coverage for TOTP and recovery-code MFA behavior."""
 
 import base64
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
@@ -12,6 +13,7 @@ from litestar.exceptions import ImproperlyConfiguredException
 
 import litestar_security.accounts as accounts_module
 import litestar_security.accounts._mfa as mfa_module
+import litestar_security.accounts._mfa_login as mfa_login_module
 import litestar_security.testing as testing_module
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.config import MFAConfig, PasskeyConfig
@@ -801,3 +803,20 @@ def test_mfa_and_passkey_feature_configs_build_services_and_validate_route_contr
     ):
         with pytest.raises(ImproperlyConfiguredException):
             config()
+
+
+async def test_mfa_services_require_mfa_extra_when_pyotp_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "pyotp", None)
+
+    expected = r"litestar-security feature requires the \[mfa\] extra: pip install 'litestar-security\[mfa\]'"
+    with pytest.raises(ImportError, match=expected):
+        mfa_module.MFAService(store=MFAStore(), secret_protector=MFAProtector())
+    with pytest.raises(ImportError, match=expected):
+        mfa_login_module.MFALoginService(store=cast("Any", object()), mfa=cast("Any", object()), pepper=b"p" * 32)
+
+    mfa_key = accounts_module.SecretProtectorKey(key_version="v1", key=b"k" * 32)
+    protector = accounts_module.AESGCMSecretProtector(active_key=mfa_key)
+    protected = await protector.protect(b"secret", associated_data=b"bound")
+    assert await protector.unprotect(protected, associated_data=b"bound") == b"secret"
+    step_up = accounts_module.StepUpService(StepUpStore())
+    assert step_up.store is not None

@@ -4,9 +4,8 @@ These modules are the top of the `accounts` graph: they consume the account
 services and wire schemas and nothing in the package depends back on them.
 """
 
+from importlib import import_module
 from typing import TYPE_CHECKING, Any
-
-from litestar_security._lazy import import_optional_attribute
 
 if TYPE_CHECKING:
     from litestar_security.accounts.controllers._local import (
@@ -22,20 +21,10 @@ _LOCAL_EXPORTS = frozenset({"LOCAL_AUTH_TAGS", "build_local_auth_routes", "requi
 
 
 def __getattr__(name: str) -> Any:  # noqa: ANN401 - module lazy-export hook is dynamically typed
-    """Resolve generated controller exports when their optional features are installed."""
+    """Resolve generated controller exports without loading route trees at root import."""
     if name in _LOCAL_EXPORTS:
-        return import_optional_attribute(
-            "litestar_security.accounts.controllers._local",
-            name,
-            extras="argon2,mfa",
-            dependencies=frozenset({"argon2", "pyotp"}),
-        )
+        return getattr(import_module("litestar_security.accounts.controllers._local"), name)
     if name == "build_mfa_routes":
-        return import_optional_attribute(
-            "litestar_security.accounts.controllers._mfa",
-            name,
-            extras="argon2,mfa,passkeys",
-            dependencies=frozenset({"argon2", "pyotp", "webauthn"}),
-        )
+        return getattr(import_module("litestar_security.accounts.controllers._mfa"), name)
     message = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(message)

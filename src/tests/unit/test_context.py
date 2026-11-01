@@ -631,19 +631,16 @@ from importlib import import_module
 sys.modules[{blocked_dependency!r}] = None
 import litestar_security.accounts as accounts
 
+expected_optional = {{
+    "Argon2PasswordHasher": ("litestar_security.accounts._passwords", "argon2", frozenset({{"argon2"}})),
+    "MFALoginService": ("litestar_security.accounts._mfa_login", "mfa", frozenset({{"pyotp"}})),
+    "MFAService": ("litestar_security.accounts._mfa", "mfa", frozenset({{"pyotp"}})),
+    "PyWebAuthnVerifier": ("litestar_security.accounts._passkeys", "passkeys", frozenset({{"webauthn"}})),
+}}
+assert accounts._OPTIONAL_EXPORTS == expected_optional, accounts._OPTIONAL_EXPORTS
 assert accounts.RateLimiter
 for name in accounts.__all__:
     target = accounts._OPTIONAL_EXPORTS.get(name)
-    if target is None and name in accounts._CONTROLLER_EXPORTS:
-        target = (
-            ("litestar_security.accounts.controllers", "argon2,mfa", frozenset({{"argon2", "pyotp"}}))
-            if name != "build_mfa_routes"
-            else (
-                "litestar_security.accounts.controllers",
-                "argon2,mfa,passkeys",
-                frozenset({{"argon2", "pyotp", "webauthn"}}),
-            )
-        )
     if target is None or {blocked_dependency!r} not in target[2]:
         getattr(accounts, name)
         continue
@@ -660,24 +657,7 @@ for name in accounts.__all__:
 
 controllers = import_module("litestar_security.accounts.controllers")
 for name in controllers.__all__:
-    target = (
-        ("argon2,mfa", frozenset({{"argon2", "pyotp"}}))
-        if name in controllers._LOCAL_EXPORTS
-        else ("argon2,mfa,passkeys", frozenset({{"argon2", "pyotp", "webauthn"}}))
-    )
-    if {blocked_dependency!r} not in target[1]:
-        getattr(controllers, name)
-        continue
-    try:
-        getattr(controllers, name)
-    except ImportError as error:
-        expected = (
-            f"litestar-security feature requires the [{{target[0]}}] extra: "
-            f"pip install 'litestar-security[{{target[0]}}]'"
-        )
-        assert str(error) == expected, (name, str(error))
-    else:
-        raise AssertionError(f"expected an actionable optional-extra ImportError for {{name}}")
+    assert getattr(controllers, name) is not None
 """
 
     result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
@@ -688,6 +668,7 @@ for name in controllers.__all__:
 @pytest.mark.parametrize("blocked_dependency", ["pyotp", "webauthn", "cbor2", "argon2"])
 def test_testing_module_isolates_missing_optional_dependencies(blocked_dependency: str) -> None:
     script = f"""
+import asyncio
 import sys
 sys.modules[{blocked_dependency!r}] = None
 
@@ -697,6 +678,11 @@ from litestar_security.testing import InMemoryLocalAccountStore, InMemorySecurit
 backend = InMemorySecurityBackend()
 assert backend.accounts is not None
 assert testing.assert_session_registry_conformance is not None
+asyncio.run(testing.assert_mfa_store_conformance(testing.InMemoryMFAStore))
+asyncio.run(testing.assert_mfa_login_challenge_store_conformance(testing.InMemoryMFALoginChallengeStore))
+asyncio.run(testing.assert_passkey_store_conformance(testing.InMemoryPasskeyStore))
+asyncio.run(testing.assert_step_up_store_conformance(testing.InMemoryStepUpStore))
+asyncio.run(testing.assert_webauthn_challenge_store_conformance(testing.InMemoryWebAuthnChallengeStore))
 """
     result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603
     assert result.returncode == 0, result.stderr
@@ -724,8 +710,10 @@ from typing import get_type_hints
 
 sys.modules["pyotp"] = None
 
+import litestar_security.accounts as accounts
 import litestar_security.providers.oauth._routes as oauth_routes
 
+assert oauth_routes.StepUpCredential is accounts.StepUpCredential
 fields = [(name, str(kind)) for name, kind in get_type_hints(oauth_routes.StepUpCredential).items()]
 print(json.dumps(fields))
 """

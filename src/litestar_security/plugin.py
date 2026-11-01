@@ -592,7 +592,8 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             raise ImproperlyConfiguredException(detail=message)
         route_handlers = self._mfa_route_handlers
         if route_handlers is None:
-            from litestar_security.accounts import MFAService, PasskeyService, StepUpService, build_mfa_routes  # noqa: PLC0415 - route imports remain feature-local
+            from litestar_security.accounts import PasskeyService, StepUpService, build_mfa_routes  # noqa: PLC0415 - route imports remain feature-local
+            from litestar_security.accounts._mfa import MFAService  # noqa: PLC0415 - route imports remain feature-local
 
             if not isinstance(step_up, StepUpService):
                 message = "Generated MFA and passkey routes require a StepUpService"

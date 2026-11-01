@@ -11,6 +11,8 @@ def import_optional_attribute(
 ) -> Any:  # noqa: ANN401 - package lazy-export hooks resolve arbitrary public objects
     """Import one optional-feature attribute without masking unrelated failures."""
     try:
+        for dependency in sorted(dependencies):
+            import_module(dependency)
         module = import_module(module_name)
     except ModuleNotFoundError as error:
         if error.name not in dependencies:

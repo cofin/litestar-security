@@ -41,7 +41,7 @@ from litestar.utils.scope.state import ScopeState
 from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
 from litestar_security._dto import apply_wire_dtos
 from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
-from litestar_security._typing import PYOTP_INSTALLED
+from litestar_security.accounts import StepUpCredential
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import AuthenticationEvidence, Principal
 from litestar_security.providers.oauth._accounts import (
@@ -72,21 +72,7 @@ from litestar_security.providers.oauth._transactions import (
 from litestar_security.schema import WirePolicy, WireStruct
 
 if TYPE_CHECKING:
-    from litestar_security.accounts import RateLimitGuard, StepUpCredential, StepUpService
-elif PYOTP_INSTALLED:
-    from litestar_security.accounts import StepUpCredential
-else:
-
-    class StepUpCredential(WireStruct, frozen=True, kw_only=True):  # type: ignore[no-redef]
-        """Mirror the MFA step-up credential so the wire contract stays whole without pyotp."""
-
-        token: str
-        purpose: str
-        expires_at: datetime
-
-        def __repr__(self) -> str:
-            """Redact the reveal-once credential."""
-            return f"{type(self).__name__}(token=<redacted>, purpose={self.purpose!r}, expires_at={self.expires_at!r})"
+    from litestar_security.accounts import RateLimitGuard, StepUpService
 
 
 __all__ = (
@@ -237,7 +223,7 @@ class OAuthReauthenticationOutcome(WireStruct, frozen=True, kw_only=True):
     account_id: str
     provider: str
     provider_account_id: str
-    credential: "StepUpCredential"
+    credential: StepUpCredential
 
 
 class OAuthLogout(msgspec.Struct, frozen=True, kw_only=True):
