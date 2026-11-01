@@ -8,7 +8,14 @@ from litestar.openapi.config import OpenAPIConfig
 from litestar.openapi.spec import Components, SecurityScheme, Tag
 
 from litestar_security._openapi import OpenAPISchemeSet, merge_openapi_tags, prepare_openapi_config
-from litestar_security.authentication import MechanismRequirement, SecurityRuntimePlan
+from litestar_security.authentication import (
+    AuthenticationMechanism,
+    AuthenticationRegistry,
+    MechanismRequirement,
+    NoCredentials,
+    SecurityRuntimePlan,
+)
+from litestar_security.context import Principal
 
 
 def _scheme_set(*, scheme: SecurityScheme | None = None) -> OpenAPISchemeSet:
@@ -76,3 +83,63 @@ def test_merge_openapi_tags_preserves_declared_tags_and_stably_deduplicates() ->
 
     assert merged.tags == [owned, Tag(name="security", description="Security routes")]
     assert merge_openapi_tags(merged, [Tag(name="accounts"), Tag(name="security")]) is merged
+
+
+class _OpenAPISlot:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def extract(self, _connection: object) -> NoCredentials:
+        return NoCredentials()
+
+
+class _OpenAPIAuthenticator:
+    def __init__(self, name: str, slot: str) -> None:
+        self.name = name
+        self.slot = slot
+        self.participates_by_default = True
+
+    async def authenticate(self, _credential: str, _connection: object) -> NoCredentials:
+        return NoCredentials()
+
+
+class _OpenAPIResolver:
+    async def resolve(self, claims: str) -> Principal[object]:
+        return Principal(id=claims)
+
+
+def test_openapi_scheme_set_projects_additional_security_schemes_and_rejects_conflicts() -> None:
+    header_scheme = SecurityScheme(type="apiKey", name="X-API-Key", security_scheme_in="header")
+    bearer_scheme = SecurityScheme(type="http", scheme="bearer", bearer_format="lsk_<key_id>_<secret>")
+    api_key_mechanism = AuthenticationMechanism(
+        authenticator=_OpenAPIAuthenticator("api-key", "api-key"),  # type: ignore[arg-type]
+        resolver=_OpenAPIResolver(),
+        scheme_name="APIKey",
+        security_scheme=header_scheme,
+        additional_security_schemes={"APIKeyBearer": bearer_scheme},
+    )
+    registry = AuthenticationRegistry(slots=(_OpenAPISlot("api-key"),), mechanisms=(api_key_mechanism,))  # type: ignore[arg-type]
+    schemes = OpenAPISchemeSet.from_registry(registry)
+
+    assert schemes.unique_schemes == {"APIKey": header_scheme, "APIKeyBearer": bearer_scheme}
+    required_plan = SecurityRuntimePlan(
+        authenticate=True, required=True, alternatives=((MechanismRequirement(name="api-key"),),)
+    )
+    optional_plan = SecurityRuntimePlan(
+        authenticate=True, alternatives=required_plan.alternatives, allow_anonymous=True
+    )
+    assert schemes.project(required_plan) == [{"APIKey": []}, {"APIKeyBearer": []}]
+    assert schemes.project(optional_plan) == [{}, {"APIKey": []}, {"APIKeyBearer": []}]
+
+    conflicting_mechanism = AuthenticationMechanism(
+        authenticator=_OpenAPIAuthenticator("bearer", "bearer"),  # type: ignore[arg-type]
+        resolver=_OpenAPIResolver(),
+        scheme_name="APIKeyBearer",
+        security_scheme=SecurityScheme(type="http", scheme="bearer", bearer_format="JWT"),
+    )
+    conflicting_registry = AuthenticationRegistry(
+        slots=(_OpenAPISlot("api-key"), _OpenAPISlot("bearer")),
+        mechanisms=(api_key_mechanism, conflicting_mechanism),  # type: ignore[arg-type]
+    )
+    with pytest.raises(ImproperlyConfiguredException, match="Conflicting native OpenAPI security scheme: APIKeyBearer"):
+        OpenAPISchemeSet.from_registry(conflicting_registry)

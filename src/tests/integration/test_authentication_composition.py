@@ -9,12 +9,20 @@ from typing import TYPE_CHECKING
 import jwt
 import pytest
 from litestar import Litestar, Request, get
+from litestar.openapi.config import OpenAPIConfig
 from litestar.status_codes import HTTP_200_OK, HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAILABLE
 from litestar.testing import TestClient
 
 from litestar_security import SecurityConfig, SecurityPlugin
-from litestar_security.authentication import InvalidCredentials, NoCredentials, VerificationUnavailable, required
+from litestar_security.authentication import (
+    InvalidCredentials,
+    NoCredentials,
+    VerificationUnavailable,
+    any_of,
+    required,
+)
 from litestar_security.context import Principal
+from litestar_security.providers.api_key import APIKeyClaims, APIKeyConfig
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
     BearerTokenSlot,
@@ -24,7 +32,7 @@ from litestar_security.providers.jwt import (
     PyJWTVerifier,
     extend_composite_bearer,
 )
-from tests.fixtures.collaborators import AsyncRecordingJWTVerifier
+from tests.fixtures.collaborators import AsyncRecordingJWTVerifier, build_api_key_store
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -291,3 +299,82 @@ def test_selected_terminal_outcomes_survive_framework_mapping(
     assert response.status_code == expected_status
     assert len(external.calls) == 1  # type: ignore[attr-defined]
     assert local.calls == []
+
+
+class _APIKeyResolver:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def resolve(self, claims: APIKeyClaims) -> Principal[object]:
+        self.calls.append(claims.subject_id)
+        return Principal(id=f"api-key:{claims.subject_id}")
+
+
+async def test_api_key_authorization_bearer_coexists_with_composite_bearer_and_projects_openapi(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    signing_key, verification_key = jwt_key_material["RS256"]
+    issuer, audience = _PROFILES["external"]
+    jwt_verifier = _RecordingVerifier(
+        PyJWTVerifier(
+            config=JWTValidationConfig(issuer=issuer, audiences=frozenset({audience}), algorithms=frozenset({"RS256"})),
+            key=verification_key,
+            require_key_id=True,
+        )
+    )
+    jwt_resolver = _Resolver("bearer")
+    bearer_slot, bearer_mechanism = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="external",
+                selector=BearerSlotSelector(issuers=frozenset({issuer}), audiences=frozenset({audience})),
+                verifier=jwt_verifier,
+            ),
+        ),
+    ).build(jwt_resolver, clock=lambda: _NOW)
+
+    api_key_store = build_api_key_store()
+    api_key_resolver = _APIKeyResolver()
+    api_key_slot, api_key_mechanism, api_key_service = APIKeyConfig(
+        store=api_key_store, pepper=b"p" * 32, accept_authorization_bearer=True
+    ).build(api_key_resolver, clock=lambda: _NOW)
+    issued = await api_key_service.issue(subject_id="machine-1")
+
+    @get("/items", auth=any_of("api-key", "bearer"))
+    async def items(request: Request) -> dict[str, object]:
+        return {
+            "id": request.user.id,
+            "mechanism": request.auth.evidence[0].mechanism,
+            "slot": request.auth.evidence[0].slot,
+        }
+
+    app = Litestar(
+        route_handlers=[items],
+        openapi_config=OpenAPIConfig(title="API", version="1.0.0"),
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(slots=(api_key_slot, bearer_slot), mechanisms=(api_key_mechanism, bearer_mechanism))
+            )
+        ],
+    )
+    jwt_token = _token(signing_key, issuer, audience)
+
+    with TestClient(app) as client:
+        api_key_bearer_response = client.get("/items", headers={"Authorization": f"Bearer {issued.value}"})
+        api_key_header_response = client.get("/items", headers={"X-API-Key": issued.value})
+        jwt_response = client.get("/items", headers={"Authorization": f"Bearer {jwt_token}"})
+        invalid_api_key_response = client.get("/items", headers={"Authorization": f"Bearer lsk_{'A' * 16}_{'B' * 43}"})
+        schema = client.get("/schema/openapi.json").json()
+
+    assert api_key_bearer_response.status_code == HTTP_200_OK
+    assert api_key_bearer_response.json() == {"id": "api-key:machine-1", "mechanism": "api-key", "slot": "api-key"}
+    assert api_key_header_response.status_code == HTTP_200_OK
+    assert api_key_header_response.json() == {"id": "api-key:machine-1", "mechanism": "api-key", "slot": "api-key"}
+    assert jwt_response.status_code == HTTP_200_OK
+    assert jwt_response.json() == {"id": "bearer:user-1", "mechanism": "bearer", "slot": "external"}
+    assert invalid_api_key_response.status_code == HTTP_401_UNAUTHORIZED
+    assert len(jwt_verifier.calls) == 1
+    assert schema["paths"]["/items"]["get"]["security"] == [{"APIKey": []}, {"APIKeyBearer": []}, {"bearer": []}]
+    assert "APIKey" in schema["components"]["securitySchemes"]
+    assert "APIKeyBearer" in schema["components"]["securitySchemes"]

@@ -35,9 +35,18 @@ from litestar_security.authentication import (
 )
 from litestar_security.config import ExternalCSRF, SecurityConfig
 from litestar_security.context import AuthenticationEvidence, Principal
+from litestar_security.providers.api_key import APIKeyConfig
 from litestar_security.providers.jwks import JWKSFetchOutcome, JWKSFetchTarget, JWKSSource
-from litestar_security.providers.jwt import JWTValidationConfig, PyJWTVerifier, VerificationKey
+from litestar_security.providers.jwt import (
+    BearerSlotSelector,
+    BearerTokenSlot,
+    CompositeBearerConfig,
+    JWTValidationConfig,
+    PyJWTVerifier,
+    VerificationKey,
+)
 from litestar_security.providers.oidc import DiscoveryPolicy, OIDCDiscoveryClient, OIDCMetadata
+from tests.fixtures.collaborators import build_api_key_store
 
 _JWT_NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
 _NAIVE_JWT_NOW = datetime(2026, 7, 26)  # noqa: DTZ001 - explicit rejection fixture
@@ -571,3 +580,80 @@ async def test_verified_claims_are_frozen_recursively_and_secret_safe(
     assert token not in repr(claims)
     assert token not in repr(verifier)
     assert verification_key.decode() not in repr(verifier)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        (
+            {"additional_security_schemes": {"APIKeyBearer": SecurityScheme(type="http", scheme="bearer")}},
+            "configured together",
+        ),
+        (
+            {
+                "scheme_name": "APIKey",
+                "security_scheme": SecurityScheme(type="apiKey", name="X-API-Key", security_scheme_in="header"),
+                "additional_security_schemes": {" ": SecurityScheme(type="http", scheme="bearer")},
+            },
+            "must not be blank",
+        ),
+        (
+            {
+                "scheme_name": "APIKey",
+                "security_scheme": SecurityScheme(type="apiKey", name="X-API-Key", security_scheme_in="header"),
+                "additional_security_schemes": {"APIKey": SecurityScheme(type="http", scheme="bearer")},
+            },
+            "Duplicate OpenAPI security scheme name",
+        ),
+        (
+            {
+                "scheme_name": "APIKey",
+                "security_scheme": SecurityScheme(type="apiKey", name="X-API-Key", security_scheme_in="header"),
+                "additional_security_schemes": {"APIKeyBearer": cast("Any", object())},
+            },
+            "must be a SecurityScheme",
+        ),
+    ],
+)
+def test_authentication_mechanism_validates_additional_security_schemes(kwargs: dict[str, object], match: str) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        AuthenticationMechanism(
+            authenticator=_Authenticator("a", "slot-a"),  # type: ignore[arg-type]
+            resolver=_Resolver(),
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+
+def test_registry_coordinates_api_key_bearer_prefix_with_composite_bearer_slot() -> None:
+    api_key_slot, api_key_mechanism, _ = APIKeyConfig(
+        store=build_api_key_store(), pepper=b"p" * 32, accept_authorization_bearer=True
+    ).build(_Resolver(), clock=lambda: _JWT_NOW)
+    bearer_slot, bearer_mechanism = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="local",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                verifier=_recording_jwt_verifier(InvalidCredentials()),  # type: ignore[arg-type]
+            ),
+        ),
+    ).build(_Resolver(), clock=lambda: _JWT_NOW)
+
+    registry = AuthenticationRegistry(
+        slots=(api_key_slot, bearer_slot),
+        mechanisms=(api_key_mechanism, bearer_mechanism),  # type: ignore[arg-type]
+    )
+
+    compiled_api_key_slot = registry.get_slot("api-key")
+    compiled_bearer_slot = registry.get_slot("authorization.bearer")
+    assert getattr(compiled_api_key_slot, "coexists_with_bearer_slot", False) is True
+    assert getattr(compiled_bearer_slot, "excluded_prefixes", ()) == ("lsk_",)
+    assert (
+        compiled_bearer_slot.extract(
+            type("Connection", (), {"scope": {"headers": [(b"authorization", b"Bearer lsk_key_secret")]}})()
+        )
+        == NoCredentials()
+    )
+    assert compiled_bearer_slot.extract(
+        type("Connection", (), {"scope": {"headers": [(b"authorization", b"Bearer compact.jwt.token")]}})()
+    ) == PresentedCredential("compact.jwt.token")
