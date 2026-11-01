@@ -408,9 +408,7 @@ class APIKeyConfig:
         Returns:
             The slot, authentication mechanism, and lifecycle service.
         """
-        from litestar_security.providers.api_key._runtime import (  # noqa: PLC0415 - breaks config/runtime cycle
-            build_api_key_runtime,
-        )
+        from litestar_security.providers.api_key._runtime import build_api_key_runtime  # noqa: PLC0415 - breaks config/runtime cycle
 
         if not callable(clock) or not callable(entropy) or participates_by_default.__class__ is not bool:
             raise ImproperlyConfiguredException(detail="API-key runtime configuration is invalid")

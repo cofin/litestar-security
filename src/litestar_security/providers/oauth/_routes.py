@@ -22,12 +22,8 @@ from litestar.exceptions import (
     ServiceUnavailableException,
     TooManyRequestsException,
 )
-from litestar.exceptions.responses import (
-    create_exception_response,  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized Response
-)
-from litestar.middleware._internal.exceptions.middleware import (
-    get_exception_handler,  # pyright: ignore[reportUnknownVariableType] - Litestar types the resolved handler unparameterized
-)
+from litestar.exceptions.responses import create_exception_response  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized Response
+from litestar.middleware._internal.exceptions.middleware import get_exception_handler  # pyright: ignore[reportUnknownVariableType] - Litestar types the resolved handler unparameterized
 from litestar.params import Body, FromPath, FromQuery, JSONBody, QueryParameter, SkipValidation
 from litestar.response import Redirect
 from litestar.status_codes import (
@@ -1152,10 +1148,7 @@ class OIDCLogoutLifecycleService:
                 any forwarding header.
             clock: Source of the current aware time.
         """
-        from litestar_security.accounts import (  # noqa: PLC0415 - a module import would cycle back through providers
-            RateLimitGuard,
-            trusted_client_key,
-        )
+        from litestar_security.accounts import RateLimitGuard, trusted_client_key  # noqa: PLC0415 - a module import would cycle back through providers
 
         if (
             not provider_issuers
@@ -1219,9 +1212,7 @@ class OIDCLogoutLifecycleService:
                 unavailable. An outage never removes the limit or the binding.
         """
         if self.rate_limits is not None:
-            from litestar_security.accounts import (  # noqa: PLC0415 - a module import would cycle back through providers
-                RateLimited,
-            )
+            from litestar_security.accounts import RateLimited  # noqa: PLC0415 - a module import would cycle back through providers
 
             limited = await self.rate_limits.check(
                 OIDC_FRONTCHANNEL_LOGOUT,

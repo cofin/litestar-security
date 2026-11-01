@@ -232,10 +232,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             mechanisms.extend(provider_mechanisms)
             local_auth = self.config.local_auth
             if local_auth is not None and local_auth.bearer_slot is not None:
-                from litestar_security.providers.jwt import (  # noqa: PLC0415 - deferred to break an import cycle
-                    CompositeBearerConfig,
-                    extend_composite_bearer,
-                )
+                from litestar_security.providers.jwt import CompositeBearerConfig, extend_composite_bearer  # noqa: PLC0415 - deferred to break an import cycle
 
                 bearer_resolver = local_auth.bearer_resolver
                 if bearer_resolver is None:  # pragma: no cover - LocalAuthConfig invariant
@@ -386,9 +383,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         Returns:
             Whether raised denials reach the wire as problem details.
         """
-        from litestar.plugins.problem_details import (  # noqa: PLC0415 - the problem-details tree loads only when detected
-            ProblemDetailsPlugin,
-        )
+        from litestar.plugins.problem_details import ProblemDetailsPlugin  # noqa: PLC0415 - the problem-details tree loads only when detected
 
         return any(
             plugin.config.enable_for_all_http_exceptions
@@ -597,12 +592,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             raise ImproperlyConfiguredException(detail=message)
         route_handlers = self._mfa_route_handlers
         if route_handlers is None:
-            from litestar_security.accounts import (  # noqa: PLC0415 - route imports remain feature-local
-                MFAService,
-                PasskeyService,
-                StepUpService,
-                build_mfa_routes,
-            )
+            from litestar_security.accounts import MFAService, PasskeyService, StepUpService, build_mfa_routes  # noqa: PLC0415 - route imports remain feature-local
 
             if not isinstance(step_up, StepUpService):
                 message = "Generated MFA and passkey routes require a StepUpService"
@@ -731,9 +721,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         # co-installed plugin owns the path RFC 9728 pins to the root.
         if self.config.protected_resource is None or not self.config.protected_resource.register_route:
             return
-        from litestar_security.providers.oauth import (  # noqa: PLC0415 - the OAuth tree loads only when configured
-            build_protected_resource_handler,
-        )
+        from litestar_security.providers.oauth import build_protected_resource_handler  # noqa: PLC0415 - the OAuth tree loads only when configured
 
         app_config.route_handlers.append(build_protected_resource_handler(self.config.protected_resource))
 

@@ -18,9 +18,7 @@ from litestar._openapi.plugin import OpenAPIPlugin
 from litestar.exceptions import ImproperlyConfiguredException, LitestarDeprecationWarning, LitestarWarning
 from litestar.handlers.base import BaseRouteHandler
 from litestar.handlers.http_handlers import HTTPRouteHandler
-from litestar.middleware._utils import (
-    build_exclude_path_pattern,  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized re.Pattern
-)
+from litestar.middleware._utils import build_exclude_path_pattern  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized re.Pattern
 from litestar.openapi.config import OpenAPIConfig
 from litestar.openapi.controller import OpenAPIController
 from litestar.openapi.plugins import OpenAPIRenderPlugin
