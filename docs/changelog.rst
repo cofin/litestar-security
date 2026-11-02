@@ -1,6 +1,51 @@
 Changelog
 =========
 
+0.7.0
+-----
+
+Added
+~~~~~
+
+* :class:`~litestar_security.providers.api_key.APIKeyConfig` adds
+  ``accept_authorization_bearer: bool = False`` (`#80 <https://github.com/cofin/litestar-security/issues/80>`__).
+  When enabled, :class:`~litestar_security.providers.api_key.APIKeyConfig` extracts
+  prefixed API keys from ``Authorization: Bearer <prefix>_<secret>`` when its
+  dedicated header is absent, coordinates prefix exclusion automatically with a
+  co-registered :class:`~litestar_security.providers.jwt.JWTAuthConfig` or
+  :class:`~litestar_security.providers.jwt.CompositeBearerConfig` Bearer JWT slot,
+  and projects both the ``APIKey`` header scheme and ``APIKeyBearer`` HTTP Bearer
+  scheme into OpenAPI.
+* :class:`~litestar_security.providers.iap.GoogleIAPClaims` adds
+  ``normalized_subject``, ``spiffe_id``, ``is_service_account``,
+  ``is_agent_identity``, and ``is_machine_principal`` properties
+  (`#81 <https://github.com/cofin/litestar-security/issues/81>`__) so application
+  identity resolvers can distinguish human Google Workspace assertions from
+  allowlisted Google Cloud service accounts (``*.gserviceaccount.com``) and
+  Vertex AI Agent Engine / GKE Workload Identity SPIFFE workload principals
+  (``principal://agents.global....``, ``principalSet://agents.global....``,
+  ``spiffe://...``).
+
+Fixed
+~~~~~
+
+* Pure ``litestar_security.accounts`` contracts, value records, exceptions,
+  :class:`~litestar_security.accounts.AESGCMSecretProtector`,
+  :class:`~litestar_security.accounts.StepUpService`,
+  :class:`~litestar_security.accounts.PasskeyService`,
+  :class:`~litestar_security.accounts.LocalAuth`,
+  :class:`~litestar_security.accounts.LocalAuthConfig`,
+  :class:`~litestar_security.accounts.LocalAuthService`, controller builders, and
+  ``litestar_security.testing`` in-memory stores and conformance harnesses no
+  longer require the optional ``argon2``, ``mfa`` (``pyotp``), or ``passkeys``
+  (``webauthn``) extras (`#75 <https://github.com/cofin/litestar-security/issues/75>`__).
+  Only the concrete third-party SDK adapter classes
+  (:class:`~litestar_security.accounts.Argon2PasswordHasher`,
+  :class:`~litestar_security.accounts.MFAService`,
+  :class:`~litestar_security.accounts.MFALoginService`, and
+  :class:`~litestar_security.accounts.PyWebAuthnVerifier`) require their
+  corresponding optional package.
+
 0.6.0
 -----
 
