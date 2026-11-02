@@ -47,7 +47,7 @@ repos:
         exclude: ^(docs|src/tests|tools)/
 
   - repo: https://github.com/ariebovenberg/slotscheck
-    rev: v0.20.1
+    rev: v0.21.0
     hooks:
       - id: slotscheck
         files: ^src/litestar_security/
