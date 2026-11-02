@@ -22,6 +22,7 @@ from litestar_security.accounts._internal import (
 from litestar_security.accounts._mfa import MFAService
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
+from litestar_security.typing import ensure_pyotp
 
 if TYPE_CHECKING:
     from litestar_security.accounts._records import LocalAccountState
@@ -115,6 +116,7 @@ class MFALoginService:
 
     def __post_init__(self) -> None:
         """Require an atomic store and bounded, explicit cryptographic inputs."""
+        ensure_pyotp()
         store = cast("object", self.store)
         mfa = cast("object", self.mfa)
         pepper = cast("object", self.pepper)

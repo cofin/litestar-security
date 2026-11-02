@@ -362,3 +362,188 @@ def test_iap_build_rejects_non_callable_clock_and_accepts_audience_set(
 
     with pytest.raises(ImproperlyConfiguredException, match="clock"):
         config.build(clock=None)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    (
+        "claims",
+        "expected_subject",
+        "expected_spiffe_id",
+        "expected_service_account",
+        "expected_agent_identity",
+        "expected_machine_principal",
+    ),
+    [
+        (
+            GoogleIAPClaims(
+                subject="accounts.google.com:123456", email="person@example.com", hosted_domain="example.com"
+            ),
+            "123456",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(
+                subject="accounts.google.com:10987654321", email="caller@my-project.iam.gserviceaccount.com"
+            ),
+            "10987654321",
+            None,
+            True,
+            False,
+            True,
+        ),
+        (
+            GoogleIAPClaims(subject="10987654321", email="12345-compute@developer.gserviceaccount.com"),
+            "10987654321",
+            None,
+            True,
+            False,
+            True,
+        ),
+        (
+            GoogleIAPClaims(subject="10987654321", email="direct@gserviceaccount.com"),
+            "10987654321",
+            None,
+            True,
+            False,
+            True,
+        ),
+        (
+            GoogleIAPClaims(
+                subject=(
+                    "accounts.google.com:principal://agents.global.org-123456.system.id.goog/"
+                    "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+                )
+            ),
+            (
+                "principal://agents.global.org-123456.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+            (
+                "principal://agents.global.org-123456.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+            False,
+            True,
+            True,
+        ),
+        (
+            GoogleIAPClaims(
+                subject=(
+                    "principalSet://agents.global.org-123456.system.id.goog/"
+                    "resources/aiplatform/projects/789/locations/us-central1"
+                )
+            ),
+            (
+                "principalSet://agents.global.org-123456.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1"
+            ),
+            (
+                "principalSet://agents.global.org-123456.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1"
+            ),
+            False,
+            True,
+            True,
+        ),
+        (
+            GoogleIAPClaims(subject="accounts.google.com:spiffe://trust.domain/ns/default/sa/agent"),
+            "spiffe://trust.domain/ns/default/sa/agent",
+            "spiffe://trust.domain/ns/default/sa/agent",
+            False,
+            True,
+            True,
+        ),
+        (
+            GoogleIAPClaims(
+                subject="accounts.google.com:spiffe://trust.domain/ns/default/sa/agent",
+                email="spoof@my-project.iam.gserviceaccount.com",
+                external_identity=GoogleIAPExternalIdentity(subject="external-1"),
+            ),
+            "spiffe://trust.domain/ns/default/sa/agent",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(
+                subject="accounts.google.com:123456",
+                email="user@my-project.iam.gserviceaccount.com",
+                hosted_domain="example.com",
+            ),
+            "123456",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (GoogleIAPClaims(subject="spiffe://"), "spiffe://", None, False, False, False),
+        (
+            GoogleIAPClaims(subject="spiffe://trust-domain-only"),
+            "spiffe://trust-domain-only",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(subject="spiffe:///missing-authority"),
+            "spiffe:///missing-authority",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(subject="spiffe://trust.domain//double-slash"),
+            "spiffe://trust.domain//double-slash",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(subject="principal://agents.global.org/path with space"),
+            "principal://agents.global.org/path with space",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(subject="https://example.com/workload"),
+            "https://example.com/workload",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (GoogleIAPClaims(subject="123", email="@gserviceaccount.com"), "123", None, False, False, False),
+        (GoogleIAPClaims(subject="123", email="a@b@gserviceaccount.com"), "123", None, False, False, False),
+        (GoogleIAPClaims(subject="123", email="caller@evil-gserviceaccount.com"), "123", None, False, False, False),
+        (
+            GoogleIAPClaims(subject="123", email="bad space@my-project.iam.gserviceaccount.com"),
+            "123",
+            None,
+            False,
+            False,
+            False,
+        ),
+    ],
+)
+def test_iap_claims_classify_human_service_account_and_spiffe_agent_identities(  # noqa: PLR0913, PLR0917 - parametrized claim matrix
+    claims: GoogleIAPClaims,
+    expected_subject: str,
+    expected_spiffe_id: str | None,
+    expected_service_account: bool,  # noqa: FBT001 - pytest parametrize fixture
+    expected_agent_identity: bool,  # noqa: FBT001 - pytest parametrize fixture
+    expected_machine_principal: bool,  # noqa: FBT001 - pytest parametrize fixture
+) -> None:
+    assert claims.normalized_subject == expected_subject
+    assert claims.spiffe_id == expected_spiffe_id
+    assert claims.is_service_account is expected_service_account
+    assert claims.is_agent_identity is expected_agent_identity
+    assert claims.is_machine_principal is expected_machine_principal

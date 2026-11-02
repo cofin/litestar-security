@@ -1,6 +1,6 @@
 """Deterministic conformance helpers for security integration test suites."""
 
-# ruff: noqa: EM101, TRY003, PLC0415  # conformance failures intentionally name their exact violated invariant; lazy optional imports
+# ruff: noqa: EM101, TRY003  # conformance failures intentionally name their exact violated invariant; lazy optional imports
 
 from base64 import urlsafe_b64encode
 from collections.abc import Awaitable, Callable, Mapping
@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import compare_digest
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
+from typing import Generic, Protocol, TypeVar, cast
 from urllib.parse import parse_qsl
 
 import httpx
@@ -22,16 +22,25 @@ from litestar_security.accounts import (
     LocalAccountCapabilities,
     LocalAccountState,
     LoginMethod,
+    MFALoginChallenge,
+    MFALoginChallengeStore,
+    MFAStore,
     NotificationCommand,
+    PasskeyAssertionStatus,
+    PasskeyCredential,
+    PasskeyStore,
     PasswordChangeOutcome,
     PasswordChangeStatus,
     PasswordCredentialState,
     PasswordResetOutcome,
     PasswordResetStatus,
+    PendingTOTPEnrollment,
+    ProtectedSecret,
     PurposeTokenCodec,
     PurposeTokenDelivery,
     RateLimitAttempt,
     RateLimiter,
+    RecoveryCodeDigest,
     RefreshFamilyContext,
     RefreshPreflightOutcome,
     RefreshReceiptReplay,
@@ -46,33 +55,22 @@ from litestar_security.accounts import (
     RevokeLoginMethodOutcome,
     RevokeLoginMethodStatus,
     RotateRefreshCommand,
+    SecretProtector,
     SecurityEvent,
     SessionRegistry,
+    StepUpGrantState,
+    StepUpStore,
     TokenIssue,
     TokenPurpose,
+    TOTPMethod,
+    TOTPPolicy,
     UserAuthSession,
+    UserVerification,
     VerificationOutcome,
     VerificationStatus,
+    WebAuthnChallenge,
+    WebAuthnChallengeStore,
 )
-
-if TYPE_CHECKING:
-    from litestar_security.accounts import (
-        MFALoginChallenge,
-        MFALoginChallengeStore,
-        MFAStore,
-        PasskeyAssertionStatus,
-        PasskeyCredential,
-        PasskeyStore,
-        PendingTOTPEnrollment,
-        ProtectedSecret,
-        RecoveryCodeDigest,
-        SecretProtector,
-        StepUpGrantState,
-        StepUpStore,
-        TOTPMethod,
-        WebAuthnChallenge,
-        WebAuthnChallengeStore,
-    )
 from litestar_security.authentication import AuthorizationResolution, IdentityResolution
 from litestar_security.context import AuthorizationSnapshot, CredentialRestrictions, Principal
 from litestar_security.providers.api_key import APIKeyState, APIKeyStore
@@ -2406,11 +2404,6 @@ async def assert_mfa_store_conformance(
     Raises:
         AssertionError: If a counter update is non-atomic or a recovery code can be reused.
     """
-    from litestar_security.typing import require_dependency
-
-    require_dependency("pyotp")
-    from litestar_security.accounts._mfa import PendingTOTPEnrollment, ProtectedSecret, RecoveryCodeDigest, TOTPPolicy
-
     ids = _resolve_conformance_account_ids(identifiers)
     store = factory()
     enrollment = PendingTOTPEnrollment(
@@ -2473,9 +2466,6 @@ async def assert_mfa_login_challenge_store_conformance(
     Raises:
         AssertionError: If a challenge can be replayed or survives a rejected binding or expiry.
     """
-    from litestar_security.typing import require_dependency
-
-    require_dependency("pyotp")
     store = factory()
     ids = _resolve_conformance_account_ids(identifiers)
     wrong_account = _conformance_mfa_login_challenge(b"m" * 32, account_id=ids.account)
@@ -2571,9 +2561,6 @@ async def assert_webauthn_challenge_store_conformance(
     Raises:
         AssertionError: If consume-once, binding, purpose, or expiry behavior is violated.
     """
-    from litestar_security.typing import require_dependency
-
-    require_dependency("webauthn")
     store = factory()
     ids = _resolve_conformance_account_ids(identifiers)
     wrong_binding = _conformance_webauthn_challenge(b"b" * 32, account_id=ids.account)
@@ -2791,11 +2778,6 @@ async def assert_passkey_store_conformance(
     Raises:
         AssertionError: If only one optimistic writer is not recorded or clone risk is lost.
     """
-    from litestar_security.typing import require_dependency
-
-    require_dependency("webauthn")
-    from litestar_security.accounts._passkeys import PasskeyAssertionStatus
-
     store = factory()
     ids = _resolve_conformance_account_ids(identifiers)
     credential = _conformance_passkey_credential(b"credential", account_id=ids.account)
@@ -2977,9 +2959,6 @@ async def assert_step_up_store_conformance(
     Raises:
         AssertionError: If a grant can be replayed, double-consumed, or accepted with an altered binding.
     """
-    from litestar_security.typing import require_dependency
-
-    require_dependency("pyotp")
     record = _conformance_step_up_record(principal_id=_resolve_conformance_account_ids(identifiers).principal)
     store = factory()
     await store.put(record)
@@ -3377,10 +3356,8 @@ def _different_digest(digest: bytes) -> bytes:
 
 def _conformance_mfa_login_challenge(
     digest: bytes, *, expires_at: datetime | None = None, account_id: str = "conformance-account"
-) -> "MFALoginChallenge":
+) -> MFALoginChallenge:
     """Build a fixed valid MFA-login challenge."""
-    from litestar_security.accounts._mfa_login import MFALoginChallenge
-
     return MFALoginChallenge(
         challenge_digest=digest,
         account_id=account_id,
@@ -3393,10 +3370,8 @@ def _conformance_mfa_login_challenge(
 
 def _conformance_webauthn_challenge(
     digest: bytes, *, expires_at: datetime | None = None, account_id: str = "conformance-account"
-) -> "WebAuthnChallenge":
+) -> WebAuthnChallenge:
     """Build a fixed valid WebAuthn challenge."""
-    from litestar_security.accounts._passkeys import UserVerification, WebAuthnChallenge
-
     return WebAuthnChallenge(
         challenge_digest=digest,
         binding_digest=b"b" * 32,
@@ -3446,10 +3421,8 @@ def _conformance_connect_token_record(
 
 def _conformance_passkey_credential(
     credential_id: bytes, *, account_id: str = "conformance-account"
-) -> "PasskeyCredential":
+) -> PasskeyCredential:
     """Build one fixed verified passkey credential."""
-    from litestar_security.accounts._passkeys import PasskeyCredential
-
     return PasskeyCredential(
         credential_id=credential_id,
         account_id=account_id,
@@ -3506,10 +3479,8 @@ def _conformance_oidc_logout_identity(token_id: str) -> OIDCLogoutIdentity:
     )
 
 
-def _conformance_step_up_record(*, principal_id: str = "conformance-principal") -> "StepUpGrantState":
+def _conformance_step_up_record(*, principal_id: str = "conformance-principal") -> StepUpGrantState:
     """Build one fixed exact-binding step-up grant."""
-    from litestar_security.accounts._mfa import StepUpGrantState
-
     return StepUpGrantState(
         grant_digest=b"g" * 32,
         transport_digest=b"t" * 32,
@@ -3728,8 +3699,6 @@ class InMemoryMFAStore:
             The active method only for the winning call.
         """
         async with self._lock:
-            from litestar_security.accounts._mfa import TOTPMethod
-
             enrollment = self.enrollments.pop(enrollment_id, None)
             if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
                 return None
@@ -3752,15 +3721,13 @@ class InMemoryMFAStore:
         enrollment_id: str,
         *,
         accepted_counter: int,
-        codes: "tuple[RecoveryCodeDigest, ...]",
+        codes: tuple[RecoveryCodeDigest, ...],
         login_method: LoginMethod,
         event: SecurityEvent,
         now: datetime,
-    ) -> "TOTPMethod | None":
+    ) -> TOTPMethod | None:
         """Atomically activate one enrollment and replace recovery codes."""
         async with self._lock:
-            from litestar_security.accounts._mfa import TOTPMethod
-
             enrollment = self.enrollments.get(enrollment_id)
             if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
                 return None
@@ -3960,8 +3927,6 @@ class InMemoryPasskeyStore:
             Structured record, conflict, or clone-risk status.
         """
         async with self._lock:
-            from litestar_security.accounts._passkeys import PasskeyAssertionStatus
-
             credential = self.credentials.get(credential_id)
             if (
                 credential is None
@@ -4111,37 +4076,3 @@ class InMemoryStepUpStore:
             ):
                 return None
             return record
-
-
-_OPTIONAL_TESTING_EXPORTS: Mapping[str, tuple[str, str, frozenset[str]]] = {
-    "MFAStore": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
-    "MFALoginChallengeStore": ("litestar_security.accounts._mfa_login", "mfa", frozenset({"pyotp"})),
-    "PasskeyStore": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
-    "WebAuthnChallengeStore": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
-    "StepUpStore": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
-    "StepUpCredential": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
-    "PasskeyCredential": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
-    "PasskeyAssertionStatus": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
-    "WebAuthnChallenge": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
-    "MFALoginChallenge": ("litestar_security.accounts._mfa_login", "mfa", frozenset({"pyotp"})),
-    "PendingTOTPEnrollment": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
-    "ProtectedSecret": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
-    "RecoveryCodeDigest": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
-    "SecretProtector": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
-    "StepUpGrantState": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
-    "TOTPMethod": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
-    "TOTPPolicy": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
-    "UserVerification": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
-}
-
-
-def __getattr__(name: str) -> object:
-    """Resolve optional testing exports only when their feature dependencies are available."""
-    from litestar_security._lazy import import_optional_attribute
-
-    target = _OPTIONAL_TESTING_EXPORTS.get(name)
-    if target is not None:
-        module_name, extras, dependencies = target
-        return import_optional_attribute(module_name, name, extras=extras, dependencies=dependencies)
-    message = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(message)

@@ -9,6 +9,52 @@ from litestar_security.accounts._access_tokens import (
     LocalAccessTokenIssuer,
     LocalBearerIdentityResolver,
 )
+from litestar_security.accounts._auth_service import LocalAuthService, forwarded_client_key, trusted_client_key
+from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
+from litestar_security.accounts._mfa import (
+    AESGCMSecretProtector,
+    MFAStore,
+    PendingTOTPEnrollment,
+    ProtectedSecret,
+    RecoveryCodeDigest,
+    RecoveryCodeGrant,
+    RecoveryCodePepper,
+    SecretProtector,
+    SecretProtectorKey,
+    StepUpCredential,
+    StepUpGrantState,
+    StepUpService,
+    StepUpStore,
+    TOTPMethod,
+    TOTPPolicy,
+    TOTPProvisioningGrant,
+)
+from litestar_security.accounts._mfa_login import MFALoginChallenge, MFALoginChallengeStore, MFARequired
+from litestar_security.accounts._passkeys import (
+    AttestationTrustMapper,
+    AuthenticationVerification,
+    CloneRiskPolicy,
+    PasskeyAssertionStatus,
+    PasskeyCredential,
+    PasskeyMetadata,
+    PasskeyService,
+    PasskeyStore,
+    RegistrationVerification,
+    UserVerification,
+    WebAuthnChallenge,
+    WebAuthnChallengeStore,
+    WebAuthnOptions,
+    WebAuthnVerificationError,
+    WebAuthnVerifier,
+)
+from litestar_security.accounts._passwords import (
+    PasswordHasher,
+    PasswordHashingUnavailableError,
+    PasswordPolicy,
+    PasswordPolicyDecision,
+    PasswordVerificationOutcome,
+)
+from litestar_security.accounts._profiles import LocalAuth, LocalAuthConfig, LocalAuthSecrets
 from litestar_security.accounts._purpose_tokens import (
     NotificationCommand,
     PendingTokenIssue,
@@ -65,6 +111,7 @@ from litestar_security.accounts._records import (
     VerificationStatus,
     normalize_identifier,
 )
+from litestar_security.accounts._recovery import PasswordChangeService, RecoveryTokenService
 from litestar_security.accounts._refresh import (
     REFRESH_RESPONSE_HEADERS,
     CreateRefreshFamilyCommand,
@@ -82,6 +129,7 @@ from litestar_security.accounts._refresh_tokens import (
     RefreshTokenProof,
     TokenPair,
 )
+from litestar_security.accounts._registration import RegistrationService, VerificationTokenService
 from litestar_security.accounts._sessions import (
     CreateSessionCommand,
     NativeSessionAuth,
@@ -138,57 +186,10 @@ from litestar_security.accounts.schemas import (
 from litestar_security.guards import AssuranceRequirement, AssuranceTrait
 
 if TYPE_CHECKING:
-    from litestar_security.accounts._auth_service import LocalAuthService, forwarded_client_key, trusted_client_key
-    from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
-    from litestar_security.accounts._mfa import (
-        AESGCMSecretProtector,
-        MFAService,
-        MFAStore,
-        PendingTOTPEnrollment,
-        ProtectedSecret,
-        RecoveryCodeDigest,
-        RecoveryCodeGrant,
-        RecoveryCodePepper,
-        SecretProtector,
-        SecretProtectorKey,
-        StepUpCredential,
-        StepUpGrantState,
-        StepUpService,
-        StepUpStore,
-        TOTPMethod,
-        TOTPPolicy,
-        TOTPProvisioningGrant,
-    )
-    from litestar_security.accounts._mfa_login import MFALoginChallenge, MFALoginChallengeStore, MFARequired
-    from litestar_security.accounts._passkeys import (
-        AttestationTrustMapper,
-        AuthenticationVerification,
-        CloneRiskPolicy,
-        PasskeyAssertionStatus,
-        PasskeyCredential,
-        PasskeyMetadata,
-        PasskeyService,
-        PasskeyStore,
-        PyWebAuthnVerifier,
-        RegistrationVerification,
-        UserVerification,
-        WebAuthnChallenge,
-        WebAuthnChallengeStore,
-        WebAuthnOptions,
-        WebAuthnVerificationError,
-        WebAuthnVerifier,
-    )
-    from litestar_security.accounts._passwords import (
-        Argon2PasswordHasher,
-        PasswordHasher,
-        PasswordHashingUnavailableError,
-        PasswordPolicy,
-        PasswordPolicyDecision,
-        PasswordVerificationOutcome,
-    )
-    from litestar_security.accounts._profiles import LocalAuth, LocalAuthConfig, LocalAuthSecrets
-    from litestar_security.accounts._recovery import PasswordChangeService, RecoveryTokenService
-    from litestar_security.accounts._registration import RegistrationService, VerificationTokenService
+    from litestar_security.accounts._mfa import MFAService
+    from litestar_security.accounts._mfa_login import MFALoginService
+    from litestar_security.accounts._passkeys import PyWebAuthnVerifier
+    from litestar_security.accounts._passwords import Argon2PasswordHasher
     from litestar_security.accounts.controllers import (
         LOCAL_AUTH_TAGS,
         build_local_auth_routes,
@@ -240,6 +241,7 @@ __all__ = (
     "LoginMethodStore",
     "MFALoginChallenge",
     "MFALoginChallengeStore",
+    "MFALoginService",
     "MFARequired",
     "MFAService",
     "MFAStore",
@@ -370,81 +372,18 @@ __all__ = (
     "trusted_client_key",
 )
 
-_MFA_EXPORTS = frozenset({
-    "AESGCMSecretProtector",
-    "MFAService",
-    "MFAStore",
-    "PendingTOTPEnrollment",
-    "ProtectedSecret",
-    "RecoveryCodeDigest",
-    "RecoveryCodePepper",
-    "RecoveryCodeGrant",
-    "SecretProtector",
-    "SecretProtectorKey",
-    "StepUpCredential",
-    "StepUpGrantState",
-    "StepUpService",
-    "StepUpStore",
-    "TOTPProvisioningGrant",
-    "TOTPMethod",
-    "TOTPPolicy",
-})
-_MFA_LOGIN_EXPORTS = frozenset({"MFALoginChallenge", "MFALoginChallengeStore", "MFARequired"})
-_PASSKEY_EXPORTS = frozenset({
-    "PasskeyAssertionStatus",
-    "AttestationTrustMapper",
-    "AuthenticationVerification",
-    "CloneRiskPolicy",
-    "WebAuthnVerificationError",
-    "PasskeyCredential",
-    "PasskeyService",
-    "PasskeyStore",
-    "PasskeyMetadata",
-    "PyWebAuthnVerifier",
-    "RegistrationVerification",
-    "UserVerification",
-    "WebAuthnChallenge",
-    "WebAuthnChallengeStore",
-    "WebAuthnOptions",
-    "WebAuthnVerifier",
-})
-_ARGON2_EXPORTS = frozenset({
-    "Argon2PasswordHasher",
-    "PasswordHasher",
-    "PasswordHashingUnavailableError",
-    "PasswordPolicy",
-    "PasswordPolicyDecision",
-    "PasswordVerificationOutcome",
-})
-_LOGIN_EXPORTS = frozenset({"PasswordLoginService", "PasswordReauthenticationService"})
-_REGISTRATION_EXPORTS = frozenset({"RegistrationService", "VerificationTokenService"})
-_RECOVERY_EXPORTS = frozenset({"PasswordChangeService", "RecoveryTokenService"})
-_AUTH_SERVICE_EXPORTS = frozenset({"LocalAuthService", "forwarded_client_key", "trusted_client_key"})
-_PROFILE_EXPORTS = frozenset({"LocalAuth", "LocalAuthConfig", "LocalAuthSecrets"})
 _CONTROLLER_EXPORTS = frozenset({
     "LOCAL_AUTH_TAGS",
     "build_local_auth_routes",
     "build_mfa_routes",
     "require_local_bearer",
 })
-_OPTIONAL_EXPORTS = (
-    dict.fromkeys(_MFA_EXPORTS, ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})))
-    | dict.fromkeys(_MFA_LOGIN_EXPORTS, ("litestar_security.accounts._mfa_login", "mfa", frozenset({"pyotp"})))
-    | dict.fromkeys(_PASSKEY_EXPORTS, ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})))
-    | dict.fromkeys(_ARGON2_EXPORTS, ("litestar_security.accounts._passwords", "argon2", frozenset({"argon2"})))
-    | dict.fromkeys(_LOGIN_EXPORTS, ("litestar_security.accounts._login", "argon2", frozenset({"argon2"})))
-    | dict.fromkeys(
-        _REGISTRATION_EXPORTS, ("litestar_security.accounts._registration", "argon2", frozenset({"argon2"}))
-    )
-    | dict.fromkeys(_RECOVERY_EXPORTS, ("litestar_security.accounts._recovery", "argon2", frozenset({"argon2"})))
-    | dict.fromkeys(
-        _AUTH_SERVICE_EXPORTS,
-        ("litestar_security.accounts._auth_service", "argon2,mfa", frozenset({"argon2", "pyotp"})),
-    )
-    | dict.fromkeys(
-        _PROFILE_EXPORTS, ("litestar_security.accounts._profiles", "argon2,mfa", frozenset({"argon2", "pyotp"}))
-    )
-)
+_OPTIONAL_EXPORTS = {
+    "Argon2PasswordHasher": ("litestar_security.accounts._passwords", "argon2", frozenset({"argon2"})),
+    "MFALoginService": ("litestar_security.accounts._mfa_login", "mfa", frozenset({"pyotp"})),
+    "MFAService": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
+    "PyWebAuthnVerifier": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
+}
 
 
 def __getattr__(name: str) -> Any:  # noqa: ANN401 - module lazy-export hook is dynamically typed

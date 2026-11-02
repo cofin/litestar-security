@@ -7,6 +7,7 @@ from threading import get_ident
 
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException
+from litestar.openapi.spec import SecurityScheme
 
 import litestar_security.workers as workers_module
 from litestar_security.authentication import (
@@ -356,3 +357,67 @@ async def test_usage_buffer_coalesces_bounds_flushes_and_isolates_sink_failure()
     sink.fail = True
     await usage.close()
     assert "security.api_key.usage_failure" in metrics.increments
+
+
+_KEY_A = "lsk_a2tra2tra2tra2tr_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+_KEY_B = "lsk_bGxsbGxsbGxsbGxs_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+
+
+@pytest.mark.parametrize(
+    ("headers", "coexists_with_bearer_slot", "expected"),
+    [
+        ([], False, NoCredentials()),
+        ([(b"authorization", f"Bearer {_KEY_A}".encode())], False, PresentedCredential(_KEY_A)),
+        ([(b"authorization", f"bEaReR {_KEY_A}".encode())], False, PresentedCredential(_KEY_A)),
+        ([(b"authorization", b"Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig")], False, NoCredentials()),
+        (
+            [
+                (b"x-api-key", _KEY_A.encode()),
+                (b"authorization", b"Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig"),
+            ],
+            False,
+            PresentedCredential(_KEY_A),
+        ),
+        (
+            [(b"x-api-key", _KEY_A.encode()), (b"authorization", f"Bearer {_KEY_A}".encode())],
+            False,
+            PresentedCredential(_KEY_A),
+        ),
+        (
+            [(b"x-api-key", _KEY_A.encode()), (b"authorization", f"Bearer {_KEY_B}".encode())],
+            False,
+            InvalidCredentials(),
+        ),
+        (
+            [(b"authorization", f"Bearer {_KEY_A}".encode()), (b"Authorization", f"Bearer {_KEY_A}".encode())],
+            False,
+            InvalidCredentials(),
+        ),
+        ([(b"authorization", b"Bearer \xff")], False, InvalidCredentials()),
+        ([(b"authorization", b"Bearer lsk_control\x7f")], False, InvalidCredentials()),
+        ([(b"authorization", b"Bearer lsk_" + b"A" * 61)], False, InvalidCredentials()),
+        ([(b"authorization", b"Basic dXNlcjpwYXNz")], False, InvalidCredentials()),
+        ([(b"authorization", b"Basic dXNlcjpwYXNz")], True, NoCredentials()),
+        ([(b"x-api-key", _KEY_A.encode()), (b"authorization", b"Basic dXNlcjpwYXNz")], True, InvalidCredentials()),
+    ],
+)
+def test_api_key_slot_extracts_authorization_bearer_and_validates_coexistence(
+    headers: list[tuple[bytes, bytes]],
+    coexists_with_bearer_slot: bool,  # noqa: FBT001 - pytest parametrize fixture
+    expected: object,
+) -> None:
+    store = _MemoryAPIKeyStore()
+    slot, mechanism, _ = APIKeyConfig(store=store, pepper=_PEPPER, accept_authorization_bearer=True).build(
+        _Resolver(), clock=lambda: _NOW
+    )
+    if coexists_with_bearer_slot:
+        slot = replace(slot, coexists_with_bearer_slot=True)  # type: ignore[call-overload]
+
+    extraction = slot.extract(type("Connection", (), {"scope": {"headers": headers}})())
+
+    assert extraction == expected
+    assert mechanism.additional_security_schemes == {
+        "APIKeyBearer": SecurityScheme(type="http", scheme="bearer", bearer_format="lsk_<key_id>_<secret>")
+    }
+    default_mechanism = APIKeyConfig(store=store, pepper=_PEPPER).build(_Resolver(), clock=lambda: _NOW)[1]
+    assert default_mechanism.additional_security_schemes == {}

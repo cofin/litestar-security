@@ -10,7 +10,6 @@ from hmac import new as new_hmac
 from secrets import token_bytes, token_urlsafe
 from typing import Literal, Protocol, cast, runtime_checkable
 
-import pyotp
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from litestar.exceptions import ImproperlyConfiguredException
 
@@ -43,6 +42,7 @@ from litestar_security.accounts._stores import LoginMethodStore
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
 from litestar_security.schema import WireStruct
+from litestar_security.typing import ensure_pyotp, pyotp
 
 __all__ = (
     "AESGCMSecretProtector",
@@ -613,6 +613,7 @@ class MFAService:
 
     def __post_init__(self) -> None:
         """Validate structural capabilities and stable issuer configuration."""
+        ensure_pyotp()
         store = cast("object", self.store)
         secret_protector = cast("object", self.secret_protector)
         login_methods = cast("object", self.login_methods)
@@ -1057,7 +1058,7 @@ def _validate_secret(secret: str) -> None:
         raise ValueError
 
 
-def _totp(secret: str, policy: TOTPPolicy) -> pyotp.TOTP:
+def _totp(secret: str, policy: TOTPPolicy) -> "pyotp.TOTP":
     return pyotp.TOTP(
         secret, digits=policy.digits, digest=_ALGORITHMS[policy.algorithm], interval=policy.period_seconds
     )

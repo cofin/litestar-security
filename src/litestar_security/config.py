@@ -136,12 +136,7 @@ class MFAConfig:
 
     def __post_init__(self) -> None:
         """Build project-owned services from explicit application ports."""
-        from litestar_security.accounts import (  # noqa: PLC0415 - account services load only when configured
-            MFALoginChallengeStore,
-            MFAService,
-            StepUpService,
-            StepUpStore,
-        )
+        from litestar_security.accounts import MFALoginChallengeStore, MFAService, StepUpService, StepUpStore  # noqa: PLC0415 - account services load only when configured
 
         mfa_service_kwargs: dict[str, object] = {
             "store": self.store,
@@ -209,11 +204,7 @@ class PasskeyConfig:
 
     def __post_init__(self) -> None:
         """Freeze relying-party origins and build the project-owned service."""
-        from litestar_security.accounts import (  # noqa: PLC0415 - account services load only when configured
-            PasskeyService,
-            StepUpService,
-            StepUpStore,
-        )
+        from litestar_security.accounts import PasskeyService, StepUpService, StepUpStore  # noqa: PLC0415 - account services load only when configured
 
         object.__setattr__(self, "origins", tuple(self.origins))
         object.__setattr__(self, "algorithms", tuple(self.algorithms))
@@ -426,9 +417,7 @@ class SecurityConfig(Generic[UserT]):
     def _validate_protected_resource(self) -> None:
         if self.protected_resource is None:
             return
-        from litestar_security.providers.oauth import (  # noqa: PLC0415 - the OAuth tree loads only when configured
-            ProtectedResourceConfig,
-        )
+        from litestar_security.providers.oauth import ProtectedResourceConfig  # noqa: PLC0415 - the OAuth tree loads only when configured
 
         if not isinstance(cast("object", self.protected_resource), ProtectedResourceConfig):
             msg = "Protected resource metadata must be a ProtectedResourceConfig"

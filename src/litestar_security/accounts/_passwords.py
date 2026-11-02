@@ -7,10 +7,6 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
 from anyio import to_thread
-from argon2 import PasswordHasher as _Argon2Engine
-from argon2 import extract_parameters
-from argon2.exceptions import Argon2Error, InvalidHashError, VerificationError, VerifyMismatchError
-from argon2.low_level import Type as Argon2Type
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts._records import (
@@ -18,12 +14,22 @@ from litestar_security.accounts._records import (
     PasswordVerificationStatus,
     normalize_identifier,
 )
+from litestar_security.typing import (
+    Argon2Error,
+    Argon2Type,
+    InvalidHashError,
+    VerificationError,
+    VerifyMismatchError,
+    ensure_argon2,
+    extract_parameters,
+)
+from litestar_security.typing import Argon2PasswordHasherEngine as _Argon2Engine
 from litestar_security.workers import WorkerLimits
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from argon2 import Parameters
+    from litestar_security.typing import Argon2Parameters
 
 __all__ = (
     "Argon2PasswordHasher",
@@ -195,10 +201,11 @@ class Argon2PasswordHasher:
     hash_len: int = 32
     worker_limits: WorkerLimits = field(default_factory=WorkerLimits, repr=False, compare=False)
     dummy_hash: str = field(default=_DEFAULT_DUMMY_HASH, repr=False, compare=False)
-    _engine: _Argon2Engine = field(init=False, repr=False, compare=False)
+    _engine: "_Argon2Engine" = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate bounded parameters and one policy-matched precomputed dummy."""
+        ensure_argon2()
         _validate_argon2_configuration(
             memory_cost=self.memory_cost,
             time_cost=self.time_cost,
@@ -238,6 +245,7 @@ class Argon2PasswordHasher:
             A hasher whose dummy hash matches its own parameters, so verifying an
             absent account costs the same as verifying a real one.
         """
+        ensure_argon2()
         workers = WorkerLimits() if worker_limits is None else worker_limits
         _validate_argon2_configuration(
             memory_cost=memory_cost,
@@ -420,7 +428,7 @@ def _validate_argon2_configuration(  # noqa: PLR0913 - explicit configuration su
         raise ImproperlyConfiguredException(detail=msg)
 
 
-def _build_argon2_engine(hasher: Argon2PasswordHasher) -> _Argon2Engine:
+def _build_argon2_engine(hasher: Argon2PasswordHasher) -> "_Argon2Engine":
     try:
         return _Argon2Engine(
             memory_cost=hasher.memory_cost,
@@ -435,7 +443,7 @@ def _build_argon2_engine(hasher: Argon2PasswordHasher) -> _Argon2Engine:
         raise ImproperlyConfiguredException(detail=msg) from None
 
 
-def _safe_argon2_parameters(encoded_hash: object, worker_limits: WorkerLimits) -> "Parameters | None":
+def _safe_argon2_parameters(encoded_hash: object, worker_limits: WorkerLimits) -> "Argon2Parameters | None":
     if not isinstance(encoded_hash, str):
         return None
     try:
@@ -459,7 +467,7 @@ def _safe_argon2_parameters(encoded_hash: object, worker_limits: WorkerLimits) -
     return parameters
 
 
-def _parameters_match_hasher(parameters: "Parameters", hasher: Argon2PasswordHasher) -> bool:
+def _parameters_match_hasher(parameters: "Argon2Parameters", hasher: Argon2PasswordHasher) -> bool:
     return (
         parameters.memory_cost,
         parameters.time_cost,

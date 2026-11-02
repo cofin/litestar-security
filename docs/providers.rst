@@ -88,6 +88,80 @@ application owns shared ``OIDCDiscoveryClient`` and ``JWKSProvider`` resources.
 The returned provider owns only its OAuth HTTP client; closing it does not close
 the shared discovery or JWKS resources.
 
+Google IAP human, service account, and agent identities
+-------------------------------------------------------
+
+When Google Identity-Aware Proxy fronts an application used by both Google
+Workspace users and non-interactive callers (such as Cloud Run service accounts,
+Vertex AI Agent Engine reasoning engines, or GKE Workload Identity workloads),
+``GoogleIAPClaims`` exposes structured classification helpers so your
+``IdentityResolver[GoogleIAPClaims, User]`` does not have to parse ``sub``
+prefixes or ``email`` suffixes manually:
+
+* ``claims.normalized_subject`` strips the leading ``accounts.google.com:``
+  prefix added to Google-issued IAP assertions.
+* ``claims.is_service_account`` is ``True`` only for Google-issued assertions
+  (no ``external_identity`` or ``hosted_domain``) whose ``email`` ends with
+  ``gserviceaccount.com`` or ``.gserviceaccount.com``.
+* ``claims.spiffe_id`` returns the validated ``principal://agents.global....``,
+  ``principalSet://agents.global....``, or ``spiffe://...`` URI when present
+  (and ``None`` for human users, service accounts, or GCIP external identities).
+* ``claims.is_agent_identity`` and ``claims.is_machine_principal`` classify
+  SPIFFE / Agent Engine workloads and combined non-human principals.
+
+.. code-block:: python
+
+   from litestar_security.providers.iap import GoogleIAPClaims
+
+
+   class IAPPrincipalResolver:
+       def __init__(
+           self,
+           *,
+           allowed_domains: frozenset[str],
+           allowed_service_accounts: frozenset[str],
+           allowed_spiffe_ids: frozenset[str],
+       ) -> None:
+           self._allowed_domains = allowed_domains
+           self._allowed_service_accounts = allowed_service_accounts
+           self._allowed_spiffe_ids = allowed_spiffe_ids
+
+       async def resolve(self, claims: GoogleIAPClaims) -> dict[str, str] | None:
+           if claims.hosted_domain in self._allowed_domains and claims.email:
+               return {"id": claims.normalized_subject, "email": claims.email, "kind": "human"}
+           if claims.is_service_account and claims.email in self._allowed_service_accounts:
+               return {"id": claims.normalized_subject, "email": claims.email, "kind": "service_account"}
+           if claims.spiffe_id in self._allowed_spiffe_ids and claims.spiffe_id is not None:
+               return {"id": claims.spiffe_id, "kind": "agent"}
+           return None
+
+API key Bearer extraction alongside JWTs
+----------------------------------------
+
+By default, ``APIKeyConfig`` reads keys only from its dedicated request header
+(such as ``X-API-Key``). When CLI, SDK, or Model Context Protocol (MCP) clients
+send prefixed API keys through ``Authorization: Bearer <prefix>_<secret>``,
+enable ``accept_authorization_bearer=True``:
+
+.. code-block:: python
+
+   from litestar_security.providers.api_key import APIKeyConfig
+
+
+   api_keys = APIKeyConfig(
+       store=api_key_store,
+       identity_resolver=api_key_resolver,
+       pepper=api_key_pepper,
+       accept_authorization_bearer=True,
+   )
+
+When ``accept_authorization_bearer=True`` is combined with ``JWTAuthConfig`` or
+``CompositeBearerConfig`` in the same ``SecurityConfig``, ``litestar-security``
+automatically routes ``Authorization: Bearer <prefix>_...`` credentials to the
+API key slot while non-prefixed Bearer tokens continue through the JWT slot, and
+projects both the header ``APIKey`` scheme and ``APIKeyBearer`` HTTP Bearer
+scheme into OpenAPI.
+
 Tenant authorization
 --------------------
 

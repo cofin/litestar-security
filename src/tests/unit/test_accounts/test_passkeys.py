@@ -1,6 +1,7 @@
 """Unit coverage for passkey registration and authentication ceremonies."""
 
 import json
+import sys
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -672,3 +673,27 @@ async def test_testing_stores_cover_expiry_update_and_clone_risk_outcomes() -> N
         )
         is accounts_module.PasskeyAssertionStatus.CLONE_RISK
     )
+
+
+async def test_pywebauthn_verifier_requires_passkeys_extra_while_custom_verifier_runs_without_webauthn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "webauthn", None)
+    monkeypatch.setitem(sys.modules, "webauthn.helpers", None)
+    monkeypatch.setitem(sys.modules, "webauthn.helpers.structs", None)
+
+    expected = r"litestar-security feature requires the \[passkeys\] extra: pip install 'litestar-security\[passkeys\]'"
+    with pytest.raises(ImportError, match=expected):
+        passkeys_module.PyWebAuthnVerifier()
+    with pytest.raises(ImportError, match=expected):
+        passkeys_module.PasskeyService(
+            store=PasskeyStore(),
+            challenge_store=WebAuthnChallengeStore(),
+            rp_id="example.com",
+            rp_name="Example",
+            origins=("https://example.com",),
+        )
+
+    service = build_passkey_service()
+    options = await service.begin_registration("account-1", user_name="person@example.com", binding=b"binding")
+    assert isinstance(options, accounts_module.WebAuthnOptions)

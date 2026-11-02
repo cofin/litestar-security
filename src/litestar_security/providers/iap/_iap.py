@@ -42,6 +42,10 @@ UserT = TypeVar("UserT")
 _IAP_ISSUER = "https://cloud.google.com/iap"
 _IAP_JWKS_URI = "https://www.gstatic.com/iap/verify/public_key-jwk"
 _IAP_HEADER = "X-Goog-IAP-JWT-Assertion"
+_IAP_SUBJECT_PREFIX = "accounts.google.com:"
+_SPIFFE_URI_PREFIXES = ("principal://agents.global.", "principalSet://agents.global.", "spiffe://")
+_SERVICE_ACCOUNT_DOMAIN = "gserviceaccount.com"
+_SERVICE_ACCOUNT_DOMAIN_SUFFIX = ".gserviceaccount.com"
 _MAXIMUM_ASSERTION_BYTES = 16_384
 _MAXIMUM_ASSERTION_LIFETIME = timedelta(minutes=10)
 _MAXIMUM_SIGN_IN_ATTRIBUTES = 32
@@ -72,6 +76,59 @@ class GoogleIAPClaims:
     access_levels: tuple[str, ...] = ()
     device_id: str | None = None
     external_identity: GoogleIAPExternalIdentity | None = None
+
+    @property
+    def normalized_subject(self) -> str:
+        """Return ``subject`` with the leading ``accounts.google.com:`` prefix stripped."""
+        return self.subject.removeprefix(_IAP_SUBJECT_PREFIX)
+
+    @property
+    def spiffe_id(self) -> str | None:
+        """Return the SPIFFE or Vertex AI Agent Engine principal URI when present.
+
+        Returns ``None`` when ``external_identity`` is present (GCIP assertions)
+        or when ``normalized_subject`` is not a well-formed SPIFFE / Agent Engine URI.
+        """
+        if self.external_identity is not None:
+            return None
+        candidate = self.normalized_subject
+        if not candidate.startswith(_SPIFFE_URI_PREFIXES) or self._contains_control_or_whitespace(candidate):
+            return None
+        _, _, remainder = candidate.partition("://")
+        authority, slash, workload_path = remainder.partition("/")
+        if not authority or slash != "/" or not workload_path or workload_path.startswith("/") or "//" in workload_path:
+            return None
+        return candidate
+
+    @property
+    def is_service_account(self) -> bool:
+        """Return ``True`` when the assertion represents a Google Cloud service account."""
+        if self.external_identity is not None or self.hosted_domain is not None or self.email is None:
+            return False
+        if self._contains_control_or_whitespace(self.email):
+            return False
+        local_part, separator, domain = self.email.partition("@")
+        if not local_part or separator != "@" or "@" in domain:
+            return False
+        normalized_domain = domain.lower()
+        return normalized_domain == _SERVICE_ACCOUNT_DOMAIN or normalized_domain.endswith(
+            _SERVICE_ACCOUNT_DOMAIN_SUFFIX
+        )
+
+    @property
+    def is_agent_identity(self) -> bool:
+        """Return ``True`` when the assertion represents a SPIFFE or Agent Engine identity."""
+        return self.spiffe_id is not None
+
+    @property
+    def is_machine_principal(self) -> bool:
+        """Return ``True`` when the assertion represents a service account or agent identity."""
+        return self.is_service_account or self.is_agent_identity
+
+    @staticmethod
+    def _contains_control_or_whitespace(value: str) -> bool:
+        """Return ``True`` when ``value`` contains whitespace or non-printable control characters."""
+        return any(not character.isprintable() or character.isspace() for character in value)
 
 
 @dataclass(frozen=True, slots=True)

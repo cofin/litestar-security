@@ -240,6 +240,10 @@ def test_record_rejects_invalid_storage_state(overrides: dict[str, object]) -> N
         {"prefix": ""},
         {"prefix": "bad_prefix"},
         {"header_name": "bad header"},
+        {"header_name": "Authorization"},
+        {"header_name": "authorization"},
+        {"accept_authorization_bearer": 1},
+        {"accept_authorization_bearer": "true"},
         {"usage_write_interval": timedelta(0)},
         {"usage_buffer_capacity": 0},
         {"usage_buffer_capacity": 1_000_001},
@@ -264,7 +268,15 @@ def test_secret_bearing_values_are_redacted() -> None:
     assert _PEPPER.hex() not in repr(config)
     assert issued.as_dict() == {"key_id": issued.key_id, "value": "<redacted>"}
     assert record.as_dict()["digest"] == "<redacted>"
+    assert config.accept_authorization_bearer is False
     assert config.as_dict()["pepper"] == "<redacted>"
+    assert config.as_dict()["accept_authorization_bearer"] is False
+    assert (
+        APIKeyConfig(store=build_api_key_store(), pepper=_PEPPER, accept_authorization_bearer=True).as_dict()[
+            "accept_authorization_bearer"
+        ]
+        is True
+    )
 
 
 def test_codec_rejects_invalid_entropy_without_leaking_detail() -> None:

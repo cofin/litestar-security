@@ -38,7 +38,7 @@ license = { text = "MIT" }
 name = "litestar-security"
 readme = "README.md"
 requires-python = ">=3.10"
-version = "0.6.0"
+version = "0.7.0"
 
 [project.optional-dependencies]
 argon2 = ["argon2-cffi>=25.1,<26"]
@@ -67,7 +67,7 @@ packages = ["src/litestar_security"]
 [tool.bumpversion]
 allow_dirty = true
 commit = false
-current_version = "0.6.0"
+current_version = "0.7.0"
 ignore_missing_files = false
 ignore_missing_version = false
 parse = """(?x)
@@ -167,6 +167,7 @@ preview-features = ["index-exclude-newer"]
 
 [tool.uv.exclude-newer-package]
 advanced-alchemy = "2099-01-01T00:00:00Z"
+bump-my-version = "2026-10-16T07:57:28Z"
 litestar = "2099-01-01T00:00:00Z"
 litestar-asyncapi = "2099-01-01T00:00:00Z"
 litestar-asyncpg = "2099-01-01T00:00:00Z"
@@ -181,6 +182,7 @@ litestar-saq = "2099-01-01T00:00:00Z"
 litestar-security = "2099-01-01T00:00:00Z"
 litestar-vite = "2099-01-01T00:00:00Z"
 polyfactory = "2099-01-01T00:00:00Z"
+prek = "2026-10-14T08:17:43Z"
 pytest-databases = "2099-01-01T00:00:00Z"
 ruff = "2099-01-01T00:00:00Z"
 sqlglot = "2099-01-01T00:00:00Z"

@@ -228,6 +228,7 @@ def _selector_matches(selector: BearerSlotSelector, route: UnverifiedJWTRoute) -
 @dataclass(slots=True)
 class _BearerCredentialSlot:
     maximum_token_bytes: int
+    excluded_prefixes: tuple[str, ...] = ()
     name: str = field(default="authorization.bearer", init=False)
 
     def extract(  # noqa: PLR0911 - preserve explicit sanitized outcomes at each security boundary
@@ -259,6 +260,8 @@ class _BearerCredentialSlot:
             or len(token.encode("ascii")) > self.maximum_token_bytes
         ):
             return InvalidCredentials()
+        if token.startswith(self.excluded_prefixes):
+            return NoCredentials()
         return PresentedCredential(token)
 
 

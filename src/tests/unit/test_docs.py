@@ -70,9 +70,7 @@ def test_the_registry_is_read_only() -> None:
 
 def test_the_controllers_file_their_routes_under_registered_display_names() -> None:
     """Every tag a generated controller declares resolves to a registry entry."""
-    from litestar_security.accounts.controllers._local import (  # noqa: PLC0415 - private import under test
-        LOCAL_AUTH_TAGS,
-    )
+    from litestar_security.accounts.controllers._local import LOCAL_AUTH_TAGS  # noqa: PLC0415 - private import under test
     from litestar_security.accounts.controllers._mfa import _MFA_TAG, _PASSKEY_TAG, _STEP_UP_TAG  # noqa: PLC0415
     from litestar_security.providers.oauth._routes import _OAUTH_PROVIDERS_TAG, _OIDC_LOGOUT_TAG  # noqa: PLC0415
 

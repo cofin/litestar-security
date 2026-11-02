@@ -22,12 +22,8 @@ from litestar.exceptions import (
     ServiceUnavailableException,
     TooManyRequestsException,
 )
-from litestar.exceptions.responses import (
-    create_exception_response,  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized Response
-)
-from litestar.middleware._internal.exceptions.middleware import (
-    get_exception_handler,  # pyright: ignore[reportUnknownVariableType] - Litestar types the resolved handler unparameterized
-)
+from litestar.exceptions.responses import create_exception_response  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized Response
+from litestar.middleware._internal.exceptions.middleware import get_exception_handler  # pyright: ignore[reportUnknownVariableType] - Litestar types the resolved handler unparameterized
 from litestar.params import Body, FromPath, FromQuery, JSONBody, QueryParameter, SkipValidation
 from litestar.response import Redirect
 from litestar.status_codes import (
@@ -45,7 +41,7 @@ from litestar.utils.scope.state import ScopeState
 from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
 from litestar_security._dto import apply_wire_dtos
 from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
-from litestar_security._typing import PYOTP_INSTALLED
+from litestar_security.accounts import StepUpCredential
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import AuthenticationEvidence, Principal
 from litestar_security.providers.oauth._accounts import (
@@ -76,21 +72,7 @@ from litestar_security.providers.oauth._transactions import (
 from litestar_security.schema import WirePolicy, WireStruct
 
 if TYPE_CHECKING:
-    from litestar_security.accounts import RateLimitGuard, StepUpCredential, StepUpService
-elif PYOTP_INSTALLED:
-    from litestar_security.accounts import StepUpCredential
-else:
-
-    class StepUpCredential(WireStruct, frozen=True, kw_only=True):  # type: ignore[no-redef]
-        """Mirror the MFA step-up credential so the wire contract stays whole without pyotp."""
-
-        token: str
-        purpose: str
-        expires_at: datetime
-
-        def __repr__(self) -> str:
-            """Redact the reveal-once credential."""
-            return f"{type(self).__name__}(token=<redacted>, purpose={self.purpose!r}, expires_at={self.expires_at!r})"
+    from litestar_security.accounts import RateLimitGuard, StepUpService
 
 
 __all__ = (
@@ -241,7 +223,7 @@ class OAuthReauthenticationOutcome(WireStruct, frozen=True, kw_only=True):
     account_id: str
     provider: str
     provider_account_id: str
-    credential: "StepUpCredential"
+    credential: StepUpCredential
 
 
 class OAuthLogout(msgspec.Struct, frozen=True, kw_only=True):
@@ -1152,10 +1134,7 @@ class OIDCLogoutLifecycleService:
                 any forwarding header.
             clock: Source of the current aware time.
         """
-        from litestar_security.accounts import (  # noqa: PLC0415 - a module import would cycle back through providers
-            RateLimitGuard,
-            trusted_client_key,
-        )
+        from litestar_security.accounts import RateLimitGuard, trusted_client_key  # noqa: PLC0415 - a module import would cycle back through providers
 
         if (
             not provider_issuers
@@ -1219,9 +1198,7 @@ class OIDCLogoutLifecycleService:
                 unavailable. An outage never removes the limit or the binding.
         """
         if self.rate_limits is not None:
-            from litestar_security.accounts import (  # noqa: PLC0415 - a module import would cycle back through providers
-                RateLimited,
-            )
+            from litestar_security.accounts import RateLimited  # noqa: PLC0415 - a module import would cycle back through providers
 
             limited = await self.rate_limits.check(
                 OIDC_FRONTCHANNEL_LOGOUT,

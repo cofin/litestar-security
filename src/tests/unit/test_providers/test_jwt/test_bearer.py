@@ -3,6 +3,7 @@
 import base64
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -304,3 +305,27 @@ def test_composite_bearer_requires_a_callable_clock() -> None:
 
     with pytest.raises(ImproperlyConfiguredException, match="clock must be callable"):
         composite.build(_Resolver(), clock=None)  # type: ignore[arg-type]
+
+
+def test_composite_bearer_slot_skips_excluded_prefixes() -> None:
+    physical_slot, _ = CompositeBearerConfig(
+        mechanism_name="bearer",
+        slots=(
+            BearerTokenSlot(
+                name="local",
+                selector=BearerSlotSelector(issuers=frozenset({_JWT_ISSUER})),
+                verifier=_recording_jwt_verifier(InvalidCredentials()),  # type: ignore[arg-type]
+            ),
+        ),
+    ).build(_Resolver())
+    configured_slot = replace(physical_slot, excluded_prefixes=("lsk_",))  # type: ignore[call-overload]
+
+    assert (
+        configured_slot.extract(
+            SimpleNamespace(scope={"headers": [(b"authorization", b"Bearer lsk_key_secret")]})  # type: ignore[arg-type]
+        )
+        == NoCredentials()
+    )
+    assert configured_slot.extract(
+        SimpleNamespace(scope={"headers": [(b"authorization", b"Bearer compact.jwt.value")]})  # type: ignore[arg-type]
+    ) == PresentedCredential("compact.jwt.value")

@@ -202,9 +202,21 @@ class APIKeyService:
 class _APIKeyCredentialSlot:
     header_name: str
     maximum_value_bytes: int
+    accept_authorization_bearer: bool = False
+    bearer_prefix: str = ""
+    coexists_with_bearer_slot: bool = False
     name: str = field(default=_SLOT_NAME, init=False)
 
     def extract(self, connection: ASGIConnection[Any, Any, Any, Any]) -> CredentialExtraction[str]:
+        header_extraction = self._extract_header(connection)
+        if isinstance(header_extraction, InvalidCredentials):
+            return header_extraction
+        header_credential = header_extraction.value if isinstance(header_extraction, PresentedCredential) else None
+        if not self.accept_authorization_bearer:
+            return header_extraction
+        return self._extract_authorization_bearer(connection, header_credential=header_credential)
+
+    def _extract_header(self, connection: ASGIConnection[Any, Any, Any, Any]) -> CredentialExtraction[str]:
         values = tuple(
             value
             for name, value in connection.scope["headers"]
@@ -224,6 +236,40 @@ class _APIKeyCredentialSlot:
         ):
             return InvalidCredentials()
         return PresentedCredential(value)
+
+    def _extract_authorization_bearer(  # noqa: PLR0911 - explicit boundary returns keep failure modes distinct
+        self, connection: ASGIConnection[Any, Any, Any, Any], *, header_credential: str | None
+    ) -> CredentialExtraction[str]:
+        auth_values = tuple(value for name, value in connection.scope["headers"] if name.lower() == b"authorization")
+        if not auth_values:
+            return PresentedCredential(header_credential) if header_credential is not None else NoCredentials()
+        if len(auth_values) != 1:
+            return InvalidCredentials()
+        try:
+            auth_text = auth_values[0].decode("ascii")
+        except (AttributeError, UnicodeDecodeError):
+            return InvalidCredentials()
+        if not auth_text or any(
+            ord(character) < _ASCII_CONTROL_LIMIT or ord(character) == _ASCII_DELETE for character in auth_text
+        ):
+            return InvalidCredentials()
+        scheme, separator, token = auth_text.partition(" ")
+        if (
+            separator != " "
+            or scheme.lower() != "bearer"
+            or not token
+            or any(character.isspace() for character in token)
+        ):
+            if header_credential is not None:
+                return InvalidCredentials()
+            return NoCredentials() if self.coexists_with_bearer_slot else InvalidCredentials()
+        if token.startswith(self.bearer_prefix):
+            if len(token) > self.maximum_value_bytes:
+                return InvalidCredentials()
+            if header_credential is not None and header_credential != token:
+                return InvalidCredentials()
+            return PresentedCredential(token)
+        return PresentedCredential(header_credential) if header_credential is not None else NoCredentials()
 
 
 @dataclass(slots=True)
@@ -289,16 +335,29 @@ def build_api_key_runtime(  # noqa: PLR0913 - explicit runtime dependencies are 
         else None
     )
     slot = _APIKeyCredentialSlot(
-        header_name=config.header_name, maximum_value_bytes=len(config.prefix) + 1 + 16 + 1 + 43
+        header_name=config.header_name,
+        maximum_value_bytes=len(config.prefix) + 1 + 16 + 1 + 43,
+        accept_authorization_bearer=config.accept_authorization_bearer,
+        bearer_prefix=f"{config.prefix}_",
     )
     authenticator = _APIKeyAuthenticator(
         config=config, codec=codec, clock=clock, usage=usage, participates_by_default=participates_by_default
+    )
+    additional_schemes = (
+        {
+            "APIKeyBearer": SecurityScheme(
+                type="http", scheme="bearer", bearer_format=f"{config.prefix}_<key_id>_<secret>"
+            )
+        }
+        if config.accept_authorization_bearer
+        else {}
     )
     mechanism = AuthenticationMechanism(
         authenticator=authenticator,
         resolver=resolver,
         scheme_name="APIKey",
         security_scheme=SecurityScheme(type="apiKey", name=config.header_name, security_scheme_in="header"),
+        additional_security_schemes=additional_schemes,
     )
     api_key_service = APIKeyService(config=config, codec=codec, clock=clock, usage=usage)
     return slot, mechanism, api_key_service

@@ -15,7 +15,9 @@ from litestar.exceptions import ImproperlyConfiguredException
 from litestar.stores.memory import MemoryStore
 from litestar.stores.registry import StoreRegistry
 
+import litestar_security._typing as private_typing_module
 import litestar_security.accounts as accounts_module
+import litestar_security.typing as typing_module
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.providers.jwt import BearerTokenSlot, LocalKeyRing
 from tests.fixtures.accounts import (
@@ -620,3 +622,36 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
     services.password_reauthentication.verify.outcomes.extend((InvalidCredentials(), proof))
     assert isinstance(await services.change_token_password("account-1", password_request), InvalidCredentials)
     assert await services.change_token_password("account-1", password_request) == changed
+
+
+def test_typing_facade_optional_dependency_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert bool(typing_module.ARGON2_INSTALLED) is True
+    assert bool(typing_module.PYOTP_INSTALLED) is True
+    assert bool(typing_module.WEBAUTHN_INSTALLED) is True
+    assert repr(typing_module.ARGON2_INSTALLED) == "OptionalDependencyFlag(module='argon2', status='available')"
+
+    missing_flag = typing_module.OptionalDependencyFlag("litestar_security_missing_optional_pkg")
+    assert bool(missing_flag) is False
+    assert (
+        repr(missing_flag)
+        == "OptionalDependencyFlag(module='litestar_security_missing_optional_pkg', status='missing')"
+    )
+    assert typing_module.module_available("litestar_security_missing_optional_pkg") is False
+    assert typing_module.module_available("") is False
+    assert typing_module.import_optional_attr("litestar_security_missing_optional_pkg", "attr") is None
+    assert typing_module.resolve_optional_attr("litestar_security_missing_optional_pkg", None, "fallback") == "fallback"
+
+    typing_module.reset_dependency_cache("litestar_security_missing_optional_pkg")
+    typing_module.reset_dependency_cache()
+    assert typing_module.resolve_optional_attr("pyotp", None, "fallback") is import_module("pyotp")
+    assert "Argon2PasswordHasherEngine" in dir(typing_module)
+    assert "Argon2PasswordHasherEngine" in dir(private_typing_module)
+
+    unknown_name = "unknown_export"
+    with pytest.raises(AttributeError, match="has no attribute 'unknown_export'"):
+        getattr(typing_module, unknown_name)
+    with pytest.raises(AttributeError, match="has no attribute 'unknown_export'"):
+        getattr(private_typing_module, unknown_name)
+
+    monkeypatch.setitem(sys.modules, "argon2", None)
+    assert bool(typing_module.ARGON2_INSTALLED) is False

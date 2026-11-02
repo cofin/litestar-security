@@ -5,7 +5,7 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from inspect import iscoroutine
-from itertools import combinations
+from itertools import combinations, product
 from math import comb
 from re import Pattern
 from re import compile as recompile
@@ -18,9 +18,7 @@ from litestar._openapi.plugin import OpenAPIPlugin
 from litestar.exceptions import ImproperlyConfiguredException, LitestarDeprecationWarning, LitestarWarning
 from litestar.handlers.base import BaseRouteHandler
 from litestar.handlers.http_handlers import HTTPRouteHandler
-from litestar.middleware._utils import (
-    build_exclude_path_pattern,  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized re.Pattern
-)
+from litestar.middleware._utils import build_exclude_path_pattern  # pyright: ignore[reportUnknownVariableType] - Litestar returns an unparameterized re.Pattern
 from litestar.openapi.config import OpenAPIConfig
 from litestar.openapi.controller import OpenAPIController
 from litestar.openapi.plugins import OpenAPIRenderPlugin
@@ -172,6 +170,9 @@ class OpenAPISchemeSet:
 
     by_mechanism: Mapping[str, tuple[str, SecurityScheme]]
     unique_schemes: Mapping[str, SecurityScheme]
+    additional_by_mechanism: Mapping[str, tuple[tuple[str, SecurityScheme], ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     @classmethod
     def from_registry(cls, registry: AuthenticationRegistry[object]) -> "OpenAPISchemeSet":
@@ -188,6 +189,7 @@ class OpenAPISchemeSet:
                 two mechanisms declare conflicting definitions under one name.
         """
         by_mechanism: dict[str, tuple[str, SecurityScheme]] = {}
+        additional_by_mechanism: dict[str, tuple[tuple[str, SecurityScheme], ...]] = {}
         unique_schemes: dict[str, SecurityScheme] = {}
         for mechanism_name in registry.mechanism_names:
             mechanism_value = registry.get_mechanism(mechanism_name)
@@ -196,14 +198,18 @@ class OpenAPISchemeSet:
             if scheme_name is None or scheme is None:
                 message = f"Authentication mechanism {mechanism_name} has no native OpenAPI security scheme"
                 raise ImproperlyConfiguredException(detail=message)
-            if existing := unique_schemes.get(scheme_name):
-                if existing != scheme:
-                    message = f"Conflicting native OpenAPI security scheme: {scheme_name}"
-                    raise ImproperlyConfiguredException(detail=message)
-            else:
-                unique_schemes[scheme_name] = scheme
+            _register_unique_scheme(unique_schemes, scheme_name, scheme)
             by_mechanism[mechanism_name] = (scheme_name, scheme)
-        return cls(by_mechanism=MappingProxyType(by_mechanism), unique_schemes=MappingProxyType(unique_schemes))
+            additional_items = tuple(mechanism_value.additional_security_schemes.items())
+            for extra_name, extra_scheme in additional_items:
+                _register_unique_scheme(unique_schemes, extra_name, extra_scheme)
+            if additional_items:
+                additional_by_mechanism[mechanism_name] = additional_items
+        return cls(
+            by_mechanism=MappingProxyType(by_mechanism),
+            unique_schemes=MappingProxyType(unique_schemes),
+            additional_by_mechanism=MappingProxyType(additional_by_mechanism),
+        )
 
     def project(self, plan: SecurityRuntimePlan) -> list[SecurityRequirement]:
         """Project one runtime plan into native OpenAPI requirements.
@@ -225,19 +231,37 @@ class OpenAPISchemeSet:
         if plan.allow_anonymous:
             projection.append({})
         for alternative in plan.alternatives:
-            requirement: SecurityRequirement = {}
+            participant_options: list[tuple[tuple[str, list[str]], ...]] = []
             for participant in alternative:
-                scheme_name, scheme = self.by_mechanism[participant.name]
-                if participant.scopes and scheme.type not in {"oauth2", "openIdConnect"}:
-                    message = f"OpenAPI security scheme {scheme_name} does not support OAuth or OIDC scopes"
-                    raise ImproperlyConfiguredException(detail=message)
-                scopes = list(participant.scopes)
-                if scheme_name in requirement and requirement[scheme_name] != scopes:
-                    message = f"OpenAPI security scheme {scheme_name} has conflicting scopes in one requirement"
-                    raise ImproperlyConfiguredException(detail=message)
-                requirement[scheme_name] = scopes
-            projection.append(requirement)
+                primary = self.by_mechanism[participant.name]
+                candidates = (primary, *self.additional_by_mechanism.get(participant.name, ()))
+                options: list[tuple[str, list[str]]] = []
+                for scheme_name, scheme in candidates:
+                    if participant.scopes and scheme.type not in {"oauth2", "openIdConnect"}:
+                        message = f"OpenAPI security scheme {scheme_name} does not support OAuth or OIDC scopes"
+                        raise ImproperlyConfiguredException(detail=message)
+                    options.append((scheme_name, list(participant.scopes)))
+                participant_options.append(tuple(options))
+            for combination in product(*participant_options):
+                requirement: SecurityRequirement = {}
+                for scheme_name, scopes in combination:
+                    if scheme_name in requirement and requirement[scheme_name] != scopes:
+                        message = f"OpenAPI security scheme {scheme_name} has conflicting scopes in one requirement"
+                        raise ImproperlyConfiguredException(detail=message)
+                    requirement[scheme_name] = scopes
+                projection.append(requirement)
         return projection
+
+
+def _register_unique_scheme(
+    unique_schemes: dict[str, SecurityScheme], scheme_name: str, scheme: SecurityScheme
+) -> None:
+    if existing := unique_schemes.get(scheme_name):
+        if existing != scheme:
+            message = f"Conflicting native OpenAPI security scheme: {scheme_name}"
+            raise ImproperlyConfiguredException(detail=message)
+    else:
+        unique_schemes[scheme_name] = scheme
 
 
 def prepare_openapi_config(config: OpenAPIConfig, schemes: OpenAPISchemeSet) -> OpenAPIConfig:

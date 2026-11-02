@@ -212,7 +212,10 @@ class WireBackend(DTOCodegenBackend):
         """
         name_key = (model_type, _policy_key(config))
         shape = cls._transfer_shapes.get(name_key)
-        return None if shape is None else cls._transfer_models[(*name_key, shape)]
+        if shape is None:
+            return None
+        cache_key = (*name_key, shape)
+        return cls._transfer_models[cache_key]
 
     def parse_model(
         self,
@@ -282,7 +285,8 @@ class WireBackend(DTOCodegenBackend):
                 "and one OpenAPI component cannot describe both"
             )
             raise ImproperlyConfiguredException(detail=message)
-        cached = self._transfer_models.get((*name_key, shape))
+        cache_key = (*name_key, shape)
+        cached = self._transfer_models.get(cache_key)
         if cached is not None:
             return cached
         struct = _mirroring_defaults(
@@ -290,7 +294,7 @@ class WireBackend(DTOCodegenBackend):
             model_type,
         )
         self._transfer_shapes[name_key] = shape
-        self._transfer_models[(*name_key, shape)] = struct
+        self._transfer_models[cache_key] = struct
         return struct
 
     def _create_transfer_model_name(self, model_name: str) -> str:

@@ -474,15 +474,31 @@ class AuthenticationMechanism(Generic[CredentialT, ClaimsT, UserT]):
     resolver: IdentityResolver[ClaimsT, UserT]
     scheme_name: str | None = None
     security_scheme: SecurityScheme | None = field(default=None, hash=False)
+    additional_security_schemes: Mapping[str, SecurityScheme] = field(
+        default_factory=lambda: MappingProxyType({}), hash=False
+    )
     session_capable: bool = False
 
     def __post_init__(self) -> None:
         """Validate the optional native OpenAPI scheme pair."""
-        if (self.scheme_name is None) is not (self.security_scheme is None):
+        if (self.scheme_name is None) is not (self.security_scheme is None) or (
+            self.additional_security_schemes and self.scheme_name is None
+        ):
             message = "Authentication mechanism OpenAPI scheme name and definition must be configured together"
             raise ImproperlyConfiguredException(detail=message)
         if self.scheme_name is not None:
             object.__setattr__(self, "scheme_name", _normalize_name(self.scheme_name, "OpenAPI security scheme name"))
+        additional: dict[str, SecurityScheme] = {}
+        for extra_name, extra_scheme in self.additional_security_schemes.items():
+            normalized_extra = _normalize_name(extra_name, "OpenAPI security scheme name")
+            if normalized_extra == self.scheme_name:
+                message = f"Duplicate OpenAPI security scheme name: {normalized_extra}"
+                raise ImproperlyConfiguredException(detail=message)
+            if not isinstance(cast("object", extra_scheme), SecurityScheme):
+                message = f"OpenAPI security scheme {normalized_extra} must be a SecurityScheme"
+                raise ImproperlyConfiguredException(detail=message)
+            additional[normalized_extra] = extra_scheme
+        object.__setattr__(self, "additional_security_schemes", MappingProxyType(additional))
 
 
 @dataclass(frozen=True, slots=True)
@@ -518,6 +534,8 @@ class AuthenticationRegistry(Generic[UserT]):
                 raise ImproperlyConfiguredException(detail=message)
             slots_by_name[name] = slot
             slot_names.append(name)
+
+        slots = self._coordinate_bearer_slots(slots, slots_by_name, slot_names)
 
         mechanisms_by_name: dict[str, AuthenticationMechanism[Any, Any, UserT]] = {}
         mechanisms_by_slot: dict[str, AuthenticationMechanism[Any, Any, UserT]] = {}
@@ -612,6 +630,31 @@ class AuthenticationRegistry(Generic[UserT]):
             An evaluator that may be shared across requests.
         """
         return _AuthenticationEvaluator(self)
+
+    @staticmethod
+    def _coordinate_bearer_slots(
+        slots: tuple[CredentialSlot[Any], ...], slots_by_name: dict[str, CredentialSlot[Any]], slot_names: Sequence[str]
+    ) -> tuple[CredentialSlot[Any], ...]:
+        if "authorization.bearer" not in slots_by_name:
+            return slots
+        bearer_prefixes = tuple(
+            sorted({
+                cast("str", getattr(slot, "bearer_prefix", ""))
+                for slot in slots_by_name.values()
+                if getattr(slot, "accept_authorization_bearer", False) is True
+            })
+        )
+        if not bearer_prefixes:
+            return slots
+        bearer_slot = slots_by_name["authorization.bearer"]
+        existing_prefixes = cast("tuple[str, ...]", getattr(bearer_slot, "excluded_prefixes", ()))
+        slots_by_name["authorization.bearer"] = replace(
+            cast("Any", bearer_slot), excluded_prefixes=tuple(sorted({*existing_prefixes, *bearer_prefixes}))
+        )
+        for slot_key, slot_value in tuple(slots_by_name.items()):
+            if getattr(slot_value, "accept_authorization_bearer", False) is True:
+                slots_by_name[slot_key] = replace(cast("Any", slot_value), coexists_with_bearer_slot=True)
+        return tuple(slots_by_name[name] for name in slot_names)
 
 
 @dataclass(frozen=True, slots=True)

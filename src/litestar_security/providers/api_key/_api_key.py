@@ -332,6 +332,7 @@ class APIKeyConfig:
     usage_buffer_capacity: int = 1024
     prefix: str = "lsk"
     header_name: str = "X-API-Key"
+    accept_authorization_bearer: bool = False
 
     def __post_init__(self) -> None:
         """Reject weak peppers, malformed namespaces, and invalid ports."""
@@ -370,6 +371,8 @@ class APIKeyConfig:
             or not 1 <= self.usage_buffer_capacity <= _MAXIMUM_USAGE_BUFFER_CAPACITY
             or not _valid_prefix(self.prefix)
             or not _valid_header_name(self.header_name)
+            or self.header_name.lower() == "authorization"
+            or self.accept_authorization_bearer.__class__ is not bool
         ):
             raise ImproperlyConfiguredException(detail="API-key configuration is invalid")
 
@@ -385,6 +388,7 @@ class APIKeyConfig:
             "usage_buffer_capacity": self.usage_buffer_capacity,
             "prefix": self.prefix,
             "header_name": self.header_name,
+            "accept_authorization_bearer": self.accept_authorization_bearer,
         }
 
     def build(
@@ -408,9 +412,7 @@ class APIKeyConfig:
         Returns:
             The slot, authentication mechanism, and lifecycle service.
         """
-        from litestar_security.providers.api_key._runtime import (  # noqa: PLC0415 - breaks config/runtime cycle
-            build_api_key_runtime,
-        )
+        from litestar_security.providers.api_key._runtime import build_api_key_runtime  # noqa: PLC0415 - breaks config/runtime cycle
 
         if not callable(clock) or not callable(entropy) or participates_by_default.__class__ is not bool:
             raise ImproperlyConfiguredException(detail="API-key runtime configuration is invalid")

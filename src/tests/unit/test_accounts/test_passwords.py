@@ -1,5 +1,6 @@
 """Unit tests for password policy and verification contracts."""
 
+import sys
 from datetime import datetime, timedelta, timezone
 from threading import Lock as ThreadLock
 from time import sleep
@@ -14,6 +15,8 @@ from argon2.exceptions import VerificationError
 from litestar.exceptions import ImproperlyConfiguredException
 
 import litestar_security.accounts as accounts_module
+import litestar_security.accounts._passwords as passwords_module
+import litestar_security.testing as testing_module
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.providers.jwks import WorkerLimits
 from tests.fixtures.accounts import CredentialCleanup as _CredentialCleanup
@@ -1005,3 +1008,26 @@ async def test_security_epoch_validator_rejects_invalid_configuration_and_presen
 
     assert isinstance(await validator.validate(" ", 1), InvalidCredentials)
     assert isinstance(await validator.validate("account-1", invalid_epoch), InvalidCredentials)
+
+
+async def test_argon2_password_hasher_requires_argon2_extra_while_custom_hasher_runs_without_argon2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "argon2", None)
+    monkeypatch.setitem(sys.modules, "argon2.exceptions", None)
+
+    expected = r"litestar-security feature requires the \[argon2\] extra: pip install 'litestar-security\[argon2\]'"
+    with pytest.raises(ImportError, match=expected):
+        passwords_module.Argon2PasswordHasher()
+    with pytest.raises(ImportError, match=expected):
+        await passwords_module.Argon2PasswordHasher.create()
+
+    backend = testing_module.InMemorySecurityBackend()
+    config = accounts_module.LocalAuth.session(
+        accounts=backend.accounts,
+        secrets=accounts_module.LocalAuthSecrets.session(purpose_token_pepper=b"p" * 32),
+        binding=accounts_module.SessionBindingConfig(pepper=b"s" * 32),
+        password_hasher=_PasswordHasher(),
+        register_routes=False,
+    )
+    assert isinstance(config.password_hasher, _PasswordHasher)
