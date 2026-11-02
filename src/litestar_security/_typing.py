@@ -99,7 +99,8 @@ T = TypeVar("T")
 _dependency_cache: "dict[str, bool]" = {}
 _optional_module_cache: "dict[str, ModuleType | None]" = {}
 
-_DISTRIBUTIONS = {"argon2": "argon2-cffi", "jwt": "PyJWT", "pyotp": "PyOTP"}
+_DISTRIBUTIONS = {"argon2": "argon2-cffi", "jwt": "PyJWT", "pyotp": "PyOTP", "webauthn": "webauthn"}
+_EXTRAS = {"argon2": "argon2", "pyotp": "mfa", "webauthn": "passkeys"}
 
 
 class MissingDependencyError(ImportError):
@@ -114,10 +115,13 @@ class MissingDependencyError(ImportError):
                 the module name.
         """
         target = install_package or _DISTRIBUTIONS.get(package, package)
-        super().__init__(
-            f"Package {package!r} is not installed but is required for this feature. "
-            f"Install it with 'pip install litestar-security[{target}]' or 'pip install {target}'."
+        extra = _EXTRAS.get(package)
+        install_hint = (
+            f"Install it with 'pip install litestar-security[{extra}]' or 'pip install {target}'."
+            if extra is not None
+            else f"Install it with 'pip install {target}'."
         )
+        super().__init__(f"Package {package!r} is not installed but is required for this feature. {install_hint}")
 
 
 def module_available(module_name: str) -> bool:

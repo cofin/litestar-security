@@ -92,11 +92,22 @@ class GoogleIAPClaims:
         if self.external_identity is not None:
             return None
         candidate = self.normalized_subject
-        if not candidate.startswith(_SPIFFE_URI_PREFIXES) or self._contains_control_or_whitespace(candidate):
+        if (
+            not candidate.startswith(_SPIFFE_URI_PREFIXES)
+            or "?" in candidate
+            or "#" in candidate
+            or self._contains_control_or_whitespace(candidate)
+        ):
             return None
         _, _, remainder = candidate.partition("://")
         authority, slash, workload_path = remainder.partition("/")
-        if not authority or slash != "/" or not workload_path or workload_path.startswith("/") or "//" in workload_path:
+        if (
+            not authority
+            or authority.startswith(".")
+            or authority.endswith(".")
+            or slash != "/"
+            or any(segment in {"", ".", ".."} for segment in workload_path.split("/"))
+        ):
             return None
         return candidate
 

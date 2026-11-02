@@ -129,6 +129,21 @@ class _Slot:
         return NoCredentials()
 
 
+class _CustomBearerSlot:
+    name = "authorization.bearer"
+
+    def extract(self, connection: Any) -> NoCredentials | InvalidCredentials | PresentedCredential[str]:
+        values = [value for header, value in connection.scope["headers"] if header.lower() == b"authorization"]
+        if not values:
+            return NoCredentials()
+        if len(values) != 1 or not values[0].isascii():
+            return InvalidCredentials()
+        scheme, separator, token = values[0].decode("ascii").partition(" ")
+        if separator != " " or scheme.lower() != "bearer" or not token or " " in token:
+            return InvalidCredentials()
+        return PresentedCredential(token)
+
+
 class _Authenticator:
     def __init__(self, name: str, slot: str, *, participates_by_default: bool = True) -> None:
         self.name = name
@@ -657,3 +672,39 @@ def test_registry_coordinates_api_key_bearer_prefix_with_composite_bearer_slot()
     assert compiled_bearer_slot.extract(
         type("Connection", (), {"scope": {"headers": [(b"authorization", b"Bearer compact.jwt.token")]}})()
     ) == PresentedCredential("compact.jwt.token")
+
+
+def test_registry_coordinates_api_key_bearer_prefix_with_custom_bearer_slot() -> None:
+    api_key_slot, api_key_mechanism, _ = APIKeyConfig(
+        store=build_api_key_store(), pepper=b"p" * 32, accept_authorization_bearer=True
+    ).build(_Resolver(), clock=lambda: _JWT_NOW)
+    custom_bearer_mechanism = AuthenticationMechanism(
+        authenticator=_Authenticator("custom-bearer", "authorization.bearer"),  # type: ignore[arg-type]
+        resolver=_Resolver(),
+    )
+
+    registry = AuthenticationRegistry(
+        slots=(api_key_slot, _CustomBearerSlot()),  # type: ignore[arg-type]
+        mechanisms=(api_key_mechanism, custom_bearer_mechanism),  # type: ignore[arg-type]
+    )
+
+    compiled_api_key_slot = registry.get_slot("api-key")
+    compiled_bearer_slot = registry.get_slot("authorization.bearer")
+    assert getattr(compiled_api_key_slot, "coexists_with_bearer_slot", False) is True
+    assert compiled_bearer_slot.name == "authorization.bearer"
+    assert (
+        compiled_bearer_slot.extract(
+            type("Connection", (), {"scope": {"headers": [(b"authorization", b"Bearer lsk_key_secret")]}})()
+        )
+        == NoCredentials()
+    )
+    assert compiled_bearer_slot.extract(
+        type("Connection", (), {"scope": {"headers": [(b"authorization", b"Bearer custom-token")]}})()
+    ) == PresentedCredential("custom-token")
+    assert compiled_bearer_slot.extract(type("Connection", (), {"scope": {"headers": []}})()) == NoCredentials()
+    assert isinstance(
+        compiled_bearer_slot.extract(
+            type("Connection", (), {"scope": {"headers": [(b"authorization", b"Bearer lsk_bad extra")]}})()
+        ),
+        InvalidCredentials,
+    )

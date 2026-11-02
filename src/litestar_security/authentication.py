@@ -2,7 +2,7 @@
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, is_dataclass, replace
 from secrets import token_urlsafe
 from types import MappingProxyType
 from typing import Any, Generic, Literal, Protocol, TypeAlias, TypeVar, cast
@@ -647,14 +647,47 @@ class AuthenticationRegistry(Generic[UserT]):
         if not bearer_prefixes:
             return slots
         bearer_slot = slots_by_name["authorization.bearer"]
-        existing_prefixes = cast("tuple[str, ...]", getattr(bearer_slot, "excluded_prefixes", ()))
-        slots_by_name["authorization.bearer"] = replace(
-            cast("Any", bearer_slot), excluded_prefixes=tuple(sorted({*existing_prefixes, *bearer_prefixes}))
+        bearer_slot_obj = cast("object", bearer_slot)
+        existing_prefixes = cast("tuple[str, ...]", getattr(bearer_slot_obj, "excluded_prefixes", ()))
+        combined_prefixes = tuple(sorted({*existing_prefixes, *bearer_prefixes}))
+        slots_by_name["authorization.bearer"] = (
+            replace(cast("Any", bearer_slot_obj), excluded_prefixes=combined_prefixes)
+            if is_dataclass(bearer_slot_obj)
+            and not isinstance(bearer_slot_obj, type)
+            and hasattr(bearer_slot_obj, "excluded_prefixes")
+            else _PrefixExcludingBearerSlot(inner=bearer_slot, excluded_prefixes=combined_prefixes)
         )
         for slot_key, slot_value in tuple(slots_by_name.items()):
             if getattr(slot_value, "accept_authorization_bearer", False) is True:
                 slots_by_name[slot_key] = replace(cast("Any", slot_value), coexists_with_bearer_slot=True)
         return tuple(slots_by_name[name] for name in slot_names)
+
+
+@dataclass(slots=True)
+class _PrefixExcludingBearerSlot(Generic[CredentialT]):
+    """Wrap a custom bearer slot so prefixed API-key tokens yield ``NoCredentials``."""
+
+    inner: CredentialSlot[CredentialT]
+    excluded_prefixes: tuple[str, ...]
+    name: str = field(default="authorization.bearer", init=False)
+
+    def extract(self, connection: ASGIConnection[Any, Any, Any, Any]) -> CredentialExtraction[CredentialT]:
+        """Yield ``NoCredentials`` for valid single-header prefixed Bearer API keys."""
+        authorization_values = tuple(
+            value for header, value in connection.scope["headers"] if header.lower() == b"authorization"
+        )
+        if len(authorization_values) == 1 and authorization_values[0].isascii():
+            value = authorization_values[0].decode("ascii")
+            scheme, separator, token = value.partition(" ")
+            if (
+                separator == " "
+                and scheme.lower() == "bearer"
+                and value.isprintable()
+                and " " not in token
+                and token.startswith(self.excluded_prefixes)
+            ):
+                return NoCredentials()
+        return self.inner.extract(connection)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1029,14 +1062,15 @@ def _plan_uses_bearer(registry: AuthenticationRegistry[Any], plan: SecurityRunti
     participants = plan.participant_names
     names = registry.default_mechanism_names if participants is None else participants
     for name in names:
-        scheme = registry.get_mechanism(name).security_scheme
-        if (
-            scheme is not None
-            and scheme.type == "http"
-            and scheme.scheme is not None
-            and scheme.scheme.lower() == "bearer"
-        ):
-            return True
+        mechanism = registry.get_mechanism(name)
+        for scheme in (mechanism.security_scheme, *mechanism.additional_security_schemes.values()):
+            if (
+                scheme is not None
+                and scheme.type == "http"
+                and scheme.scheme is not None
+                and scheme.scheme.lower() == "bearer"
+            ):
+                return True
     return False
 
 
