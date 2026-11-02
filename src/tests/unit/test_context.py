@@ -60,14 +60,24 @@ def test_typing_public_surface_reexports_the_private_implementation() -> None:
     assert all(getattr(public_typing, name) is getattr(typing_module, name) for name in public_typing.__all__)
 
 
-@pytest.mark.parametrize(("package", "install_package"), [("jwt", None), ("custom", "custom-dist"), ("plain", None)])
-def test_missing_dependency_error_names_the_actionable_distribution(package: str, install_package: str | None) -> None:
+@pytest.mark.parametrize(
+    ("package", "install_package", "expected_install_hint"),
+    [
+        ("argon2", None, "Install it with 'pip install litestar-security[argon2]' or 'pip install argon2-cffi'."),
+        ("pyotp", None, "Install it with 'pip install litestar-security[mfa]' or 'pip install PyOTP'."),
+        ("webauthn", None, "Install it with 'pip install litestar-security[passkeys]' or 'pip install webauthn'."),
+        ("jwt", None, "Install it with 'pip install PyJWT'."),
+        ("custom", "custom-dist", "Install it with 'pip install custom-dist'."),
+        ("plain", None, "Install it with 'pip install plain'."),
+    ],
+)
+def test_missing_dependency_error_names_the_actionable_distribution(
+    package: str, install_package: str | None, expected_install_hint: str
+) -> None:
     error = typing_module.MissingDependencyError(package, install_package)
-    target = install_package or {"jwt": "PyJWT"}.get(package, package)
 
     assert str(error) == (
-        f"Package {package!r} is not installed but is required for this feature. "
-        f"Install it with 'pip install litestar-security[{target}]' or 'pip install {target}'."
+        f"Package {package!r} is not installed but is required for this feature. {expected_install_hint}"
     )
 
 
@@ -556,11 +566,8 @@ for name in litestar_security.__all__:
 
 for name in accounts.__all__:
     resolved = getattr(accounts, name)
-    target = accounts._OPTIONAL_EXPORTS.get(name)
     eager = (
-        getattr(import_module(target[0]), name)
-        if target is not None
-        else getattr(import_module("litestar_security.accounts.controllers"), name)
+        getattr(import_module("litestar_security.accounts.controllers"), name)
         if name in accounts._CONTROLLER_EXPORTS
         else accounts.__dict__[name]
     )
@@ -574,6 +581,7 @@ for name in accounts.__all__:
 @pytest.mark.parametrize(
     ("module_name", "name", "target_module"),
     [
+        ("litestar_security.accounts", "LOCAL_AUTH_TAGS", "litestar_security.accounts.controllers._local"),
         ("litestar_security.accounts.controllers", "LOCAL_AUTH_TAGS", "litestar_security.accounts.controllers._local"),
         ("litestar_security.accounts.controllers", "build_mfa_routes", "litestar_security.accounts.controllers._mfa"),
         ("litestar_security.providers", "OAuthConfig", "litestar_security.providers.oauth"),
@@ -586,7 +594,10 @@ def test_lazy_export_packages_resolve_optional_attributes(module_name: str, name
     assert getattr(module, name) is getattr(import_module(target_module), name)
 
 
-@pytest.mark.parametrize("module_name", ["litestar_security.accounts.controllers", "litestar_security.providers"])
+@pytest.mark.parametrize(
+    "module_name",
+    ["litestar_security.accounts", "litestar_security.accounts.controllers", "litestar_security.providers"],
+)
 def test_lazy_export_packages_reject_unknown_attributes(module_name: str) -> None:
     module = import_module(module_name)
 
@@ -622,42 +633,62 @@ def test_import_optional_attribute_only_translates_declared_missing_dependencies
         assert str(error.value) == expected_message
 
 
-@pytest.mark.parametrize("blocked_dependency", ["pyotp", "webauthn", "argon2"])
-def test_accounts_lazy_extra_exports_isolate_missing_dependencies(blocked_dependency: str) -> None:
+@pytest.mark.parametrize(
+    ("blocked_dependency", "expected_extra"), [("argon2", "argon2"), ("pyotp", "mfa"), ("webauthn", "passkeys")]
+)
+def test_accounts_lazy_extra_exports_isolate_missing_dependencies(blocked_dependency: str, expected_extra: str) -> None:
     script = f"""
+import asyncio
 import sys
 from importlib import import_module
 
 sys.modules[{blocked_dependency!r}] = None
 import litestar_security.accounts as accounts
+from litestar_security.testing import InMemoryMFALoginChallengeStore, InMemoryMFAStore
 
-expected_optional = {{
-    "Argon2PasswordHasher": ("litestar_security.accounts._passwords", "argon2", frozenset({{"argon2"}})),
-    "MFALoginService": ("litestar_security.accounts._mfa_login", "mfa", frozenset({{"pyotp"}})),
-    "MFAService": ("litestar_security.accounts._mfa", "mfa", frozenset({{"pyotp"}})),
-    "PyWebAuthnVerifier": ("litestar_security.accounts._passkeys", "passkeys", frozenset({{"webauthn"}})),
-}}
-assert accounts._OPTIONAL_EXPORTS == expected_optional, accounts._OPTIONAL_EXPORTS
-assert accounts.RateLimiter
+assert not hasattr(accounts, "_OPTIONAL_EXPORTS")
 for name in accounts.__all__:
-    target = accounts._OPTIONAL_EXPORTS.get(name)
-    if target is None or {blocked_dependency!r} not in target[2]:
-        getattr(accounts, name)
-        continue
-    try:
-        getattr(accounts, name)
-    except ImportError as error:
-        expected = (
-            f"litestar-security feature requires the [{{target[1]}}] extra: "
-            f"pip install 'litestar-security[{{target[1]}}]'"
-        )
-        assert str(error) == expected, (name, str(error))
-    else:
-        raise AssertionError(f"expected an actionable optional-extra ImportError for {{name}}")
+    assert getattr(accounts, name) is not None, name
+
+
+def annotated_consumer(
+    hasher: accounts.Argon2PasswordHasher,
+    mfa: accounts.MFAService,
+    mfa_login: accounts.MFALoginService,
+    verifier: accounts.PyWebAuthnVerifier,
+) -> None:
+    del hasher, mfa, mfa_login, verifier
+
+
+assert annotated_consumer.__annotations__["hasher"] is accounts.Argon2PasswordHasher
 
 controllers = import_module("litestar_security.accounts.controllers")
 for name in controllers.__all__:
     assert getattr(controllers, name) is not None
+
+protector = accounts.AESGCMSecretProtector(active_key=accounts.SecretProtectorKey("v1", b"k" * 32))
+factories = {{
+    "argon2": (
+        lambda: accounts.Argon2PasswordHasher(),
+        lambda: asyncio.run(accounts.Argon2PasswordHasher.create()),
+    ),
+    "pyotp": (
+        lambda: accounts.MFAService(store=InMemoryMFAStore(), secret_protector=protector),
+        lambda: accounts.MFALoginService(store=InMemoryMFALoginChallengeStore(), mfa=object(), pepper=b"p" * 32),
+    ),
+    "webauthn": (lambda: accounts.PyWebAuthnVerifier(),),
+}}
+expected = (
+    "litestar-security feature requires the "
+    "[{expected_extra}] extra: pip install 'litestar-security[{expected_extra}]'"
+)
+for build in factories[{blocked_dependency!r}]:
+    try:
+        build()
+    except ImportError as error:
+        assert str(error) == expected, str(error)
+    else:
+        raise AssertionError("expected an actionable optional-extra ImportError at instantiation")
 """
 
     result = run([sys.executable, "-c", script], check=False, capture_output=True, text=True)  # noqa: S603

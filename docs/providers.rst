@@ -111,6 +111,7 @@ prefixes or ``email`` suffixes manually:
 
 .. code-block:: python
 
+   from litestar_security import IdentityResolution, InvalidCredentials, Principal
    from litestar_security.providers.iap import GoogleIAPClaims
 
 
@@ -126,21 +127,24 @@ prefixes or ``email`` suffixes manually:
            self._allowed_service_accounts = allowed_service_accounts
            self._allowed_spiffe_ids = allowed_spiffe_ids
 
-       async def resolve(self, claims: GoogleIAPClaims) -> dict[str, str] | None:
+       async def resolve(self, claims: GoogleIAPClaims) -> IdentityResolution[dict[str, str]]:
            if claims.hosted_domain in self._allowed_domains and claims.email:
-               return {"id": claims.normalized_subject, "email": claims.email, "kind": "human"}
+               user = {"id": claims.normalized_subject, "email": claims.email, "kind": "human"}
+               return Principal(id=claims.normalized_subject, display_name=claims.email, user=user)
            if claims.is_service_account and claims.email in self._allowed_service_accounts:
-               return {"id": claims.normalized_subject, "email": claims.email, "kind": "service_account"}
+               user = {"id": claims.normalized_subject, "email": claims.email, "kind": "service_account"}
+               return Principal(id=claims.normalized_subject, display_name=claims.email, user=user)
            if claims.spiffe_id in self._allowed_spiffe_ids and claims.spiffe_id is not None:
-               return {"id": claims.spiffe_id, "kind": "agent"}
-           return None
+               user = {"id": claims.spiffe_id, "kind": "agent"}
+               return Principal(id=claims.spiffe_id, display_name=claims.spiffe_id, user=user)
+           return InvalidCredentials()
 
 API key Bearer extraction alongside JWTs
 ----------------------------------------
 
 By default, ``APIKeyConfig`` reads keys only from its dedicated request header
 (such as ``X-API-Key``). When CLI, SDK, or Model Context Protocol (MCP) clients
-send prefixed API keys through ``Authorization: Bearer <prefix>_<secret>``,
+send prefixed API keys through ``Authorization: Bearer <prefix>_<key_id>_<secret>``,
 enable ``accept_authorization_bearer=True``:
 
 .. code-block:: python
@@ -155,12 +159,13 @@ enable ``accept_authorization_bearer=True``:
        accept_authorization_bearer=True,
    )
 
-When ``accept_authorization_bearer=True`` is combined with ``JWTAuthConfig`` or
-``CompositeBearerConfig`` in the same ``SecurityConfig``, ``litestar-security``
-automatically routes ``Authorization: Bearer <prefix>_...`` credentials to the
-API key slot while non-prefixed Bearer tokens continue through the JWT slot, and
-projects both the header ``APIKey`` scheme and ``APIKeyBearer`` HTTP Bearer
-scheme into OpenAPI.
+When ``accept_authorization_bearer=True`` is combined with
+``CompositeBearerConfig``, ``ServiceTokenConfig``, or ``LocalAuth`` Bearer
+tokens in the same ``SecurityConfig``, ``litestar-security`` automatically
+routes ``Authorization: Bearer <prefix>_...`` credentials to the API key slot
+while non-prefixed Bearer tokens continue through the JWT slot, and projects
+both the header ``APIKey`` scheme and ``APIKeyBearer`` HTTP Bearer scheme into
+OpenAPI.
 
 Tenant authorization
 --------------------

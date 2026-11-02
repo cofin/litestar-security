@@ -3,7 +3,6 @@
 from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
-from litestar_security._lazy import import_optional_attribute
 from litestar_security.accounts._access_tokens import (
     LocalAccessToken,
     LocalAccessTokenIssuer,
@@ -13,6 +12,7 @@ from litestar_security.accounts._auth_service import LocalAuthService, forwarded
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._mfa import (
     AESGCMSecretProtector,
+    MFAService,
     MFAStore,
     PendingTOTPEnrollment,
     ProtectedSecret,
@@ -29,7 +29,12 @@ from litestar_security.accounts._mfa import (
     TOTPPolicy,
     TOTPProvisioningGrant,
 )
-from litestar_security.accounts._mfa_login import MFALoginChallenge, MFALoginChallengeStore, MFARequired
+from litestar_security.accounts._mfa_login import (
+    MFALoginChallenge,
+    MFALoginChallengeStore,
+    MFALoginService,
+    MFARequired,
+)
 from litestar_security.accounts._passkeys import (
     AttestationTrustMapper,
     AuthenticationVerification,
@@ -39,6 +44,7 @@ from litestar_security.accounts._passkeys import (
     PasskeyMetadata,
     PasskeyService,
     PasskeyStore,
+    PyWebAuthnVerifier,
     RegistrationVerification,
     UserVerification,
     WebAuthnChallenge,
@@ -48,6 +54,7 @@ from litestar_security.accounts._passkeys import (
     WebAuthnVerifier,
 )
 from litestar_security.accounts._passwords import (
+    Argon2PasswordHasher,
     PasswordHasher,
     PasswordHashingUnavailableError,
     PasswordPolicy,
@@ -186,10 +193,6 @@ from litestar_security.accounts.schemas import (
 from litestar_security.guards import AssuranceRequirement, AssuranceTrait
 
 if TYPE_CHECKING:
-    from litestar_security.accounts._mfa import MFAService
-    from litestar_security.accounts._mfa_login import MFALoginService
-    from litestar_security.accounts._passkeys import PyWebAuthnVerifier
-    from litestar_security.accounts._passwords import Argon2PasswordHasher
     from litestar_security.accounts.controllers import (
         LOCAL_AUTH_TAGS,
         build_local_auth_routes,
@@ -378,21 +381,11 @@ _CONTROLLER_EXPORTS = frozenset({
     "build_mfa_routes",
     "require_local_bearer",
 })
-_OPTIONAL_EXPORTS = {
-    "Argon2PasswordHasher": ("litestar_security.accounts._passwords", "argon2", frozenset({"argon2"})),
-    "MFALoginService": ("litestar_security.accounts._mfa_login", "mfa", frozenset({"pyotp"})),
-    "MFAService": ("litestar_security.accounts._mfa", "mfa", frozenset({"pyotp"})),
-    "PyWebAuthnVerifier": ("litestar_security.accounts._passkeys", "passkeys", frozenset({"webauthn"})),
-}
 
 
 def __getattr__(name: str) -> Any:  # noqa: ANN401 - module lazy-export hook is dynamically typed
-    """Resolve optional local-account exports only when their features are installed."""
+    """Resolve lazy local-account controller exports on demand."""
     if name in _CONTROLLER_EXPORTS:
         return getattr(import_module("litestar_security.accounts.controllers"), name)
-    target = _OPTIONAL_EXPORTS.get(name)
-    if target is not None:
-        module_name, extras, dependencies = target
-        return import_optional_attribute(module_name, name, extras=extras, dependencies=dependencies)
     message = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(message)

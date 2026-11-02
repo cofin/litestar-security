@@ -1,6 +1,38 @@
 Changelog
 =========
 
+0.7.1
+-----
+
+Fixed
+~~~~~
+
+* :mod:`litestar_security.accounts` now exports
+  :class:`~litestar_security.accounts.Argon2PasswordHasher`,
+  :class:`~litestar_security.accounts.MFAService`,
+  :class:`~litestar_security.accounts.MFALoginService`, and
+  :class:`~litestar_security.accounts.PyWebAuthnVerifier` directly at import time
+  so runtime annotations succeed without optional extras installed, enforcing
+  the ``[argon2]``, ``[mfa]``, and ``[passkeys]`` extras strictly at adapter
+  instantiation (`#75 <https://github.com/cofin/litestar-security/issues/75>`__, `#83 <https://github.com/cofin/litestar-security/pull/83>`__).
+  :class:`~litestar_security.typing.MissingDependencyError` also maps optional
+  modules to their declared ``litestar-security`` extra names instead of
+  distribution names.
+* :class:`~litestar_security.AuthenticationRegistry` wraps custom
+  :class:`~litestar_security.CredentialSlot` implementations owning
+  ``authorization.bearer`` when coordinating
+  :class:`~litestar_security.providers.api_key.APIKeyConfig`
+  ``accept_authorization_bearer=True`` prefixes, and includes
+  ``additional_security_schemes`` when emitting RFC 9728
+  ``WWW-Authenticate: Bearer resource_metadata="..."`` challenges on ``401``
+  responses (`#80 <https://github.com/cofin/litestar-security/issues/80>`__, `#83 <https://github.com/cofin/litestar-security/pull/83>`__).
+* :attr:`litestar_security.providers.iap.GoogleIAPClaims.spiffe_id` rejects URI
+  query and fragment components, ``.``/``..`` path segments, trailing slashes,
+  and leading or trailing dots in the authority (`#81 <https://github.com/cofin/litestar-security/issues/81>`__, `#83 <https://github.com/cofin/litestar-security/pull/83>`__).
+* Correct the :class:`~litestar_security.providers.iap.GoogleIAPClaims`
+  principal resolver return contract and Bearer API-key configuration references
+  in ``docs/providers.rst`` (`#83 <https://github.com/cofin/litestar-security/pull/83>`__).
+
 0.7.0
 -----
 
@@ -10,10 +42,11 @@ Added
 * :class:`~litestar_security.providers.api_key.APIKeyConfig` adds
   ``accept_authorization_bearer: bool = False`` (`#80 <https://github.com/cofin/litestar-security/issues/80>`__, `#82 <https://github.com/cofin/litestar-security/pull/82>`__).
   When enabled, :class:`~litestar_security.providers.api_key.APIKeyConfig` extracts
-  prefixed API keys from ``Authorization: Bearer <prefix>_<secret>`` when its
-  dedicated header is absent, coordinates prefix exclusion automatically with a
-  co-registered :class:`~litestar_security.providers.jwt.JWTAuthConfig` or
-  :class:`~litestar_security.providers.jwt.CompositeBearerConfig` Bearer JWT slot,
+  prefixed API keys from ``Authorization: Bearer <prefix>_<key_id>_<secret>`` when
+  its dedicated header is absent, coordinates prefix exclusion automatically with a
+  co-registered :class:`~litestar_security.providers.jwt.CompositeBearerConfig`,
+  :class:`~litestar_security.providers.oidc.ServiceTokenConfig`, or
+  :class:`~litestar_security.accounts.LocalAuth` Bearer JWT slot,
   and projects both the ``APIKey`` header scheme and ``APIKeyBearer`` HTTP Bearer
   scheme into OpenAPI.
 * :class:`~litestar_security.providers.iap.GoogleIAPClaims` adds

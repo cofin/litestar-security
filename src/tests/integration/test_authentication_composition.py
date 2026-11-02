@@ -30,8 +30,10 @@ from litestar_security.providers.jwt import (
     JWTClaims,
     JWTValidationConfig,
     PyJWTVerifier,
+    VerificationKey,
     extend_composite_bearer,
 )
+from litestar_security.providers.oidc import ServiceTokenConfig
 from tests.fixtures.collaborators import AsyncRecordingJWTVerifier, build_api_key_store
 
 if TYPE_CHECKING:
@@ -79,6 +81,23 @@ class _UnavailableVerifier:
         return VerificationUnavailable(code="provider_unavailable", retry_after=2)
 
 
+class _StaticJWKS:
+    def __init__(self, key: VerificationKey) -> None:
+        self.key = key
+
+    async def select_key(
+        self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime
+    ) -> VerificationKey:
+        del issuer, jwks_uri, kid, algorithm, now
+        return self.key
+
+    async def warmup(self, *, now: datetime) -> None:
+        del now
+
+    async def aclose(self) -> None:
+        return None
+
+
 def _claims(issuer: str, audience: str, *, subject: str = "user-1") -> dict[str, object]:
     return {
         "iss": issuer,
@@ -89,6 +108,7 @@ def _claims(issuer: str, audience: str, *, subject: str = "user-1") -> dict[str,
         "nbf": int((_NOW - timedelta(seconds=1)).timestamp()),
         "client_id": "client-1",
         "jti": "token-1",
+        "scope": "read",
     }
 
 
@@ -378,3 +398,55 @@ async def test_api_key_authorization_bearer_coexists_with_composite_bearer_and_p
     assert schema["paths"]["/items"]["get"]["security"] == [{"APIKey": []}, {"APIKeyBearer": []}, {"bearer": []}]
     assert "APIKey" in schema["components"]["securitySchemes"]
     assert "APIKeyBearer" in schema["components"]["securitySchemes"]
+
+
+async def test_api_key_authorization_bearer_coexists_with_service_token_config(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    signing_key, verification_key = jwt_key_material["RS256"]
+    issuer, audience = _PROFILES["external"]
+    jwks = _StaticJWKS(VerificationKey(key_id="shared", algorithm="RS256", key=verification_key))
+    api_key_store = build_api_key_store()
+    api_key_resolver = _APIKeyResolver()
+    api_key_config = APIKeyConfig(
+        store=api_key_store, identity_resolver=api_key_resolver, pepper=b"p" * 32, accept_authorization_bearer=True
+    )
+    service_token_config = ServiceTokenConfig(
+        issuer=issuer,
+        audiences=frozenset({audience}),
+        allowed_algorithms=frozenset({"RS256"}),
+        jwks=jwks,
+        jwks_uri=f"{issuer}/.well-known/jwks.json",
+    )
+
+    @get("/workload", auth=any_of("api-key", "service-jwt"))
+    async def workload(request: Request) -> dict[str, object]:
+        return {"id": request.user.id, "mechanism": request.auth.evidence[0].mechanism}
+
+    plugin = SecurityPlugin(SecurityConfig(api_key=api_key_config, service_token=service_token_config))
+    app = Litestar(route_handlers=[workload], openapi_config=None, plugins=[plugin])
+    _, _, api_key_service = api_key_config.build()
+    issued = await api_key_service.issue(subject_id="cli-1")
+    now = datetime.now(timezone.utc)
+    jwt_claims = {
+        "iss": issuer,
+        "sub": "user-1",
+        "aud": audience,
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+        "iat": int(now.timestamp()),
+        "nbf": int((now - timedelta(seconds=1)).timestamp()),
+        "client_id": "client-1",
+        "jti": "token-1",
+        "scope": "read",
+    }
+    encoded = jwt.encode(jwt_claims, signing_key, algorithm="RS256", headers={"kid": "shared", "typ": "at+jwt"})
+    jwt_token = encoded.decode() if isinstance(encoded, bytes) else encoded
+
+    with TestClient(app) as client:
+        api_key_response = client.get("/workload", headers={"Authorization": f"Bearer {issued.value}"})
+        jwt_response = client.get("/workload", headers={"Authorization": f"Bearer {jwt_token}"})
+
+    assert api_key_response.status_code == HTTP_200_OK
+    assert api_key_response.json() == {"id": "api-key:cli-1", "mechanism": "api-key"}
+    assert jwt_response.status_code == HTTP_200_OK
+    assert jwt_response.json() == {"id": "user-1", "mechanism": "service-jwt"}

@@ -72,7 +72,8 @@ _NOW = datetime(2026, 7, 26, tzinfo=timezone.utc)
 def test_resource_metadata_preserves_existing_authentication_challenges(challenge: str, expected: str) -> None:
     scheme = SecurityScheme(type="http", scheme="bearer")
     registry = SimpleNamespace(
-        default_mechanism_names=("bearer",), get_mechanism=lambda _name: SimpleNamespace(security_scheme=scheme)
+        default_mechanism_names=("bearer",),
+        get_mechanism=lambda _name: SimpleNamespace(security_scheme=scheme, additional_security_schemes={}),
     )
     config = SimpleNamespace(resource_metadata_url="https://api.example.com/metadata", registry=registry)
     plan = SimpleNamespace(participant_names=frozenset({"bearer"}))

@@ -20,7 +20,9 @@ from litestar_security.authentication import (
     PresentedCredential,
 )
 from litestar_security.context import Principal
+from litestar_security.providers.api_key import APIKeyClaims, APIKeyConfig
 from litestar_security.providers.oauth import ProtectedResourceConfig, build_protected_resource_handler
+from tests.fixtures.collaborators import build_api_key_store
 
 METADATA_PATH = "/.well-known/oauth-protected-resource"
 
@@ -52,6 +54,11 @@ class _HeaderAuthenticator:
 class _HeaderResolver:
     async def resolve(self, claims: str) -> Principal[object]:
         return Principal(id=claims)
+
+
+class _APIKeyResolver:
+    async def resolve(self, claims: APIKeyClaims) -> Principal[object]:
+        return Principal(id=claims.subject_id)
 
 
 def _app_config(**kwargs: object) -> SecurityConfig[object]:
@@ -378,3 +385,32 @@ def test_suppressed_registration_still_advertises_the_metadata_url() -> None:
 def test_register_route_must_be_boolean() -> None:
     with pytest.raises(ImproperlyConfiguredException, match="Protected resource route registration must be boolean"):
         ProtectedResourceConfig(resource="https://api.example.com", register_route="yes")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("accept_bearer", [True, False])
+def test_api_key_bearer_scheme_controls_resource_metadata_challenge_advertisement(*, accept_bearer: bool) -> None:
+    @get("/private")
+    async def private() -> str:  # pragma: no cover - the request never reaches the handler
+        return "private"
+
+    config = SecurityConfig[object](
+        api_key=APIKeyConfig(
+            store=build_api_key_store(),
+            identity_resolver=_APIKeyResolver(),
+            pepper=b"p" * 32,
+            accept_authorization_bearer=accept_bearer,
+        ),
+        require_default=True,
+        protected_resource=ProtectedResourceConfig(resource="https://api.example.com/mcp"),
+    )
+
+    with create_test_client([private], plugins=[SecurityPlugin(config)]) as client:
+        response = client.get("/private")
+
+    assert response.status_code == HTTP_401_UNAUTHORIZED
+    if accept_bearer:
+        assert response.headers["www-authenticate"] == (
+            'Bearer resource_metadata="https://api.example.com/.well-known/oauth-protected-resource/mcp"'
+        )
+    else:
+        assert "www-authenticate" not in response.headers
