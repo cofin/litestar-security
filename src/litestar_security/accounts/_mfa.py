@@ -1,6 +1,5 @@
 """MFA assurance, TOTP, recovery, and step-up contracts."""
 
-import sys
 from base64 import b32decode, urlsafe_b64encode
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -8,22 +7,11 @@ from datetime import datetime, timedelta
 from hashlib import sha1, sha256, sha512
 from hmac import compare_digest
 from hmac import new as new_hmac
-from importlib import import_module
 from secrets import token_bytes, token_urlsafe
-from typing import TYPE_CHECKING, Literal, Protocol, cast, runtime_checkable
+from typing import Literal, Protocol, cast, runtime_checkable
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from litestar.exceptions import ImproperlyConfiguredException
-
-if TYPE_CHECKING:
-    import pyotp
-else:
-    try:
-        import pyotp
-    except ModuleNotFoundError as error:  # pragma: no cover - exercised in optional-extra subprocess isolation tests
-        if error.name != "pyotp" and not (error.name or "").startswith("pyotp."):
-            raise
-        pyotp = None
 
 from litestar_security.accounts._internal import (
     aware_utc_time,
@@ -54,6 +42,7 @@ from litestar_security.accounts._stores import LoginMethodStore
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
 from litestar_security.schema import WireStruct
+from litestar_security.typing import ensure_pyotp, pyotp
 
 __all__ = (
     "AESGCMSecretProtector",
@@ -624,7 +613,7 @@ class MFAService:
 
     def __post_init__(self) -> None:
         """Validate structural capabilities and stable issuer configuration."""
-        require_pyotp()
+        ensure_pyotp()
         store = cast("object", self.store)
         secret_protector = cast("object", self.secret_protector)
         login_methods = cast("object", self.login_methods)
@@ -1067,16 +1056,6 @@ def _validate_secret(secret: str) -> None:
         raise ValueError from None
     if len(decoded) * 8 < _MINIMUM_SECRET_BITS:
         raise ValueError
-
-
-def require_pyotp() -> None:
-    """Require the optional [mfa] extra before constructing TOTP services."""
-    if cast("object", pyotp) is None or sys.modules.get("pyotp") is None:
-        try:
-            import_module("pyotp")
-        except ModuleNotFoundError:
-            message = "litestar-security feature requires the [mfa] extra: pip install 'litestar-security[mfa]'"
-            raise ImportError(message) from None
 
 
 def _totp(secret: str, policy: TOTPPolicy) -> "pyotp.TOTP":

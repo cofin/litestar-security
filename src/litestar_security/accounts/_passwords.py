@@ -1,49 +1,35 @@
 """Password policy evaluation and Argon2id hashing."""
 
-import sys
 from dataclasses import dataclass, field
 from functools import partial
 from hmac import compare_digest
-from importlib import import_module
 from time import perf_counter
-from typing import TYPE_CHECKING, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
 from anyio import to_thread
 from litestar.exceptions import ImproperlyConfiguredException
-
-if TYPE_CHECKING:
-    from argon2 import PasswordHasher as _Argon2Engine
-    from argon2 import extract_parameters
-    from argon2.exceptions import Argon2Error, InvalidHashError, VerificationError, VerifyMismatchError
-    from argon2.low_level import Type as Argon2Type
-else:
-    try:
-        from argon2 import PasswordHasher as _Argon2Engine
-        from argon2 import extract_parameters
-        from argon2.exceptions import Argon2Error, InvalidHashError, VerificationError, VerifyMismatchError
-        from argon2.low_level import Type as Argon2Type
-    except ModuleNotFoundError as error:  # pragma: no cover - exercised in optional-extra subprocess isolation tests
-        if error.name != "argon2" and not (error.name or "").startswith("argon2."):
-            raise
-        _Argon2Engine = None
-        extract_parameters = None
-        Argon2Error = Exception
-        InvalidHashError = Exception
-        VerificationError = Exception
-        VerifyMismatchError = Exception
-        Argon2Type = None
 
 from litestar_security.accounts._records import (
     PasswordPolicyViolation,
     PasswordVerificationStatus,
     normalize_identifier,
 )
+from litestar_security.typing import (
+    Argon2Error,
+    Argon2Type,
+    InvalidHashError,
+    VerificationError,
+    VerifyMismatchError,
+    ensure_argon2,
+    extract_parameters,
+)
+from litestar_security.typing import Argon2PasswordHasherEngine as _Argon2Engine
 from litestar_security.workers import WorkerLimits
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from argon2 import Parameters
+    from litestar_security.typing import Argon2Parameters
 
 __all__ = (
     "Argon2PasswordHasher",
@@ -219,7 +205,7 @@ class Argon2PasswordHasher:
 
     def __post_init__(self) -> None:
         """Validate bounded parameters and one policy-matched precomputed dummy."""
-        _require_argon2()
+        ensure_argon2()
         _validate_argon2_configuration(
             memory_cost=self.memory_cost,
             time_cost=self.time_cost,
@@ -259,7 +245,7 @@ class Argon2PasswordHasher:
             A hasher whose dummy hash matches its own parameters, so verifying an
             absent account costs the same as verifying a real one.
         """
-        _require_argon2()
+        ensure_argon2()
         workers = WorkerLimits() if worker_limits is None else worker_limits
         _validate_argon2_configuration(
             memory_cost=memory_cost,
@@ -421,16 +407,6 @@ async def _run_password_worker(operation: "Callable[[], UserT]", workers: Worker
     return result
 
 
-def _require_argon2() -> None:
-    """Require the optional [argon2] extra before constructing Argon2PasswordHasher."""
-    if cast("object", _Argon2Engine) is None or sys.modules.get("argon2") is None:
-        try:
-            import_module("argon2")
-        except ModuleNotFoundError:
-            msg = "litestar-security feature requires the [argon2] extra: pip install 'litestar-security[argon2]'"
-            raise ImportError(msg) from None
-
-
 def _validate_argon2_configuration(  # noqa: PLR0913 - explicit configuration surface; every input is named
     *, memory_cost: int, time_cost: int, parallelism: int, salt_len: int, hash_len: int, worker_limits: WorkerLimits
 ) -> None:
@@ -467,7 +443,7 @@ def _build_argon2_engine(hasher: Argon2PasswordHasher) -> "_Argon2Engine":
         raise ImproperlyConfiguredException(detail=msg) from None
 
 
-def _safe_argon2_parameters(encoded_hash: object, worker_limits: WorkerLimits) -> "Parameters | None":
+def _safe_argon2_parameters(encoded_hash: object, worker_limits: WorkerLimits) -> "Argon2Parameters | None":
     if not isinstance(encoded_hash, str):
         return None
     try:
@@ -491,7 +467,7 @@ def _safe_argon2_parameters(encoded_hash: object, worker_limits: WorkerLimits) -
     return parameters
 
 
-def _parameters_match_hasher(parameters: "Parameters", hasher: Argon2PasswordHasher) -> bool:
+def _parameters_match_hasher(parameters: "Argon2Parameters", hasher: Argon2PasswordHasher) -> bool:
     return (
         parameters.memory_cost,
         parameters.time_cost,

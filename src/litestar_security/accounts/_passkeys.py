@@ -1,6 +1,5 @@
 """Project-owned WebAuthn challenge, credential, and service boundary."""
 
-import sys
 from base64 import urlsafe_b64encode
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -8,78 +7,13 @@ from datetime import datetime, timedelta
 from enum import Enum
 from functools import partial
 from hashlib import sha256
-from importlib import import_module
 from math import isfinite
 from secrets import token_bytes
-from typing import TYPE_CHECKING, Protocol, TypeVar, cast, runtime_checkable
+from typing import Protocol, TypeVar, cast, runtime_checkable
 from urllib.parse import urlsplit
 
 from anyio import CapacityLimiter, fail_after, to_thread
 from litestar.exceptions import ImproperlyConfiguredException
-
-if TYPE_CHECKING:
-    from webauthn import (
-        generate_authentication_options,
-        generate_registration_options,
-        options_to_json,
-        verify_authentication_response,
-        verify_registration_response,
-    )
-    from webauthn.helpers import (
-        parse_attestation_object,
-        parse_authentication_credential_json,
-        parse_client_data_json,
-        parse_registration_credential_json,
-    )
-    from webauthn.helpers.cose import COSEAlgorithmIdentifier
-    from webauthn.helpers.structs import (
-        AttestationConveyancePreference,
-        AttestationFormat,
-        AuthenticatorSelectionCriteria,
-        CredentialDeviceType,
-        UserVerificationRequirement,
-    )
-else:
-    try:
-        from webauthn import (
-            generate_authentication_options,
-            generate_registration_options,
-            options_to_json,
-            verify_authentication_response,
-            verify_registration_response,
-        )
-        from webauthn.helpers import (
-            parse_attestation_object,
-            parse_authentication_credential_json,
-            parse_client_data_json,
-            parse_registration_credential_json,
-        )
-        from webauthn.helpers.cose import COSEAlgorithmIdentifier
-        from webauthn.helpers.structs import (
-            AttestationConveyancePreference,
-            AttestationFormat,
-            AuthenticatorSelectionCriteria,
-            CredentialDeviceType,
-            UserVerificationRequirement,
-        )
-    except ModuleNotFoundError as error:  # pragma: no cover - exercised in optional-extra subprocess isolation tests
-        if error.name not in {"webauthn", "cbor2"} and not (error.name or "").startswith("webauthn."):
-            raise
-        generate_authentication_options = None
-        generate_registration_options = None
-        options_to_json = None
-        verify_authentication_response = None
-        verify_registration_response = None
-        parse_attestation_object = None
-        parse_authentication_credential_json = None
-        parse_client_data_json = None
-        parse_registration_credential_json = None
-        COSEAlgorithmIdentifier = None
-        AttestationConveyancePreference = None
-        AttestationFormat = None
-        AuthenticatorSelectionCriteria = None
-        CredentialDeviceType = None
-        UserVerificationRequirement = None
 
 from litestar_security.accounts._internal import aware_utc_time, new_event_id, strict_context_text, utc_now
 from litestar_security.accounts._operations import (
@@ -101,6 +35,24 @@ from litestar_security.accounts._records import (
 from litestar_security.accounts._stores import LoginMethodStore
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
+from litestar_security.typing import (
+    AttestationConveyancePreference,
+    AttestationFormat,
+    AuthenticatorSelectionCriteria,
+    COSEAlgorithmIdentifier,
+    CredentialDeviceType,
+    UserVerificationRequirement,
+    ensure_webauthn,
+    generate_authentication_options,
+    generate_registration_options,
+    options_to_json,
+    parse_attestation_object,
+    parse_authentication_credential_json,
+    parse_client_data_json,
+    parse_registration_credential_json,
+    verify_authentication_response,
+    verify_registration_response,
+)
 
 __all__ = (
     "AttestationTrustMapper",
@@ -126,11 +78,11 @@ _MAXIMUM_CHALLENGE_TTL = timedelta(minutes=10)
 _DEFAULT_CHALLENGE_TTL = timedelta(minutes=5)
 _DEFAULT_ALGORITHMS = (-8, -7, -257)
 _SUPPORTED_ALGORITHMS = frozenset(_DEFAULT_ALGORITHMS)
-_APPLICATION_ROOT_VERIFYING_FORMATS: frozenset[object] = (
-    frozenset()
-    if cast("object", AttestationFormat) is None
-    else frozenset({AttestationFormat.FIDO_U2F, AttestationFormat.PACKED, AttestationFormat.TPM})
-)
+_APPLICATION_ROOT_VERIFYING_FORMATS: frozenset[object] = frozenset({
+    AttestationFormat.FIDO_U2F,
+    AttestationFormat.PACKED,
+    AttestationFormat.TPM,
+})
 WorkerT = TypeVar("WorkerT")
 
 
@@ -548,7 +500,7 @@ class PyWebAuthnVerifier:
 
     def __post_init__(self) -> None:
         """Require the optional [passkeys] extra when instantiating the default verifier."""
-        _require_webauthn()
+        ensure_webauthn()
 
     def registration_options(self, **kwargs: object) -> str:
         """Build registration options with project-validated arguments."""
@@ -1030,18 +982,6 @@ class PasskeyService:
             return VerificationUnavailable()
         encoded = urlsafe_b64encode(challenge).rstrip(b"=").decode("ascii")
         return WebAuthnOptions(challenge=encoded, json=json_options, expires_at=expires_at)
-
-
-def _require_webauthn() -> None:
-    """Require the optional [passkeys] extra before constructing PyWebAuthnVerifier."""
-    if cast("object", generate_registration_options) is None or sys.modules.get("webauthn") is None:
-        try:
-            import_module("webauthn")
-        except ModuleNotFoundError:
-            message = (
-                "litestar-security feature requires the [passkeys] extra: pip install 'litestar-security[passkeys]'"
-            )
-            raise ImportError(message) from None
 
 
 def _binding_digest(binding: bytes) -> bytes:
