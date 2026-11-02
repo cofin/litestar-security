@@ -8,7 +8,7 @@ Added
 ~~~~~
 
 * :class:`~litestar_security.providers.api_key.APIKeyConfig` adds
-  ``accept_authorization_bearer: bool = False`` (`#80 <https://github.com/cofin/litestar-security/issues/80>`__).
+  ``accept_authorization_bearer: bool = False`` (`#80 <https://github.com/cofin/litestar-security/issues/80>`__, `#82 <https://github.com/cofin/litestar-security/pull/82>`__).
   When enabled, :class:`~litestar_security.providers.api_key.APIKeyConfig` extracts
   prefixed API keys from ``Authorization: Bearer <prefix>_<secret>`` when its
   dedicated header is absent, coordinates prefix exclusion automatically with a
@@ -19,12 +19,21 @@ Added
 * :class:`~litestar_security.providers.iap.GoogleIAPClaims` adds
   ``normalized_subject``, ``spiffe_id``, ``is_service_account``,
   ``is_agent_identity``, and ``is_machine_principal`` properties
-  (`#81 <https://github.com/cofin/litestar-security/issues/81>`__) so application
+  (`#81 <https://github.com/cofin/litestar-security/issues/81>`__, `#82 <https://github.com/cofin/litestar-security/pull/82>`__) so application
   identity resolvers can distinguish human Google Workspace assertions from
   allowlisted Google Cloud service accounts (``*.gserviceaccount.com``) and
   Vertex AI Agent Engine / GKE Workload Identity SPIFFE workload principals
   (``principal://agents.global....``, ``principalSet://agents.global....``,
   ``spiffe://...``).
+
+Changed
+~~~~~~~
+
+* Update GitHub Actions workflows to ``actions/deploy-pages`` v5.0.1 (`#63 <https://github.com/cofin/litestar-security/pull/63>`__),
+  ``codecov/codecov-action`` v7.1.1 (`#67 <https://github.com/cofin/litestar-security/pull/67>`__),
+  ``astral-sh/setup-uv`` v10.2.0 (`#70 <https://github.com/cofin/litestar-security/pull/70>`__),
+  ``actions/upload-artifact`` v7.0.2 (`#73 <https://github.com/cofin/litestar-security/pull/73>`__),
+  and ``actions/download-artifact`` v8.0.2 (`#74 <https://github.com/cofin/litestar-security/pull/74>`__, `#82 <https://github.com/cofin/litestar-security/pull/82>`__).
 
 Fixed
 ~~~~~
@@ -38,7 +47,7 @@ Fixed
   :class:`~litestar_security.accounts.LocalAuthService`, controller builders, and
   ``litestar_security.testing`` in-memory stores and conformance harnesses no
   longer require the optional ``argon2``, ``mfa`` (``pyotp``), or ``passkeys``
-  (``webauthn``) extras (`#75 <https://github.com/cofin/litestar-security/issues/75>`__).
+  (``webauthn``) extras (`#75 <https://github.com/cofin/litestar-security/issues/75>`__, `#56 <https://github.com/cofin/litestar-security/pull/56>`__, `#82 <https://github.com/cofin/litestar-security/pull/82>`__).
   Only the concrete third-party SDK adapter classes
   (:class:`~litestar_security.accounts.Argon2PasswordHasher`,
   :class:`~litestar_security.accounts.MFAService`,
