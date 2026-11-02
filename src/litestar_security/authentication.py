@@ -466,9 +466,6 @@ class AuthorizationResolver(Protocol[_UserT]):
         ...  # pragma: no cover
 
 
-_EMPTY_SECURITY_SCHEMES: Mapping[str, SecurityScheme] = MappingProxyType({})
-
-
 @dataclass(frozen=True, slots=True)
 class AuthenticationMechanism(Generic[CredentialT, ClaimsT, UserT]):
     """Pair one slot authenticator with its identity resolver."""
@@ -477,7 +474,9 @@ class AuthenticationMechanism(Generic[CredentialT, ClaimsT, UserT]):
     resolver: IdentityResolver[ClaimsT, UserT]
     scheme_name: str | None = None
     security_scheme: SecurityScheme | None = field(default=None, hash=False)
-    additional_security_schemes: Mapping[str, SecurityScheme] = field(default=_EMPTY_SECURITY_SCHEMES, hash=False)
+    additional_security_schemes: Mapping[str, SecurityScheme] = field(
+        default_factory=lambda: MappingProxyType({}), hash=False
+    )
     session_capable: bool = False
 
     def __post_init__(self) -> None:
