@@ -1,0 +1,10 @@
+# False-Positive Suppressions: Runtime & Policy Review
+
+Suppress and do not report findings matching these intentional repository patterns:
+
+- **FP-RUN-01 (Top-level runtime imports for Litestar route/DI signatures & `accounts/__init__.py`)**: Because `from __future__ import annotations` is prohibited under `src/litestar_security/`, runtime imports of `Request`, `ASGIConnection`, `Principal`, `SecurityContext`, DTO/schema classes, and `Argon2PasswordHasher` / `MFAService` / `MFALoginService` / `PyWebAuthnVerifier` are mandatory; optional extras are enforced at instantiation.
+- **FP-RUN-02 (Default CSRF exclusion on `public()` routes vs. untouched `exclude()` routes)**: `public()` routes without `csrf_required=True` deliberately set `opt[csrf_exclude_key] = True` (cookie-establishing public routes such as `/auth/login` set `csrf_required=True`), whereas `exclude()` leaves Litestar's native CSRF middleware untouched unless `csrf_required=True` is set.
+- **FP-RUN-03 (`__getattr__` + `_lazy.py` in `src/litestar_security/__init__.py`)**: `__init__.py` uses `_lazy.py` (`import_optional_attribute`) solely to defer `_OAUTH_EXPORTS` from `litestar_security.providers`; `litestar_security.testing` isolation (`R5`) is enforced by Ruff `TID251` and `tools/check_import_boundaries.py` (`assert not hasattr(litestar_security, "InMemorySecurityBackend")`).
+- **FP-RUN-04 (`BlockingCallRunner` with `abandon_on_cancel=False`)**: Waiting for bounded sync worker completion on cancellation is deliberate to prevent orphan worker threads mutating shared state.
+- **FP-RUN-05 (Mutable `@dataclass(slots=True)` on runtime orchestrators and slots)**: `SecurityConfig`, `RouteCompiler`, `PolicyCompiler`, `BlockingCallRunner`, and `_PrefixExcludingBearerSlot` intentionally omit `frozen=True` while preserving `slots=True`.
+- **FP-RUN-06 (Local `cache_key = (*name_key, shape)` assignment in `WireBackend`)**: Binding `cache_key` before subscripting `cls._transfer_models[cache_key]` in `src/litestar_security/_dto.py` prevents Python 3.10 `mypy` (`ast-serialize`) from rejecting starred subscript unpacking as PEP 646 syntax.
