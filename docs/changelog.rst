@@ -25,6 +25,10 @@ Changed
   ``inspect.isawaitable`` branching during local login, re-authentication, and
   logout coordination
   (`#88 <https://github.com/cofin/litestar-security/pull/88>`__).
+* Adopt the official Litestar Security brand banners, favicons, Shibuya theme
+  styling, and categorized documentation navigation in ``docs/`` and
+  ``README.md``
+  (`#88 <https://github.com/cofin/litestar-security/pull/88>`__).
 * Update GitHub Actions workflows to ``pypa/gh-action-pypi-publish`` v1.14.3
   (`#84 <https://github.com/cofin/litestar-security/pull/84>`__),
   ``astral-sh/setup-uv`` v10.3.3

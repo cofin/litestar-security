@@ -47,7 +47,10 @@ oauth = []
 passkeys = ["webauthn>=3,<4"]
 
 [project.urls]
+Changelog = "https://cofin.github.io/litestar-security/changelog.html"
+Discord = "https://discord.gg/litestar"
 Documentation = "https://cofin.github.io/litestar-security/"
+Homepage = "https://cofin.github.io/litestar-security/"
 Issues = "https://github.com/cofin/litestar-security/issues"
 Source = "https://github.com/cofin/litestar-security"
 
@@ -60,6 +63,9 @@ security = "litestar_security._cli:security_group"
 [build-system]
 build-backend = "hatchling.build"
 requires = ["hatchling"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/.agents", "/AGENTS.md", "/CLAUDE.md", "/GEMINI.md", "/uv.toml"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/litestar_security"]
@@ -216,7 +222,7 @@ ban-relative-imports = "all"
 # Runtime source must not depend on the shipped test kit. Downstream callers
 # import litestar_security.testing explicitly, and tools/check_import_boundaries.py
 # proves at lint time that a bare `import litestar_security` does not load it.
-"litestar_security.testing".msg = "Runtime source must not import the test kit. See .agents/bundles/knowledge/testing/test-organization-and-conformance.md."
+"litestar_security.testing".msg = "Runtime source must not import the test kit; import litestar_security.testing only from tests, examples, or conformance suites."
 
 # No storage, cache or cloud adapter may become a runtime dependency: this library
 # ships protocols, and an adapter belongs in the consumer. tools/check_downstream_consumer.py

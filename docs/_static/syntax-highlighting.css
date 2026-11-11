@@ -1,0 +1,269 @@
+/* Litestar Security Syntax Highlighting
+ * Cohesive WCAG AA/AAA Pygments theme aligned with Litestar Deep Navy & Gold.
+ *
+ * Light Mode Surface: #f8fafc (border #e2e8f0)
+ * Dark Mode Surface:  #171a2b (border #292e4a)
+ */
+
+.highlight {
+  border-radius: 0.5rem;
+  padding: 0.95rem 1.15rem;
+  overflow-x: auto;
+  margin: 1rem 0 1.35rem;
+}
+
+.highlight pre {
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  font-family: var(--sy-f-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.845rem;
+  line-height: 1.62;
+}
+
+.sd-tab-content .highlight {
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.highlight .linenos {
+  opacity: 0.55;
+  user-select: none;
+  padding-right: 1rem;
+}
+
+/* =====================================================
+ * Light Mode Syntax Palette
+ * ===================================================== */
+
+html.light .highlight {
+  background-color: #f8fafc !important;
+  border: 1px solid #e2e8f0;
+}
+
+html.light .highlight pre {
+  background-color: transparent !important;
+  color: #1e293b;
+}
+
+html.light .highlight .hll {
+  background-color: rgba(237, 182, 65, 0.2);
+  display: block;
+  margin: 0 -1.15rem;
+  padding: 0 1.15rem;
+}
+
+html.light .highlight .n,
+html.light .highlight .nn,
+html.light .highlight .nx,
+html.light .highlight .nl,
+html.light .highlight .p,
+html.light .highlight .o {
+  color: #1e293b !important;
+}
+
+html.light .highlight .k,
+html.light .highlight .kd,
+html.light .highlight .kn,
+html.light .highlight .kp,
+html.light .highlight .kr,
+html.light .highlight .ow {
+  color: #6d28d9 !important;
+  font-weight: 600;
+}
+
+html.light .highlight .kc,
+html.light .highlight .kt,
+html.light .highlight .bp {
+  color: #0369a1 !important;
+  font-weight: 600;
+}
+
+html.light .highlight .nc,
+html.light .highlight .ne {
+  color: #9a5200 !important;
+  font-weight: 600;
+}
+
+html.light .highlight .nf,
+html.light .highlight .fm {
+  color: #1d4ed8 !important;
+  font-weight: 600;
+}
+
+html.light .highlight .nb {
+  color: #0f766e !important;
+}
+
+html.light .highlight .\6e d {
+  color: #92400e !important;
+  font-weight: 600;
+}
+
+html.light .highlight .na,
+html.light .highlight .nv,
+html.light .highlight .vc,
+html.light .highlight .vg,
+html.light .highlight .vi {
+  color: #92400e !important;
+}
+
+html.light .highlight .s,
+html.light .highlight .s1,
+html.light .highlight .s2,
+html.light .highlight .sa,
+html.light .highlight .sb,
+html.light .highlight .sc,
+html.light .highlight .sh,
+html.light .highlight .sx {
+  color: #15803d !important;
+}
+
+html.light .highlight .si,
+html.light .highlight .se {
+  color: #be123c !important;
+}
+
+html.light .highlight .sd,
+html.light .highlight .c,
+html.light .highlight .c1,
+html.light .highlight .cm,
+html.light .highlight .ch,
+html.light .highlight .cp,
+html.light .highlight .cpf {
+  color: #526071 !important;
+  font-style: italic;
+}
+
+html.light .highlight .m,
+html.light .highlight .mi,
+html.light .highlight .mf,
+html.light .highlight .mh,
+html.light .highlight .mo,
+html.light .highlight .il {
+  color: #b45309 !important;
+}
+
+html.light .highlight .nt {
+  color: #1d4ed8 !important;
+  font-weight: 600;
+}
+
+/* =====================================================
+ * Dark Mode Syntax Palette (Litestar Deep Navy & Gold)
+ * ===================================================== */
+
+html.dark .highlight {
+  background-color: #171a2b !important;
+  border: 1px solid #292e4a;
+}
+
+html.dark .highlight pre {
+  background-color: transparent !important;
+  color: #e2e8f0;
+}
+
+html.dark .highlight .hll {
+  background-color: rgba(237, 182, 65, 0.16);
+  display: block;
+  margin: 0 -1.15rem;
+  padding: 0 1.15rem;
+}
+
+html.dark .highlight .n,
+html.dark .highlight .nx,
+html.dark .highlight .nl,
+html.dark .highlight .p {
+  color: #e2e8f0 !important;
+}
+
+html.dark .highlight .nn,
+html.dark .highlight .o {
+  color: #cbd5e1 !important;
+}
+
+html.dark .highlight .k,
+html.dark .highlight .kd,
+html.dark .highlight .kn,
+html.dark .highlight .kp,
+html.dark .highlight .kr,
+html.dark .highlight .ow {
+  color: #c4b5fd !important;
+  font-weight: 600;
+}
+
+html.dark .highlight .kc,
+html.dark .highlight .kt,
+html.dark .highlight .bp {
+  color: #7dd3fc !important;
+}
+
+html.dark .highlight .nc,
+html.dark .highlight .ne {
+  color: #edb641 !important;
+  font-weight: 600;
+}
+
+html.dark .highlight .nf,
+html.dark .highlight .fm {
+  color: #60a5fa !important;
+  font-weight: 600;
+}
+
+html.dark .highlight .nb {
+  color: #5eead4 !important;
+}
+
+html.dark .highlight .\6e d {
+  color: #ffd480 !important;
+  font-weight: 600;
+}
+
+html.dark .highlight .na,
+html.dark .highlight .nv,
+html.dark .highlight .vc,
+html.dark .highlight .vg,
+html.dark .highlight .vi {
+  color: #ffd480 !important;
+}
+
+html.dark .highlight .s,
+html.dark .highlight .s1,
+html.dark .highlight .s2,
+html.dark .highlight .sa,
+html.dark .highlight .sb,
+html.dark .highlight .sc,
+html.dark .highlight .sh,
+html.dark .highlight .sx {
+  color: #86efac !important;
+}
+
+html.dark .highlight .si,
+html.dark .highlight .se {
+  color: #fda4af !important;
+}
+
+html.dark .highlight .sd,
+html.dark .highlight .c,
+html.dark .highlight .c1,
+html.dark .highlight .cm,
+html.dark .highlight .ch,
+html.dark .highlight .cp,
+html.dark .highlight .cpf {
+  color: #94a3b8 !important;
+  font-style: italic;
+}
+
+html.dark .highlight .m,
+html.dark .highlight .mi,
+html.dark .highlight .mf,
+html.dark .highlight .mh,
+html.dark .highlight .mo,
+html.dark .highlight .il {
+  color: #fdba74 !important;
+}
+
+html.dark .highlight .nt {
+  color: #edb641 !important;
+  font-weight: 600;
+}
