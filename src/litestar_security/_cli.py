@@ -43,10 +43,10 @@ def _inherited_guards(route_handler: "BaseRouteHandler") -> tuple[str, ...]:
     """Name every guard the handler inherits, security predicates and plain callables alike.
 
     Ownership is read from the layers rather than ``resolve_guards()``, which
-    wraps each guard in ``ensure_async_callable`` and erases the type.
+    wraps each guard in ``ensure_async_callable`` and erases the type. Security
+    predicates are frozen dataclasses whose ``repr`` names the grant checked,
+    keeping the reported guard column actionable.
     """
-    # A security predicate is a frozen dataclass whose repr names the grant it
-    # checks, which is what makes the column actionable.
     return tuple(
         repr(guard) if isinstance(guard, AuthorizationPredicate) else getattr(guard, "__name__", type(guard).__name__)
         for layer in route_handler.ownership_layers
@@ -58,13 +58,12 @@ def _handlers(route: "BaseRoute") -> "list[tuple[str, BaseRouteHandler]]":
     """Pair each route with its handlers, keyed by method or scope type.
 
     ``route.route_handlers`` ordering is not stable, so HTTP handlers are read
-    through the method map instead of by index.
+    through the method map instead of by index. Auto-generated Litestar
+    ``OPTIONS`` handlers are omitted because they are unauthenticated framework
+    plumbing rather than application-declared routes.
     """
     if isinstance(route, HTTPRoute):
         handler_map = cast("Mapping[str, Any]", route.route_handler_map)
-        # Litestar generates an OPTIONS handler per route. It is never an
-        # application route and is always unauthenticated, so listing it would
-        # double the table and imply a posture nobody declared.
         return [
             (method, handler_map[method][0])
             for method in sorted(handler_map)

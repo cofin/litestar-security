@@ -2,6 +2,7 @@
 
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -94,7 +95,7 @@ async def test_passkey_registration_rejects_unbound_invalid_or_unavailable_cerem
     assert isinstance(outcome, VerificationUnavailable if case == "store" else InvalidCredentials)
 
 
-def test_py_webauthn_adapter_builds_exact_options_and_sanitizes_malformed_json() -> None:
+def test_py_webauthn_adapter_builds_exact_options() -> None:
     verifier = accounts_module.PyWebAuthnVerifier()
     registration = verifier.registration_options(
         challenge=b"c" * 32,
@@ -112,9 +113,24 @@ def test_py_webauthn_adapter_builds_exact_options_and_sanitizes_malformed_json()
     assert json.loads(registration)["rp"]["id"] == "example.com"
     assert json.loads(registration)["attestation"] == "none"
     assert json.loads(authentication)["userVerification"] == "required"
-    for operation in (verifier.registration_challenge, verifier.authentication_challenge, verifier.credential_id):
-        with pytest.raises(accounts_module.WebAuthnVerificationError):
-            operation("{}")
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda verifier: verifier.registration_challenge("{}"),
+        lambda verifier: verifier.authentication_challenge("{}"),
+        lambda verifier: verifier.credential_id("{}"),
+    ],
+    ids=["registration-challenge", "authentication-challenge", "credential-id"],
+)
+def test_py_webauthn_adapter_sanitizes_malformed_json(
+    operation: Callable[[accounts_module.PyWebAuthnVerifier], object],
+) -> None:
+    verifier = accounts_module.PyWebAuthnVerifier()
+
+    with pytest.raises(accounts_module.WebAuthnVerificationError):
+        operation(verifier)
 
 
 async def test_passkey_authentication_verifies_owner_and_emits_normalized_assurance() -> None:
@@ -179,7 +195,7 @@ async def test_passkey_listing_rename_and_removal_are_safe_and_final_method_guar
 
 async def test_passkey_defensive_registration_authentication_and_audit_outcomes() -> None:  # noqa: PLR0915
     binding = b"session-binding"
-    assert not passkeys_module._valid_attestation_roots({"none": (b"root",)})  # noqa: SLF001
+    assert not passkeys_module.PasskeyService._valid_attestation_roots({"none": (b"root",)})  # noqa: SLF001
     service = build_passkey_service(verifier=InvalidAttestationVerifier())
     await service.begin_registration("account-1", user_name="person@example.com", binding=binding)
     assert isinstance(
@@ -261,9 +277,12 @@ async def test_passkey_defensive_registration_authentication_and_audit_outcomes(
 
     service.login_methods = cast("Any", FailingRecoveryLoginMethods())
     assert isinstance(await service.remove_credential("account-1", b"credential-1"), VerificationUnavailable)
+    await service.begin_authentication("account-1", binding=binding)
+    cast("WebAuthnVerifier", service.verifier).sign_count = 1
+    service.clone_risk_policy = accounts_module.CloneRiskPolicy.AUDIT_ONLY
     service.events = SecurityEvents(fail=True)
-    await service._emit_event(  # noqa: SLF001 - verifies best-effort audit isolation directly
-        operation="passkey.assert", outcome="clone_risk", account_id="account-1", occurred_at=_JWT_NOW
+    assert isinstance(
+        await service.verify_authentication("account-1", binding=binding, response="{}"), AuthenticationEvidence
     )
 
 
@@ -551,15 +570,21 @@ def test_passkey_values_and_dependency_configuration_reject_invalid_shapes() -> 
         )
     with pytest.raises(ValueError, match="Passkey credential"):
         replace(stored_passkey(), backup_state=True)
-    base: dict[str, object] = {
-        "store": PasskeyStore(),
-        "challenge_store": WebAuthnChallengeStore(),
-        "verifier": WebAuthnVerifier(),
-        "rp_id": "example.com",
-        "rp_name": "Example",
-        "origins": ("https://example.com",),
-    }
-    for replacement, match in (
+    localhost = accounts_module.PasskeyService(
+        store=PasskeyStore(),
+        challenge_store=WebAuthnChallengeStore(),
+        verifier=WebAuthnVerifier(),
+        rp_id="localhost",
+        rp_name="Example",
+        origins=("http://localhost:8000",),
+        allow_insecure_localhost=True,
+    )
+    assert localhost.allow_insecure_localhost is True
+
+
+@pytest.mark.parametrize(
+    ("replacement", "match"),
+    [
         ({"store": object()}, "Store"),
         ({"challenge_store": object()}, "Store"),
         ({"verifier": object()}, "verifier"),
@@ -569,18 +594,32 @@ def test_passkey_values_and_dependency_configuration_reject_invalid_shapes() -> 
         ({"origins": ("https://user@example.com",)}, "HTTPS"),
         ({"origins": ("https://example.com/path",)}, "HTTPS"),
         ({"origins": ("https://example.com:bad",)}, "HTTPS"),
-    ):
-        config = {**base, **replacement}
-        with pytest.raises(ImproperlyConfiguredException, match=match):
-            accounts_module.PasskeyService(**config)  # type: ignore[arg-type]
-    localhost_config = {
-        **base,
-        "origins": ("http://localhost:8000",),
-        "rp_id": "localhost",
-        "allow_insecure_localhost": True,
+    ],
+    ids=[
+        "store",
+        "challenge-store",
+        "verifier",
+        "worker-limiter",
+        "worker-timeout",
+        "attestation-trust",
+        "origin-userinfo",
+        "origin-path",
+        "origin-bad-port",
+    ],
+)
+def test_passkey_service_rejects_invalid_configuration_shapes(replacement: dict[str, object], match: str) -> None:
+    config: dict[str, object] = {
+        "store": PasskeyStore(),
+        "challenge_store": WebAuthnChallengeStore(),
+        "verifier": WebAuthnVerifier(),
+        "rp_id": "example.com",
+        "rp_name": "Example",
+        "origins": ("https://example.com",),
+        **replacement,
     }
-    localhost = accounts_module.PasskeyService(**localhost_config)  # type: ignore[arg-type]
-    assert localhost.allow_insecure_localhost is True
+
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        accounts_module.PasskeyService(**config)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

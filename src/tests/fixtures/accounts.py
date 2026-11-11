@@ -1,7 +1,5 @@
 """Reusable account test collaborators and configuration builders."""
 
-from __future__ import annotations
-
 import asyncio
 import base64
 import hmac
@@ -15,7 +13,7 @@ from typing import Any, cast
 
 from anyio.lowlevel import checkpoint
 from litestar.connection import ASGIConnection
-from litestar.stores.base import Store  # noqa: TC002
+from litestar.stores.base import Store
 from litestar.stores.memory import MemoryStore
 
 import litestar_security.accounts as accounts_module
@@ -1494,7 +1492,7 @@ class _WebAuthnVerifier:
 
 def _passkey_service(  # noqa: PLR0913 - explicit service seam builder for ceremony matrices
     *,
-    challenge_store: _ChallengeStore | None = None,
+    challenge_store: "_ChallengeStore | None" = None,
     store: _PasskeyStore | None = None,
     verifier: _WebAuthnVerifier | None = None,
     now: datetime = _JWT_NOW,

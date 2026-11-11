@@ -1,6 +1,5 @@
 """Purpose-bound one-time token issuing, delivery, and verification."""
 
-from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hmac import compare_digest
@@ -11,7 +10,20 @@ from urllib.parse import urlsplit
 
 from litestar.exceptions import ImproperlyConfiguredException
 
-from litestar_security.accounts._internal import aware_utc_time, strict_context_text, strict_text, valid_security_epoch
+from litestar_security.accounts._internal import (
+    ASCII_CONTROL_LIMIT,
+    DIGEST_BYTES,
+    LOOKUP_BYTES,
+    MINIMUM_PEPPER_BYTES,
+    SECRET_BYTES,
+    aware_utc_time,
+    decode_random,
+    encode_random,
+    strict_context_text,
+    strict_text,
+    valid_identifier,
+    valid_security_epoch,
+)
 from litestar_security.accounts._records import TokenPurpose
 
 if TYPE_CHECKING:
@@ -29,38 +41,10 @@ __all__ = (
     "TokenIssue",
 )
 
-
-_ASCII_CONTROL_LIMIT = 32
-
-
-_MINIMUM_TOKEN_PEPPER_BYTES = 32
-
-
-_TOKEN_LOOKUP_BYTES = 16
-
-
-_TOKEN_SECRET_BYTES = 32
-
-
-_TOKEN_DIGEST_BYTES = 32
-
-
-_TOKEN_LOOKUP_CHARACTERS = 22
-
-
-_TOKEN_SECRET_CHARACTERS = 43
-
-
-_DEFAULT_TOKEN_ATTEMPTS = 5
-
-
-_MAXIMUM_TOKEN_ATTEMPTS = 100
-
-
-_DUMMY_TOKEN_LOOKUP = b"\x00" * _TOKEN_LOOKUP_BYTES
-
-
-_DUMMY_TOKEN_SECRET = b"\x00" * _TOKEN_SECRET_BYTES
+DEFAULT_TOKEN_ATTEMPTS = 5
+MAXIMUM_TOKEN_ATTEMPTS = 100
+_DUMMY_TOKEN_LOOKUP = b"\x00" * LOOKUP_BYTES
+_DUMMY_TOKEN_SECRET = b"\x00" * SECRET_BYTES
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,8 +154,8 @@ class PurposeTokenProof:
         """Validate the exact storage-facing proof shape."""
         if (
             self.purpose.__class__ is not TokenPurpose
-            or not _valid_token_id(self.token_id, self.purpose)
-            or len(self.digest) != _TOKEN_DIGEST_BYTES
+            or not valid_identifier(self.token_id, prefix=f"{self.purpose.value}_")
+            or len(self.digest) != DIGEST_BYTES
         ):
             msg = "Invalid purpose token proof"
             raise ValueError(msg)
@@ -221,7 +205,7 @@ class PurposeTokenCodec:
         """Require an explicit strong HMAC pepper and callable entropy source."""
         pepper_value: object = object.__getattribute__(self, "pepper")
         entropy_value: object = object.__getattribute__(self, "entropy")
-        if pepper_value.__class__ is not bytes or len(self.pepper) < _MINIMUM_TOKEN_PEPPER_BYTES:
+        if pepper_value.__class__ is not bytes or len(self.pepper) < MINIMUM_PEPPER_BYTES:
             msg = "Purpose token pepper must contain at least 32 bytes"
             raise ImproperlyConfiguredException(detail=msg)
         if not callable(entropy_value):
@@ -237,7 +221,7 @@ class PurposeTokenCodec:
         template: str,
         destination: str,
         return_url: str | None = None,
-        maximum_attempts: int = _DEFAULT_TOKEN_ATTEMPTS,
+        maximum_attempts: int = DEFAULT_TOKEN_ATTEMPTS,
     ) -> PurposeTokenDelivery:
         """Create one digest-bound issue whose raw token exists only in its notification.
 
@@ -263,18 +247,18 @@ class PurposeTokenCodec:
         if lifetime.__class__ is not timedelta or lifetime <= timedelta(0):
             msg = "Purpose token lifetime must be positive"
             raise ValueError(msg)
-        if maximum_attempts.__class__ is not int or not 1 <= maximum_attempts <= _MAXIMUM_TOKEN_ATTEMPTS:
+        if maximum_attempts.__class__ is not int or not 1 <= maximum_attempts <= MAXIMUM_TOKEN_ATTEMPTS:
             msg = "Purpose token attempts must be a positive bounded integer"
             raise ValueError(msg)
-        lookup = self._entropy(_TOKEN_LOOKUP_BYTES)
-        secret = self._entropy(_TOKEN_SECRET_BYTES)
-        lookup_segment = _encode_token_segment(lookup)
-        secret_segment = _encode_token_segment(secret)
+        lookup = self._entropy(LOOKUP_BYTES)
+        secret = self._entropy(SECRET_BYTES)
+        lookup_segment = encode_random(lookup)
+        secret_segment = encode_random(secret)
         token_id = f"{purpose.value}_{lookup_segment}"
         token = f"{token_id}.{secret_segment}"
         issue = PendingTokenIssue(
             token_id=token_id,
-            digest=_purpose_token_digest(self.pepper, purpose, lookup, secret),
+            digest=self._purpose_token_digest(purpose, lookup, secret),
             purpose=purpose,
             expires_at=issued_at + lifetime,
             maximum_attempts=maximum_attempts,
@@ -311,8 +295,8 @@ class PurposeTokenCodec:
             expected_prefix = f"{expected_purpose.value}_"
             left, separator, secret_segment = token.partition(".")
             purpose_prefix, purpose_separator, lookup_segment = left.partition("_")
-            decoded_lookup = _decode_token_segment(lookup_segment, _TOKEN_LOOKUP_BYTES)
-            decoded_secret = _decode_token_segment(secret_segment, _TOKEN_SECRET_BYTES)
+            decoded_lookup = decode_random(lookup_segment, LOOKUP_BYTES)
+            decoded_secret = decode_random(secret_segment, SECRET_BYTES)
             valid = (
                 separator == "."
                 and "." not in secret_segment
@@ -328,7 +312,7 @@ class PurposeTokenCodec:
                 secret = decoded_secret
             if valid:
                 token_id = left
-        digest = _purpose_token_digest(self.pepper, expected_purpose, lookup, secret)
+        digest = self._purpose_token_digest(expected_purpose, lookup, secret)
         if not valid:
             return None
         return PurposeTokenProof(token_id=token_id, digest=digest, purpose=expected_purpose)
@@ -342,13 +326,16 @@ class PurposeTokenCodec:
             raise PurposeTokenGenerationError
         return value
 
+    def _purpose_token_digest(self, purpose: TokenPurpose, lookup: bytes, secret: bytes) -> bytes:
+        return hmac_digest(self.pepper, purpose.value.encode("ascii") + lookup + secret, "sha256")
+
 
 def approved_return_url(value: object) -> bool:
     if (
         not isinstance(value, str)
         or value.__class__ is not str
         or not value.strip()
-        or any(ord(character) < _ASCII_CONTROL_LIMIT for character in value)
+        or any(ord(character) < ASCII_CONTROL_LIMIT for character in value)
     ):
         return False
     parsed = urlsplit(value)
@@ -364,11 +351,11 @@ def approved_return_url(value: object) -> bool:
 def _validate_pending_token_issue(issue: "PendingTokenIssue | TokenIssue") -> None:
     if (
         issue.purpose.__class__ is not TokenPurpose
-        or not _valid_token_id(issue.token_id, issue.purpose)
+        or not valid_identifier(issue.token_id, prefix=f"{issue.purpose.value}_")
         or issue.digest.__class__ is not bytes
-        or len(issue.digest) != _TOKEN_DIGEST_BYTES
+        or len(issue.digest) != DIGEST_BYTES
         or issue.maximum_attempts.__class__ is not int
-        or not 1 <= issue.maximum_attempts <= _MAXIMUM_TOKEN_ATTEMPTS
+        or not 1 <= issue.maximum_attempts <= MAXIMUM_TOKEN_ATTEMPTS
     ):
         msg = "Invalid pending purpose token issue"
         raise ValueError(msg)
@@ -377,37 +364,3 @@ def _validate_pending_token_issue(issue: "PendingTokenIssue | TokenIssue") -> No
     except (AttributeError, ValueError):
         msg = "Pending purpose token expiry must be timezone-aware"
         raise ValueError(msg) from None
-
-
-def _valid_token_id(token_id: object, purpose: TokenPurpose) -> bool:
-    if not isinstance(token_id, str) or token_id.__class__ is not str:
-        return False
-    prefix = f"{purpose.value}_"
-    if not token_id.startswith(prefix):
-        return False
-    segment = token_id[len(prefix) :]
-    return _decode_token_segment(segment, _TOKEN_LOOKUP_BYTES) is not None
-
-
-def _purpose_token_digest(pepper: bytes, purpose: TokenPurpose, lookup: bytes, secret: bytes) -> bytes:
-    return hmac_digest(pepper, purpose.value.encode("ascii") + lookup + secret, "sha256")
-
-
-def _encode_token_segment(value: bytes) -> str:
-    return urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
-
-
-def _decode_token_segment(value: object, expected_bytes: int) -> bytes | None:
-    expected_characters = (
-        _TOKEN_LOOKUP_CHARACTERS if expected_bytes == _TOKEN_LOOKUP_BYTES else _TOKEN_SECRET_CHARACTERS
-    )
-    if not isinstance(value, str) or value.__class__ is not str or len(value) != expected_characters:
-        return None
-    try:
-        encoded = value.encode("ascii")
-        decoded = urlsafe_b64decode(encoded + b"=" * (-len(encoded) % 4))
-    except (UnicodeError, ValueError):
-        return None
-    if len(decoded) != expected_bytes or _encode_token_segment(decoded) != value:
-        return None
-    return decoded

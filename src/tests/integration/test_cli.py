@@ -1,4 +1,4 @@
-"""Unit contracts for the security CLI command group."""
+"""Integration contracts for the security CLI command group."""
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,7 +36,7 @@ class _Authenticator:
     name = "api-key"
     slot = "slot-api-key"
 
-    async def authenticate(self, credential: object, _connection: object) -> "Authenticated[str]":
+    async def authenticate(self, credential: object, _connection: object) -> Authenticated[str]:
         return Authenticated(
             claims=cast("str", credential),
             evidence=AuthenticationEvidence(
@@ -46,7 +46,7 @@ class _Authenticator:
 
 
 class _Resolver:
-    async def resolve(self, claims: str) -> "Principal[object]":
+    async def resolve(self, claims: str) -> Principal[object]:
         return Principal(id=claims)
 
 

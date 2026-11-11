@@ -61,16 +61,16 @@ class ContentSecurityPolicy:
             raise ImproperlyConfiguredException(detail=message)
         normalized: dict[str, tuple[str, ...]] = {}
         for name, sources in self.directives.items():
-            _validate_directive(name)
+            self._validate_directive(name)
             values: list[str] = []
             for source in sources:
-                _validate_source(source)
+                self._validate_source(source)
                 if source not in values:
                     values.append(source)
             normalized[name] = tuple(values)
         nonce_directives = tuple(dict.fromkeys(self.nonce_directives))
         for name in nonce_directives:
-            _validate_directive(name)
+            self._validate_directive(name)
             if name not in normalized:
                 message = f"CSP nonce directive {name!r} must also be configured"
                 raise ImproperlyConfiguredException(detail=message)
@@ -112,6 +112,26 @@ class ContentSecurityPolicy:
             serialized.append(" ".join((name, *values)))
         return "; ".join(serialized)
 
+    @staticmethod
+    def _validate_directive(name: object) -> None:
+        if not isinstance(name, str) or _DIRECTIVE_TOKEN.fullmatch(name) is None:
+            message = f"Invalid CSP directive name {name!r}"
+            raise ImproperlyConfiguredException(detail=message)
+
+    @staticmethod
+    def _validate_source(source: object) -> None:
+        if (
+            not isinstance(source, str)
+            or not source
+            or ";" in source
+            or any(
+                character.isspace() or ord(character) < _ASCII_CONTROL_LIMIT or ord(character) == _ASCII_DELETE
+                for character in source
+            )
+        ):
+            message = f"Invalid CSP source value {source!r}"
+            raise ImproperlyConfiguredException(detail=message)
+
 
 @dataclass(frozen=True, slots=True)
 class SecurityHeadersConfig:
@@ -151,7 +171,7 @@ class SecurityHeadersConfig:
         normalized: dict[str, str] = {}
         seen: dict[str, str] = {}
         for name, value in self.static.items():
-            _validate_header(name, value)
+            self._validate_header(name, value)
             lower_name = name.lower()
             existing_name = seen.get(lower_name)
             if existing_name is not None and normalized[existing_name] != value:
@@ -169,6 +189,17 @@ class SecurityHeadersConfig:
                     raise ImproperlyConfiguredException(detail=message)
                 normalized.pop(existing_name)
         object.__setattr__(self, "static", MappingProxyType(normalized))
+
+    @staticmethod
+    def _validate_header(name: object, value: object) -> None:
+        if not isinstance(name, str) or _HEADER_TOKEN.fullmatch(name) is None:
+            message = f"Invalid response header name {name!r}"
+            raise ImproperlyConfiguredException(detail=message)
+        if not isinstance(value, str) or any(
+            ord(character) < _ASCII_CONTROL_LIMIT or ord(character) == _ASCII_DELETE for character in value
+        ):
+            message = f"Invalid response header value for {name!r}"
+            raise ImproperlyConfiguredException(detail=message)
 
 
 def configure_security_headers(
@@ -208,7 +239,7 @@ def configure_security_headers(
         message = "Application config already owns the reserved 'csp_nonce' dependency"
         raise ImproperlyConfiguredException(detail=message)
     if existing_dependency is None:
-        app_config.dependencies["csp_nonce"] = Provide(_provide_csp_nonce, sync_to_thread=False, use_cache=False)
+        app_config.dependencies["csp_nonce"] = Provide(_scope_nonce, sync_to_thread=False, use_cache=False)
     app_config.signature_namespace.setdefault("csp_nonce", csp_nonce)
     nonce_hook = next((hook for hook in hooks if hook.__name__ == "add_csp_header"), None)
     managed_hooks = (*managed_hooks, nonce_hook if nonce_hook is not None else _create_csp_hook(csp))
@@ -240,10 +271,6 @@ def _create_static_headers_hook(static: Mapping[str, str]) -> CSPHook:
                 headers.append((name, value))
 
     return add_static_headers
-
-
-def _provide_csp_nonce(scope: Scope) -> str:
-    return _scope_nonce(scope)
 
 
 def _scope_nonce(scope: Scope) -> str:
@@ -292,34 +319,3 @@ def _merge_native_headers(app_config: "AppConfig", configured: Mapping[str, str]
         headers.append(header)
         by_name[name.lower()] = header
     app_config.response_headers = headers
-
-
-def _validate_directive(name: object) -> None:
-    if not isinstance(name, str) or _DIRECTIVE_TOKEN.fullmatch(name) is None:
-        message = f"Invalid CSP directive name {name!r}"
-        raise ImproperlyConfiguredException(detail=message)
-
-
-def _validate_source(source: object) -> None:
-    if (
-        not isinstance(source, str)
-        or not source
-        or ";" in source
-        or any(
-            character.isspace() or ord(character) < _ASCII_CONTROL_LIMIT or ord(character) == _ASCII_DELETE
-            for character in source
-        )
-    ):
-        message = f"Invalid CSP source value {source!r}"
-        raise ImproperlyConfiguredException(detail=message)
-
-
-def _validate_header(name: object, value: object) -> None:
-    if not isinstance(name, str) or _HEADER_TOKEN.fullmatch(name) is None:
-        message = f"Invalid response header name {name!r}"
-        raise ImproperlyConfiguredException(detail=message)
-    if not isinstance(value, str) or any(
-        ord(character) < _ASCII_CONTROL_LIMIT or ord(character) == _ASCII_DELETE for character in value
-    ):
-        message = f"Invalid response header value for {name!r}"
-        raise ImproperlyConfiguredException(detail=message)

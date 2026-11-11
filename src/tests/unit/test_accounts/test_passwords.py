@@ -25,6 +25,12 @@ from tests.fixtures.accounts import PasswordStore as _PasswordStore
 from tests.fixtures.accounts import SecurityEvents as _SecurityEvents
 
 
+@pytest.fixture
+def password_hasher() -> accounts_module.Argon2PasswordHasher:
+    """Return one request-local hasher because its limiter tracks mutable loans."""
+    return accounts_module.Argon2PasswordHasher()
+
+
 @pytest.mark.parametrize(
     ("password", "identifier", "violations"),
     [
@@ -41,7 +47,7 @@ from tests.fixtures.accounts import SecurityEvents as _SecurityEvents
     ],
 )
 def test_password_policy_reports_only_secret_free_violations(
-    password: str, identifier: str | None, violations: set["accounts_module.PasswordPolicyViolation"]
+    password: str, identifier: str | None, violations: set[accounts_module.PasswordPolicyViolation]
 ) -> None:
     policy = accounts_module.PasswordPolicy(compromised=lambda candidate: candidate == "known compromised passphrase")
 
@@ -131,7 +137,7 @@ def test_password_policy_handles_invalid_runtime_text_and_normalizer_failures() 
     ],
 )
 def test_password_verification_outcomes_are_discriminated_and_redacted(
-    status: "accounts_module.PasswordVerificationStatus", replacement_hash: str | None
+    status: accounts_module.PasswordVerificationStatus, replacement_hash: str | None
 ) -> None:
     result = accounts_module.PasswordVerificationOutcome(status=status, replacement_hash=replacement_hash)
 
@@ -155,7 +161,7 @@ def _unavailable_password_check(_password: str) -> bool:
 
 
 async def test_argon2_hasher_uses_locked_id_parameters_and_detects_rehash(
-    password_hasher: "accounts_module.Argon2PasswordHasher",
+    password_hasher: accounts_module.Argon2PasswordHasher,
 ) -> None:
     candidate = "correct horse battery staple"
     encoded = await password_hasher.hash(candidate)
@@ -247,7 +253,7 @@ def test_argon2_hasher_rejects_weak_unsafe_or_mismatched_configuration(kwargs: d
 
 @pytest.mark.parametrize("memory_cost", [40_000, 999_999_999])
 async def test_argon2_hasher_rejects_hostile_parameters_before_real_verification(
-    monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher", memory_cost: int
+    monkeypatch: pytest.MonkeyPatch, password_hasher: accounts_module.Argon2PasswordHasher, memory_cost: int
 ) -> None:
     hostile = password_hasher.dummy_hash.replace("m=19456", f"m={memory_cost}")
     calls: list[str | bytes] = []
@@ -267,7 +273,7 @@ async def test_argon2_hasher_rejects_hostile_parameters_before_real_verification
 
 
 async def test_argon2_hasher_accepts_exact_utf8_byte_boundary(
-    password_hasher: "accounts_module.Argon2PasswordHasher",
+    password_hasher: accounts_module.Argon2PasswordHasher,
 ) -> None:
     candidate = "a" * 1_024
 
@@ -278,7 +284,7 @@ async def test_argon2_hasher_accepts_exact_utf8_byte_boundary(
 
 
 async def test_argon2_hasher_equalizes_absent_wrong_and_malformed_verification_work(
-    monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher"
+    monkeypatch: pytest.MonkeyPatch, password_hasher: accounts_module.Argon2PasswordHasher
 ) -> None:
     presented = "incorrect passphrase"
     encoded = await password_hasher.hash("correct horse battery staple")
@@ -307,7 +313,7 @@ async def test_argon2_hasher_equalizes_absent_wrong_and_malformed_verification_w
 
 
 async def test_argon2_hasher_maps_verification_library_failures_to_sanitized_outcomes(
-    monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher"
+    monkeypatch: pytest.MonkeyPatch, password_hasher: accounts_module.Argon2PasswordHasher
 ) -> None:
     encoded = await password_hasher.hash("correct horse battery staple")
     original = Argon2Engine.verify
@@ -333,7 +339,7 @@ async def test_argon2_hasher_maps_verification_library_failures_to_sanitized_out
 
 
 async def test_argon2_hasher_maps_unexpected_dummy_failure_to_unavailable(
-    monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher"
+    monkeypatch: pytest.MonkeyPatch, password_hasher: accounts_module.Argon2PasswordHasher
 ) -> None:
     def unavailable(_engine: Argon2Engine, _candidate_hash: str | bytes, _candidate: str | bytes) -> bool:
         raise RuntimeError
@@ -346,7 +352,7 @@ async def test_argon2_hasher_maps_unexpected_dummy_failure_to_unavailable(
 
 @pytest.mark.parametrize("encoded_hash", [object(), "a" * 1_025])
 async def test_argon2_hasher_treats_invalid_hash_runtime_shapes_as_malformed(
-    password_hasher: "accounts_module.Argon2PasswordHasher", encoded_hash: object
+    password_hasher: accounts_module.Argon2PasswordHasher, encoded_hash: object
 ) -> None:
     result = await password_hasher.verify(encoded_hash, "constant-work candidate")  # type: ignore[arg-type]
 
@@ -354,7 +360,7 @@ async def test_argon2_hasher_treats_invalid_hash_runtime_shapes_as_malformed(
 
 
 async def test_argon2_hasher_rejects_oversized_or_invalid_text_before_workers(
-    monkeypatch: pytest.MonkeyPatch, password_hasher: "accounts_module.Argon2PasswordHasher"
+    monkeypatch: pytest.MonkeyPatch, password_hasher: accounts_module.Argon2PasswordHasher
 ) -> None:
     worker_calls = 0
     original = Argon2Engine.verify
@@ -380,14 +386,19 @@ async def test_argon2_hasher_rejects_oversized_or_invalid_text_before_workers(
         await password_hasher.hash(object())  # type: ignore[arg-type]
 
 
-def test_argon2_hasher_maps_engine_configuration_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("mode", ["init", "create"])
+async def test_argon2_hasher_maps_engine_configuration_failure(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     def unavailable(**_kwargs: object) -> object:
         raise TypeError
 
     monkeypatch.setattr("litestar_security.accounts._passwords._Argon2Engine", unavailable)
 
-    with pytest.raises(ImproperlyConfiguredException, match="Invalid Argon2"):
-        accounts_module.Argon2PasswordHasher()
+    if mode == "create":
+        with pytest.raises(ImproperlyConfiguredException, match="Invalid Argon2"):
+            await accounts_module.Argon2PasswordHasher.create()
+    else:
+        with pytest.raises(ImproperlyConfiguredException, match="Invalid Argon2"):
+            accounts_module.Argon2PasswordHasher()
 
 
 async def test_argon2_hasher_bounds_concurrency_and_maps_timeout(monkeypatch: pytest.MonkeyPatch) -> None:

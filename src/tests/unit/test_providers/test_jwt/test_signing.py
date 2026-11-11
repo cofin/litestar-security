@@ -184,12 +184,27 @@ def test_local_key_material_is_secret_safe(jwt_key_material: Mapping[str, tuple[
         private_key.decode() not in repr(value) and public_key.decode() not in repr(value)
         for value in (signing_key, verification_key, ring, ring.build_signer())
     )
-    for public_jwk in (signing_key.public_jwk, verification_key.public_jwk):
-        assert public_jwk is not None
-        assert not {"d", "dp", "dq", "k", "oth", "p", "q", "qi"}.intersection(public_jwk)
 
 
-def test_local_keys_canonicalize_null_public_jwk_metadata(jwt_key_material: Mapping[str, tuple[bytes, bytes]]) -> None:
+@pytest.mark.parametrize("key_kind", ["signing", "verification"])
+def test_local_key_public_jwk_excludes_private_rsa_members(
+    key_kind: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+) -> None:
+    private_key, public_key = jwt_key_material["RS256"]
+    public_jwk = (
+        SigningKey(key_id="active", algorithm="RS256", private_key=private_key).public_jwk
+        if key_kind == "signing"
+        else VerificationKey(key_id="retained", algorithm="RS256", key=public_key).public_jwk
+    )
+
+    assert public_jwk is not None
+    assert not {"d", "dp", "dq", "k", "oth", "p", "q", "qi"}.intersection(public_jwk)
+
+
+@pytest.mark.parametrize(("key_kind", "key_id"), [("signing", "active"), ("verification", "retained")])
+def test_local_keys_canonicalize_null_public_jwk_metadata(
+    key_kind: str, key_id: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+) -> None:
     private_key, public_key = jwt_key_material["RS256"]
     generated = SigningKey(key_id="generated", algorithm="RS256", private_key=private_key)
     null_metadata = {
@@ -199,17 +214,18 @@ def test_local_keys_canonicalize_null_public_jwk_metadata(jwt_key_material: Mapp
         "kid": None,
         "use": None,
     }
-
-    signing_key = SigningKey(
-        key_id="active", algorithm="RS256", private_key=private_key, public_jwk=cast("Any", null_metadata)
+    public_jwk = (
+        SigningKey(
+            key_id=key_id, algorithm="RS256", private_key=private_key, public_jwk=cast("Any", null_metadata)
+        ).public_jwk
+        if key_kind == "signing"
+        else VerificationKey(
+            key_id=key_id, algorithm="RS256", key=public_key, public_jwk=cast("Any", null_metadata)
+        ).public_jwk
     )
-    verification_key = VerificationKey(
-        key_id="retained", algorithm="RS256", key=public_key, public_jwk=cast("Any", null_metadata)
-    )
 
-    for public_jwk, key_id in ((signing_key.public_jwk, "active"), (verification_key.public_jwk, "retained")):
-        assert public_jwk is not None
-        assert public_jwk["alg"] == "RS256"
-        assert public_jwk["key_ops"] == ("verify",)
-        assert public_jwk["kid"] == key_id
-        assert public_jwk["use"] == "sig"
+    assert public_jwk is not None
+    assert public_jwk["alg"] == "RS256"
+    assert public_jwk["key_ops"] == ("verify",)
+    assert public_jwk["kid"] == key_id
+    assert public_jwk["use"] == "sig"

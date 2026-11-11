@@ -4,7 +4,8 @@ import asyncio
 import ipaddress
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -13,12 +14,12 @@ from typing import NoReturn, Protocol, cast, runtime_checkable
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import httpx
-from litestar.exceptions import ImproperlyConfiguredException
 from typing_extensions import Self
 
 from litestar_security.providers._internal import (
     AddressResolver,
     public_address,
+    raise_config,
     reject_non_finite,
     resolve_addresses,
     unique_object,
@@ -77,10 +78,6 @@ _RESERVED_AUTHORIZATION_PARAMETERS = frozenset({
 })
 
 
-def _empty_parameters() -> dict[str, str]:
-    return {}
-
-
 class OAuthClientAuth(str, Enum):
     """Supported OAuth token-endpoint client authentication methods."""
 
@@ -103,16 +100,20 @@ class OAuthHTTPPolicy:
     def __post_init__(self) -> None:
         """Require finite timeouts and bounded integer resources."""
         if (
-            not _positive_finite(self.connect_timeout)
-            or not _positive_finite(self.read_timeout)
-            or not _positive_finite(self.write_timeout)
-            or not _positive_finite(self.pool_timeout)
+            not self._positive_finite(self.connect_timeout)
+            or not self._positive_finite(self.read_timeout)
+            or not self._positive_finite(self.write_timeout)
+            or not self._positive_finite(self.pool_timeout)
             or self.maximum_connections.__class__ is not int
             or not 1 <= self.maximum_connections <= _MAXIMUM_CONNECTIONS
             or self.maximum_response_bytes.__class__ is not int
             or not 1 <= self.maximum_response_bytes <= _MAXIMUM_RESPONSE_BYTES
         ):
-            _raise_config("OAuth HTTP resource limits must be positive and bounded")
+            raise_config("OAuth HTTP resource limits must be positive and bounded")
+
+    @staticmethod
+    def _positive_finite(value: object) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,23 +129,23 @@ class OAuthEndpointConfig:
     revocation_endpoint: str | None
     allowed_scopes: frozenset[str]
     required_scopes: frozenset[str]
-    extra_authorization_parameters: Mapping[str, str] = field(default_factory=_empty_parameters)
+    extra_authorization_parameters: Mapping[str, str] = field(default_factory=dict[str, str])
 
     def __post_init__(self) -> None:
         """Validate provider identity, fixed endpoints, scopes, and client auth."""
         if not _strict_text(self.name) or not _strict_text(self.client_id):
-            _raise_config("OAuth provider name and client ID must not be blank")
+            raise_config("OAuth provider name and client ID must not be blank")
         if self.client_auth.__class__ is not OAuthClientAuth:
-            _raise_config("OAuth client authentication method is invalid")
+            raise_config("OAuth client authentication method is invalid")
         has_secret = self.client_secret is not None and self.client_secret.__class__ is SecretStr
         if (self.client_auth is OAuthClientAuth.NONE and self.client_secret is not None) or (
             self.client_auth is not OAuthClientAuth.NONE and not has_secret
         ):
-            _raise_config("OAuth client secret does not match the authentication method")
-        _validate_endpoint(self.authorization_endpoint)
-        _validate_endpoint(self.token_endpoint)
+            raise_config("OAuth client secret does not match the authentication method")
+        self._validate_endpoint(self.authorization_endpoint)
+        self._validate_endpoint(self.token_endpoint)
         if self.revocation_endpoint is not None:
-            _validate_endpoint(self.revocation_endpoint)
+            self._validate_endpoint(self.revocation_endpoint)
         if (
             self.allowed_scopes.__class__ is not frozenset
             or not self.allowed_scopes
@@ -153,10 +154,10 @@ class OAuthEndpointConfig:
             or any(not _valid_scope(scope) for scope in self.required_scopes)
             or not self.required_scopes.issubset(self.allowed_scopes)
         ):
-            _raise_config("OAuth provider scopes must be immutable, valid, and allowlisted")
+            raise_config("OAuth provider scopes must be immutable, valid, and allowlisted")
         parameters = cast("object", self.extra_authorization_parameters)
         if not isinstance(parameters, Mapping):
-            _raise_config("OAuth authorization parameters must be a mapping")
+            raise_config("OAuth authorization parameters must be a mapping")
         normalized_parameters: dict[str, str] = {}
         for key, value in self.extra_authorization_parameters.items():
             if (
@@ -165,9 +166,30 @@ class OAuthEndpointConfig:
                 or key in _RESERVED_AUTHORIZATION_PARAMETERS
                 or key in normalized_parameters
             ):
-                _raise_config("OAuth authorization parameters cannot override protocol bindings")
+                raise_config("OAuth authorization parameters cannot override protocol bindings")
             normalized_parameters[key] = value
         object.__setattr__(self, "extra_authorization_parameters", MappingProxyType(normalized_parameters))
+
+    @staticmethod
+    def _validate_endpoint(value: str) -> None:
+        if value.__class__ is not str or value != value.strip() or "*" in value or "\\" in value:
+            raise_config("OAuth endpoints must be exact HTTPS URLs")
+        try:
+            split = urlsplit(value)
+            port = split.port
+        except ValueError:
+            raise_config("OAuth endpoints must be exact HTTPS URLs")
+        if (
+            split.scheme != "https"
+            or not split.netloc
+            or split.hostname is None
+            or split.username is not None
+            or split.password is not None
+            or split.query
+            or split.fragment
+            or (port is not None and not 1 <= port <= _MAXIMUM_TCP_PORT)
+        ):
+            raise_config("OAuth endpoints must be exact HTTPS URLs")
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,7 +271,24 @@ class ProviderIdentity:
         ):
             message = "Provider identity is invalid"
             raise ValueError(message)
-        object.__setattr__(self, "raw_claims", _freeze_mapping(self.raw_claims))
+        object.__setattr__(self, "raw_claims", self._freeze_mapping(self.raw_claims))
+
+    @classmethod
+    def _freeze_mapping(cls, value: Mapping[str, object]) -> Mapping[str, object]:
+        return MappingProxyType({key: cls._freeze_value(item) for key, item in value.items()})
+
+    @classmethod
+    def _freeze_value(cls, value: object) -> object:
+        if isinstance(value, Mapping):
+            mapping = cast("Mapping[object, object]", value)
+            if any(not _strict_text(key) for key in mapping):
+                message = "Provider identity is invalid"
+                raise ValueError(message)
+            return MappingProxyType({cast("str", key): cls._freeze_value(item) for key, item in mapping.items()})
+        if isinstance(value, (list, tuple)):
+            items = cast("list[object] | tuple[object, ...]", value)
+            return tuple(cls._freeze_value(item) for item in items)
+        return value
 
 
 @runtime_checkable
@@ -376,9 +415,9 @@ class OAuthProviderClient:
             resolver: Optional asynchronous endpoint address resolver.
         """
         if config.__class__ is not OAuthEndpointConfig:
-            _raise_config("OAuth endpoint configuration is invalid")
+            raise_config("OAuth endpoint configuration is invalid")
         if policy is not None and policy.__class__ is not OAuthHTTPPolicy:
-            _raise_config("OAuth HTTP policy is invalid")
+            raise_config("OAuth HTTP policy is invalid")
         self.config = config
         self.policy = policy or OAuthHTTPPolicy()
         self._resolver = resolver or resolve_addresses
@@ -520,14 +559,12 @@ class OAuthProviderClient:
             data["token_type_hint"] = token_type_hint
         auth, request_data = self._client_auth(data)
         try:
-            url, host, sni_hostname = await self._pinned_endpoint(self.config.revocation_endpoint)
-            async with self._client.stream(
+            async with self.stream_pinned(
                 "POST",
-                url,
-                data=request_data,
+                self.config.revocation_endpoint,
+                headers={"Accept": "application/json", "Accept-Encoding": "identity"},
                 auth=auth,
-                headers={"Accept": "application/json", "Accept-Encoding": "identity", "Host": host},
-                extensions={"sni_hostname": sni_hostname},
+                data=request_data,
             ) as response:
                 if response.status_code != _HTTP_OK:
                     _raise_provider()
@@ -536,6 +573,36 @@ class OAuthProviderClient:
             raise
         except Exception:  # noqa: BLE001 - sanitize transport and provider response failures
             raise OAuthProviderError from None
+
+    @asynccontextmanager
+    async def stream_pinned(  # noqa: PLR0913 - explicit request options keep the pinned-SSRF boundary clear
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        auth: httpx.Auth | None = None,
+        data: Mapping[str, str] | None = None,
+        json_body: object | None = None,
+    ) -> AsyncGenerator[httpx.Response, None]:
+        """Stream one outbound request to a DNS-pinned public endpoint."""
+        self._require_open()
+        url, host, sni_hostname = await self._pinned_endpoint(endpoint)
+        request_headers = (
+            {"Host": host}
+            if headers is None
+            else {**{name: value for name, value in headers.items() if name.lower() != "host"}, "Host": host}
+        )
+        async with self._client.stream(
+            method,
+            url,
+            headers=request_headers,
+            auth=auth,
+            data=data,
+            json=json_body,
+            extensions={"sni_hostname": sni_hostname},
+        ) as response:
+            yield response
 
     async def aclose(self) -> None:
         """Close the owned client idempotently."""
@@ -562,31 +629,24 @@ class OAuthProviderClient:
     ) -> ProviderTokenSet:
         auth, request_data = self._client_auth(data)
         try:
-            url, host, sni_hostname = await self._pinned_endpoint(self.config.token_endpoint)
-            async with self._client.stream(
+            async with self.stream_pinned(
                 "POST",
-                url,
-                data=request_data,
-                auth=auth,
+                self.config.token_endpoint,
                 headers={
                     "Accept": "application/json, application/x-www-form-urlencoded",
                     "Accept-Encoding": "identity",
-                    "Host": host,
                 },
-                extensions={"sni_hostname": sni_hostname},
+                auth=auth,
+                data=request_data,
             ) as response:
                 body = await _read_bounded(response, self.policy.maximum_response_bytes)
                 if response.status_code != _HTTP_OK:
-                    if _is_invalid_grant_response(response.headers.get("content-type", ""), body):
+                    if self._is_invalid_grant_response(response.headers.get("content-type", ""), body):
                         raise InvalidProviderGrantError  # noqa: TRY301 - preserve provider reauthorization classification
                     _raise_provider()
-                document = _parse_token_document(response.headers.get("content-type", ""), body)
-            return _token_set(
-                document,
-                fallback_scopes=fallback_scopes,
-                config=self.config,
-                fallback_refresh_token=fallback_refresh_token,
-                now=now,
+                document = self._parse_token_document(response.headers.get("content-type", ""), body)
+            return self._token_set(
+                document, fallback_scopes=fallback_scopes, fallback_refresh_token=fallback_refresh_token, now=now
             )
         except OAuthProviderError:
             raise
@@ -605,8 +665,13 @@ class OAuthProviderClient:
         return None, request_data
 
     async def _pinned_endpoint(self, endpoint: str) -> tuple[httpx.URL, str, str]:
-        url = httpx.URL(endpoint)
+        try:
+            url = httpx.URL(endpoint)
+        except (httpx.InvalidURL, TypeError):
+            _raise_provider()
         hostname = url.raw_host.decode("ascii")
+        if url.scheme != "https" or not hostname or bool(url.userinfo):
+            _raise_provider()
         port = url.port or 443
         try:
             literal = ipaddress.ip_address(hostname)
@@ -623,7 +688,7 @@ class OAuthProviderClient:
         if any(not public_address(address) for address in parsed):
             _raise_provider()
         selected = str(parsed[0])
-        default_port = 443 if url.scheme == "https" else 80
+        default_port = 443
         authority_host = f"[{hostname}]" if ":" in hostname else hostname
         host = authority_host if port == default_port else f"{authority_host}:{port}"
         return url.copy_with(host=selected), host, hostname
@@ -632,13 +697,103 @@ class OAuthProviderClient:
         if self._closed:
             raise OAuthProviderError(closed=True)
 
+    @staticmethod
+    def _parse_token_document(content_type: str, body: bytes) -> dict[str, object]:
+        media_type = content_type.partition(";")[0].strip().lower()
+        if media_type == "application/json":
+            document = json.loads(body, object_pairs_hook=unique_object, parse_constant=reject_non_finite)
+            validate_depth(document, maximum=_MAXIMUM_JSON_DEPTH)
+            if not isinstance(document, dict):
+                raise ValueError
+            return cast("dict[str, object]", document)
+        if media_type == "application/x-www-form-urlencoded":
+            text = body.decode("utf-8")
+            pairs = parse_qsl(text, keep_blank_values=True, strict_parsing=True)
+            values: dict[str, object] = {}
+            for key, value in pairs:
+                if key in values:
+                    raise ValueError
+                values[key] = value
+            return values
+        return _raise_provider()
+
+    @classmethod
+    def _is_invalid_grant_response(cls, content_type: str, body: bytes) -> bool:
+        try:
+            document = cls._parse_token_document(content_type, body)
+        except Exception:  # noqa: BLE001 - malformed provider errors remain one sanitized failure
+            return False
+        return document.get("error") == "invalid_grant"
+
+    def _token_set(
+        self,
+        document: Mapping[str, object],
+        *,
+        fallback_scopes: frozenset[str],
+        fallback_refresh_token: SecretStr | None = None,
+        now: datetime,
+    ) -> ProviderTokenSet:
+        access_token = self._required_text(document, "access_token")
+        token_type = self._required_text(document, "token_type")
+        if token_type.lower() != _BEARER_TOKEN_TYPE.lower():
+            _raise_provider()
+        expires_seconds = self._expires_seconds(document.get("expires_in"))
+        scopes = self._response_scopes(document.get("scope"), fallback=fallback_scopes)
+        if not self.config.required_scopes.issubset(scopes) or not scopes.issubset(self.config.allowed_scopes):
+            _raise_provider()
+        refresh_token = self._optional_secret(document, "refresh_token") or fallback_refresh_token
+        id_token = self._optional_secret(document, "id_token")
+        return ProviderTokenSet(
+            access_token=SecretStr(access_token),
+            token_type=_BEARER_TOKEN_TYPE,
+            scopes=scopes,
+            expires_at=now + timedelta(seconds=expires_seconds),
+            refresh_token=refresh_token,
+            id_token=id_token,
+        )
+
+    @staticmethod
+    def _required_text(document: Mapping[str, object], key: str) -> str:
+        value = document.get(key)
+        if not _strict_text(value):
+            _raise_provider()
+        return cast("str", value)
+
+    @staticmethod
+    def _optional_secret(document: Mapping[str, object], key: str) -> SecretStr | None:
+        value = document.get(key)
+        if value is None:
+            return None
+        if not _strict_text(value):
+            _raise_provider()
+        return SecretStr(cast("str", value))
+
+    @staticmethod
+    def _expires_seconds(value: object) -> int:
+        if isinstance(value, str) and value.__class__ is str and value.isascii() and value.isdigit():
+            value = int(value)
+        if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= _MAXIMUM_EXPIRES_SECONDS:
+            _raise_provider()
+        return value
+
+    @staticmethod
+    def _response_scopes(value: object, *, fallback: frozenset[str]) -> frozenset[str]:
+        if value is None:
+            return fallback
+        if not _strict_text(value):
+            _raise_provider()
+        parts = cast("str", value).split(" ")
+        if any(not _valid_scope(part) for part in parts) or len(parts) != len(set(parts)):
+            _raise_provider()
+        return frozenset(parts)
+
 
 class GitHubOAuthProvider:
     """GitHub OAuth specialization using current profile and verified-email APIs."""
 
     __slots__ = ("oauth",)
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - provider HTTP transport and DNS seams remain independently injectable
         self,
         *,
         client_id: str,
@@ -646,6 +801,7 @@ class GitHubOAuthProvider:
         scopes: frozenset[str] = _GITHUB_REQUIRED_SCOPES,
         policy: OAuthHTTPPolicy | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        resolver: AddressResolver | None = None,
     ) -> None:
         """Create a GitHub provider with fixed authorization and API endpoints.
 
@@ -655,6 +811,7 @@ class GitHubOAuthProvider:
             scopes: Allowlisted request scopes.
             policy: Bounded shared HTTP policy.
             transport: Optional application or test transport.
+            resolver: Optional asynchronous endpoint address resolver.
         """
         self.oauth = OAuthProviderClient(
             OAuthEndpointConfig(
@@ -670,6 +827,7 @@ class GitHubOAuthProvider:
             ),
             policy=policy,
             transport=transport,
+            resolver=resolver,
         )
 
     @property
@@ -745,7 +903,7 @@ class GitHubOAuthProvider:
             or (name is not None and not _strict_text(name))
         ):
             _raise_provider()
-        email = _github_verified_email(cast("list[object]", emails))
+        email = self._github_verified_email(cast("list[object]", emails))
         raw_claims = dict(profile_document)
         raw_claims["verified_email"] = email
         return ProviderIdentity(
@@ -783,20 +941,21 @@ class GitHubOAuthProvider:
         Raises:
             OAuthProviderError: If deletion fails.
         """
-        self.oauth._require_open()  # pyright: ignore[reportPrivateUsage] # noqa: SLF001 - specialization shares its composed transport lifecycle
+        if self.oauth.closed:
+            raise OAuthProviderError(closed=True)
         if token.__class__ is not SecretStr or token_type_hint not in {None, "access_token"}:
             _raise_provider()
         secret = cast("SecretStr", self.oauth.config.client_secret)
         try:
-            async with self.oauth._client.stream(  # pyright: ignore[reportPrivateUsage] # noqa: SLF001 - specialization shares its composed hardened client
+            async with self.oauth.stream_pinned(
                 "DELETE",
                 f"{_GITHUB_API}/applications/{quote(self.oauth.config.client_id, safe='')}/token",
+                headers=self._github_headers(),
                 auth=httpx.BasicAuth(self.oauth.config.client_id, secret.get_secret_value()),
-                json={"access_token": token.get_secret_value()},
-                headers=_github_headers(),
+                json_body={"access_token": token.get_secret_value()},
             ) as response:
                 if response.status_code != _HTTP_NO_CONTENT:
-                    _raise_github_response(response)
+                    self._raise_github_response(response)
                 await _read_bounded(response, self.oauth.policy.maximum_response_bytes)
         except OAuthProviderError:
             raise
@@ -808,15 +967,14 @@ class GitHubOAuthProvider:
         await self.oauth.aclose()
 
     async def _api_json(self, path: str, token: SecretStr) -> object:
-        self.oauth._require_open()  # pyright: ignore[reportPrivateUsage] # noqa: SLF001 - specialization shares its composed transport lifecycle
         try:
-            async with self.oauth._client.stream(  # pyright: ignore[reportPrivateUsage] # noqa: SLF001 - specialization shares its composed hardened client
+            async with self.oauth.stream_pinned(
                 "GET",
                 f"{_GITHUB_API}{path}",
-                headers={**_github_headers(), "Authorization": f"Bearer {token.get_secret_value()}"},
+                headers={**self._github_headers(), "Authorization": f"Bearer {token.get_secret_value()}"},
             ) as response:
                 if response.status_code != _HTTP_OK:
-                    _raise_github_response(response)
+                    self._raise_github_response(response)
                 body = await _read_bounded(response, self.oauth.policy.maximum_response_bytes)
                 if response.headers.get("content-type", "").partition(";")[0].strip().lower() != "application/json":
                     _raise_provider()
@@ -827,6 +985,48 @@ class GitHubOAuthProvider:
         except Exception:  # noqa: BLE001 - sanitize transport and provider response failures
             raise OAuthProviderError from None
         return value
+
+    @classmethod
+    def _github_verified_email(cls, values: list[object]) -> str | None:
+        verified: list[tuple[bool, str]] = []
+        for value in values:
+            if not isinstance(value, Mapping):
+                _raise_provider()
+            record = cast("Mapping[str, object]", value)
+            email = record.get("email")
+            is_verified = record.get("verified")
+            is_primary = record.get("primary")
+            if not _strict_text(email):
+                _raise_provider()
+            verified_value = cls._exact_bool(is_verified)
+            primary_value = cls._exact_bool(is_primary)
+            if verified_value:
+                verified.append((primary_value, cast("str", email)))
+        if not verified:
+            return None
+        verified.sort(key=lambda candidate: not candidate[0])
+        return verified[0][1]
+
+    @staticmethod
+    def _exact_bool(value: object) -> bool:
+        if not isinstance(value, bool) or value.__class__ is not bool:
+            _raise_provider()
+        return value
+
+    @staticmethod
+    def _github_headers() -> dict[str, str]:
+        return {"Accept": _GITHUB_ACCEPT, "Accept-Encoding": "identity", "X-GitHub-Api-Version": _GITHUB_API_VERSION}
+
+    @staticmethod
+    def _raise_github_response(response: httpx.Response) -> NoReturn:
+        retry_after: int | None = None
+        if response.status_code in {httpx.codes.FORBIDDEN, httpx.codes.TOO_MANY_REQUESTS}:
+            value = response.headers.get("retry-after")
+            if value is not None and value.isascii() and value.isdigit():
+                parsed = int(value)
+                if 1 <= parsed <= _GITHUB_MAXIMUM_RETRY_AFTER:
+                    retry_after = parsed
+        raise OAuthProviderError(retry_after=retry_after)
 
 
 async def _read_bounded(response: httpx.Response, maximum: int) -> bytes:
@@ -847,159 +1047,11 @@ async def _read_bounded(response: httpx.Response, maximum: int) -> bytes:
     return bytes(body)
 
 
-def _github_verified_email(values: list[object]) -> str | None:
-    verified: list[tuple[bool, str]] = []
-    for value in values:
-        if not isinstance(value, Mapping):
-            _raise_provider()
-        record = cast("Mapping[str, object]", value)
-        email = record.get("email")
-        is_verified = record.get("verified")
-        is_primary = record.get("primary")
-        if not _strict_text(email):
-            _raise_provider()
-        verified_value = _exact_bool(is_verified)
-        primary_value = _exact_bool(is_primary)
-        if verified_value:
-            verified.append((primary_value, cast("str", email)))
-    if not verified:
-        return None
-    verified.sort(key=lambda candidate: not candidate[0])
-    return verified[0][1]
-
-
-def _github_headers() -> dict[str, str]:
-    return {"Accept": _GITHUB_ACCEPT, "Accept-Encoding": "identity", "X-GitHub-Api-Version": _GITHUB_API_VERSION}
-
-
-def _raise_github_response(response: httpx.Response) -> NoReturn:
-    retry_after: int | None = None
-    if response.status_code in {httpx.codes.FORBIDDEN, httpx.codes.TOO_MANY_REQUESTS}:
-        value = response.headers.get("retry-after")
-        if value is not None and value.isascii() and value.isdigit():
-            parsed = int(value)
-            if 1 <= parsed <= _GITHUB_MAXIMUM_RETRY_AFTER:
-                retry_after = parsed
-    raise OAuthProviderError(retry_after=retry_after)
-
-
-def _parse_token_document(content_type: str, body: bytes) -> dict[str, object]:
-    media_type = content_type.partition(";")[0].strip().lower()
-    if media_type == "application/json":
-        document = json.loads(body, object_pairs_hook=unique_object, parse_constant=reject_non_finite)
-        validate_depth(document, maximum=_MAXIMUM_JSON_DEPTH)
-        if not isinstance(document, dict):
-            raise ValueError
-        return cast("dict[str, object]", document)
-    if media_type == "application/x-www-form-urlencoded":
-        text = body.decode("utf-8")
-        pairs = parse_qsl(text, keep_blank_values=True, strict_parsing=True)
-        values: dict[str, object] = {}
-        for key, value in pairs:
-            if key in values:
-                raise ValueError
-            values[key] = value
-        return values
-    return _raise_provider()
-
-
-def _is_invalid_grant_response(content_type: str, body: bytes) -> bool:
-    try:
-        document = _parse_token_document(content_type, body)
-    except Exception:  # noqa: BLE001 - malformed provider errors remain one sanitized failure
-        return False
-    return document.get("error") == "invalid_grant"
-
-
-def _token_set(
-    document: Mapping[str, object],
-    *,
-    fallback_scopes: frozenset[str],
-    config: OAuthEndpointConfig,
-    fallback_refresh_token: SecretStr | None = None,
-    now: datetime,
-) -> ProviderTokenSet:
-    access_token = _required_text(document, "access_token")
-    token_type = _required_text(document, "token_type")
-    if token_type.lower() != _BEARER_TOKEN_TYPE.lower():
-        _raise_provider()
-    expires_seconds = _expires_seconds(document.get("expires_in"))
-    scopes = _response_scopes(document.get("scope"), fallback=fallback_scopes)
-    if not config.required_scopes.issubset(scopes) or not scopes.issubset(config.allowed_scopes):
-        _raise_provider()
-    refresh_token = _optional_secret(document, "refresh_token") or fallback_refresh_token
-    id_token = _optional_secret(document, "id_token")
-    return ProviderTokenSet(
-        access_token=SecretStr(access_token),
-        token_type=_BEARER_TOKEN_TYPE,
-        scopes=scopes,
-        expires_at=now + timedelta(seconds=expires_seconds),
-        refresh_token=refresh_token,
-        id_token=id_token,
-    )
-
-
-def _required_text(document: Mapping[str, object], key: str) -> str:
-    value = document.get(key)
-    if not _strict_text(value):
-        _raise_provider()
-    return cast("str", value)
-
-
-def _optional_secret(document: Mapping[str, object], key: str) -> SecretStr | None:
-    value = document.get(key)
-    if value is None:
-        return None
-    if not _strict_text(value):
-        _raise_provider()
-    return SecretStr(cast("str", value))
-
-
-def _expires_seconds(value: object) -> int:
-    if isinstance(value, str) and value.__class__ is str and value.isascii() and value.isdigit():
-        value = int(value)
-    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= _MAXIMUM_EXPIRES_SECONDS:
-        _raise_provider()
-    return value
-
-
-def _response_scopes(value: object, *, fallback: frozenset[str]) -> frozenset[str]:
-    if value is None:
-        return fallback
-    if not _strict_text(value):
-        _raise_provider()
-    parts = cast("str", value).split(" ")
-    if any(not _valid_scope(part) for part in parts) or len(parts) != len(set(parts)):
-        _raise_provider()
-    return frozenset(parts)
-
-
 def _response_time(value: datetime | None) -> datetime:
     now = value or datetime.now(timezone.utc)
     if not _aware_time(now):
         _raise_provider()
     return now
-
-
-def _validate_endpoint(value: str) -> None:
-    if value.__class__ is not str or value != value.strip() or "*" in value or "\\" in value:
-        _raise_config("OAuth endpoints must be exact HTTPS URLs")
-    try:
-        split = urlsplit(value)
-        port = split.port
-    except ValueError:
-        _raise_config("OAuth endpoints must be exact HTTPS URLs")
-    if (
-        split.scheme != "https"
-        or not split.netloc
-        or split.hostname is None
-        or split.username is not None
-        or split.password is not None
-        or split.query
-        or split.fragment
-        or (port is not None and not 1 <= port <= _MAXIMUM_TCP_PORT)
-    ):
-        _raise_config("OAuth endpoints must be exact HTTPS URLs")
 
 
 def _valid_scope(value: object) -> bool:
@@ -1017,36 +1069,5 @@ def _aware_time(value: object) -> bool:
     return isinstance(value, datetime) and value.tzinfo is not None and value.utcoffset() is not None
 
 
-def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
-    return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
-
-
-def _freeze_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        mapping = cast("Mapping[object, object]", value)
-        if any(not _strict_text(key) for key in mapping):
-            message = "Provider identity is invalid"
-            raise ValueError(message)
-        return MappingProxyType({cast("str", key): _freeze_value(item) for key, item in mapping.items()})
-    if isinstance(value, (list, tuple)):
-        items = cast("list[object] | tuple[object, ...]", value)
-        return tuple(_freeze_value(item) for item in items)
-    return value
-
-
-def _positive_finite(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
-
-
-def _exact_bool(value: object) -> bool:
-    if not isinstance(value, bool) or value.__class__ is not bool:
-        _raise_provider()
-    return value
-
-
 def _raise_provider() -> NoReturn:
     raise OAuthProviderError
-
-
-def _raise_config(message: str) -> NoReturn:
-    raise ImproperlyConfiguredException(detail=message)

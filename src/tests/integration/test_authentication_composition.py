@@ -1,10 +1,8 @@
 """Request-level authentication composition and trust-domain isolation."""
 
-from __future__ import annotations
-
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
 
 import jwt
 import pytest
@@ -15,6 +13,7 @@ from litestar.testing import TestClient
 
 from litestar_security import SecurityConfig, SecurityPlugin
 from litestar_security.authentication import (
+    Authenticated,
     InvalidCredentials,
     NoCredentials,
     VerificationUnavailable,
@@ -35,11 +34,6 @@ from litestar_security.providers.jwt import (
 )
 from litestar_security.providers.oidc import ServiceTokenConfig
 from tests.fixtures.collaborators import AsyncRecordingJWTVerifier, build_api_key_store
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from litestar_security.authentication import Authenticated
 
 _NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
 _PROFILES = {"external": ("https://external.example", "external-api"), "local": ("https://local.example", "local-api")}

@@ -1,6 +1,5 @@
 """Contracts and service for password logins that require a second factor."""
 
-from base64 import urlsafe_b64encode
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -15,6 +14,7 @@ from litestar.exceptions import ImproperlyConfiguredException
 from litestar_security.accounts._internal import (
     MINIMUM_PEPPER_BYTES,
     aware_utc_time,
+    encode_random,
     strict_context_text,
     utc_now,
     valid_security_epoch,
@@ -133,7 +133,7 @@ class MFALoginService:
         if not isinstance(pepper, bytes) or pepper.__class__ is not bytes or len(pepper) < MINIMUM_PEPPER_BYTES:
             message = "MFA login challenge pepper must be at least 32 exact bytes"
             raise ImproperlyConfiguredException(detail=message)
-        if not _valid_methods(methods):
+        if not self._valid_methods(methods):
             message = "MFA login methods must be a non-empty exact set of supported methods"
             raise ImproperlyConfiguredException(detail=message)
         if (
@@ -156,7 +156,7 @@ class MFALoginService:
             if (
                 not strict_context_text(account.account_id)
                 or not valid_security_epoch(account.security_epoch)
-                or not _valid_client_key(client_key)
+                or not self._valid_client_key(client_key)
             ):
                 return VerificationUnavailable()
             raw_value = cast("object", self.entropy(_MFA_LOGIN_TOKEN_BYTES))
@@ -166,11 +166,11 @@ class MFALoginService:
                 or len(raw_value) != _MFA_LOGIN_TOKEN_BYTES
             ):
                 return VerificationUnavailable()
-            token = urlsafe_b64encode(raw_value).rstrip(b"=").decode("ascii")
+            token = encode_random(raw_value)
             expires_at = now + self.ttl
             await self.store.put(
                 MFALoginChallenge(
-                    challenge_digest=_challenge_digest(self.pepper, token),
+                    challenge_digest=self._challenge_digest(self.pepper, token),
                     account_id=account.account_id,
                     security_epoch=account.security_epoch,
                     client_key=client_key,
@@ -187,7 +187,7 @@ class MFALoginService:
     ) -> MFALoginChallenge | InvalidCredentials | VerificationUnavailable:
         """Atomically burn one challenge before checking its client binding."""
         if (
-            not _strict_ascii_context(challenge)
+            not self._strict_ascii_context(challenge)
             or not strict_context_text(account_id)
             or not valid_security_epoch(security_epoch)
         ):
@@ -195,11 +195,18 @@ class MFALoginService:
         try:
             now = aware_utc_time(self.clock())
             record = await self.store.consume(
-                _challenge_digest(self.pepper, challenge), account_id=account_id, security_epoch=security_epoch, now=now
+                self._challenge_digest(self.pepper, challenge),
+                account_id=account_id,
+                security_epoch=security_epoch,
+                now=now,
             )
         except Exception:  # noqa: BLE001 - sanitize clock and store failures
             return VerificationUnavailable()
-        if record is None or not _valid_client_key(client_key) or not _client_keys_match(record.client_key, client_key):
+        if (
+            record is None
+            or not self._valid_client_key(client_key)
+            or not self._client_keys_match(record.client_key, client_key)
+        ):
             return InvalidCredentials()
         return record
 
@@ -220,43 +227,43 @@ class MFALoginService:
             return VerificationUnavailable()
         return InvalidCredentials()
 
+    @staticmethod
+    def _challenge_digest(pepper: bytes, challenge: str) -> bytes:
+        """Return the domain-separated digest for one strict-ASCII challenge."""
+        return new_hmac(pepper, challenge.encode("ascii"), sha256).digest()
 
-def _challenge_digest(pepper: bytes, challenge: str) -> bytes:
-    """Return the domain-separated digest for one strict-ASCII challenge."""
-    return new_hmac(pepper, challenge.encode("ascii"), sha256).digest()
+    @staticmethod
+    def _strict_ascii_context(value: object) -> bool:
+        """Accept only exact, nonblank, control-free ASCII context text."""
+        try:
+            return strict_context_text(value) and cast("str", value).isascii()
+        except UnicodeError:
+            return False
 
+    @staticmethod
+    def _valid_client_key(value: object) -> bool:
+        """Allow no client binding or one strict client context value."""
+        try:
+            return value is None or strict_context_text(value)
+        except UnicodeError:
+            return False
 
-def _strict_ascii_context(value: object) -> bool:
-    """Accept only exact, nonblank, control-free ASCII context text."""
-    try:
-        return strict_context_text(value) and cast("str", value).isascii()
-    except UnicodeError:
-        return False
+    @staticmethod
+    def _valid_methods(value: object) -> bool:
+        """Require a concrete non-empty subset of the supported MFA methods."""
+        if type(value) is not frozenset:
+            return False
+        methods = cast("frozenset[object]", value)
+        return bool(methods) and all(type(method) is str and method in MFA_LOGIN_METHODS for method in methods)
 
-
-def _valid_client_key(value: object) -> bool:
-    """Allow no client binding or one strict client context value."""
-    try:
-        return value is None or strict_context_text(value)
-    except UnicodeError:
-        return False
-
-
-def _valid_methods(value: object) -> bool:
-    """Require a concrete non-empty subset of the supported MFA methods."""
-    if type(value) is not frozenset:
-        return False
-    methods = cast("frozenset[object]", value)
-    return bool(methods) and all(type(method) is str and method in MFA_LOGIN_METHODS for method in methods)
-
-
-def _client_keys_match(expected: str | None, actual: object) -> bool:
-    """Compare optional stored and presented client bindings without shortcuts."""
-    if expected is None or actual is None:
-        return expected is None and actual is None
-    if not isinstance(actual, str):
-        return False
-    try:
-        return compare_digest(expected.encode("utf-8"), actual.encode("utf-8"))
-    except UnicodeError:
-        return False
+    @staticmethod
+    def _client_keys_match(expected: str | None, actual: object) -> bool:
+        """Compare optional stored and presented client bindings without shortcuts."""
+        if expected is None or actual is None:
+            return expected is None and actual is None
+        if not isinstance(actual, str):
+            return False
+        try:
+            return compare_digest(expected.encode("utf-8"), actual.encode("utf-8"))
+        except UnicodeError:
+            return False

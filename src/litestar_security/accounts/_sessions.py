@@ -22,6 +22,7 @@ from litestar.enums import ScopeType
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts._internal import (
+    ASCII_CONTROL_LIMIT,
     DIGEST_BYTES,
     LOOKUP_BYTES,
     MINIMUM_PEPPER_BYTES,
@@ -86,6 +87,22 @@ _SESSION_AUTHENTICATION_KEY = "_litestar_security"
 _SESSION_PAYLOAD_VERSION = 3
 _SESSION_PAYLOAD_ASSURANCE_VERSION = 2
 
+_SESSION_PAYLOAD_BASE_KEYS = frozenset({
+    "version",
+    "session_id",
+    "binding_id",
+    "account_id",
+    "security_epoch",
+    "authenticated_at",
+    "expires_at",
+})
+_SESSION_PAYLOAD_ASSURANCE_KEYS = _SESSION_PAYLOAD_BASE_KEYS | frozenset({"methods", "traits", "amr"})
+_SESSION_PAYLOAD_KEYS: "Mapping[int, frozenset[str]]" = MappingProxyType({
+    1: _SESSION_PAYLOAD_BASE_KEYS,
+    _SESSION_PAYLOAD_ASSURANCE_VERSION: _SESSION_PAYLOAD_ASSURANCE_KEYS,
+    _SESSION_PAYLOAD_VERSION: _SESSION_PAYLOAD_ASSURANCE_KEYS | frozenset({"assurance_expires_at"}),
+})
+
 
 _SESSION_BINDING_PREFIX = "sb_"
 
@@ -111,9 +128,6 @@ _MAXIMUM_DISPLAY_METADATA_ITEM_BYTES = 256
 _MAXIMUM_DISPLAY_METADATA_BYTES = 4_096
 
 
-_ASCII_CONTROL_LIMIT = 32
-
-
 _LOGGER = getLogger(__name__)
 
 
@@ -137,9 +151,90 @@ class SessionBindingConfig:
         if self.pepper.__class__ is not bytes or len(self.pepper) < MINIMUM_PEPPER_BYTES:
             msg = "Session binding pepper must contain at least 32 bytes"
             raise ImproperlyConfiguredException(detail=msg)
-        _validate_binding_cookie_config(self)
-        _validate_binding_lifetime_config(self)
-        _validate_preserved_session_keys(self.preserve_session_keys)
+        self._validate_binding_cookie_config(self)
+        self._validate_binding_lifetime_config(self)
+        self._validate_preserved_session_keys(self.preserve_session_keys)
+
+    @classmethod
+    def _validate_binding_cookie_config(cls, config: "SessionBindingConfig") -> None:
+        secure_value: object = config.secure
+        allow_insecure_value: object = config.allow_insecure
+        if (
+            not strict_text(config.cookie_name)
+            or config.cookie_name != config.cookie_name.strip()
+            or any(character in config.cookie_name for character in '()<>@,;:\\"/[]?={} \t')
+        ):
+            msg = "Session binding cookie name must be strict cookie-safe text"
+            raise ImproperlyConfiguredException(detail=msg)
+        if secure_value.__class__ is not bool:
+            msg = "Session binding Secure setting must be boolean"
+            raise ImproperlyConfiguredException(detail=msg)
+        if config.same_site not in {"lax", "strict", "none"}:
+            msg = "Session binding SameSite must be lax, strict, or none"
+            raise ImproperlyConfiguredException(detail=msg)
+        if allow_insecure_value.__class__ is not bool:
+            msg = "Session binding insecure-development opt-in must be boolean"
+            raise ImproperlyConfiguredException(detail=msg)
+        if config.secure and config.allow_insecure:
+            msg = "Session binding insecure-development opt-in requires an insecure cookie"
+            raise ImproperlyConfiguredException(detail=msg)
+        if not config.secure and not config.allow_insecure:
+            msg = "Insecure session binding cookies require explicit development opt-in"
+            raise ImproperlyConfiguredException(detail=msg)
+        if config.same_site == "none" and not config.secure:
+            msg = "Session binding SameSite=None requires Secure"
+            raise ImproperlyConfiguredException(detail=msg)
+        cls._validate_binding_cookie_scope(config)
+
+    @staticmethod
+    def _validate_binding_cookie_scope(config: "SessionBindingConfig") -> None:
+        if config.cookie_name.startswith("__Host-") and (config.secure, config.path, config.domain) != (
+            True,
+            "/",
+            None,
+        ):
+            msg = "__Host- session binding cookies require Secure, Path=/, and no Domain"
+            raise ImproperlyConfiguredException(detail=msg)
+        if (
+            not strict_text(config.path)
+            or not config.path.startswith("/")
+            or any(character.isspace() or ord(character) < ASCII_CONTROL_LIMIT for character in config.path)
+        ):
+            msg = "Session binding cookie path must be an absolute printable path"
+            raise ImproperlyConfiguredException(detail=msg)
+        if config.domain is not None and (
+            not strict_text(config.domain)
+            or config.domain != config.domain.strip()
+            or any(character.isspace() or ord(character) < ASCII_CONTROL_LIMIT for character in config.domain)
+        ):
+            msg = "Session binding cookie domain must be strict printable text"
+            raise ImproperlyConfiguredException(detail=msg)
+
+    @staticmethod
+    def _validate_binding_lifetime_config(config: "SessionBindingConfig") -> None:
+        if config.max_age.__class__ is not int or config.max_age < 1:
+            msg = "Session binding maximum age must be a positive integer"
+            raise ImproperlyConfiguredException(detail=msg)
+        if (
+            config.touch_interval.__class__ is not timedelta
+            or config.touch_interval <= timedelta(0)
+            or config.touch_interval > timedelta(seconds=config.max_age)
+        ):
+            msg = "Session touch interval must be positive and no longer than the binding lifetime"
+            raise ImproperlyConfiguredException(detail=msg)
+
+    @staticmethod
+    def _validate_preserved_session_keys(keys: tuple[str, ...]) -> None:
+        if keys.__class__ is not tuple:
+            msg = "Preserved session keys must be an immutable tuple"
+            raise ImproperlyConfiguredException(detail=msg)
+        if (
+            len(frozenset(keys)) != len(keys)
+            or _SESSION_AUTHENTICATION_KEY in keys
+            or any(not strict_text(key) for key in keys)
+        ):
+            msg = "Preserved session keys must be unique non-security text"
+            raise ImproperlyConfiguredException(detail=msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -570,7 +665,7 @@ class NativeSessionAuth(Generic[UserT]):
 
     def __post_init__(self) -> None:
         """Validate the combined account, epoch, registry, and customization ports."""
-        _validate_native_session_store(self.accounts)
+        self._validate_native_session_store(self.accounts)
         if self.resolver is not None and not callable(getattr(self.resolver, "resolve_user_auth_session", None)):
             msg = "Native session resolver must implement resolve_user_auth_session"
             raise ImproperlyConfiguredException(detail=msg)
@@ -716,7 +811,7 @@ class NativeSessionAuth(Generic[UserT]):
             expires_at = occurred_at + timedelta(seconds=self.binding.max_age)
             token, proof = self._issue_binding()
             command = CreateSessionCommand(
-                session_id=encode_random(self._entropy(SESSION_ID_BYTES)),
+                session_id=encode_random(self.entropy(SESSION_ID_BYTES)),
                 binding_id=proof.binding_id,
                 binding_digest=proof.digest,
                 account_id=account.account_id,
@@ -766,7 +861,7 @@ class NativeSessionAuth(Generic[UserT]):
         session.clear()
         session.update(preserved)
         session[_SESSION_AUTHENTICATION_KEY] = self._encode_authentication(authentication)
-        self._queue_binding_cookie(connection.scope, token)
+        self._queue_binding_cookie(connection.scope, token, max_age=self.binding.max_age)
         return authentication
 
     async def logout(
@@ -927,7 +1022,7 @@ class NativeSessionAuth(Generic[UserT]):
             occurred_at = aware_utc_time(self.clock() if now is None else now)
             binding_token, proof = self._issue_binding()
             command = CreateSessionCommand(
-                session_id=encode_random(self._entropy(SESSION_ID_BYTES)),
+                session_id=encode_random(self.entropy(SESSION_ID_BYTES)),
                 binding_id=proof.binding_id,
                 binding_digest=proof.digest,
                 account_id=account.account_id,
@@ -979,12 +1074,12 @@ class NativeSessionAuth(Generic[UserT]):
             expires_at=command.expires_at,
         )
         session[_SESSION_AUTHENTICATION_KEY] = self._encode_authentication(authentication)
-        self._queue_binding_cookie(connection.scope, plan.binding_token)
+        self._queue_binding_cookie(connection.scope, plan.binding_token, max_age=self.binding.max_age)
         return True
 
     def _issue_binding(self) -> tuple[str, SessionBindingProof]:
-        lookup = self._entropy(LOOKUP_BYTES)
-        secret = self._entropy(SECRET_BYTES)
+        lookup = self.entropy(LOOKUP_BYTES)
+        secret = self.entropy(SECRET_BYTES)
         if lookup.__class__ is not bytes or len(lookup) != LOOKUP_BYTES:
             raise ValueError
         if secret.__class__ is not bytes or len(secret) != SECRET_BYTES:
@@ -1043,26 +1138,11 @@ class NativeSessionAuth(Generic[UserT]):
         if not isinstance(value, Mapping):
             return None
         payload = cast("Mapping[str, object]", value)
-        legacy_keys = {
-            "version",
-            "session_id",
-            "binding_id",
-            "account_id",
-            "security_epoch",
-            "authenticated_at",
-            "expires_at",
-        }
         version = payload.get("version")
-        version_two_keys = legacy_keys | {"methods", "traits", "amr"}
-        current_keys = version_two_keys | {"assurance_expires_at"}
-        if (
-            (version == 1 and set(payload) != legacy_keys)
-            or (version == _SESSION_PAYLOAD_ASSURANCE_VERSION and set(payload) != version_two_keys)
-            or (version == _SESSION_PAYLOAD_VERSION and set(payload) != current_keys)
-        ):
+        if not isinstance(version, int) or version.__class__ is not int:
             return None
-        supported_versions = {1, _SESSION_PAYLOAD_ASSURANCE_VERSION, _SESSION_PAYLOAD_VERSION}
-        if version.__class__ is not int or version not in supported_versions:
+        expected_keys = _SESSION_PAYLOAD_KEYS.get(version)
+        if expected_keys is None or frozenset(payload) != expected_keys:
             return None
         try:
             return SessionAuthentication(
@@ -1148,28 +1228,19 @@ class NativeSessionAuth(Generic[UserT]):
         )
 
     def _clear_local_state(self, scope: "Scope") -> None:
+        if scope["type"] != ScopeType.HTTP:
+            return
         session = self._session_mapping(scope)
-        if session is not None and scope["type"] == ScopeType.HTTP:
+        if session is not None:
             session.pop(_SESSION_AUTHENTICATION_KEY, None)
-        if scope["type"] == ScopeType.HTTP:
-            cookie = Cookie(
-                key=self.binding.cookie_name,
-                value="",
-                max_age=0,
-                expires=0,
-                domain=self.binding.domain,
-                path=self.binding.path,
-                secure=self.binding.secure,
-                httponly=True,
-                samesite=self.binding.same_site,
-            )
-            queue_security_response_header(scope, cookie.to_encoded_header())
+        self._queue_binding_cookie(scope, "", max_age=0, expires=0)
 
-    def _queue_binding_cookie(self, scope: "Scope", token: str) -> None:
+    def _queue_binding_cookie(self, scope: "Scope", value: str, *, max_age: int, expires: int | None = None) -> None:
         cookie = Cookie(
             key=self.binding.cookie_name,
-            value=token,
-            max_age=self.binding.max_age,
+            value=value,
+            max_age=max_age,
+            expires=expires,
             domain=self.binding.domain,
             path=self.binding.path,
             secure=self.binding.secure,
@@ -1178,11 +1249,13 @@ class NativeSessionAuth(Generic[UserT]):
         )
         queue_security_response_header(scope, cookie.to_encoded_header())
 
-    def _entropy(self, length: int) -> bytes:
-        return self.entropy(length)
+    @staticmethod
+    def _validate_native_session_store(value: object) -> None:
+        if not isinstance(value, NativeSessionStore):
+            msg = "Native session accounts must implement account, epoch, and session registry capabilities"
+            raise ImproperlyConfiguredException(detail=msg)
 
     def _event(self, occurred_at: datetime, *, operation: str, outcome: str, account_id: str) -> "SecurityEvent":
-
         event_id = self.event_ids()
         if not strict_text(event_id):
             raise ValueError
@@ -1211,89 +1284,6 @@ def _freeze_display_metadata(value: Mapping[str, str]) -> "Mapping[str, str]":
             msg = "Session display metadata must contain bounded non-blank text"
             raise ValueError(msg)
     return MappingProxyType(dict(value))
-
-
-def _validate_native_session_store(value: object) -> None:
-    if not isinstance(value, NativeSessionStore):
-        msg = "Native session accounts must implement account, epoch, and session registry capabilities"
-        raise ImproperlyConfiguredException(detail=msg)
-
-
-def _validate_binding_cookie_config(config: SessionBindingConfig) -> None:
-    secure_value: object = config.secure
-    allow_insecure_value: object = config.allow_insecure
-    if (
-        not strict_text(config.cookie_name)
-        or config.cookie_name != config.cookie_name.strip()
-        or any(character in config.cookie_name for character in '()<>@,;:\\"/[]?={} \t')
-    ):
-        msg = "Session binding cookie name must be strict cookie-safe text"
-        raise ImproperlyConfiguredException(detail=msg)
-    if secure_value.__class__ is not bool:
-        msg = "Session binding Secure setting must be boolean"
-        raise ImproperlyConfiguredException(detail=msg)
-    if config.same_site not in {"lax", "strict", "none"}:
-        msg = "Session binding SameSite must be lax, strict, or none"
-        raise ImproperlyConfiguredException(detail=msg)
-    if allow_insecure_value.__class__ is not bool:
-        msg = "Session binding insecure-development opt-in must be boolean"
-        raise ImproperlyConfiguredException(detail=msg)
-    if config.secure and config.allow_insecure:
-        msg = "Session binding insecure-development opt-in requires an insecure cookie"
-        raise ImproperlyConfiguredException(detail=msg)
-    if not config.secure and not config.allow_insecure:
-        msg = "Insecure session binding cookies require explicit development opt-in"
-        raise ImproperlyConfiguredException(detail=msg)
-    if config.same_site == "none" and not config.secure:
-        msg = "Session binding SameSite=None requires Secure"
-        raise ImproperlyConfiguredException(detail=msg)
-    _validate_binding_cookie_scope(config)
-
-
-def _validate_binding_cookie_scope(config: SessionBindingConfig) -> None:
-    if config.cookie_name.startswith("__Host-") and (config.secure, config.path, config.domain) != (True, "/", None):
-        msg = "__Host- session binding cookies require Secure, Path=/, and no Domain"
-        raise ImproperlyConfiguredException(detail=msg)
-    if (
-        not strict_text(config.path)
-        or not config.path.startswith("/")
-        or any(character.isspace() or ord(character) < _ASCII_CONTROL_LIMIT for character in config.path)
-    ):
-        msg = "Session binding cookie path must be an absolute printable path"
-        raise ImproperlyConfiguredException(detail=msg)
-    if config.domain is not None and (
-        not strict_text(config.domain)
-        or config.domain != config.domain.strip()
-        or any(character.isspace() or ord(character) < _ASCII_CONTROL_LIMIT for character in config.domain)
-    ):
-        msg = "Session binding cookie domain must be strict printable text"
-        raise ImproperlyConfiguredException(detail=msg)
-
-
-def _validate_binding_lifetime_config(config: SessionBindingConfig) -> None:
-    if config.max_age.__class__ is not int or config.max_age < 1:
-        msg = "Session binding maximum age must be a positive integer"
-        raise ImproperlyConfiguredException(detail=msg)
-    if (
-        config.touch_interval.__class__ is not timedelta
-        or config.touch_interval <= timedelta(0)
-        or config.touch_interval > timedelta(seconds=config.max_age)
-    ):
-        msg = "Session touch interval must be positive and no longer than the binding lifetime"
-        raise ImproperlyConfiguredException(detail=msg)
-
-
-def _validate_preserved_session_keys(keys: tuple[str, ...]) -> None:
-    if keys.__class__ is not tuple:
-        msg = "Preserved session keys must be an immutable tuple"
-        raise ImproperlyConfiguredException(detail=msg)
-    if (
-        len(frozenset(keys)) != len(keys)
-        or _SESSION_AUTHENTICATION_KEY in keys
-        or any(not strict_text(key) for key in keys)
-    ):
-        msg = "Preserved session keys must be unique non-security text"
-        raise ImproperlyConfiguredException(detail=msg)
 
 
 @dataclass(frozen=True, slots=True)

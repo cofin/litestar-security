@@ -11,8 +11,7 @@ Verify your backend
 ===================
 
 Pass a fresh, isolated instance of each application-owned atomic port to its
-matching conformance helper. The in-memory backend is a deterministic reference
-for the store contracts; it is not a production persistence implementation.
+matching conformance helper.
 
 .. list-table::
    :header-rows: 1
@@ -54,9 +53,6 @@ for the store contracts; it is not a production persistence implementation.
    * - ``StepUpStore``
      - :func:`~litestar_security.testing.assert_step_up_store_conformance`
      - ``InMemoryStepUpStore``
-   * - ``OAuthAccountStore``
-     - OAuth account-store conformance helpers
-     - ``MemoryOAuthAccountStore`` with an AEAD protector
    * - ``WebAuthnChallengeStore``
      - :func:`~litestar_security.testing.assert_webauthn_challenge_store_conformance`
      - ``InMemorySecurityBackend.challenges``

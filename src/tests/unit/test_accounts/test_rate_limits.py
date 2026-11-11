@@ -1,5 +1,6 @@
-from __future__ import annotations
+"""Unit tests for rate-limit policies, limiters, guards, and client-key extraction."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
@@ -7,7 +8,7 @@ from threading import Event as ThreadEvent
 from threading import Lock as ThreadLock
 from threading import Thread
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import pytest
 from anyio import Event, create_task_group, fail_after, to_thread
@@ -37,10 +38,6 @@ from tests.fixtures.accounts import (
     rate_limit_guard,
     refresh_service,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
 
 _JWT_NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
 
@@ -812,9 +809,9 @@ async def test_refresh_rotation_is_limited_by_client_only() -> None:
 
 def test_route_errors_map_denials_to_429_with_a_retry_hint() -> None:
     with pytest.raises(TooManyRequestsException) as limited_info:
-        controllers_module._route_error(accounts_module.RateLimited(retry_after=42))  # noqa: SLF001
+        controllers_module.route_error(accounts_module.RateLimited(retry_after=42))
     with pytest.raises(TooManyRequestsException) as unhinted_info:
-        controllers_module._route_error(accounts_module.RateLimited())  # noqa: SLF001
+        controllers_module.route_error(accounts_module.RateLimited())
 
     assert limited_info.value.status_code == 429
     assert limited_info.value.detail == "Too many requests."

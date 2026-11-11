@@ -1,6 +1,9 @@
-"""Deterministic conformance helpers for security integration test suites."""
+"""Deterministic conformance helpers for security integration test suites.
 
-# ruff: noqa: EM101, TRY003  # conformance failures intentionally name their exact violated invariant; lazy optional imports
+Conformance failures intentionally name their exact violated invariant.
+"""
+
+# ruff: noqa: EM101, TRY003
 
 from base64 import urlsafe_b64encode
 from collections.abc import Awaitable, Callable, Mapping
@@ -10,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import compare_digest
 from types import MappingProxyType
-from typing import Generic, Protocol, TypeVar, cast
+from typing import ClassVar, Generic, Protocol, TypeVar, cast
 from urllib.parse import parse_qsl
 
 import httpx
@@ -143,22 +146,11 @@ __all__ = (
 )
 
 _DEFAULT_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
-_CONFORMANCE_ACCOUNT_IDS = (
-    "account-1",
-    "conformance-account",
-    "conformance-principal",
-    "conformance-session-other",
-    "conformance-session-owner",
-    "conformance-subject",
-)
 _DEFAULT_CREDENTIAL_HASH = "$litestar-security$deterministic-test-hash"
 ClaimsT = TypeVar("ClaimsT")
 ResultT = TypeVar("ResultT")
 UserT = TypeVar("UserT")
-
-
-def _default_identifier(namespace: str, sequence: int) -> str:
-    return f"{namespace}-{sequence:04d}"
+_StatusT = TypeVar("_StatusT", VerificationStatus, PasswordResetStatus)
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,18 +167,21 @@ class _ConformanceAccountIds:
         """Return every account identifier a referential backend must pre-create."""
         return (self.account, self.principal, self.session_other, self.session_owner, self.subject)
 
+    @classmethod
+    def resolve(cls, identifiers: Callable[[str, int], str] | None) -> "_ConformanceAccountIds":
+        """Derive account identifiers from the supplied factory, or keep the fixed defaults."""
+        if identifiers is None:
+            return cls()
+        return cls(
+            account=identifiers("conformance-account", 0),
+            principal=identifiers("conformance-principal", 0),
+            session_other=identifiers("conformance-session-other", 0),
+            session_owner=identifiers("conformance-session-owner", 0),
+            subject=identifiers("conformance-subject", 0),
+        )
 
-def _resolve_conformance_account_ids(identifiers: "Callable[[str, int], str] | None") -> _ConformanceAccountIds:
-    """Derive account identifiers from the supplied factory, or keep the fixed defaults."""
-    if identifiers is None:
-        return _ConformanceAccountIds()
-    return _ConformanceAccountIds(
-        account=identifiers("conformance-account", 0),
-        principal=identifiers("conformance-principal", 0),
-        session_other=identifiers("conformance-session-other", 0),
-        session_owner=identifiers("conformance-session-owner", 0),
-        subject=identifiers("conformance-subject", 0),
-    )
+
+_CONFORMANCE_ACCOUNT_IDS = ("account-1", *_ConformanceAccountIds().seeded())
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,10 +379,6 @@ class InMemoryWebSocketRevocationSource:
         """
         self._events: dict[WebSocketBinding, Event] = {}
 
-    def _event(self, binding: WebSocketBinding) -> Event:
-        """Return the private revocation event for one complete binding."""
-        return self._events.setdefault(binding, Event())
-
     async def wait(self, binding: WebSocketBinding) -> None:
         """Block until the exact binding has been revoked.
 
@@ -415,6 +406,10 @@ class InMemoryWebSocketRevocationSource:
             None.
         """
         self._event(binding).set()
+
+    def _event(self, binding: WebSocketBinding) -> Event:
+        """Return the private revocation event for one complete binding."""
+        return self._events.setdefault(binding, Event())
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,6 +545,19 @@ class _InMemoryRefreshState:
 
 class InMemoryLocalAccountStore:
     """Atomic in-memory local-account, session, and refresh reference store."""
+
+    _VERIFICATION_STATUSES: ClassVar[Mapping[str, VerificationStatus]] = MappingProxyType({
+        "used": VerificationStatus.USED,
+        "invalid": VerificationStatus.INVALID,
+        "expired": VerificationStatus.EXPIRED,
+        "conflict": VerificationStatus.INVALID,
+    })
+    _RESET_STATUSES: ClassVar[Mapping[str, PasswordResetStatus]] = MappingProxyType({
+        "used": PasswordResetStatus.USED,
+        "invalid": PasswordResetStatus.INVALID,
+        "expired": PasswordResetStatus.EXPIRED,
+        "conflict": PasswordResetStatus.CONFLICT,
+    })
 
     __slots__ = (
         "_accounts",
@@ -737,8 +745,7 @@ class InMemoryLocalAccountStore:
             self._accounts[account_id] = account
             self._password_hashes[account_id] = password_hash
             if invitation is not None:
-                del self._purpose_tokens[invitation.token_id]
-                self._used_purpose_tokens.add(invitation.token_id)
+                self._retire_purpose_token_locked(invitation.token_id)
             return RegistrationOutcome(RegistrationStatus.CREATED, account)
 
     async def issue(self, issue: TokenIssue, notification: NotificationCommand, *, event: SecurityEvent) -> None:
@@ -764,25 +771,13 @@ class InMemoryLocalAccountStore:
         del event
         await self._observe("accounts.consume_and_verify", {"token_id": token_id})
         async with self._lock:
-            issue = self._purpose_tokens.get(token_id)
-            if issue is None or issue.purpose is not TokenPurpose.VERIFICATION:
-                status = (
-                    VerificationStatus.USED if token_id in self._used_purpose_tokens else VerificationStatus.INVALID
-                )
-                return VerificationOutcome(status)
-            if not compare_digest(issue.digest, digest):
-                self._record_failed_purpose_proof_locked(issue)
-                return VerificationOutcome(VerificationStatus.INVALID)
-            if issue.expires_at <= now:
-                return VerificationOutcome(VerificationStatus.EXPIRED)
-            account = self._accounts.get(issue.account_id)
-            if account is None:
-                return VerificationOutcome(VerificationStatus.INVALID)
-            del self._purpose_tokens[token_id]
-            self._purpose_attempts.pop(token_id, None)
-            self._used_purpose_tokens.add(token_id)
-            self._accounts[account.account_id] = replace(account, verified=True)
-            return VerificationOutcome(VerificationStatus.CONSUMED, account.account_id, account.security_epoch)
+            result = self._consume_purpose_token_locked(
+                token_id, digest, purpose=TokenPurpose.VERIFICATION, now=now, statuses=self._VERIFICATION_STATUSES
+            )
+            if isinstance(result, VerificationStatus):
+                return VerificationOutcome(result)
+            self._accounts[result.account_id] = replace(result, verified=True)
+            return VerificationOutcome(VerificationStatus.CONSUMED, result.account_id, result.security_epoch)
 
     async def consume_and_reset(
         self, token_id: str, digest: bytes, new_password_hash: str, *, now: datetime, event: SecurityEvent
@@ -791,27 +786,15 @@ class InMemoryLocalAccountStore:
         del event
         await self._observe("accounts.consume_and_reset", {"token_id": token_id})
         async with self._lock:
-            issue = self._purpose_tokens.get(token_id)
-            if issue is None or issue.purpose is not TokenPurpose.RECOVERY:
-                status = (
-                    PasswordResetStatus.USED if token_id in self._used_purpose_tokens else PasswordResetStatus.INVALID
-                )
-                return PasswordResetOutcome(status)
-            if not compare_digest(issue.digest, digest):
-                self._record_failed_purpose_proof_locked(issue)
-                return PasswordResetOutcome(PasswordResetStatus.INVALID)
-            if issue.expires_at <= now:
-                return PasswordResetOutcome(PasswordResetStatus.EXPIRED)
-            account = self._accounts.get(issue.account_id)
-            if account is None or issue.issued_security_epoch != account.security_epoch:
-                return PasswordResetOutcome(PasswordResetStatus.CONFLICT)
-            next_epoch = account.security_epoch + 1
-            del self._purpose_tokens[token_id]
-            self._purpose_attempts.pop(token_id, None)
-            self._used_purpose_tokens.add(token_id)
-            self._password_hashes[account.account_id] = new_password_hash
-            self._accounts[account.account_id] = replace(account, security_epoch=next_epoch)
-            return PasswordResetOutcome(PasswordResetStatus.RESET, account.account_id, next_epoch)
+            result = self._consume_purpose_token_locked(
+                token_id, digest, purpose=TokenPurpose.RECOVERY, now=now, statuses=self._RESET_STATUSES
+            )
+            if isinstance(result, PasswordResetStatus):
+                return PasswordResetOutcome(result)
+            next_epoch = result.security_epoch + 1
+            self._password_hashes[result.account_id] = new_password_hash
+            self._accounts[result.account_id] = replace(result, security_epoch=next_epoch)
+            return PasswordResetOutcome(PasswordResetStatus.RESET, result.account_id, next_epoch)
 
     async def create(self, command: CreateSessionCommand, *, event: SecurityEvent) -> UserAuthSession:
         """Create one native session record."""
@@ -823,18 +806,7 @@ class InMemoryLocalAccountStore:
             if command.session_id in self._sessions:
                 message = "In-memory session identifier collision"
                 raise ValueError(message)
-            record = UserAuthSession(
-                session_id=command.session_id,
-                binding_id=command.binding_id,
-                binding_digest=command.binding_digest,
-                account_id=command.account_id,
-                security_epoch=command.security_epoch,
-                created_at=command.created_at,
-                authenticated_at=command.authenticated_at,
-                last_seen_at=command.created_at,
-                expires_at=command.expires_at,
-                display_metadata=command.display_metadata,
-            )
+            record = _conformance_session_record(command)
             self._sessions[record.session_id] = record
             return record
 
@@ -881,22 +853,14 @@ class InMemoryLocalAccountStore:
         del event
         await self._observe("accounts.revoke_sessions", {"account_id": account_id})
         async with self._lock:
-            session_ids = tuple(key for key, record in self._sessions.items() if record.account_id == account_id)
-            for session_id in session_ids:
-                del self._sessions[session_id]
-            return len(session_ids)
+            return self._revoke_sessions_locked(account_id)
 
     async def revoke_other_sessions(self, account_id: str, session_id: str, *, event: SecurityEvent) -> int:
         """Revoke all native sessions except the named current one."""
         del event
         await self._observe("accounts.revoke_other_sessions", {"account_id": account_id, "session_id": session_id})
         async with self._lock:
-            session_ids = tuple(
-                key for key, record in self._sessions.items() if record.account_id == account_id and key != session_id
-            )
-            for other_session_id in session_ids:
-                del self._sessions[other_session_id]
-            return len(session_ids)
+            return self._revoke_sessions_locked(account_id, exclude_session_id=session_id)
 
     async def rebind(
         self, prior_session_id: str, command: CreateSessionCommand, *, event: SecurityEvent
@@ -913,18 +877,7 @@ class InMemoryLocalAccountStore:
                 message = "In-memory session identifier collision"
                 raise ValueError(message)
             del self._sessions[prior_session_id]
-            record = UserAuthSession(
-                session_id=command.session_id,
-                binding_id=command.binding_id,
-                binding_digest=command.binding_digest,
-                account_id=command.account_id,
-                security_epoch=command.security_epoch,
-                created_at=command.created_at,
-                authenticated_at=command.authenticated_at,
-                last_seen_at=command.created_at,
-                expires_at=command.expires_at,
-                display_metadata=command.display_metadata,
-            )
+            record = _conformance_session_record(command)
             self._sessions[record.session_id] = record
             return record
 
@@ -1031,10 +984,7 @@ class InMemoryLocalAccountStore:
         del event
         await self._observe("accounts.revoke_refresh_token", {"token_id": token_id})
         async with self._lock:
-            state = self._refresh_tokens.get(token_id)
-            return (
-                state is not None and state.token_digest == token_digest and self._revoke_family_locked(state.family_id)
-            )
+            return self._revoke_refresh_token_locked(token_id, token_digest)
 
     async def revoke_token_for_account(
         self, account_id: str, token_id: str, token_digest: bytes, *, event: SecurityEvent
@@ -1043,13 +993,7 @@ class InMemoryLocalAccountStore:
         del event
         await self._observe("accounts.revoke_refresh_token", {"account_id": account_id, "token_id": token_id})
         async with self._lock:
-            state = self._refresh_tokens.get(token_id)
-            return (
-                state is not None
-                and state.account_id == account_id
-                and state.token_digest == token_digest
-                and self._revoke_family_locked(state.family_id)
-            )
+            return self._revoke_refresh_token_locked(token_id, token_digest, account_id=account_id)
 
     async def revoke_for_account(self, account_id: str, *, event: SecurityEvent) -> int:
         """Revoke every refresh family owned by one account."""
@@ -1069,17 +1013,57 @@ class InMemoryLocalAccountStore:
             scopes=state.scopes,
         )
 
+    def _retire_purpose_token_locked(self, token_id: str) -> None:
+        self._purpose_tokens.pop(token_id, None)
+        self._purpose_attempts.pop(token_id, None)
+        self._used_purpose_tokens.add(token_id)
+
+    def _consume_purpose_token_locked(
+        self, token_id: str, digest: bytes, *, purpose: TokenPurpose, now: datetime, statuses: Mapping[str, _StatusT]
+    ) -> LocalAccountState[object] | _StatusT:
+        issue = self._purpose_tokens.get(token_id)
+        if issue is None or issue.purpose is not purpose:
+            return statuses["used" if token_id in self._used_purpose_tokens else "invalid"]
+        if not compare_digest(issue.digest, digest):
+            self._record_failed_purpose_proof_locked(issue)
+            return statuses["invalid"]
+        if issue.expires_at <= now:
+            return statuses["expired"]
+        account = self._accounts.get(issue.account_id)
+        if account is None or (
+            purpose is TokenPurpose.RECOVERY and issue.issued_security_epoch != account.security_epoch
+        ):
+            return statuses["conflict"]
+        self._retire_purpose_token_locked(token_id)
+        return account
+
     def _record_failed_purpose_proof_locked(self, issue: TokenIssue) -> None:
         attempts = self._purpose_attempts.get(issue.token_id, 0) + 1
         if attempts < issue.maximum_attempts:
             self._purpose_attempts[issue.token_id] = attempts
             return
-        del self._purpose_tokens[issue.token_id]
-        self._purpose_attempts.pop(issue.token_id, None)
-        self._used_purpose_tokens.add(issue.token_id)
+        self._retire_purpose_token_locked(issue.token_id)
 
     def _purpose_token_id_exists_locked(self, token_id: str) -> bool:
         return token_id in self._purpose_tokens or token_id in self._used_purpose_tokens
+
+    def _revoke_sessions_locked(self, account_id: str, *, exclude_session_id: str | None = None) -> int:
+        session_ids = tuple(
+            key
+            for key, record in self._sessions.items()
+            if record.account_id == account_id and (exclude_session_id is None or key != exclude_session_id)
+        )
+        for session_id in session_ids:
+            del self._sessions[session_id]
+        return len(session_ids)
+
+    def _revoke_refresh_token_locked(
+        self, token_id: str, token_digest: bytes, *, account_id: str | None = None
+    ) -> bool:
+        state = self._refresh_tokens.get(token_id)
+        if state is None or (account_id is not None and state.account_id != account_id):
+            return False
+        return state.token_digest == token_digest and self._revoke_family_locked(state.family_id)
 
     def _revoke_family_locked(self, family_id: str) -> bool:
         states = tuple(state for state in self._refresh_tokens.values() if state.family_id == family_id)
@@ -1157,7 +1141,7 @@ class InMemorySecurityBackend:
             message = "In-memory backend entropy factory must be callable"
             raise TypeError(message)
         selected_clock = (lambda: _DEFAULT_NOW) if clock is None else clock
-        selected_identifiers = _default_identifier if identifiers is None else identifiers
+        selected_identifiers = self._default_identifier if identifiers is None else identifiers
         if not isinstance(password_hash_value, str) or not password_hash_value.strip():
             message = "In-memory backend password hash must be non-empty"
             raise ValueError(message)
@@ -1264,6 +1248,10 @@ class InMemorySecurityBackend:
         if error is not None:
             raise error
 
+    @staticmethod
+    def _default_identifier(namespace: str, sequence: int) -> str:
+        return f"{namespace}-{sequence:04d}"
+
 
 @dataclass(frozen=True, slots=True)
 class StoreConformanceFactories:
@@ -1299,34 +1287,12 @@ async def assert_oauth_transaction_protector_conformance(factory: Callable[[], O
         AssertionError: If the protector violates a round-trip, key-version,
             associated-data, or non-determinism invariant.
     """
-    protector = factory()
-    associated_data = b"conformance|transaction=a|purpose=pkce"
-    other_associated_data = b"conformance|transaction=b|purpose=pkce"
-    secret = b"conformance-secret-value"
-    envelope: ProtectedOAuthSecret = await protector.protect(secret, associated_data=associated_data)
-    if await protector.unprotect(envelope, associated_data=associated_data) != secret:
-        message = (
-            "OAuthTransactionProtector round-trip invariant: matching associated data must recover the original secret"
-        )
-        raise AssertionError(message)
-    if not envelope.key_version or envelope.key_version != protector.active_key_version:
-        message = (
-            "OAuthTransactionProtector key-version invariant: envelope version must be the non-empty active key version"
-        )
-        raise AssertionError(message)
-    try:
-        await protector.unprotect(envelope, associated_data=other_associated_data)
-    except Exception:  # noqa: BLE001, S110 - conforming protectors may raise implementation-specific authentication errors
-        pass
-    else:
-        message = "OAuthTransactionProtector associated data invariant: altered associated data must fail closed"
-        raise AssertionError(message)
-    second_envelope = await protector.protect(secret, associated_data=associated_data)
-    if second_envelope.ciphertext == envelope.ciphertext:
-        message = (
-            "OAuthTransactionProtector non-determinism invariant: equivalent protections require distinct ciphertext"
-        )
-        raise AssertionError(message)
+    await _assert_aead_protector_conformance(
+        factory,
+        label="OAuthTransactionProtector",
+        associated_data=b"conformance|transaction=a|purpose=pkce",
+        other_associated_data=b"conformance|transaction=b|purpose=pkce",
+    )
 
 
 async def assert_api_key_store_conformance(
@@ -1352,7 +1318,7 @@ async def assert_api_key_store_conformance(
     if store is isolated:
         message = "APIKeyStore factory invariant: each call must return isolated state"
         raise AssertionError(message)
-    ids = _resolve_conformance_account_ids(identifiers)
+    ids = _ConformanceAccountIds.resolve(identifiers)
     current = _conformance_api_key_record("a2tra2tra2tra2tr", subject_id=ids.subject)
     replacements = (
         _conformance_api_key_record("ZmZmZmZmZmZmZmZm", subject_id=ids.subject),
@@ -1364,14 +1330,16 @@ async def assert_api_key_store_conformance(
         raise AssertionError(message)
 
     async def rotate(replacement: APIKeyState) -> bool:
-        return await _won_unless_raised(
-            lambda: store.rotate(
+        try:
+            await store.rotate(
                 current_key_id=current.key_id,
                 replacement=replacement,
                 overlap_until=_DEFAULT_NOW + timedelta(seconds=30),
                 now=_DEFAULT_NOW,
             )
-        )
+        except Exception:  # noqa: BLE001 - conformance accepts implementation-specific conflict exceptions
+            return False
+        return True
 
     contenders = tuple(lambda replacement=replacement: rotate(replacement) for replacement in replacements)
     winners = await _single_winner(contenders)
@@ -1409,28 +1377,12 @@ async def assert_secret_protector_conformance(factory: "Callable[[], SecretProte
         AssertionError: If the protector violates a round-trip, key-version,
             associated-data, or non-determinism invariant.
     """
-    protector = factory()
-    associated_data = b"conformance|account=a|purpose=totp"
-    other_associated_data = b"conformance|account=b|purpose=totp"
-    secret = b"conformance-secret-value"
-    envelope: ProtectedSecret = await protector.protect(secret, associated_data=associated_data)
-    if await protector.unprotect(envelope, associated_data=associated_data) != secret:
-        message = "SecretProtector round-trip invariant: matching associated data must recover the original secret"
-        raise AssertionError(message)
-    if not envelope.key_version or envelope.key_version != protector.active_key_version:
-        message = "SecretProtector key-version invariant: envelope version must be the non-empty active key version"
-        raise AssertionError(message)
-    try:
-        await protector.unprotect(envelope, associated_data=other_associated_data)
-    except Exception:  # noqa: BLE001, S110 - conforming protectors may raise implementation-specific authentication errors
-        pass
-    else:
-        message = "SecretProtector associated data invariant: altered associated data must fail closed"
-        raise AssertionError(message)
-    second_envelope = await protector.protect(secret, associated_data=associated_data)
-    if second_envelope.ciphertext == envelope.ciphertext:
-        message = "SecretProtector non-determinism invariant: equivalent protections require distinct ciphertext"
-        raise AssertionError(message)
+    await _assert_aead_protector_conformance(
+        factory,
+        label="SecretProtector",
+        associated_data=b"conformance|account=a|purpose=totp",
+        other_associated_data=b"conformance|account=b|purpose=totp",
+    )
 
 
 class _ConformanceLocalAccountStore(LocalAccountCapabilities[object], RegistrationStore[object], Protocol):
@@ -1903,7 +1855,7 @@ async def assert_session_registry_conformance(  # noqa: C901, PLR0915 - one publ
     if store is isolated:
         message = "SessionRegistry factory invariant: each call must return isolated state"
         raise AssertionError(message)
-    ids = _resolve_conformance_account_ids(identifiers)
+    ids = _ConformanceAccountIds.resolve(identifiers)
     command = _conformance_session_command(marker=1, account_id=ids.session_owner, now=now)
     created = await store.create(command, event=_conformance_event("create-session"))
     expected = _conformance_session_record(command)
@@ -1931,7 +1883,7 @@ async def assert_session_registry_conformance(  # noqa: C901, PLR0915 - one publ
         async def attempt() -> bool:
             result = await store.rebind(command.session_id, replacement, event=_conformance_event("rebind-session"))
             results.append((replacement, result))
-            return _won_by_presence(result)
+            return result is not None
 
         return attempt
 
@@ -1992,6 +1944,12 @@ class _ConformanceRefreshFamilyStore(RefreshTokenFamilyStore, RegistrationStore[
 
 async def assert_refresh_family_store_conformance(factory: Callable[[], _ConformanceRefreshFamilyStore]) -> None:
     """Assert strict refresh-family creation, rotation, replay, and ownership behavior.
+
+    A valid command requires ``token_expires_at <= family_expires_at``, so an
+    independently expired family with a live token is unrepresentable through
+    the public command contract; the shared-deadline scenario exercises that
+    state boundary while keeping divergent internal store state outside the
+    protocol contract.
 
     Args:
         factory: Isolated zero-argument combined local-account and refresh-family
@@ -2066,10 +2024,6 @@ async def assert_refresh_family_store_conformance(factory: Callable[[], _Conform
         message = "RefreshTokenFamilyStore.prepare_rotation expiry invariant: expired tokens must be rejected"
         raise AssertionError(message)
 
-    # A valid command requires token_expires_at <= family_expires_at, so an
-    # independently expired family with a live token is unrepresentable. This
-    # shared deadline covers the public state boundary; divergent internal
-    # store state is outside the protocol contract.
     shared_expiry = _conformance_refresh_family_command(
         account, marker=15, token_expires_at=_DEFAULT_NOW, family_expires_at=_DEFAULT_NOW
     )
@@ -2115,7 +2069,7 @@ async def _assert_refresh_rotation_atomicity(
     async def rotate(candidate: RotateRefreshCommand) -> bool:
         result = await store.rotate(candidate, now=_DEFAULT_NOW, event=_conformance_event("rotate-refresh"))
         results.append((candidate, result))
-        return _won_by_status(result.status, winning=RefreshRotationStatus.ROTATED)
+        return result.status is RefreshRotationStatus.ROTATED
 
     def contender(candidate: RotateRefreshCommand) -> Callable[[], Awaitable[bool]]:
         async def attempt() -> bool:
@@ -2404,7 +2358,7 @@ async def assert_mfa_store_conformance(
     Raises:
         AssertionError: If a counter update is non-atomic or a recovery code can be reused.
     """
-    ids = _resolve_conformance_account_ids(identifiers)
+    ids = _ConformanceAccountIds.resolve(identifiers)
     store = factory()
     enrollment = PendingTOTPEnrollment(
         enrollment_id="conformance-enrollment",
@@ -2467,7 +2421,7 @@ async def assert_mfa_login_challenge_store_conformance(
         AssertionError: If a challenge can be replayed or survives a rejected binding or expiry.
     """
     store = factory()
-    ids = _resolve_conformance_account_ids(identifiers)
+    ids = _ConformanceAccountIds.resolve(identifiers)
     wrong_account = _conformance_mfa_login_challenge(b"m" * 32, account_id=ids.account)
     await store.put(wrong_account)
     if (
@@ -2562,7 +2516,7 @@ async def assert_webauthn_challenge_store_conformance(
         AssertionError: If consume-once, binding, purpose, or expiry behavior is violated.
     """
     store = factory()
-    ids = _resolve_conformance_account_ids(identifiers)
+    ids = _ConformanceAccountIds.resolve(identifiers)
     wrong_binding = _conformance_webauthn_challenge(b"b" * 32, account_id=ids.account)
     await store.put(wrong_binding)
     if (
@@ -2727,7 +2681,7 @@ async def assert_websocket_connect_token_store_conformance(
         AssertionError: If a wrong digest burns a token, or a token can be reused or outlive expiry.
     """
     store = factory()
-    ids = _resolve_conformance_account_ids(identifiers)
+    ids = _ConformanceAccountIds.resolve(identifiers)
     record = _conformance_connect_token_record("aWlpaWlpaWlpaWlpaWlpaQ", b"d" * 32, subject_id=ids.subject)
     await store.create(record)
     if await store.consume(connect_token_id=record.connect_token_id, digest=b"z" * 32, now=_DEFAULT_NOW) is not None:
@@ -2779,7 +2733,7 @@ async def assert_passkey_store_conformance(
         AssertionError: If only one optimistic writer is not recorded or clone risk is lost.
     """
     store = factory()
-    ids = _resolve_conformance_account_ids(identifiers)
+    ids = _ConformanceAccountIds.resolve(identifiers)
     credential = _conformance_passkey_credential(b"credential", account_id=ids.account)
     if not await store.add_credential(
         credential,
@@ -2959,7 +2913,7 @@ async def assert_step_up_store_conformance(
     Raises:
         AssertionError: If a grant can be replayed, double-consumed, or accepted with an altered binding.
     """
-    record = _conformance_step_up_record(principal_id=_resolve_conformance_account_ids(identifiers).principal)
+    record = _conformance_step_up_record(principal_id=_ConformanceAccountIds.resolve(identifiers).principal)
     store = factory()
     await store.put(record)
 
@@ -3018,7 +2972,7 @@ async def assert_oauth_account_store_conformance(
     Raises:
         AssertionError: If a final method can be removed or concurrent unlinking has two winners.
     """
-    ids = _resolve_conformance_account_ids(identifiers)
+    ids = _ConformanceAccountIds.resolve(identifiers)
     store = factory()
     identity = _conformance_provider_identity("first")
     first = await store.link(
@@ -3142,7 +3096,7 @@ async def assert_security_backend_conformance(  # noqa: C901, PLR0912 - explicit
     """
     if create_account is not None:
         seed_ids = (
-            _CONFORMANCE_ACCOUNT_IDS if identifiers is None else _resolve_conformance_account_ids(identifiers).seeded()
+            _CONFORMANCE_ACCOUNT_IDS if identifiers is None else _ConformanceAccountIds.resolve(identifiers).seeded()
         )
         for default_account_id in seed_ids:
             await create_account(default_account_id)
@@ -3494,9 +3448,76 @@ def _conformance_step_up_record(*, principal_id: str = "conformance-principal") 
     )
 
 
+class _ProtectedEnvelope(Protocol):
+    """Opaque encrypted secret envelope exposing ciphertext and key version."""
+
+    @property
+    def ciphertext(self) -> bytes:
+        """Return the raw opaque ciphertext bytes."""
+        ...  # pragma: no cover
+
+    @property
+    def key_version(self) -> str:
+        """Return the stable key version embedded in the envelope."""
+        ...  # pragma: no cover
+
+
+_EnvelopeT = TypeVar("_EnvelopeT", bound=_ProtectedEnvelope)
+
+
+class _AEADProtector(Protocol[_EnvelopeT]):
+    """AEAD protector protocol shared across OAuth and MFA conformance checks."""
+
+    @property
+    def active_key_version(self) -> str:
+        """Return the key version stamped onto newly protected secrets."""
+        ...  # pragma: no cover
+
+    async def protect(self, secret: bytes, *, associated_data: bytes) -> _EnvelopeT:
+        """Encrypt a plaintext secret under exact associated data."""
+        ...  # pragma: no cover
+
+    async def unprotect(self, protected: _EnvelopeT, *, associated_data: bytes) -> bytes:
+        """Decrypt a secret envelope under exact associated data."""
+        ...  # pragma: no cover
+
+
+async def _assert_aead_protector_conformance(
+    factory: Callable[[], _AEADProtector[_EnvelopeT]],
+    *,
+    label: str,
+    associated_data: bytes,
+    other_associated_data: bytes,
+) -> None:
+    """Assert round-trip, key-version, associated-data, and non-determinism AEAD invariants."""
+    protector = factory()
+    secret = b"conformance-secret"
+    first = await protector.protect(secret, associated_data=associated_data)
+    second = await protector.protect(secret, associated_data=associated_data)
+    recovered = await protector.unprotect(first, associated_data=associated_data)
+    if recovered != secret:
+        message = f"{label} round-trip invariant: matching associated data must recover the original secret"
+        raise AssertionError(message)
+    active_version = protector.active_key_version
+    if not active_version or first.key_version != active_version or second.key_version != active_version:
+        message = f"{label} key-version invariant: envelope version must be the non-empty active key version"
+        raise AssertionError(message)
+    rejected_altered_aad = False
+    try:
+        await protector.unprotect(first, associated_data=other_associated_data)
+    except Exception:  # noqa: BLE001 - protector backends raise implementation-specific decryption errors
+        rejected_altered_aad = True
+    if not rejected_altered_aad:
+        message = f"{label} associated data invariant: altered associated data must fail closed"
+        raise AssertionError(message)
+    if first.ciphertext == second.ciphertext:
+        message = f"{label} non-determinism invariant: equivalent protections require distinct ciphertext"
+        raise AssertionError(message)
+
+
 async def _presence(operation: Awaitable[object | None]) -> bool:
     """Project an optional async result to the shared winner boolean shape."""
-    return _won_by_presence(await operation)
+    return (await operation) is not None
 
 
 async def _append_result(operation: Callable[[], Awaitable[ResultT]], results: list[ResultT]) -> None:
@@ -3509,36 +3530,8 @@ async def _single_winner(contenders: tuple[Callable[[], Awaitable[bool]], ...]) 
     outcomes: list[bool] = []
     async with create_task_group() as task_group:
         for attempt in contenders:
-            task_group.start_soon(_record, attempt, outcomes)
-    return outcomes.count(True)
-
-
-async def _record(attempt: Callable[[], Awaitable[bool]], outcomes: list[bool]) -> None:
-    outcomes.append(_won_by_status(await attempt(), winning=True))
-
-
-def _won_by_return(result: object) -> bool:
-    """Return whether a boolean-result contender won."""
-    return result is True
-
-
-def _won_by_presence(result: object | None) -> bool:
-    """Return whether an optional-result contender produced a record."""
-    return _won_by_return(result is not None)
-
-
-def _won_by_status(result: object, *, winning: object) -> bool:
-    """Return whether a status-result contender produced its winning status."""
-    return _won_by_presence(result if result == winning else None)
-
-
-async def _won_unless_raised(operation: Callable[[], Awaitable[object]]) -> bool:
-    """Return whether a contender completed without an implementation conflict."""
-    try:
-        await operation()
-    except Exception:  # noqa: BLE001 - conformance accepts implementation-specific conflict exceptions
-        return False
-    return True
+            task_group.start_soon(_append_result, attempt, outcomes)
+    return sum(outcome is True for outcome in outcomes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3699,21 +3692,14 @@ class InMemoryMFAStore:
             The active method only for the winning call.
         """
         async with self._lock:
-            enrollment = self.enrollments.pop(enrollment_id, None)
-            if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
-                return None
-            method = TOTPMethod(
-                method_id=enrollment.method_id,
-                account_id=account_id,
-                protected_secret=enrollment.protected_secret,
-                policy=enrollment.policy,
-                last_accepted_counter=accepted_counter,
-                created_at=now,
+            return self._activate_totp_locked(
+                account_id,
+                enrollment_id,
+                accepted_counter=accepted_counter,
+                login_method=login_method,
+                event=event,
+                now=now,
             )
-            self.methods[method.method_id] = method
-            self.login_methods[login_method.method_id] = login_method
-            self.events.append(event)
-            return method
 
     async def activate_totp_with_recovery_codes(  # noqa: PLR0913 - mirrors the atomic public protocol
         self,
@@ -3728,23 +3714,15 @@ class InMemoryMFAStore:
     ) -> TOTPMethod | None:
         """Atomically activate one enrollment and replace recovery codes."""
         async with self._lock:
-            enrollment = self.enrollments.get(enrollment_id)
-            if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
-                return None
-            method = TOTPMethod(
-                method_id=enrollment.method_id,
-                account_id=account_id,
-                protected_secret=enrollment.protected_secret,
-                policy=enrollment.policy,
-                last_accepted_counter=accepted_counter,
-                created_at=now,
+            return self._activate_totp_locked(
+                account_id,
+                enrollment_id,
+                accepted_counter=accepted_counter,
+                login_method=login_method,
+                event=event,
+                now=now,
+                codes=codes,
             )
-            del self.enrollments[enrollment_id]
-            self.methods[method.method_id] = method
-            self.recovery_codes[account_id] = tuple(codes)
-            self.login_methods[login_method.method_id] = login_method
-            self.events.append(event)
-            return method
 
     async def get_totp_method(self, account_id: str, method_id: str) -> "TOTPMethod | None":
         """Load an owner-checked active method.
@@ -3810,6 +3788,36 @@ class InMemoryMFAStore:
                 return False
             self.recovery_codes[account_id] = tuple(code for code in codes if code is not match)
             return True
+
+    def _activate_totp_locked(  # noqa: PLR0913 - shares the atomic public protocol parameters
+        self,
+        account_id: str,
+        enrollment_id: str,
+        *,
+        accepted_counter: int,
+        login_method: LoginMethod,
+        event: SecurityEvent,
+        now: datetime,
+        codes: tuple[RecoveryCodeDigest, ...] | None = None,
+    ) -> TOTPMethod | None:
+        enrollment = self.enrollments.get(enrollment_id)
+        if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
+            return None
+        del self.enrollments[enrollment_id]
+        method = TOTPMethod(
+            method_id=enrollment.method_id,
+            account_id=account_id,
+            protected_secret=enrollment.protected_secret,
+            policy=enrollment.policy,
+            last_accepted_counter=accepted_counter,
+            created_at=now,
+        )
+        self.methods[method.method_id] = method
+        if codes is not None:
+            self.recovery_codes[account_id] = tuple(codes)
+        self.login_methods[login_method.method_id] = login_method
+        self.events.append(event)
+        return method
 
 
 class InMemoryWebAuthnChallengeStore:

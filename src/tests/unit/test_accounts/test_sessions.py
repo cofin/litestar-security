@@ -1,4 +1,4 @@
-"""Source-oriented accounts unit tests."""
+"""Unit tests for native session authentication, binding configuration, and session contracts."""
 
 import hmac
 from collections.abc import Callable  # noqa: TC003
@@ -30,16 +30,6 @@ from tests.fixtures.accounts import (
 )
 
 _JWT_NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
-_NAIVE_JWT_NOW = datetime(2026, 7, 26)  # noqa: DTZ001 - explicit rejection fixture
-_JWT_ISSUER = "https://issuer.example"
-_JWT_AUDIENCE = "litestar-security"
-_OIDC_ISSUER = "https://issuer.example/tenant"
-_OIDC_DISCOVERY_URL = f"{_OIDC_ISSUER}/.well-known/openid-configuration"
-_OIDC_PUBLIC_IP = "93.184.216.34"
-_JWKS_URI = f"{_JWT_ISSUER}/.well-known/jwks.json"
-_MFA_VECTOR_NOW = datetime.fromtimestamp(59, tz=timezone.utc)
-_MFA_ENCODED_SEED = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
-_MFA_POLICY = accounts_module.TOTPPolicy()
 _ACCOUNT_NOW = datetime(2026, 7, 27, tzinfo=timezone.utc)
 
 
@@ -823,20 +813,6 @@ def test_native_session_http_cleanup_without_mutable_native_session_only_expires
 
     assert isinstance(outcome, InvalidCredentials)
     assert _queued_binding_token(connection) == ""
-
-
-def _local_access_account(
-    *, active: bool = True, verified: bool = True, security_epoch: int = 3
-) -> accounts_module.LocalAccountState[object]:
-    return accounts_module.LocalAccountState(
-        account_id="account-1",
-        normalized_identifier="person@example.com",
-        display_name="Local Person",
-        active=active,
-        verified=verified,
-        security_epoch=security_epoch,
-        user={"safe": "application object"},
-    )
 
 
 @pytest.mark.parametrize(

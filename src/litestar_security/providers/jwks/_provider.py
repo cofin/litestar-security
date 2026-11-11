@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast, runtime_checka
 from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
-from litestar_security.providers._internal import raise_config, safe_increment, safe_observe
+from litestar_security.providers._internal import raise_config, safe_increment, safe_observe, validate_metrics
 from litestar_security.providers.jwks._cache import (
     InMemoryJWKSCache,
     JWKSCache,
@@ -36,7 +36,7 @@ from litestar_security.providers.jwks._fetching import (
 )
 from litestar_security.providers.jwks._internal import aware_utc, etag, valid_selection_value
 from litestar_security.providers.jwt import VerificationKey
-from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
+from litestar_security.workers import SecurityMetrics, WorkerLimits
 
 if TYPE_CHECKING:
     from collections import OrderedDict
@@ -129,9 +129,7 @@ class CachedJWKSProvider:
         workers = WorkerLimits() if worker_limits is None else worker_limits
         if not isinstance(workers, WorkerLimits):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
             raise_config("JWKS provider worker limits must be WorkerLimits")
-        metric_sink = NoOpSecurityMetrics() if metrics is None else metrics
-        if not callable(getattr(metric_sink, "increment", None)) or not callable(getattr(metric_sink, "observe", None)):
-            raise_config("JWKS metrics must implement SecurityMetrics")
+        metric_sink = validate_metrics(metrics, message="JWKS metrics must implement SecurityMetrics")
         if not isinstance(fetcher_owned, bool):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
             raise_config("JWKS fetcher ownership must be boolean")
         snapshots = InMemoryJWKSCache() if cache is None else cache
@@ -488,14 +486,6 @@ class _EntryState:
     @refresh.setter
     def refresh(self, value: "_Refresh | None") -> None:
         self.coordination.refresh = value
-
-    @property
-    def forced_generation(self) -> int | None:
-        return self.coordination.forced_generation
-
-    @forced_generation.setter
-    def forced_generation(self, value: int | None) -> None:
-        self.coordination.forced_generation = value
 
     @property
     def negative(self) -> "OrderedDict[tuple[int, str, str], datetime]":

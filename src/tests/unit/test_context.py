@@ -1,6 +1,7 @@
 """Unit tests for public context, session, and package contracts."""
 
 import sys
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
@@ -167,6 +168,39 @@ def test_optional_dependency_flag_resolves_lazily(monkeypatch: pytest.MonkeyPatc
     assert calls == ["feature", "feature", "feature", "feature"]
 
 
+def test_typing_facade_optional_dependency_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert bool(public_typing.ARGON2_INSTALLED) is True
+    assert bool(public_typing.PYOTP_INSTALLED) is True
+    assert bool(public_typing.WEBAUTHN_INSTALLED) is True
+    assert repr(public_typing.ARGON2_INSTALLED) == "OptionalDependencyFlag(module='argon2', status='available')"
+
+    missing_flag = public_typing.OptionalDependencyFlag("litestar_security_missing_optional_pkg")
+    assert bool(missing_flag) is False
+    assert (
+        repr(missing_flag)
+        == "OptionalDependencyFlag(module='litestar_security_missing_optional_pkg', status='missing')"
+    )
+    assert public_typing.module_available("litestar_security_missing_optional_pkg") is False
+    assert public_typing.module_available("") is False
+    assert public_typing.import_optional_attr("litestar_security_missing_optional_pkg", "attr") is None
+    assert public_typing.resolve_optional_attr("litestar_security_missing_optional_pkg", None, "fallback") == "fallback"
+
+    public_typing.reset_dependency_cache("litestar_security_missing_optional_pkg")
+    public_typing.reset_dependency_cache()
+    assert public_typing.resolve_optional_attr("pyotp", None, "fallback") is import_module("pyotp")
+    assert "Argon2PasswordHasherEngine" in dir(public_typing)
+    assert "Argon2PasswordHasherEngine" in dir(typing_module)
+
+    unknown_name = "unknown_export"
+    with pytest.raises(AttributeError, match="has no attribute 'unknown_export'"):
+        getattr(public_typing, unknown_name)
+    with pytest.raises(AttributeError, match="has no attribute 'unknown_export'"):
+        getattr(typing_module, unknown_name)
+
+    monkeypatch.setitem(sys.modules, "argon2", None)
+    assert bool(public_typing.ARGON2_INSTALLED) is False
+
+
 def test_principal_supports_anonymous_user_and_service_states() -> None:
     user = object()
 
@@ -183,9 +217,14 @@ def test_principal_require_user_preserves_identity_and_fails_generically() -> No
     user = object()
 
     assert Principal(id="user-1", user=user).require_user() is user
-    for principal in (Principal.anonymous(), Principal(id="service-1")):
-        with pytest.raises(NotAuthorizedException, match="Authentication required"):
-            principal.require_user()
+
+
+@pytest.mark.parametrize(
+    "principal", [Principal.anonymous(), Principal(id="service-1")], ids=["anonymous", "service-without-user"]
+)
+def test_principal_require_user_fails_generically(principal: Principal[object]) -> None:
+    with pytest.raises(NotAuthorizedException, match="Authentication required"):
+        principal.require_user()
 
 
 @pytest.mark.parametrize(
@@ -386,7 +425,8 @@ def test_native_http_session_supports_live_mapping_operations() -> None:
     assert scope["session"] == {}
 
 
-def test_anonymous_context_retains_existing_session(anonymous_principal: Principal[object]) -> None:
+def test_anonymous_context_retains_existing_session() -> None:
+    anonymous_principal: Principal[object] = Principal.anonymous()
     scope = {"type": "http", "session": {"cart": ["item-1"]}}
     context = SecurityContext(
         session=LitestarSessionHandle(scope=scope)  # type: ignore[arg-type]
@@ -406,29 +446,45 @@ def test_null_session_reads_defaults_and_rejects_mutations() -> None:
     assert handle.get("missing") is None
     assert handle.get("missing", "default") == "default"
     assert handle.pop("missing", "default") == "default"
-    for mutation in (lambda: handle.set("key", "value"), handle.clear):
-        with pytest.raises(SessionUnavailableError, match="Session storage is unavailable"):
-            mutation()
 
 
-def test_native_handle_rejects_operations_when_session_disappears() -> None:
+@pytest.mark.parametrize(
+    "mutation", [lambda handle: handle.set("key", "value"), lambda handle: handle.clear()], ids=["set", "clear"]
+)
+def test_null_session_rejects_mutations(mutation: Callable[[NullSessionHandle], object]) -> None:
+    with pytest.raises(SessionUnavailableError, match="Session storage is unavailable"):
+        mutation(NullSessionHandle())
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda handle: handle.get("missing"),
+        lambda handle: handle.set("key", "value"),
+        lambda handle: handle.pop("missing"),
+        lambda handle: handle.clear(),
+    ],
+    ids=["get", "set", "pop", "clear"],
+)
+def test_native_handle_rejects_operations_when_session_disappears(
+    operation: Callable[[LitestarSessionHandle], object],
+) -> None:
     scope = {"type": "http", "session": {}}
     handle = LitestarSessionHandle(scope=scope)  # type: ignore[arg-type]
     del scope["session"]
 
     assert not handle.is_available
     assert not handle.can_persist
-    for operation in (
-        lambda: handle.get("missing"),
-        lambda: handle.set("key", "value"),
-        lambda: handle.pop("missing"),
-        handle.clear,
-    ):
-        with pytest.raises(SessionUnavailableError, match="Session storage is unavailable"):
-            operation()
+    with pytest.raises(SessionUnavailableError, match="Session storage is unavailable"):
+        operation(handle)
 
 
-def test_websocket_native_session_is_read_only() -> None:
+@pytest.mark.parametrize(
+    "mutation",
+    [lambda handle: handle.set("key", "value"), lambda handle: handle.pop("existing"), lambda handle: handle.clear()],
+    ids=["set", "pop", "clear"],
+)
+def test_websocket_native_session_is_read_only(mutation: Callable[[LitestarSessionHandle], object]) -> None:
     scope = {"type": "websocket", "session": {"existing": "value"}}
     handle = LitestarSessionHandle(scope=scope)  # type: ignore[arg-type]
     original_session = dict(scope["session"])  # type: ignore[arg-type]
@@ -436,10 +492,9 @@ def test_websocket_native_session_is_read_only() -> None:
     assert handle.is_available
     assert not handle.can_persist
     assert handle.get("existing") == "value"
-    for mutation in (lambda: handle.set("key", "value"), lambda: handle.pop("existing"), handle.clear):
-        with pytest.raises(SessionPersistenceUnavailableError, match="cannot persist"):
-            mutation()
-        assert scope["session"] == original_session
+    with pytest.raises(SessionPersistenceUnavailableError, match="cannot persist"):
+        mutation(handle)
+    assert scope["session"] == original_session
 
 
 def test_package_root_exports_its_foundational_contract() -> None:
@@ -507,8 +562,8 @@ def test_provider_package_declares_crypto_dependency_without_duplicates() -> Non
     httpx_requirements = tuple(requirement for requirement in declared if requirement.startswith("httpx"))
     assert httpx_requirements == ("httpx>=0.28.1",)
     assert all(not requirement.startswith("cryptography") for requirement in declared)
-    for dependency in ("cryptography", "jwt"):
-        assert import_module(dependency)
+    assert import_module("cryptography")
+    assert import_module("jwt")
 
     providers = import_module("litestar_security.providers")
     jwt_module = import_module("litestar_security.providers.jwt")

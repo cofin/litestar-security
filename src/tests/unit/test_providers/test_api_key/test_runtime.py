@@ -27,15 +27,16 @@ from litestar_security.providers.api_key import (
     BufferedAPIKeyUsage,
     IssuedAPIKey,
 )
+from tests.fixtures.collaborators import MemoryAPIKeyStore, build_api_key_store
 from tests.fixtures.collaborators import RecordingAPIKeyResolver as _Resolver
 from tests.fixtures.collaborators import RecordingAPIKeyUsageSink as _UsageSink
 from tests.fixtures.collaborators import RecordingAPIMetrics as _Metrics
 from tests.fixtures.collaborators import SyncMemoryAPIKeyStore as _SyncMemoryAPIKeyStore
-from tests.unit.test_providers.test_api_key.test_api_key import _NOW, _PEPPER, _codec, _MemoryAPIKeyStore
+from tests.unit.test_providers.test_api_key.test_api_key import _NOW, _PEPPER, _codec
 
 
 def _api_key_runtime(
-    store: _MemoryAPIKeyStore, *, sink: _UsageSink | None = None
+    store: MemoryAPIKeyStore, *, sink: _UsageSink | None = None
 ) -> tuple[object, object, APIKeyService, _Resolver]:
     resolver = _Resolver()
     entropy_calls = 0
@@ -64,7 +65,7 @@ def _api_key_runtime(
 def test_api_key_slot_rejects_ambiguous_or_malformed_headers(
     headers: list[tuple[bytes, bytes]], outcome: type[object]
 ) -> None:
-    slot, _, _, _ = _api_key_runtime(_MemoryAPIKeyStore())
+    slot, _, _, _ = _api_key_runtime(build_api_key_store())
 
     extraction = slot.extract(type("Connection", (), {"scope": {"headers": headers}})())
 
@@ -72,7 +73,7 @@ def test_api_key_slot_rejects_ambiguous_or_malformed_headers(
 
 
 def test_api_key_slot_accepts_one_canonical_header() -> None:
-    slot, _, _, _ = _api_key_runtime(_MemoryAPIKeyStore())
+    slot, _, _, _ = _api_key_runtime(build_api_key_store())
 
     extraction = slot.extract(type("Connection", (), {"scope": {"headers": [(b"x-api-key", b"opaque")]}})())
 
@@ -81,7 +82,7 @@ def test_api_key_slot_accepts_one_canonical_header() -> None:
 
 @pytest.mark.parametrize("state", ["malformed", "unknown", "mismatch", "expired", "revoked", "unavailable"])
 async def test_api_key_authenticator_preserves_structured_failures_and_lookup_bounds(state: str) -> None:
-    store = _MemoryAPIKeyStore()
+    store = build_api_key_store()
     slot, mechanism, _, _ = _api_key_runtime(store)
     issued, record = _codec().issue(subject_id="subject-1", expires_at=_NOW + timedelta(minutes=5))
     credential = issued.value
@@ -110,7 +111,7 @@ async def test_api_key_authenticator_preserves_structured_failures_and_lookup_bo
 
 
 async def test_api_key_authentication_is_one_lookup_and_defers_usage_persistence() -> None:
-    store = _MemoryAPIKeyStore()
+    store = build_api_key_store()
     sink = _UsageSink()
     _, mechanism, service, resolver = _api_key_runtime(store, sink=sink)
     issued, record = _codec().issue(
@@ -144,7 +145,7 @@ async def test_api_key_authentication_is_one_lookup_and_defers_usage_persistence
 
 
 async def test_api_key_service_issues_rotates_and_revokes_through_atomic_store_ports() -> None:
-    store = _MemoryAPIKeyStore()
+    store = build_api_key_store()
     _, _, service, _ = _api_key_runtime(store)
     issued = await service.issue(subject_id="subject-1", expires_at=_NOW + timedelta(hours=1))
     current = store.records[issued.key_id]
@@ -166,7 +167,7 @@ async def test_api_key_service_issues_rotates_and_revokes_through_atomic_store_p
 
 
 async def test_api_key_rotation_has_one_atomic_winner() -> None:
-    store = _MemoryAPIKeyStore()
+    store = build_api_key_store()
     _, _, service, _ = _api_key_runtime(store)
     issued = await service.issue(subject_id="subject-1")
 
@@ -181,7 +182,7 @@ async def test_api_key_rotation_has_one_atomic_winner() -> None:
 
 
 async def test_api_key_runtime_defaults_and_absent_usage_are_safe() -> None:
-    store = _MemoryAPIKeyStore()
+    store = build_api_key_store()
     resolver = _Resolver()
     slot, mechanism, service = APIKeyConfig(store=store, pepper=_PEPPER).build(
         resolver, entropy=lambda length: b"d" * length
@@ -203,7 +204,7 @@ async def test_api_key_runtime_defaults_and_absent_usage_are_safe() -> None:
 
 def test_api_key_build_requires_configured_or_explicit_identity_resolver() -> None:
     with pytest.raises(ImproperlyConfiguredException, match="identity resolver"):
-        APIKeyConfig(store=_MemoryAPIKeyStore(), pepper=_PEPPER).build()
+        APIKeyConfig(store=build_api_key_store(), pepper=_PEPPER).build()
 
 
 def test_api_key_round_trip_allows_base64url_underscore_components() -> None:
@@ -264,7 +265,7 @@ async def test_blocking_api_key_store_is_normalized_once_per_runtime(monkeypatch
 
 
 async def test_direct_async_api_key_store_never_submits_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = _MemoryAPIKeyStore()
+    store = build_api_key_store()
     config = APIKeyConfig(store=store, pepper=_PEPPER)
     service = config.build(_Resolver(), clock=lambda: _NOW)[2]
     submissions: list[object] = []
@@ -294,11 +295,11 @@ def test_blocking_api_key_store_rejects_partial_or_async_implementation() -> Non
         APIKeyConfig(store=BlockingIntegration(PartialStore()), pepper=_PEPPER)
 
     with pytest.raises(ImproperlyConfiguredException, match=r"wrapped by BlockingIntegration must be synchronous"):
-        APIKeyConfig(store=BlockingIntegration(_MemoryAPIKeyStore()), pepper=_PEPPER)
+        APIKeyConfig(store=BlockingIntegration(build_api_key_store()), pepper=_PEPPER)
 
 
 async def test_api_key_runtime_rejects_invalid_rotation_clock_and_builder_inputs() -> None:
-    store = _MemoryAPIKeyStore()
+    store = build_api_key_store()
     _, _, service, resolver = _api_key_runtime(store)
 
     with pytest.raises(ValueError, match="overlap"):
@@ -406,7 +407,7 @@ def test_api_key_slot_extracts_authorization_bearer_and_validates_coexistence(
     coexists_with_bearer_slot: bool,  # noqa: FBT001 - pytest parametrize fixture
     expected: object,
 ) -> None:
-    store = _MemoryAPIKeyStore()
+    store = build_api_key_store()
     slot, mechanism, _ = APIKeyConfig(store=store, pepper=_PEPPER, accept_authorization_bearer=True).build(
         _Resolver(), clock=lambda: _NOW
     )

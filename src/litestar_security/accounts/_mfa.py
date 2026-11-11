@@ -1,6 +1,6 @@
 """MFA assurance, TOTP, recovery, and step-up contracts."""
 
-from base64 import b32decode, urlsafe_b64encode
+from base64 import b32decode
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -14,7 +14,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts._internal import (
+    AES_256_KEY_BYTES,
+    MINIMUM_PEPPER_BYTES,
     aware_utc_time,
+    encode_random,
     new_event_id,
     strict_context_text,
     utc_now,
@@ -37,6 +40,7 @@ from litestar_security.accounts._records import (
     RevokeLoginMethodOutcome,
     SecurityEvent,
     SecurityEventSink,
+    emit_security_event,
 )
 from litestar_security.accounts._stores import LoginMethodStore
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
@@ -74,10 +78,8 @@ _RECOVERY_CODE_BYTES = 16
 _STEP_UP_TOKEN_BYTES = 32
 _RECOVERY_CODE_COUNT = 10
 _MAXIMUM_RECOVERY_CODE_COUNT = 100
-_MINIMUM_PEPPER_BYTES = 32
 _MAXIMUM_PEPPER_VERSION_LENGTH = 16
 _RECOVERY_CODE_PARTS = 3
-_AES_256_KEY_BYTES = 32
 _AES_GCM_NONCE_BYTES = 12
 _ALGORITHMS = {"SHA1": sha1, "SHA256": sha256, "SHA512": sha512}
 
@@ -185,7 +187,7 @@ class SecretProtectorKey:
         if (
             not strict_context_text(self.key_version)
             or self.key.__class__ is not bytes
-            or len(self.key) != _AES_256_KEY_BYTES
+            or len(self.key) != AES_256_KEY_BYTES
         ):
             msg = "Secret protector key requires a version and 32-byte key"
             raise ImproperlyConfiguredException(detail=msg)
@@ -341,7 +343,7 @@ class RecoveryCodePepper:
             or "_" in self.key_version
             or len(self.key_version) > _MAXIMUM_PEPPER_VERSION_LENGTH
             or not isinstance(key, bytes)
-            or len(key) < _MINIMUM_PEPPER_BYTES
+            or len(key) < MINIMUM_PEPPER_BYTES
         ):
             message = "Recovery-code pepper requires a short version and at least 32 key bytes"
             raise ImproperlyConfiguredException(detail=message)
@@ -648,9 +650,9 @@ class MFAService:
             enrollment_id = self.identifiers()
             method_id = self.identifiers()
             secret = self.secret_generator()
-            _validate_secret(secret)
+            self._validate_secret(secret)
             key_version = self.secret_protector.active_key_version
-            associated_data = _totp_associated_data(account_id, method_id, key_version)
+            associated_data = self._totp_associated_data(account_id, method_id, key_version)
             protected = await self.secret_protector.protect(secret.encode("ascii"), associated_data=associated_data)
             if protected.key_version != key_version:
                 return VerificationUnavailable()
@@ -663,7 +665,7 @@ class MFAService:
                 created_at=now,
                 expires_at=now + self.policy.enrollment_ttl,
             )
-            totp = _totp(secret, self.policy)
+            totp = self._totp(secret, self.policy)
             provisioning_uri = cast(
                 "Callable[[str | None, str | None], str]",
                 totp.provisioning_uri,  # pyright: ignore[reportUnknownMemberType] - PyOTP exposes untyped kwargs
@@ -672,8 +674,15 @@ class MFAService:
             await self.store.create_totp_enrollment(pending)
         except Exception:  # noqa: BLE001 - sanitize application protector/store and entropy failures
             return VerificationUnavailable()
-        await self._emit_event(
-            operation=MFA_TOTP_ENROLL, outcome=OUTCOME_CREATED, account_id=account_id, occurred_at=now
+        await emit_security_event(
+            self.events,
+            SecurityEvent(
+                event_id=self.event_ids(),
+                occurred_at=now,
+                operation=MFA_TOTP_ENROLL,
+                outcome=OUTCOME_CREATED,
+                account_id=account_id,
+            ),
         )
         return TOTPProvisioningGrant(
             enrollment_id=enrollment_id, method_id=method_id, provisioning_uri=uri, expires_at=pending.expires_at
@@ -694,13 +703,10 @@ class MFAService:
         """
         try:
             now = aware_utc_time(self.clock())
-            enrollment = await self.store.get_totp_enrollment(enrollment_id)
-            if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
+            verified = await self._verify_pending_totp(account_id, enrollment_id, code, now=now)
+            if verified is None:
                 return InvalidCredentials()
-            secret = await self._recover_secret(account_id, enrollment.method_id, enrollment.protected_secret)
-            counter = _accepted_counter(secret, code, now, enrollment.policy)
-            if counter is None:
-                return InvalidCredentials()
+            enrollment, counter = verified
             login_method = LoginMethod(method_id=enrollment.method_id, kind="totp", created_at=now)
             method = await self.store.activate_totp(
                 account_id,
@@ -738,24 +744,11 @@ class MFAService:
         """
         try:
             now = aware_utc_time(self.clock())
-            enrollment = await self.store.get_totp_enrollment(enrollment_id)
-            if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
+            verified = await self._verify_pending_totp(account_id, enrollment_id, code, now=now)
+            if verified is None:
                 return InvalidCredentials()
-            secret = await self._recover_secret(account_id, enrollment.method_id, enrollment.protected_secret)
-            counter = _accepted_counter(secret, code, now, enrollment.policy)
-            if counter is None:
-                return InvalidCredentials()
-            peppers = _validate_recovery_configuration(self.recovery_peppers, self.recovery_code_count)
-            active = peppers[0]
-            codes = _generate_recovery_codes(active.key_version, self.recovery_code_count, self.recovery_entropy)
-            digests = tuple(
-                RecoveryCodeDigest(
-                    account_id=account_id,
-                    pepper_version=active.key_version,
-                    digest=_recovery_digest(active, account_id, recovery_code),
-                )
-                for recovery_code in codes
-            )
+            enrollment, counter = verified
+            codes, digests = self._build_recovery_codes(account_id)
             method = await self.store.activate_totp_with_recovery_codes(
                 account_id,
                 enrollment_id,
@@ -775,11 +768,25 @@ class MFAService:
             return VerificationUnavailable()
         if method is None:
             return InvalidCredentials()
-        await self._emit_event(
-            operation=MFA_TOTP_VERIFY, outcome=OUTCOME_VERIFIED, account_id=account_id, occurred_at=now
+        await emit_security_event(
+            self.events,
+            SecurityEvent(
+                event_id=self.event_ids(),
+                occurred_at=now,
+                operation=MFA_TOTP_VERIFY,
+                outcome=OUTCOME_VERIFIED,
+                account_id=account_id,
+            ),
         )
-        await self._emit_event(
-            operation=MFA_RECOVERY_REPLACE, outcome=OUTCOME_CREATED, account_id=account_id, occurred_at=now
+        await emit_security_event(
+            self.events,
+            SecurityEvent(
+                event_id=self.event_ids(),
+                occurred_at=now,
+                operation=MFA_RECOVERY_REPLACE,
+                outcome=OUTCOME_CREATED,
+                account_id=account_id,
+            ),
         )
         return RecoveryCodeGrant(codes=codes)
 
@@ -802,15 +809,22 @@ class MFAService:
             if method is None:
                 return InvalidCredentials()
             secret = await self._recover_secret(account_id, method_id, method.protected_secret)
-            counter = _accepted_counter(secret, code, now, method.policy)
+            counter = self._accepted_counter(secret, code, now, method.policy)
             if counter is None or counter <= method.last_accepted_counter:
                 return InvalidCredentials()
             if not await self.store.advance_totp_counter(method_id, accepted_counter=counter, now=now):
                 return InvalidCredentials()
         except Exception:  # noqa: BLE001 - sanitize application protector/store failures
             return VerificationUnavailable()
-        await self._emit_event(
-            operation=MFA_TOTP_VERIFY, outcome=OUTCOME_VERIFIED, account_id=account_id, occurred_at=now
+        await emit_security_event(
+            self.events,
+            SecurityEvent(
+                event_id=self.event_ids(),
+                occurred_at=now,
+                operation=MFA_TOTP_VERIFY,
+                outcome=OUTCOME_VERIFIED,
+                account_id=account_id,
+            ),
         )
         return AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=now, methods=frozenset({"totp"}))
 
@@ -825,22 +839,19 @@ class MFAService:
         """
         try:
             now = aware_utc_time(self.clock())
-            peppers = _validate_recovery_configuration(self.recovery_peppers, self.recovery_code_count)
-            active = peppers[0]
-            codes = _generate_recovery_codes(active.key_version, self.recovery_code_count, self.recovery_entropy)
-            digests = tuple(
-                RecoveryCodeDigest(
-                    account_id=account_id,
-                    pepper_version=active.key_version,
-                    digest=_recovery_digest(active, account_id, code),
-                )
-                for code in codes
-            )
+            codes, digests = self._build_recovery_codes(account_id)
             await self.store.replace_recovery_codes(account_id, digests, now=now)
         except Exception:  # noqa: BLE001 - sanitize application store, clock, and entropy failures
             return VerificationUnavailable()
-        await self._emit_event(
-            operation=MFA_RECOVERY_REPLACE, outcome=OUTCOME_UPDATED, account_id=account_id, occurred_at=now
+        await emit_security_event(
+            self.events,
+            SecurityEvent(
+                event_id=self.event_ids(),
+                occurred_at=now,
+                operation=MFA_RECOVERY_REPLACE,
+                outcome=OUTCOME_UPDATED,
+                account_id=account_id,
+            ),
         )
         return RecoveryCodeGrant(codes=codes)
 
@@ -858,19 +869,26 @@ class MFAService:
         """
         try:
             now = aware_utc_time(self.clock())
-            version = _recovery_code_version(code)
+            version = self._recovery_code_version(code)
             pepper = next((candidate for candidate in self.recovery_peppers if candidate.key_version == version), None)
             if pepper is None:
                 return InvalidCredentials()
-            digest = _recovery_digest(pepper, account_id, code)
+            digest = self._recovery_digest(pepper, account_id, code)
             if not await self.store.consume_recovery_code(account_id, digest, now=now):
                 return InvalidCredentials()
         except (TypeError, ValueError):
             return InvalidCredentials()
         except Exception:  # noqa: BLE001 - sanitize application store and clock failures
             return VerificationUnavailable()
-        await self._emit_event(
-            operation=MFA_RECOVERY_CONSUME, outcome=OUTCOME_VERIFIED, account_id=account_id, occurred_at=now
+        await emit_security_event(
+            self.events,
+            SecurityEvent(
+                event_id=self.event_ids(),
+                occurred_at=now,
+                operation=MFA_RECOVERY_CONSUME,
+                outcome=OUTCOME_VERIFIED,
+                account_id=account_id,
+            ),
         )
         return AuthenticationEvidence(
             mechanism="recovery-code", slot="mfa", authenticated_at=now, methods=frozenset({"recovery-code"})
@@ -905,25 +923,140 @@ class MFAService:
             return VerificationUnavailable()
 
     async def _recover_secret(self, account_id: str, method_id: str, protected: ProtectedSecret) -> str:
-        associated_data = _totp_associated_data(account_id, method_id, protected.key_version)
+        associated_data = self._totp_associated_data(account_id, method_id, protected.key_version)
         plaintext = await self.secret_protector.unprotect(protected, associated_data=associated_data)
         secret = plaintext.decode("ascii")
-        _validate_secret(secret)
+        self._validate_secret(secret)
         return secret
 
-    async def _emit_event(self, *, operation: str, outcome: str, account_id: str, occurred_at: datetime) -> None:
-        try:
-            await self.events.emit(
-                SecurityEvent(
-                    event_id=self.event_ids(),
-                    occurred_at=occurred_at,
-                    operation=operation,
-                    outcome=outcome,
-                    account_id=account_id,
-                )
+    async def _verify_pending_totp(
+        self, account_id: str, enrollment_id: str, code: str, *, now: datetime
+    ) -> tuple[PendingTOTPEnrollment, int] | None:
+        enrollment = await self.store.get_totp_enrollment(enrollment_id)
+        if enrollment is None or enrollment.account_id != account_id or enrollment.expires_at <= now:
+            return None
+        secret = await self._recover_secret(account_id, enrollment.method_id, enrollment.protected_secret)
+        counter = self._accepted_counter(secret, code, now, enrollment.policy)
+        if counter is None:
+            return None
+        return enrollment, counter
+
+    def _build_recovery_codes(self, account_id: str) -> tuple[tuple[str, ...], tuple[RecoveryCodeDigest, ...]]:
+        peppers = self._validate_recovery_configuration(self.recovery_peppers, self.recovery_code_count)
+        active = peppers[0]
+        codes = self._generate_recovery_codes(active.key_version, self.recovery_code_count, self.recovery_entropy)
+        digests = tuple(
+            RecoveryCodeDigest(
+                account_id=account_id,
+                pepper_version=active.key_version,
+                digest=self._recovery_digest(active, account_id, recovery_code),
             )
-        except Exception:  # noqa: BLE001 - observational audit failure cannot change a settled decision
-            return
+            for recovery_code in codes
+        )
+        return codes, digests
+
+    @staticmethod
+    def _validate_secret(secret: str) -> None:
+        secret_value = cast("object", secret)
+        if not isinstance(secret_value, str) or secret_value.__class__ is not str:
+            raise ValueError
+        try:
+            decoded = b32decode(secret, casefold=False)
+        except (UnicodeEncodeError, ValueError):
+            raise ValueError from None
+        if len(decoded) * 8 < _MINIMUM_SECRET_BITS:
+            raise ValueError
+
+    @staticmethod
+    def _totp(secret: str, policy: TOTPPolicy) -> "pyotp.TOTP":
+        return pyotp.TOTP(
+            secret, digits=policy.digits, digest=_ALGORITHMS[policy.algorithm], interval=policy.period_seconds
+        )
+
+    @classmethod
+    def _accepted_counter(cls, secret: str, code: str, now: datetime, policy: TOTPPolicy) -> int | None:
+        code_value = cast("object", code)
+        if (
+            not isinstance(code_value, str)
+            or code_value.__class__ is not str
+            or len(code_value) != policy.digits
+            or not code_value.isascii()
+        ):
+            return None
+        if not code.isdigit():
+            return None
+        current = int(now.timestamp()) // policy.period_seconds
+        generator = cls._totp(secret, policy)
+        accepted: int | None = None
+        for offset in range(-policy.allowed_drift_steps, policy.allowed_drift_steps + 1):
+            counter = current + offset
+            if counter >= 0 and compare_digest(generator.generate_otp(counter), code):
+                accepted = counter
+        return accepted
+
+    @staticmethod
+    def _totp_associated_data(account_id: str, method_id: str, key_version: str) -> bytes:
+        values = (account_id, method_id, "totp", key_version)
+        if not all(strict_context_text(value) and "\x00" not in value for value in values):
+            raise ValueError
+        return b"\x00".join(value.encode("utf-8") for value in values)
+
+    @staticmethod
+    def _validate_recovery_configuration(
+        peppers: tuple[RecoveryCodePepper, ...], count: int
+    ) -> tuple[RecoveryCodePepper, ...]:
+        if (
+            not peppers
+            or len({pepper.key_version for pepper in peppers}) != len(peppers)
+            or count.__class__ is not int
+            or not 1 <= count <= _MAXIMUM_RECOVERY_CODE_COUNT
+        ):
+            raise ValueError
+        return peppers
+
+    @staticmethod
+    def _generate_recovery_codes(key_version: str, count: int, entropy: Callable[[int], bytes]) -> tuple[str, ...]:
+        codes: list[str] = []
+        attempts = 0
+        while len(codes) < count and attempts < count * 4:
+            attempts += 1
+            value = entropy(_RECOVERY_CODE_BYTES)
+            value_object = cast("object", value)
+            if not isinstance(value_object, bytes) or len(value_object) != _RECOVERY_CODE_BYTES:
+                raise ValueError
+            code = f"rc_{key_version}_{value.hex().upper()}"
+            if code not in codes:
+                codes.append(code)
+        if len(codes) != count:
+            raise ValueError
+        return tuple(codes)
+
+    @staticmethod
+    def _recovery_code_version(code: str) -> str:
+        code_value = cast("object", code)
+        if not isinstance(code_value, str) or code_value.__class__ is not str:
+            raise TypeError
+        parts = code_value.split("_")
+        if (
+            len(parts) != _RECOVERY_CODE_PARTS
+            or parts[0] != "rc"
+            or not strict_context_text(parts[1])
+            or len(parts[2]) != _RECOVERY_CODE_BYTES * 2
+            or parts[2] != parts[2].upper()
+            or any(character not in "0123456789ABCDEF" for character in parts[2])
+        ):
+            raise ValueError
+        return parts[1]
+
+    @classmethod
+    def _recovery_digest(cls, pepper: RecoveryCodePepper, account_id: str, code: str) -> bytes:
+        cls._recovery_code_version(code)
+        if not strict_context_text(account_id) or "\x00" in account_id:
+            raise ValueError
+        payload = (
+            b"litestar-security:recovery-code:v2\x00" + account_id.encode("utf-8") + b"\x00" + code.encode("ascii")
+        )
+        return new_hmac(pepper.key, payload, sha256).digest()
 
 
 @dataclass(slots=True)
@@ -980,7 +1113,7 @@ class StepUpService:
             if not isinstance(raw_value, bytes) or len(raw_value) != _STEP_UP_TOKEN_BYTES:
                 return VerificationUnavailable()
             raw = raw_value
-            token = urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+            token = encode_random(raw)
             expires_at = now + self.ttl
             await self.store.put(
                 StepUpGrantState(
@@ -1044,104 +1177,3 @@ class StepUpService:
             methods=record.methods,
             traits=record.traits | frozenset({f"purpose:{purpose}"}),
         )
-
-
-def _validate_secret(secret: str) -> None:
-    secret_value = cast("object", secret)
-    if not isinstance(secret_value, str) or secret_value.__class__ is not str:
-        raise ValueError
-    try:
-        decoded = b32decode(secret, casefold=False)
-    except (UnicodeEncodeError, ValueError):
-        raise ValueError from None
-    if len(decoded) * 8 < _MINIMUM_SECRET_BITS:
-        raise ValueError
-
-
-def _totp(secret: str, policy: TOTPPolicy) -> "pyotp.TOTP":
-    return pyotp.TOTP(
-        secret, digits=policy.digits, digest=_ALGORITHMS[policy.algorithm], interval=policy.period_seconds
-    )
-
-
-def _accepted_counter(secret: str, code: str, now: datetime, policy: TOTPPolicy) -> int | None:
-    code_value = cast("object", code)
-    if (
-        not isinstance(code_value, str)
-        or code_value.__class__ is not str
-        or len(code_value) != policy.digits
-        or not code_value.isascii()
-    ):
-        return None
-    if not code.isdigit():
-        return None
-    current = int(now.timestamp()) // policy.period_seconds
-    generator = _totp(secret, policy)
-    accepted: int | None = None
-    for offset in range(-policy.allowed_drift_steps, policy.allowed_drift_steps + 1):
-        counter = current + offset
-        if counter >= 0 and compare_digest(generator.generate_otp(counter), code):
-            accepted = counter
-    return accepted
-
-
-def _totp_associated_data(account_id: str, method_id: str, key_version: str) -> bytes:
-    values = (account_id, method_id, "totp", key_version)
-    if not all(strict_context_text(value) and "\x00" not in value for value in values):
-        raise ValueError
-    return b"\x00".join(value.encode("utf-8") for value in values)
-
-
-def _validate_recovery_configuration(
-    peppers: tuple[RecoveryCodePepper, ...], count: int
-) -> tuple[RecoveryCodePepper, ...]:
-    if (
-        not peppers
-        or len({pepper.key_version for pepper in peppers}) != len(peppers)
-        or count.__class__ is not int
-        or not 1 <= count <= _MAXIMUM_RECOVERY_CODE_COUNT
-    ):
-        raise ValueError
-    return peppers
-
-
-def _generate_recovery_codes(key_version: str, count: int, entropy: Callable[[int], bytes]) -> tuple[str, ...]:
-    codes: list[str] = []
-    attempts = 0
-    while len(codes) < count and attempts < count * 4:
-        attempts += 1
-        value = entropy(_RECOVERY_CODE_BYTES)
-        value_object = cast("object", value)
-        if not isinstance(value_object, bytes) or len(value_object) != _RECOVERY_CODE_BYTES:
-            raise ValueError
-        code = f"rc_{key_version}_{value.hex().upper()}"
-        if code not in codes:
-            codes.append(code)
-    if len(codes) != count:
-        raise ValueError
-    return tuple(codes)
-
-
-def _recovery_code_version(code: str) -> str:
-    code_value = cast("object", code)
-    if not isinstance(code_value, str) or code_value.__class__ is not str:
-        raise TypeError
-    parts = code_value.split("_")
-    if (
-        len(parts) != _RECOVERY_CODE_PARTS
-        or parts[0] != "rc"
-        or not strict_context_text(parts[1])
-        or len(parts[2]) != _RECOVERY_CODE_BYTES * 2
-        or parts[2] != parts[2].upper()
-        or any(character not in "0123456789ABCDEF" for character in parts[2])
-    ):
-        raise ValueError
-    return parts[1]
-
-
-def _recovery_digest(pepper: RecoveryCodePepper, account_id: str, code: str) -> bytes:
-    _recovery_code_version(code)
-    if not strict_context_text(account_id) or "\x00" in account_id:
-        raise ValueError
-    payload = b"litestar-security:recovery-code:v2\x00" + account_id.encode("utf-8") + b"\x00" + code.encode("ascii")
-    return new_hmac(pepper.key, payload, sha256).digest()

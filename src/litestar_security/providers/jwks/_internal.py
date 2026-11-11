@@ -4,18 +4,15 @@ These sit below the cache so that parsing and freshness decisions can be tested
 without constructing a provider.
 """
 
-from collections import OrderedDict
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import TypeAlias
 
 from litestar_security.providers._internal import raise_config
 
-__all__ = ("aware_utc", "empty_headers", "etag", "negative_cache", "strict_value", "valid_selection_value")
+__all__ = ("aware_utc", "empty_headers", "etag", "strict_value", "valid_selection_value")
 
 
-_NegativeKey: TypeAlias = tuple[int, str, str]
 _MAXIMUM_ETAG_LENGTH = 1_024
 _ASCII_CONTROL_LIMIT = 32
 _ASCII_DELETE = 127
@@ -24,10 +21,6 @@ _EMPTY_HEADERS: Mapping[str, str] = MappingProxyType({})
 
 def empty_headers() -> Mapping[str, str]:
     return _EMPTY_HEADERS
-
-
-def negative_cache() -> OrderedDict[_NegativeKey, datetime]:
-    return OrderedDict()
 
 
 def strict_value(value: str, label: str) -> str:

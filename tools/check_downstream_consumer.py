@@ -1,4 +1,9 @@
-"""Build and verify the isolated downstream-consumer fixture."""
+"""Build and verify the isolated downstream-consumer fixture.
+
+``FORBIDDEN_DEPENDENCIES`` mirrors the 13 adapter roots listed under
+``[tool.ruff.lint.flake8-tidy-imports.banned-api]`` in ``pyproject.toml`` in
+distribution spelling so they never enter the built wheel's ``Requires-Dist``.
+"""
 
 import os
 import subprocess
@@ -7,9 +12,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 FIXTURE = ROOT / "src" / "tests" / "fixtures" / "downstream_consumer"
-# The same 13 roots as [tool.ruff.lint.flake8-tidy-imports.banned-api] in
-# pyproject.toml, in distribution rather than module spelling. Ruff keeps them out
-# of the source; this keeps them out of the wheel's Requires-Dist.
 FORBIDDEN_DEPENDENCIES = (
     "advanced-alchemy",
     "aioboto3",

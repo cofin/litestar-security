@@ -1,7 +1,5 @@
 """Unit tests for strict authentication evaluation and authorization merging."""
 
-from __future__ import annotations
-
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -9,8 +7,8 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException, ServiceUnavailableException
 from litestar.openapi.spec import SecurityScheme
+from litestar.types import Message, Receive, Scope, Send
 
-import litestar_security.authentication as authentication_module
 from litestar_security._openapi import PolicyCompiler
 from litestar_security.authentication import (
     Authenticated,
@@ -20,6 +18,7 @@ from litestar_security.authentication import (
     InvalidCredentials,
     NoCredentials,
     PresentedCredential,
+    SecurityMiddleware,
     SecurityMiddlewareWrapper,
     SecurityRuntimeConfig,
     VerificationUnavailable,
@@ -47,7 +46,6 @@ from litestar_security.testing import StaticAuthorizationResolver, StaticIdentit
 
 if TYPE_CHECKING:
     from litestar.connection import ASGIConnection
-    from litestar.types import Message, Receive, Scope, Send
 
     from litestar_security.authentication import _AuthenticationEvaluator
 
@@ -78,7 +76,10 @@ def test_resource_metadata_preserves_existing_authentication_challenges(challeng
     config = SimpleNamespace(resource_metadata_url="https://api.example.com/metadata", registry=registry)
     plan = SimpleNamespace(participant_names=frozenset({"bearer"}))
     exception = NotAuthorizedException(headers={"WWW-Authenticate": challenge})
-    advertise = cast("Any", authentication_module._advertise_resource_metadata)  # noqa: SLF001 - unit coverage targets the challenge normalizer directly
+    advertise = cast(
+        "Any",
+        SecurityMiddleware._advertise_resource_metadata,  # noqa: SLF001 - unit coverage targets normalizer directly
+    )
 
     advertise(exception, config=config, plan=plan)
 
@@ -225,7 +226,7 @@ def _evaluator(
     events: list[str],
     *,
     authorization_resolver: object | None = None,
-) -> tuple[_AuthenticationEvaluator[object], list[_Slot], list[_Authenticator], list[_Resolver]]:
+) -> "tuple[_AuthenticationEvaluator[object], list[_Slot], list[_Authenticator], list[_Resolver]]":
     slots: list[_Slot] = []
     authenticators: list[_Authenticator] = []
     resolvers: list[_Resolver] = []
@@ -251,7 +252,7 @@ def _evaluator(
 
 def _policy_evaluator(
     presented: set[str], *, different_subject: str | None = None
-) -> tuple[_AuthenticationEvaluator[object], PolicyCompiler[object], list[_Slot]]:
+) -> "tuple[_AuthenticationEvaluator[object], PolicyCompiler[object], list[_Slot]]":
     events: list[str] = []
     slots: list[_Slot] = []
     mechanisms: list[AuthenticationMechanism[str, str, object]] = []

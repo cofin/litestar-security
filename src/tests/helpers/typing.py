@@ -1,12 +1,10 @@
 """Positive strict-typing fixture for the public typing helpers."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, cast
 
 from litestar import Controller, Litestar, Router, get
-from litestar.di import NamedDependency  # noqa: TC002 - Litestar resolves handler annotations at runtime
+from litestar.di import NamedDependency
 from typing_extensions import assert_type
 
 from litestar_security import (

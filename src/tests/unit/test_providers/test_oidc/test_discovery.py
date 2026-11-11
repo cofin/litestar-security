@@ -1,4 +1,4 @@
-"""OIDC discovery behavior.."""
+"""OIDC discovery behavior."""
 
 import gzip
 import json
@@ -10,7 +10,6 @@ from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.providers import _internal as providers_internal
 from litestar_security.providers.oidc import DiscoveryPolicy, OIDCDiscoveryClient, OIDCDiscoveryError, OIDCMetadata
-from litestar_security.providers.oidc import _discovery as oidc_discovery
 from tests.fixtures.collaborators import ChunkedByteStream as _ChunkedOIDCStream
 from tests.fixtures.collaborators import RecordingDNSResolver as _FakeOIDCResolver
 from tests.fixtures.collaborators import RecordingMockTransport as _RecordingMockTransport
@@ -562,7 +561,7 @@ async def test_oidc_discovery_checks_streaming_capacity_before_extending(monkeyp
                 raise AssertionError(message)
             super().extend(chunk)
 
-    monkeypatch.setattr(oidc_discovery, "bytearray", _CapacityCheckedBytearray, raising=False)
+    monkeypatch.setattr(providers_internal, "bytearray", _CapacityCheckedBytearray, raising=False)
     policy = DiscoveryPolicy(allowed_issuers=frozenset({_OIDC_ISSUER}), maximum_document_bytes=64)
     response = httpx.Response(
         200, headers={"content-type": "application/json"}, stream=_ChunkedOIDCStream(b"x" * 40, b"x" * 40)

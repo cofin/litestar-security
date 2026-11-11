@@ -166,9 +166,6 @@ def test_assurance_contract_validates_utc_clock_and_requirement_values() -> None
         AssuranceRequirement(max_age=timedelta())
     with pytest.raises(ImproperlyConfiguredException, match="purpose must not be blank"):
         AssuranceRequirement(purpose=" ")
-    for kwargs in ({"methods": cast("Any", {1})}, {"traits": cast("Any", {"unsupported"})}):
-        with pytest.raises(ImproperlyConfiguredException, match="methods and traits"):
-            AssuranceRequirement(**kwargs)
 
     predicate = requires_assurance(max_age=timedelta(minutes=5), clock=lambda: now)
     assert requires_assurance(clock=lambda: now).decide(_guard_connection()).granted  # type: ignore[arg-type]
@@ -182,11 +179,36 @@ def test_assurance_contract_validates_utc_clock_and_requirement_values() -> None
             )
         )
     ).granted
-    for evidence in (
-        AuthenticationEvidence(mechanism="local", slot="session", authenticated_at=now + timedelta(seconds=1)),
-        AuthenticationEvidence(mechanism="local", slot="session", authenticated_at=now, expires_at=now),
-    ):
-        assert predicate.decide(_guard_connection(evidence=(evidence,))).code == "assurance_too_old"  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"methods": cast("Any", {1})}, {"traits": cast("Any", {"unsupported"})}],
+    ids=["invalid-method-type", "unsupported-trait"],
+)
+def test_assurance_requirement_rejects_unsupported_methods_or_traits(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match="methods and traits"):
+        AssuranceRequirement(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("authenticated_offset", "expires_offset"),
+    [(timedelta(seconds=1), None), (timedelta(), timedelta())],
+    ids=["future-authenticated-at", "expires-at-equals-now"],
+)
+def test_assurance_predicate_rejects_future_or_expired_evidence_as_too_old(
+    authenticated_offset: timedelta, expires_offset: timedelta | None
+) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    predicate = requires_assurance(max_age=timedelta(minutes=5), clock=lambda: now)
+    evidence = AuthenticationEvidence(
+        mechanism="local",
+        slot="session",
+        authenticated_at=now + authenticated_offset,
+        expires_at=None if expires_offset is None else now + expires_offset,
+    )
+
+    assert predicate.decide(_guard_connection(evidence=(evidence,))).code == "assurance_too_old"  # type: ignore[arg-type]
 
 
 def test_native_authorization_guard_allows_matching_scope_and_denies_without_leaking_grant() -> None:
@@ -346,7 +368,7 @@ def test_authorization_guards_do_not_call_application_resolvers_or_adapters() ->
 
 
 def test_requires_guard_exports_and_clean_break() -> None:
-    """Verify requires_* guards are exported and the previous spellings are removed."""
+    """Verify ``requires_*`` guards are exported directly from the root package."""
     assert litestar_security.requires_all_of is requires_all_of
     assert litestar_security.requires_any_of is requires_any_of
     assert litestar_security.requires_at_least is requires_at_least
@@ -359,14 +381,21 @@ def test_requires_guard_exports_and_clean_break() -> None:
     assert litestar_security.requires_tenant is requires_tenant
     assert litestar_security.requires_tenant_role is requires_tenant_role
 
-    for name in ("requires_all_of", "requires_any_of", "requires_at_least", "requires_one_of"):
-        assert getattr(guards_module, name).__name__ == name
 
-    for name in ("all_of", "any_of", "at_least", "one_of"):
-        assert not hasattr(guards_module, name)
-        assert name not in guards_module.__all__
+@pytest.mark.parametrize("name", ["requires_all_of", "requires_any_of", "requires_at_least", "requires_one_of"])
+def test_combinator_guard_functions_preserve_names(name: str) -> None:
+    assert getattr(guards_module, name).__name__ == name
 
-    for name in (
+
+@pytest.mark.parametrize("name", ["all_of", "any_of", "at_least", "one_of"])
+def test_removed_bare_combinators_are_absent_from_guards_module(name: str) -> None:
+    assert not hasattr(guards_module, name)
+    assert name not in guards_module.__all__
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
         "guard_all_of",
         "guard_any_of",
         "guard_at_least",
@@ -383,8 +412,10 @@ def test_requires_guard_exports_and_clean_break() -> None:
         "require_any_of",
         "require_at_least",
         "require_one_of",
-    ):
-        assert not hasattr(litestar_security, name)
-        assert name not in litestar_security.__all__
-        assert not hasattr(guards_module, name)
-        assert name not in guards_module.__all__
+    ],
+)
+def test_removed_guard_aliases_are_absent(name: str) -> None:
+    assert not hasattr(litestar_security, name)
+    assert name not in litestar_security.__all__
+    assert not hasattr(guards_module, name)
+    assert name not in guards_module.__all__

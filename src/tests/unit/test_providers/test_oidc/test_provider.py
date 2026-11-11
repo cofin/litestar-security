@@ -1,14 +1,20 @@
+"""OIDC provider and logout token consumer unit tests."""
+
+import json
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import jwt
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
 
 from litestar_security.authentication import Authenticated, InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
-from litestar_security.providers.jwt import JSONValue, JWTClaims, JWTValidationConfig
+from litestar_security.providers.jwt import JSONValue, JWTClaims, JWTValidationConfig, VerificationKey
 from litestar_security.providers.oauth import (
     OAuthClientAuth,
     OAuthEndpointConfig,
@@ -17,18 +23,24 @@ from litestar_security.providers.oauth import (
     OAuthProviderError,
     OAuthTransaction,
     OAuthTransactionStart,
+    ProviderIdentity,
     ProviderTokenSet,
     SecretStr,
 )
 from litestar_security.providers.oidc import (
+    DiscoveryPolicy,
+    OIDCDiscoveryClient,
     OIDCJWTLogoutTokenConsumer,
     OIDCMetadata,
     OIDCProvider,
+    discover_google_oidc_provider,
+    discover_oidc_provider,
     google_oidc_provider,
     keycloak_oidc_provider,
     oidc_provider,
 )
 from tests.fixtures.collaborators import AsyncRecordingJWTVerifier as StubVerifier
+from tests.fixtures.collaborators import RecordingDNSResolver, RecordingMockTransport
 
 NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
 ISSUER = "https://issuer.example.com"
@@ -663,3 +675,193 @@ async def test_oidc_rejects_verified_email_without_email() -> None:
 
     with pytest.raises(OAuthProviderError):
         await oidc.resolve_identity(tokens(), transaction=transaction(), now=NOW)
+
+
+class _DiscoveryJWKS:
+    def __init__(self, key: VerificationKey) -> None:
+        self.key = key
+        self.calls: list[tuple[str, str, str, str, datetime]] = []
+
+    async def select_key(
+        self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime
+    ) -> VerificationKey:
+        self.calls.append((issuer, jwks_uri, kid, algorithm, now))
+        return self.key
+
+    async def warmup(self, *, now: datetime) -> None:
+        del now
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _discovery_client(issuer: str = ISSUER) -> tuple[OIDCDiscoveryClient, RecordingMockTransport]:
+    host = urlsplit(issuer).hostname or "issuer.example.com"
+    document = {
+        "issuer": issuer,
+        "jwks_uri": f"{issuer}/jwks",
+        "authorization_endpoint": f"{issuer}/authorize",
+        "token_endpoint": f"{issuer}/token",
+        "end_session_endpoint": f"{issuer}/logout",
+        "revocation_endpoint": f"{issuer}/revoke",
+        "id_token_signing_alg_values_supported": ["ES256"],
+    }
+    body = json.dumps(document, separators=(",", ":")).encode()
+    transport = RecordingMockTransport(
+        lambda _request: httpx.Response(200, content=body, headers={"content-type": "application/json"})
+    )
+    client = OIDCDiscoveryClient(
+        policy=DiscoveryPolicy(allowed_issuers=frozenset({issuer})),
+        algorithms=frozenset({"ES256"}),
+        transport=transport,
+        resolver=RecordingDNSResolver({host: ("93.184.216.34",)}),
+    )
+    return client, transport
+
+
+def _signed_id_token(private_key: bytes, *, issuer: str = ISSUER) -> str:
+    payload = {
+        "iss": issuer,
+        "sub": "subject-1",
+        "aud": CLIENT_ID,
+        "iat": int(NOW.timestamp()),
+        "exp": int((NOW + timedelta(minutes=10)).timestamp()),
+        "nonce": "transaction-nonce",
+        "name": "Ada Lovelace",
+        "email": "ada@example.com",
+        "email_verified": True,
+    }
+    encoded = jwt.encode(payload, private_key, algorithm="ES256", headers={"kid": "oidc-key", "typ": "JWT"})
+    return encoded.decode() if isinstance(encoded, bytes) else encoded
+
+
+async def test_discover_oidc_provider_verifies_signed_id_tokens_and_maps_identity(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    private_key, public_key = jwt_key_material["ES256"]
+    discovery, _transport = _discovery_client()
+    jwks = _DiscoveryJWKS(VerificationKey(key_id="oidc-key", algorithm="ES256", key=public_key))
+    discovered = await discover_oidc_provider(
+        name="oidc",
+        issuer=ISSUER,
+        client_id=CLIENT_ID,
+        client_secret=SecretStr("client-secret"),
+        discovery=discovery,
+        jwks=jwks,
+    )
+    try:
+        signed_id_token = _signed_id_token(private_key)
+        identity = await discovered.resolve_identity(
+            tokens(id_token=SecretStr(signed_id_token)), transaction=transaction(), now=NOW
+        )
+    finally:
+        await discovered.aclose()
+        await discovery.aclose()
+
+    assert isinstance(identity, ProviderIdentity)
+    assert identity.provider == "oidc"
+    assert identity.issuer == ISSUER
+    assert identity.subject == "subject-1"
+    assert identity.display_name == "Ada Lovelace"
+    assert identity.email == "ada@example.com"
+    assert identity.email_verified is True
+    assert jwks.calls == [(ISSUER, f"{ISSUER}/jwks", "oidc-key", "ES256", NOW)]
+
+
+@pytest.mark.parametrize("offline_access", [False, True])
+async def test_discover_google_oidc_provider_pins_google_issuer_and_offline_access(
+    *, offline_access: bool, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+) -> None:
+    google_issuer = "https://accounts.google.com"
+    private_key, public_key = jwt_key_material["ES256"]
+    discovery, _transport = _discovery_client(google_issuer)
+    jwks = _DiscoveryJWKS(VerificationKey(key_id="oidc-key", algorithm="ES256", key=public_key))
+    discovered = await discover_google_oidc_provider(
+        client_id=CLIENT_ID,
+        client_secret=SecretStr("client-secret"),
+        discovery=discovery,
+        jwks=jwks,
+        offline_access=offline_access,
+    )
+    try:
+        tx = transaction(provider="google", expected_issuer=google_issuer)
+        start = OAuthTransactionStart(
+            state=SecretStr("state"),
+            browser_binding=SecretStr("binding"),
+            pkce_challenge="challenge",
+            nonce=SecretStr("transaction-nonce"),
+            transaction=tx,
+        )
+        authorization_url = discovered.build_authorization_url(start)
+        signed_id_token = _signed_id_token(private_key, issuer=google_issuer)
+        identity = await discovered.resolve_identity(
+            tokens(id_token=SecretStr(signed_id_token)), transaction=tx, now=NOW
+        )
+    finally:
+        await discovered.aclose()
+        await discovery.aclose()
+
+    query = parse_qs(urlsplit(authorization_url).query)
+    assert discovered.name == "google"
+    assert discovered.issuer == google_issuer
+    assert discovered.retain_tokens_by_default is offline_access
+    assert discovered.oauth.config.revocation_endpoint == f"{google_issuer}/revoke"
+    assert query.get("access_type") == (["offline"] if offline_access else None)
+    assert identity.provider == "google"
+    assert identity.issuer == google_issuer
+
+
+@pytest.mark.parametrize("bad_resource", ["discovery", "jwks"])
+async def test_discover_oidc_provider_factories_reject_invalid_shared_resources(
+    bad_resource: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+) -> None:
+    discovery, transport = _discovery_client()
+    jwks = _DiscoveryJWKS(VerificationKey(key_id="oidc-key", algorithm="ES256", key=jwt_key_material["ES256"][1]))
+    discovery_arg: Any = object() if bad_resource == "discovery" else discovery
+    jwks_arg: Any = object() if bad_resource == "jwks" else jwks
+    try:
+        with pytest.raises(
+            ImproperlyConfiguredException, match="OIDC discovery factory requires shared discovery and JWKS resources"
+        ):
+            await discover_oidc_provider(
+                name="oidc",
+                issuer=ISSUER,
+                client_id=CLIENT_ID,
+                client_secret=SecretStr("client-secret"),
+                discovery=discovery_arg,
+                jwks=jwks_arg,
+            )
+        with pytest.raises(
+            ImproperlyConfiguredException, match="OIDC discovery factory requires shared discovery and JWKS resources"
+        ):
+            await discover_google_oidc_provider(
+                client_id=CLIENT_ID, client_secret=SecretStr("client-secret"), discovery=discovery_arg, jwks=jwks_arg
+            )
+    finally:
+        await discovery.aclose()
+
+    assert transport.requests == []
+
+
+async def test_discovered_oidc_verifier_rejects_naive_now_before_selecting_jwks_key(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    private_key, public_key = jwt_key_material["ES256"]
+    discovery, _transport = _discovery_client()
+    jwks = _DiscoveryJWKS(VerificationKey(key_id="oidc-key", algorithm="ES256", key=public_key))
+    discovered = await discover_oidc_provider(
+        name="oidc",
+        issuer=ISSUER,
+        client_id=CLIENT_ID,
+        client_secret=SecretStr("client-secret"),
+        discovery=discovery,
+        jwks=jwks,
+    )
+    try:
+        outcome = await discovered.verifier.verify(_signed_id_token(private_key), now=NOW.replace(tzinfo=None))
+    finally:
+        await discovered.aclose()
+        await discovery.aclose()
+
+    assert outcome == InvalidCredentials()
+    assert jwks.calls == []

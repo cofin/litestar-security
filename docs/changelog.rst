@@ -1,6 +1,53 @@
 Changelog
 =========
 
+0.7.2
+-----
+
+Added
+~~~~~
+
+* ``GitHubOAuthProvider`` accepts an optional asynchronous ``resolver``
+  parameter for DNS-pinned address resolution, matching ``OAuthProviderClient``
+  (`#88 <https://github.com/cofin/litestar-security/pull/88>`__).
+* ``OAuthProviderClient.stream_pinned`` exposes DNS-pinned outbound HTTP
+  response streaming with bound ``Host`` headers and TLS SNI for custom
+  ``OAuthProvider`` implementations
+  (`#88 <https://github.com/cofin/litestar-security/pull/88>`__).
+
+Changed
+~~~~~~~
+
+* :meth:`~litestar_security.plugin.SecurityPlugin.on_app_init` reuses a single
+  compiled ``OpenAPISchemeSet`` across OpenAPI component registration and route
+  policy compilation instead of scanning the authentication registry twice at
+  startup, and ``OAuthLocalAuthTransport`` removes per-request
+  ``inspect.isawaitable`` branching during local login, re-authentication, and
+  logout coordination
+  (`#88 <https://github.com/cofin/litestar-security/pull/88>`__).
+* Adopt the official Litestar Security brand banners, favicons, Shibuya theme
+  styling, and categorized documentation navigation in ``docs/`` and
+  ``README.md``
+  (`#88 <https://github.com/cofin/litestar-security/pull/88>`__).
+* Update GitHub Actions workflows to ``pypa/gh-action-pypi-publish`` v1.14.3
+  (`#84 <https://github.com/cofin/litestar-security/pull/84>`__),
+  ``astral-sh/setup-uv`` v10.3.3
+  (`#85 <https://github.com/cofin/litestar-security/pull/85>`__),
+  and ``amannn/action-semantic-pull-request`` v6.1.2
+  (`#86 <https://github.com/cofin/litestar-security/pull/86>`__), and upgrade
+  ``ruff`` and ``ruff-pre-commit`` to v0.17.4
+  (`#87 <https://github.com/cofin/litestar-security/pull/87>`__,
+  `#88 <https://github.com/cofin/litestar-security/pull/88>`__).
+
+Fixed
+~~~~~
+
+* Synchronize generated ``operationId`` listings in ``docs/generated-routes.rst``
+  (``PasskeyAuthenticationVerify``, ``OAuthRevalidate``, ``OAuthReauthenticate``),
+  hierarchical ``exclude_from_auth`` guidance in ``docs/resource-server.rst``, and
+  store conformance helper coverage in ``docs/customization.rst``
+  (`#88 <https://github.com/cofin/litestar-security/pull/88>`__).
+
 0.7.1
 -----
 

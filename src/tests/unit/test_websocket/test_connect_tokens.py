@@ -1,4 +1,4 @@
-"""Unit tests for WebSocket handshake transport policy."""
+"""Unit tests for WebSocket connect tokens, policy fingerprinting, and close frames."""
 
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
@@ -27,10 +27,6 @@ from litestar_security.websocket import (
 )
 
 _NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
-
-
-def _connection(*, headers: tuple[tuple[bytes, bytes], ...] = (), query_string: bytes = b"") -> SimpleNamespace:
-    return SimpleNamespace(scope={"headers": list(headers), "query_string": query_string})
 
 
 def _connect_token_record(**changes: object) -> WebSocketConnectAuthorization:

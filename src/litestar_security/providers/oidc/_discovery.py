@@ -4,27 +4,28 @@ Metadata is validated against the requested issuer before it is returned, so a
 response can never redirect trust to an issuer the caller did not ask for.
 """
 
-import ipaddress
 import json
 from dataclasses import dataclass
-from typing import TypeAlias, cast
+from typing import cast
 
 import httpx
 from litestar.status_codes import HTTP_200_OK, HTTP_300_MULTIPLE_CHOICES, HTTP_400_BAD_REQUEST
 
-from litestar_security.providers._internal import AddressResolver, public_address, raise_config, resolve_addresses
-from litestar_security.providers.oidc._internal import (
-    OIDCDiscoveryError,
-    load_document,
+from litestar_security.providers._internal import (
+    AddressResolutionError,
+    AddressResolutionReason,
+    AddressResolver,
+    BoundedBodyError,
     positive_finite,
-    raise_discovery,
+    raise_config,
+    read_bounded_body,
+    resolve_addresses,
+    resolve_public_addresses,
 )
+from litestar_security.providers.oidc._internal import JSONObject, OIDCDiscoveryError, load_document, raise_discovery
 from litestar_security.providers.oidc._urls import NormalizedURL, normalize_url, optional_url_value
 
 __all__ = ("DiscoveryPolicy", "OIDCDiscoveryClient", "OIDCMetadata")
-
-
-JSONObject: TypeAlias = dict[str, object]
 
 
 _DEFAULT_HTTPS_PORT = 443
@@ -40,6 +41,14 @@ _POOL_CONNECTIONS = 10
 
 
 _SUPPORTED_SIGNING_ALGORITHMS = frozenset({"EdDSA", "ES256", "HS256", "RS256"})
+
+
+_DISCOVERY_RESOLUTION_ERRORS: dict[AddressResolutionReason, str] = {
+    "unavailable": "OIDC discovery host resolution unavailable",
+    "empty": "OIDC discovery host resolution returned no addresses",
+    "invalid": "OIDC discovery host resolution returned an invalid address",
+    "non_public": "OIDC discovery host resolved outside the public network boundary",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,8 +242,8 @@ class OIDCDiscoveryClient:
             async with self._client.stream(
                 "GET", url, headers={"Accept": "application/json", "Accept-Encoding": "identity"}
             ) as response:
-                _validate_document_response(response, self.policy.maximum_document_bytes)
-                body = await _read_bounded_body(response, self.policy.maximum_document_bytes)
+                self._validate_document_response(response, self.policy.maximum_document_bytes)
+                body = await self._read_bounded_body(response, self.policy.maximum_document_bytes)
         except OIDCDiscoveryError:
             raise
         except httpx.HTTPError:
@@ -329,48 +338,34 @@ class OIDCDiscoveryClient:
         if self.policy.allow_private_hosts:
             return
         key = (url.host, url.port)
-        addresses = resolved.get(key)
-        if addresses is None:
-            try:
-                literal = ipaddress.ip_address(url.host)
-            except ValueError:
-                try:
-                    addresses = tuple(await self._resolver(url.host, url.port))
-                except (OSError, RuntimeError):
-                    raise_discovery("OIDC discovery host resolution unavailable")
-            else:
-                addresses = (str(literal),)
-            resolved[key] = addresses
-        if not addresses:
-            raise_discovery("OIDC discovery host resolution returned no addresses")
+        if key in resolved:
+            return
         try:
-            parsed = tuple(ipaddress.ip_address(address) for address in addresses)
-        except ValueError:
-            raise_discovery("OIDC discovery host resolution returned an invalid address")
-        if any(not public_address(address) for address in parsed):
-            raise_discovery("OIDC discovery host resolved outside the public network boundary")
+            resolved[key] = await resolve_public_addresses(url.host, url.port, resolver=self._resolver)
+        except AddressResolutionError as exc:
+            raise_discovery(_DISCOVERY_RESOLUTION_ERRORS[exc.reason])
 
-
-def _validate_document_response(response: httpx.Response, maximum_document_bytes: int) -> None:
-    if HTTP_300_MULTIPLE_CHOICES <= response.status_code < HTTP_400_BAD_REQUEST:
-        raise_discovery("OIDC discovery redirects are not allowed")
-    if response.status_code != HTTP_200_OK:
-        raise_discovery("OIDC discovery request failed")
-    content_type = response.headers.get("content-type", "").split(";", maxsplit=1)[0].strip().lower()
-    if content_type != "application/json":
-        raise_discovery("OIDC discovery response must be JSON")
-    content_encoding = response.headers.get("content-encoding", "identity").strip().lower()
-    if content_encoding != "identity":
-        raise_discovery("OIDC discovery response encoding is not allowed")
-    content_length = response.headers.get("content-length")
-    if content_length is not None and (not content_length.isdecimal() or int(content_length) > maximum_document_bytes):
-        raise_discovery("OIDC discovery response exceeds the configured limit")
-
-
-async def _read_bounded_body(response: httpx.Response, maximum_document_bytes: int) -> bytes:
-    body = bytearray()
-    async for chunk in response.aiter_bytes():
-        if len(chunk) > maximum_document_bytes - len(body):
+    @staticmethod
+    def _validate_document_response(response: httpx.Response, maximum_document_bytes: int) -> None:
+        if HTTP_300_MULTIPLE_CHOICES <= response.status_code < HTTP_400_BAD_REQUEST:
+            raise_discovery("OIDC discovery redirects are not allowed")
+        if response.status_code != HTTP_200_OK:
+            raise_discovery("OIDC discovery request failed")
+        content_type = response.headers.get("content-type", "").split(";", maxsplit=1)[0].strip().lower()
+        if content_type != "application/json":
+            raise_discovery("OIDC discovery response must be JSON")
+        content_encoding = response.headers.get("content-encoding", "identity").strip().lower()
+        if content_encoding != "identity":
+            raise_discovery("OIDC discovery response encoding is not allowed")
+        content_length = response.headers.get("content-length")
+        if content_length is not None and (
+            not content_length.isdecimal() or int(content_length) > maximum_document_bytes
+        ):
             raise_discovery("OIDC discovery response exceeds the configured limit")
-        body.extend(chunk)
-    return bytes(body)
+
+    @staticmethod
+    async def _read_bounded_body(response: httpx.Response, maximum_document_bytes: int) -> bytes:
+        try:
+            return await read_bounded_body(response, maximum_document_bytes)
+        except BoundedBodyError:
+            raise_discovery("OIDC discovery response exceeds the configured limit")

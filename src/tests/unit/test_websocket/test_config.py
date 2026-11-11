@@ -1,18 +1,11 @@
-"""Unit tests for WebSocket handshake transport policy."""
+"""Unit tests for WebSocket security configuration validation."""
 
-from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
+from datetime import timedelta
 
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.websocket import WebSocketCloseCodes, WebSocketSecurityConfig
-
-_NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
-
-
-def _connection(*, headers: tuple[tuple[bytes, bytes], ...] = (), query_string: bytes = b"") -> SimpleNamespace:
-    return SimpleNamespace(scope={"headers": list(headers), "query_string": query_string})
 
 
 @pytest.mark.parametrize(

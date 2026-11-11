@@ -476,11 +476,11 @@ async def test_mfa_login_helper_boundaries_fail_closed_without_secret_processing
         await service.issue(cast("Any", SimpleNamespace(account_id="account-1", security_epoch=0)), client_key="\ud800")
         == VerificationUnavailable()
     )
-    assert mfa_login_module._strict_ascii_context("\ud800") is False  # noqa: SLF001
-    assert mfa_login_module._valid_methods({"totp"}) is False  # noqa: SLF001
-    assert mfa_login_module._client_keys_match(None, "client") is False  # noqa: SLF001
-    assert mfa_login_module._client_keys_match("client", 1) is False  # noqa: SLF001
-    assert mfa_login_module._client_keys_match("\ud800", "\ud800") is False  # noqa: SLF001
+    assert mfa_login_module.MFALoginService._strict_ascii_context("\ud800") is False  # noqa: SLF001
+    assert mfa_login_module.MFALoginService._valid_methods({"totp"}) is False  # noqa: SLF001
+    assert mfa_login_module.MFALoginService._client_keys_match(None, "client") is False  # noqa: SLF001
+    assert mfa_login_module.MFALoginService._client_keys_match("client", 1) is False  # noqa: SLF001
+    assert mfa_login_module.MFALoginService._client_keys_match("\ud800", "\ud800") is False  # noqa: SLF001
 
     record = accounts_module.MFALoginChallenge(b"d" * 32, "account-1", 0, None, _NOW, _NOW + timedelta(minutes=5))
     object.__setattr__(service, "methods", frozenset({"unimplemented"}))

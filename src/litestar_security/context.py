@@ -115,17 +115,6 @@ class LitestarSessionHandle:
         """Return whether this connection permits session mutation."""
         return self.is_available and self.scope["type"] == ScopeType.HTTP
 
-    def _session(self) -> MutableMapping[str, object]:
-        if not self.is_available:
-            raise SessionUnavailableError
-        return cast("MutableMapping[str, object]", self.scope["session"])
-
-    def _writable_session(self) -> MutableMapping[str, object]:
-        session = self._session()
-        if not self.can_persist:
-            raise SessionPersistenceUnavailableError
-        return session
-
     def get(self, key: str, default: object = None) -> object:
         """Read the current native session mapping.
 
@@ -162,6 +151,17 @@ class LitestarSessionHandle:
     def clear(self) -> None:
         """Clear the native session when it can persist."""
         self._writable_session().clear()
+
+    def _session(self) -> MutableMapping[str, object]:
+        if not self.is_available:
+            raise SessionUnavailableError
+        return cast("MutableMapping[str, object]", self.scope["session"])
+
+    def _writable_session(self) -> MutableMapping[str, object]:
+        session = self._session()
+        if not self.can_persist:
+            raise SessionPersistenceUnavailableError
+        return session
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,15 +307,22 @@ class AuthenticationEvidence:
         object.__setattr__(self, "mechanism", _normalize_text(self.mechanism, "Mechanism"))
         object.__setattr__(self, "slot", _normalize_text(self.slot, "Slot"))
         object.__setattr__(
-            self, "authenticated_at", _normalize_datetime(self.authenticated_at, "Authenticated timestamp")
+            self, "authenticated_at", self._normalize_datetime(self.authenticated_at, "Authenticated timestamp")
         )
         if self.expires_at is not None:
-            object.__setattr__(self, "expires_at", _normalize_datetime(self.expires_at, "Expiry timestamp"))
+            object.__setattr__(self, "expires_at", self._normalize_datetime(self.expires_at, "Expiry timestamp"))
         object.__setattr__(self, "methods", _normalize_values(self.methods, "Authentication method"))
         object.__setattr__(self, "traits", _normalize_values(self.traits, "Authentication trait"))
         if self.acr is not None:
             object.__setattr__(self, "acr", _normalize_text(self.acr, "ACR"))
         object.__setattr__(self, "amr", tuple(_normalize_text(method, "AMR method") for method in self.amr))
+
+    @staticmethod
+    def _normalize_datetime(value: datetime, label: str) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            msg = f"{label} must be timezone-aware"
+            raise ValueError(msg)
+        return value.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,11 +369,15 @@ class CredentialRestrictions:
 
     def __post_init__(self) -> None:
         """Normalize bounds while preserving unbounded versus empty."""
-        object.__setattr__(self, "scopes", _normalize_optional_values(self.scopes, "Scope"))
-        object.__setattr__(self, "roles", _normalize_optional_values(self.roles, "Role"))
-        object.__setattr__(self, "capabilities", _normalize_optional_values(self.capabilities, "Capability"))
-        object.__setattr__(self, "tenant_ids", _normalize_optional_values(self.tenant_ids, "Tenant id"))
+        object.__setattr__(self, "scopes", self._normalize_optional_values(self.scopes, "Scope"))
+        object.__setattr__(self, "roles", self._normalize_optional_values(self.roles, "Role"))
+        object.__setattr__(self, "capabilities", self._normalize_optional_values(self.capabilities, "Capability"))
+        object.__setattr__(self, "tenant_ids", self._normalize_optional_values(self.tenant_ids, "Tenant id"))
         object.__setattr__(self, "resources", None if self.resources is None else frozenset(self.resources))
+
+    @staticmethod
+    def _normalize_optional_values(values: AbstractSet[str] | None, label: str) -> frozenset[str] | None:
+        return None if values is None else _normalize_values(values, label)
 
 
 def resolve_authorization(
@@ -458,10 +469,6 @@ def _normalize_values(values: AbstractSet[str], label: str) -> frozenset[str]:
     return frozenset(_normalize_text(value, label) for value in values)
 
 
-def _normalize_optional_values(values: AbstractSet[str] | None, label: str) -> frozenset[str] | None:
-    return None if values is None else _normalize_values(values, label)
-
-
 def _intersect_resources(
     current: frozenset[ResourcePermission], bounds: frozenset[ResourcePermission]
 ) -> frozenset[ResourcePermission]:
@@ -473,10 +480,3 @@ def _intersect_resources(
         for permission in current
         if permission.resource in bound_by_resource
     )
-
-
-def _normalize_datetime(value: datetime, label: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        msg = f"{label} must be timezone-aware"
-        raise ValueError(msg)
-    return value.astimezone(timezone.utc)

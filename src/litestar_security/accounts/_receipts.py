@@ -12,13 +12,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from secrets import token_bytes
 from types import MappingProxyType
-from typing import TypeVar, cast
+from typing import cast
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts._internal import (
+    AES_256_KEY_BYTES,
     DIGEST_BYTES,
     aware_utc_time,
     decode_random,
@@ -28,31 +29,19 @@ from litestar_security.accounts._internal import (
     valid_identifier,
     valid_security_epoch,
 )
-from litestar_security.accounts._refresh_tokens import RefreshFamilyContext, TokenPair
+from litestar_security.accounts._refresh_tokens import (
+    REFRESH_FAMILY_PREFIX,
+    REFRESH_TOKEN_PREFIX,
+    RefreshFamilyContext,
+    TokenPair,
+)
 from litestar_security.authentication import InvalidCredentials
 
 __all__ = ("RefreshReceiptContext", "RefreshReceiptKey", "RefreshReceiptReplay", "RefreshReceiptSealer")
 
-
-UserT = TypeVar("UserT")
-
-
-_REFRESH_TOKEN_PREFIX = "rt_"  # noqa: S105 - public token namespace, not a credential
-
-
-_REFRESH_FAMILY_PREFIX = "rf_"
-
-
+MAXIMUM_RECEIPT_BYTES = 32_768
 _REFRESH_RECEIPT_VERSION = "rr1"
-
-
 _RECEIPT_NONCE_BYTES = 12
-
-
-_MAXIMUM_RECEIPT_BYTES = 32_768
-
-
-_AES_256_KEY_BYTES = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,8 +57,8 @@ class RefreshReceiptContext:
     def __post_init__(self) -> None:
         """Validate every authenticated receipt binding value."""
         if (
-            not valid_identifier(self.token_id, prefix=_REFRESH_TOKEN_PREFIX)
-            or not valid_identifier(self.family_id, prefix=_REFRESH_FAMILY_PREFIX)
+            not valid_identifier(self.token_id, prefix=REFRESH_TOKEN_PREFIX)
+            or not valid_identifier(self.family_id, prefix=REFRESH_FAMILY_PREFIX)
             or not strict_context_text(self.account_id)
             or not valid_security_epoch(self.security_epoch)
             or (
@@ -96,7 +85,7 @@ class RefreshReceiptKey:
                 not (character.isascii() and (character.isalnum() or character in "_-")) for character in self.key_id
             )
             or self.key.__class__ is not bytes
-            or len(self.key) != _AES_256_KEY_BYTES
+            or len(self.key) != AES_256_KEY_BYTES
         ):
             msg = "Refresh receipt key requires a safe ID and 32-byte key"
             raise ImproperlyConfiguredException(detail=msg)
@@ -116,7 +105,10 @@ class RefreshReceiptSealer:
         active_key_value: object = self.active_key
         retained_values: tuple[object, ...] = tuple(self.retained_keys)
         entropy_value: object = self.entropy
-        keys = (_require_receipt_key(active_key_value), *(_require_receipt_key(key) for key in retained_values))
+        keys = (
+            self._require_receipt_key(active_key_value),
+            *(self._require_receipt_key(key) for key in retained_values),
+        )
         if len({key.key_id for key in keys}) != len(keys):
             msg = "Refresh receipt key IDs must be unique"
             raise ImproperlyConfiguredException(detail=msg)
@@ -140,7 +132,7 @@ class RefreshReceiptSealer:
         Returns:
             The sealed receipt bytes for the store to keep with the family.
         """
-        expiry = _receipt_expiry(expires_at)
+        expiry = self._receipt_expiry(expires_at)
         nonce = self.entropy(_RECEIPT_NONCE_BYTES)
         if nonce.__class__ is not bytes or len(nonce) != _RECEIPT_NONCE_BYTES:
             msg = "Refresh receipt entropy source returned an invalid nonce"
@@ -156,7 +148,7 @@ class RefreshReceiptSealer:
             sort_keys=True,
         ).encode()
         ciphertext = AESGCM(self.active_key.key).encrypt(
-            nonce, plaintext, _receipt_aad(context, expiry, self.active_key.key_id)
+            nonce, plaintext, self._receipt_aad(context, expiry, self.active_key.key_id)
         )
         return ".".join((
             _REFRESH_RECEIPT_VERSION,
@@ -184,15 +176,15 @@ class RefreshReceiptSealer:
             current = aware_utc_time(now)
         except (AttributeError, ValueError):
             return InvalidCredentials()
-        parsed = _parse_receipt_envelope(sealed_receipt)
+        parsed = self._parse_receipt_envelope(sealed_receipt)
         if parsed is None:
             return InvalidCredentials()
         key_id, expiry, nonce, ciphertext = parsed
         key = self._keys.get(key_id)
-        if key is None or _timestamp_microseconds(current) >= expiry:
+        if key is None or self._timestamp_microseconds(current) >= expiry:
             return InvalidCredentials()
         try:
-            plaintext = AESGCM(key.key).decrypt(nonce, ciphertext, _receipt_aad(context, expiry, key_id))
+            plaintext = AESGCM(key.key).decrypt(nonce, ciphertext, self._receipt_aad(context, expiry, key_id))
             payload_value: object = json.loads(plaintext)
             if not isinstance(payload_value, dict):
                 return InvalidCredentials()
@@ -210,12 +202,81 @@ class RefreshReceiptSealer:
             ):
                 return InvalidCredentials()
             return TokenPair(
-                access_token=cast("str", access_token),  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
-                refresh_token=cast("str", refresh_token),  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
-                expires_in=cast("int", expires_in),  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
+                access_token=cast("str", access_token),  # type: ignore[redundant-cast]
+                refresh_token=cast("str", refresh_token),  # type: ignore[redundant-cast]
+                expires_in=cast("int", expires_in),  # type: ignore[redundant-cast]
             )
         except (InvalidTag, KeyError, TypeError, UnicodeDecodeError, ValueError):
             return InvalidCredentials()
+
+    @staticmethod
+    def _require_receipt_key(value: object) -> RefreshReceiptKey:
+        if not isinstance(value, RefreshReceiptKey) or value.__class__ is not RefreshReceiptKey:
+            msg = "Refresh receipt keys must be RefreshReceiptKey values"
+            raise ImproperlyConfiguredException(detail=msg)
+        return value
+
+    @classmethod
+    def _receipt_expiry(cls, value: datetime) -> int:
+        try:
+            normalized = aware_utc_time(value)
+        except (AttributeError, ValueError):
+            msg = "Refresh receipt expiry must be timezone-aware"
+            raise ValueError(msg) from None
+        expiry = cls._timestamp_microseconds(normalized)
+        if expiry < 1:
+            msg = "Refresh receipt expiry is invalid"
+            raise ValueError(msg)
+        return expiry
+
+    @staticmethod
+    def _timestamp_microseconds(value: datetime) -> int:
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        delta = value - epoch
+        return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+    @staticmethod
+    def _receipt_aad(context: RefreshReceiptContext, expiry: int, key_id: str) -> bytes:
+        return json.dumps(
+            {
+                "account_id": context.account_id,
+                "expiry": expiry,
+                "family_id": context.family_id,
+                "idempotency": (None if context.idempotency_digest is None else context.idempotency_digest.hex()),
+                "key_id": key_id,
+                "security_epoch": context.security_epoch,
+                "token_id": context.token_id,
+                "version": _REFRESH_RECEIPT_VERSION,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+
+    @staticmethod
+    def _parse_receipt_envelope(value: object) -> tuple[str, int, bytes, bytes] | None:
+        if value.__class__ is not bytes:
+            return None
+        receipt = cast("bytes", value)  # type: ignore[redundant-cast]
+        if not receipt or len(receipt) > MAXIMUM_RECEIPT_BYTES:
+            return None
+        try:
+            version, key_id, expiry_text, nonce_text, ciphertext_text = receipt.decode("ascii").split(".")
+            if (
+                version != _REFRESH_RECEIPT_VERSION
+                or not strict_context_text(key_id)
+                or any(not (character.isascii() and (character.isalnum() or character in "_-")) for character in key_id)
+                or not expiry_text.isascii()
+                or not expiry_text.isdecimal()
+                or str(expiry := int(expiry_text)) != expiry_text
+            ):
+                return None
+            nonce = decode_random(nonce_text, _RECEIPT_NONCE_BYTES)
+            ciphertext = decode_random_unbounded(ciphertext_text)
+        except (BinasciiError, UnicodeDecodeError, UnicodeEncodeError, ValueError):
+            return None
+        if nonce is None or not ciphertext:
+            return None
+        return key_id, expiry, nonce, ciphertext
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,76 +292,7 @@ class RefreshReceiptReplay:
             self.context.__class__ is not RefreshFamilyContext
             or self.sealed_receipt.__class__ is not bytes
             or not self.sealed_receipt
-            or len(self.sealed_receipt) > _MAXIMUM_RECEIPT_BYTES
+            or len(self.sealed_receipt) > MAXIMUM_RECEIPT_BYTES
         ):
             msg = "Refresh receipt replay is invalid"
             raise ValueError(msg)
-
-
-def _require_receipt_key(value: object) -> RefreshReceiptKey:
-    if not isinstance(value, RefreshReceiptKey) or value.__class__ is not RefreshReceiptKey:
-        msg = "Refresh receipt keys must be RefreshReceiptKey values"
-        raise ImproperlyConfiguredException(detail=msg)
-    return value
-
-
-def _receipt_expiry(value: datetime) -> int:
-    try:
-        normalized = aware_utc_time(value)
-    except (AttributeError, ValueError):
-        msg = "Refresh receipt expiry must be timezone-aware"
-        raise ValueError(msg) from None
-    expiry = _timestamp_microseconds(normalized)
-    if expiry < 1:
-        msg = "Refresh receipt expiry is invalid"
-        raise ValueError(msg)
-    return expiry
-
-
-def _timestamp_microseconds(value: datetime) -> int:
-    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    delta = value - epoch
-    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
-
-
-def _receipt_aad(context: RefreshReceiptContext, expiry: int, key_id: str) -> bytes:
-    return json.dumps(
-        {
-            "account_id": context.account_id,
-            "expiry": expiry,
-            "family_id": context.family_id,
-            "idempotency": (None if context.idempotency_digest is None else context.idempotency_digest.hex()),
-            "key_id": key_id,
-            "security_epoch": context.security_epoch,
-            "token_id": context.token_id,
-            "version": _REFRESH_RECEIPT_VERSION,
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
-
-
-def _parse_receipt_envelope(value: object) -> tuple[str, int, bytes, bytes] | None:
-    if value.__class__ is not bytes:
-        return None
-    receipt = cast("bytes", value)  # type: ignore[redundant-cast]  # mypy narrows this; pyright does not
-    if not receipt or len(receipt) > _MAXIMUM_RECEIPT_BYTES:
-        return None
-    try:
-        version, key_id, expiry_text, nonce_text, ciphertext_text = receipt.decode("ascii").split(".")
-        if (
-            version != _REFRESH_RECEIPT_VERSION
-            or not strict_context_text(key_id)
-            or any(not (character.isascii() and (character.isalnum() or character in "_-")) for character in key_id)
-            or not expiry_text.isascii()
-            or not expiry_text.isdecimal()
-            or str(expiry := int(expiry_text)) != expiry_text
-        ):
-            return None
-        nonce = decode_random(nonce_text, _RECEIPT_NONCE_BYTES)
-        ciphertext = decode_random_unbounded(ciphertext_text)
-    except (BinasciiError, UnicodeDecodeError, UnicodeEncodeError, ValueError):
-        return None
-    if nonce is None or not ciphertext:
-        return None
-    return key_id, expiry, nonce, ciphertext

@@ -1,4 +1,4 @@
-"""Source-oriented accounts unit tests."""
+"""Unit tests for local-auth profiles, secrets, and service composition."""
 
 import sys
 from dataclasses import FrozenInstanceError, replace
@@ -15,9 +15,7 @@ from litestar.exceptions import ImproperlyConfiguredException
 from litestar.stores.memory import MemoryStore
 from litestar.stores.registry import StoreRegistry
 
-import litestar_security._typing as private_typing_module
 import litestar_security.accounts as accounts_module
-import litestar_security.typing as typing_module
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.providers.jwt import BearerTokenSlot, LocalKeyRing
 from tests.fixtures.accounts import (
@@ -28,16 +26,6 @@ from tests.fixtures.accounts import (
 )
 
 _JWT_NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
-_NAIVE_JWT_NOW = datetime(2026, 7, 26)  # noqa: DTZ001 - explicit rejection fixture
-_JWT_ISSUER = "https://issuer.example"
-_JWT_AUDIENCE = "litestar-security"
-_OIDC_ISSUER = "https://issuer.example/tenant"
-_OIDC_DISCOVERY_URL = f"{_OIDC_ISSUER}/.well-known/openid-configuration"
-_OIDC_PUBLIC_IP = "93.184.216.34"
-_JWKS_URI = f"{_JWT_ISSUER}/.well-known/jwks.json"
-_MFA_VECTOR_NOW = datetime.fromtimestamp(59, tz=timezone.utc)
-_MFA_ENCODED_SEED = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
-_MFA_POLICY = accounts_module.TOTPPolicy()
 
 
 def test_package_declares_account_feature_dependencies_only_through_extras() -> None:
@@ -176,10 +164,35 @@ def test_local_auth_profiles_validate_only_structural_enabled_capabilities(local
     assert hybrid.mode is accounts_module.LocalAuthMode.HYBRID
     assert hybrid.accounts is hybrid_store
     assert registration.registration.mode is accounts_module.RegistrationMode.PUBLIC
-    for config in (session, tokens, hybrid):
-        assert not hasattr(config, "__dict__")
-        with pytest.raises(FrozenInstanceError):
-            config.route_prefix = "/changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("mode", ["session", "tokens", "hybrid"])
+def test_local_auth_profiles_are_frozen_and_slotted(mode: str, local_key_ring: LocalKeyRing) -> None:
+    binding = accounts_module.SessionBindingConfig(pepper=b"p" * 32)
+    audience = "local-client"
+    if mode == "session":
+        store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES))
+        config: accounts_module.LocalAuthConfig[Any] = accounts_module.LocalAuth.session(
+            accounts=store, secrets=_local_auth_secrets(), binding=binding
+        )
+    elif mode == "tokens":
+        store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _REFRESH_CAPABILITIES))
+        config = accounts_module.LocalAuth.tokens(
+            accounts=store, secrets=_local_auth_secrets(refresh=True), key_ring=local_key_ring, token_audience=audience
+        )
+    else:
+        store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES))
+        config = accounts_module.LocalAuth.hybrid(
+            accounts=store,
+            secrets=_local_auth_secrets(refresh=True),
+            binding=binding,
+            key_ring=local_key_ring,
+            token_audience=audience,
+        )
+
+    assert not hasattr(config, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        config.route_prefix = "/changed"  # type: ignore[misc]
 
 
 def test_session_profile_passes_explicit_consistent_read_resolver_to_native_auth() -> None:
@@ -244,7 +257,6 @@ def test_local_auth_rejects_transport_inconsistent_custom_session_runtime(local_
     binding = accounts_module.SessionBindingConfig(pepper=b"p" * 32)
     audience = "local-client"
     store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES))
-    other_store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES))
     runtime = accounts_module.NativeSessionAuth(accounts=store, binding=binding)
     matching = accounts_module.LocalAuth.session(
         accounts=store, secrets=_local_auth_secrets(), binding=binding, session_auth=runtime
@@ -262,16 +274,26 @@ def test_local_auth_rejects_transport_inconsistent_custom_session_runtime(local_
             token_audience=audience,
             session_auth=runtime,
         )
-    for mismatched in (
-        accounts_module.NativeSessionAuth(accounts=other_store, binding=binding),
-        accounts_module.NativeSessionAuth(
+
+
+@pytest.mark.parametrize("mismatch_kind", ["accounts", "binding"])
+def test_local_auth_rejects_mismatched_custom_session_runtime(mismatch_kind: str) -> None:
+    binding = accounts_module.SessionBindingConfig(pepper=b"p" * 32)
+    store = _structural_capabilities(*(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES))
+    if mismatch_kind == "accounts":
+        other_store = _structural_capabilities(
+            *(_BASE_LOCAL_CAPABILITIES | _SESSION_CAPABILITIES | _REFRESH_CAPABILITIES)
+        )
+        mismatched = accounts_module.NativeSessionAuth(accounts=other_store, binding=binding)
+    else:
+        mismatched = accounts_module.NativeSessionAuth(
             accounts=store, binding=accounts_module.SessionBindingConfig(pepper=b"q" * 32)
-        ),
-    ):
-        with pytest.raises(ImproperlyConfiguredException, match="must share"):
-            accounts_module.LocalAuth.session(
-                accounts=store, secrets=_local_auth_secrets(), binding=binding, session_auth=mismatched
-            )
+        )
+
+    with pytest.raises(ImproperlyConfiguredException, match="must share"):
+        accounts_module.LocalAuth.session(
+            accounts=store, secrets=_local_auth_secrets(), binding=binding, session_auth=mismatched
+        )
 
 
 @pytest.mark.parametrize(
@@ -622,36 +644,3 @@ async def test_local_auth_service_graph_composes_existing_services_without_handl
     services.password_reauthentication.verify.outcomes.extend((InvalidCredentials(), proof))
     assert isinstance(await services.change_token_password("account-1", password_request), InvalidCredentials)
     assert await services.change_token_password("account-1", password_request) == changed
-
-
-def test_typing_facade_optional_dependency_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert bool(typing_module.ARGON2_INSTALLED) is True
-    assert bool(typing_module.PYOTP_INSTALLED) is True
-    assert bool(typing_module.WEBAUTHN_INSTALLED) is True
-    assert repr(typing_module.ARGON2_INSTALLED) == "OptionalDependencyFlag(module='argon2', status='available')"
-
-    missing_flag = typing_module.OptionalDependencyFlag("litestar_security_missing_optional_pkg")
-    assert bool(missing_flag) is False
-    assert (
-        repr(missing_flag)
-        == "OptionalDependencyFlag(module='litestar_security_missing_optional_pkg', status='missing')"
-    )
-    assert typing_module.module_available("litestar_security_missing_optional_pkg") is False
-    assert typing_module.module_available("") is False
-    assert typing_module.import_optional_attr("litestar_security_missing_optional_pkg", "attr") is None
-    assert typing_module.resolve_optional_attr("litestar_security_missing_optional_pkg", None, "fallback") == "fallback"
-
-    typing_module.reset_dependency_cache("litestar_security_missing_optional_pkg")
-    typing_module.reset_dependency_cache()
-    assert typing_module.resolve_optional_attr("pyotp", None, "fallback") is import_module("pyotp")
-    assert "Argon2PasswordHasherEngine" in dir(typing_module)
-    assert "Argon2PasswordHasherEngine" in dir(private_typing_module)
-
-    unknown_name = "unknown_export"
-    with pytest.raises(AttributeError, match="has no attribute 'unknown_export'"):
-        getattr(typing_module, unknown_name)
-    with pytest.raises(AttributeError, match="has no attribute 'unknown_export'"):
-        getattr(private_typing_module, unknown_name)
-
-    monkeypatch.setitem(sys.modules, "argon2", None)
-    assert bool(typing_module.ARGON2_INSTALLED) is False

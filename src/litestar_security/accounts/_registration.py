@@ -18,7 +18,12 @@ from litestar_security.accounts._operations import (
     VERIFICATION_RESEND,
 )
 from litestar_security.accounts._passwords import PasswordHasher, PasswordPolicy, PasswordPolicyDecision
-from litestar_security.accounts._purpose_tokens import PurposeTokenCodec, PurposeTokenDelivery, RegistrationCommand
+from litestar_security.accounts._purpose_tokens import (
+    DEFAULT_TOKEN_ATTEMPTS,
+    PurposeTokenCodec,
+    PurposeTokenDelivery,
+    RegistrationCommand,
+)
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, validate_rate_limits
 from litestar_security.accounts._records import (
     InvalidInvitation,
@@ -32,7 +37,7 @@ from litestar_security.accounts._records import (
     lifecycle_event,
     normalize_identifier,
 )
-from litestar_security.accounts._recovery import validate_lifecycle_configuration
+from litestar_security.accounts._recovery import check_identifier_rate_limit, validate_lifecycle_configuration
 from litestar_security.accounts._stores import (
     AccountLookup,
     RegistrationPolicy,
@@ -48,7 +53,6 @@ if TYPE_CHECKING:
 __all__ = ("RegistrationService", "VerificationTokenService")
 
 UserT = TypeVar("UserT")
-_DEFAULT_TOKEN_ATTEMPTS = 5
 _VERIFICATION_TOKEN_LIFETIME = timedelta(hours=24)
 _LOGGER = getLogger(__name__)
 
@@ -63,7 +67,7 @@ class RegistrationService(Generic[UserT]):
     registration: RegistrationPolicy
     password_policy: PasswordPolicy = field(default_factory=PasswordPolicy)
     verification_lifetime: timedelta = _VERIFICATION_TOKEN_LIFETIME
-    verification_attempts: int = _DEFAULT_TOKEN_ATTEMPTS
+    verification_attempts: int = DEFAULT_TOKEN_ATTEMPTS
     verification_return_url: str | None = None
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
     normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
@@ -205,7 +209,7 @@ class VerificationTokenService(Generic[UserT]):
     store: VerificationTokenStore = field(repr=False)
     tokens: PurposeTokenCodec = field(repr=False)
     lifetime: timedelta = _VERIFICATION_TOKEN_LIFETIME
-    maximum_attempts: int = _DEFAULT_TOKEN_ATTEMPTS
+    maximum_attempts: int = DEFAULT_TOKEN_ATTEMPTS
     return_url: str | None = None
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
     normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
@@ -258,7 +262,13 @@ class VerificationTokenService(Generic[UserT]):
             The same acceptance for every identifier, ``RateLimited`` when the
             budget is spent, or ``VerificationUnavailable`` when a dependency failed.
         """
-        limited = await self._check_rate_limit(identifier, client_key)
+        limited = await check_identifier_rate_limit(
+            self.rate_limits,
+            operation=VERIFICATION_RESEND,
+            identifier=identifier,
+            normalizer=self.normalizer,
+            client_key=client_key,
+        )
         if limited is not None:
             return limited
         try:
@@ -332,15 +342,3 @@ class VerificationTokenService(Generic[UserT]):
             )
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
-
-    async def _check_rate_limit(
-        self, identifier: str, client_key: str | None
-    ) -> "RateLimited | VerificationUnavailable | None":
-        rate_limits = self.rate_limits
-        if rate_limits is None:
-            return None
-        try:
-            normalized_identifier = self.normalizer(identifier) or None
-        except Exception:  # noqa: BLE001 - a failed normalizer still consumes the client budget
-            normalized_identifier = None
-        return await rate_limits.check(VERIFICATION_RESEND, client_key=client_key, identifier=normalized_identifier)

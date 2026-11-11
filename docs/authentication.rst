@@ -58,9 +58,8 @@ Both compile into the same ``opt["auth"]`` key, and the nearest native owner
 still wins, including a handler-level ``auth=`` override.
 
 Custom controller class attributes are not propagated by Litestar; put
-``auth`` in ``opt``. The nearest native owner wins. With configured mechanisms
-and no inherited policy, the plugin uses implicit ``required()``; without
-mechanisms it uses ``public()``.
+``auth`` in ``opt``. With configured mechanisms and no inherited policy, the
+plugin uses implicit ``required()``; without mechanisms it uses ``public()``.
 
 The ``auth`` policy also compiles for WebSocket and raw ASGI handlers.
 ``csrf_required=True`` is HTTP-only and is reserved for exceptional public

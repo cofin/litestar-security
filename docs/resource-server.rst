@@ -278,9 +278,12 @@ What a plugin must not touch
    * - Build a second JWKS cache or fetch loop for an issuer the application
        already configured
      - Take the application's ``JWKSProvider``, or share a ``JWKSCache``.
-   * - Set ``exclude_from_auth`` on your router or controller
-     - It is honored on a route handler only. For a whole subtree the
-       application uses ``SecurityConfig.exclude``; see :doc:`composition`.
+   * - Rely on ``exclude_from_auth`` for public plugin routes
+     - Declare ``auth=public()`` on public handlers instead. ``exclude_from_auth``
+       resolves hierarchically across ownership layers and conflicts with
+       ``auth=`` on the same layer; subtree exclusions belong to the
+       application via ``SecurityConfig.exclude`` or ``exclude_from_auth``
+       (see :doc:`composition`).
    * - Import from a ``_``-prefixed module
      - Everything supported is re-exported from a package. If something you
        need is not, it is not yet public.

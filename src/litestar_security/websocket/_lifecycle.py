@@ -5,10 +5,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from json import dumps
-from typing import TYPE_CHECKING, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from anyio import Lock, create_task_group, sleep
-from litestar.exceptions import NotAuthorizedException, PermissionDeniedException, ServiceUnavailableException
+from litestar.exceptions import NotAuthorizedException, PermissionDeniedException
 
 if TYPE_CHECKING:
     from litestar.types import Message, Send
@@ -18,7 +18,6 @@ from litestar_security.websocket._internal import DEFAULT_UNAUTHORIZED_CLOSE, DE
 
 __all__ = ("WebSocketCloseCoordinator", "close_websocket", "supervise_websocket_lifetime")
 
-UserT = TypeVar("UserT")
 _INVALID_POLICY_FINGERPRINT = "WebSocket policy fingerprint input is invalid"
 
 
@@ -179,10 +178,6 @@ async def supervise_websocket_lifetime(  # noqa: C901, PLR0913 - explicit race b
                 await cast("Callable[[], Awaitable[None]]", refresh)()
             except (NotAuthorizedException, PermissionDeniedException):
                 await coordinator.close(code=unauthorized_close_code, reason="authorization_denied")
-                task_group.cancel_scope.cancel()
-                return
-            except ServiceUnavailableException:
-                await coordinator.close(code=unavailable_close_code, reason="verification_unavailable")
                 task_group.cancel_scope.cancel()
                 return
             except Exception:  # noqa: BLE001 - application refresh failures are one sanitized transient outage

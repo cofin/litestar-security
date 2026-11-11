@@ -1,7 +1,5 @@
 """Deterministic local-only support objects for the runnable examples."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -25,6 +23,7 @@ from litestar_security.accounts import (
     RegistrationPolicy,
     SessionBindingConfig,
 )
+from litestar_security.authentication import InvalidCredentials
 from litestar_security.context import AuthorizationSnapshot, Principal
 from litestar_security.providers.api_key import APIKeyClaims, APIKeyConfig
 from litestar_security.providers.iap import GoogleIAPClaims, GoogleIAPConfig
@@ -44,7 +43,6 @@ from litestar_security.websocket import WebSocketSecurityConfig
 if TYPE_CHECKING:
     from litestar.connection import Request
 
-    from litestar_security.authentication import InvalidCredentials
     from litestar_security.providers.jwks import JWKSProvider
 
 __all__ = (
@@ -69,8 +67,6 @@ class _UnavailableJWKS:
         self, issuer: str, jwks_uri: str, kid: str, algorithm: str, *, now: datetime
     ) -> InvalidCredentials:
         del issuer, jwks_uri, kid, algorithm, now
-        from litestar_security.authentication import InvalidCredentials  # noqa: PLC0415 - type used on request only
-
         return InvalidCredentials()
 
     async def warmup(self, *, now: datetime) -> None:
@@ -100,7 +96,7 @@ class _ExampleOAuthService:
         return_to: str,
         scopes: frozenset[str] | None,
         step_up_grant: str | None,
-        request: Request[Any, Any, Any],
+        request: "Request[Any, Any, Any]",
     ) -> OAuthAuthorization:
         del operation, account_id, provider_account_id, return_to, scopes, step_up_grant, request
         return OAuthAuthorization(
@@ -116,12 +112,12 @@ class _ExampleOAuthService:
         )
 
     async def complete_callback(
-        self, *, provider: str, code: str, state: str, request: Request[Any, Any, Any]
+        self, *, provider: str, code: str, state: str, request: "Request[Any, Any, Any]"
     ) -> OAuthCallbackOutcome:
         del code, state, request
         return cast("OAuthCallbackOutcome", SimpleNamespace(operation=OAuthOperation.LOGIN, provider=provider))
 
-    async def establish_login(self, outcome: object, *, request: Request[Any, Any, Any]) -> OAuthOperationSummary:
+    async def establish_login(self, outcome: object, *, request: "Request[Any, Any, Any]") -> OAuthOperationSummary:
         del request
         return OAuthOperationSummary(
             detail="Authenticated.", provider_account_id=f"{cast('Any', outcome).provider}-account"
@@ -241,15 +237,20 @@ def build_local_auth(mode: str) -> LocalAuthConfig[object]:
     """
     accounts = example_account_store()
     registration = RegistrationPolicy.public(require_verification=False)
-    shared: dict[str, object] = {"accounts": accounts, "registration": registration, "route_prefix": "/auth"}
+    shared: dict[str, object] = {
+        "accounts": accounts,
+        "password_hasher": _ExamplePasswordHasher(),
+        "registration": registration,
+        "route_prefix": "/auth",
+    }
+    binding = SessionBindingConfig(
+        pepper=_BINDING_PEPPER, cookie_name="example-binding", secure=False, allow_insecure=True, max_age=600
+    )
     if mode == "local-session":
         return LocalAuth.session(
             **cast("Any", shared),
             secrets=LocalAuthSecrets.session(purpose_token_pepper=_PURPOSE_PEPPER),
-            password_hasher=_ExamplePasswordHasher(),
-            binding=SessionBindingConfig(
-                pepper=_BINDING_PEPPER, cookie_name="example-binding", secure=False, allow_insecure=True, max_age=600
-            ),
+            binding=binding,
         )
     if mode in {"local-token", "local-hybrid"}:
         private_key = Ed25519PrivateKey.generate().private_bytes(
@@ -266,23 +267,13 @@ def build_local_auth(mode: str) -> LocalAuthConfig[object]:
             issuer="http://127.0.0.1:8000",
             active_signing_key=SigningKey(key_id="example", algorithm="EdDSA", private_key=private_key),
         )
+        token_audience = "litestar-security-example"  # noqa: S105 - public JWT audience identifier
         if mode == "local-token":
             return LocalAuth.tokens(
-                **cast("Any", shared),
-                secrets=secrets,
-                key_ring=key_ring,
-                token_audience="litestar-security-example",  # noqa: S106 - public JWT audience identifier
-                password_hasher=_ExamplePasswordHasher(),
+                **cast("Any", shared), secrets=secrets, key_ring=key_ring, token_audience=token_audience
             )
         return LocalAuth.hybrid(
-            **cast("Any", shared),
-            secrets=secrets,
-            binding=SessionBindingConfig(
-                pepper=_BINDING_PEPPER, cookie_name="example-binding", secure=False, allow_insecure=True, max_age=600
-            ),
-            key_ring=key_ring,
-            token_audience="litestar-security-example",  # noqa: S106 - public JWT audience identifier
-            password_hasher=_ExamplePasswordHasher(),
+            **cast("Any", shared), secrets=secrets, binding=binding, key_ring=key_ring, token_audience=token_audience
         )
     message = f"Unsupported local example mode: {mode}"
     raise ValueError(message)

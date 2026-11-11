@@ -1,86 +1,36 @@
-"""Shared test collaborators, so a fake is defined once and found by the next test.
+"""Shared recording test collaborators and valid credential builders.
 
-Two kinds of thing live here.
+Defines reusable in-memory stores, transport/DNS/JWKS/JWT recording doubles,
+rate-limit guards, ``NotifyingLocalAccountStore`` delivery capture, and compact
+JWT / ``TokenPair`` builders shared across unit and integration suites.
 
-**Kit-backed builders.** Where ``litestar_security.testing`` already ships a
-double, the builder is a thin wrapper over it and adds only defaults. Where the
-kit ships a *production* adapter -- ``MemoryOAuthAccountStore``,
-``MemoryOAuthTransactionStore``, ``AESGCMSecretProtector``,
-``StoreRateLimiter`` -- the builder returns the real thing, so a test using it
-exercises real code rather than a double.
-
-**Hand-written collaborators.** The kit covers stores, not the runtime seams:
-nothing in it fakes a JWKS fetcher, a JWT verifier or signer, a Litestar guard,
-a controller, a metrics sink, or an event sink. Those are exactly the names that
-were being redefined inside individual test functions, so they are written once
-here.
-
-Every hand-written collaborator keeps a public call history -- ``calls``,
-``requests``, ``events`` -- matching the shape ``FakeOAuthProvider.calls``
-already uses, so a test asserts on what was received rather than on a private
-attribute. ``ProbeController`` is the one non-dataclass: a Litestar
-``Controller`` subclass has to be a plain class.
+``FIXED_NOW`` restates ``litestar_security.testing._DEFAULT_NOW`` so clock-driven
+and default-constructed test backends agree on the starting instant. Each
+recording collaborator exposes public inspection attributes (``calls``,
+``requests``, ``claims``, ``increments``, ``delivered``) so assertions inspect
+observed inputs rather than private state.
 """
-
-from __future__ import annotations
 
 import asyncio
 import json
 from base64 import urlsafe_b64encode
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from threading import get_ident
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import Any, cast
 
 import httpx
-from litestar import Controller, get
-from litestar.stores.memory import MemoryStore
 
 from litestar_security import testing as kit
-from litestar_security.accounts import (
-    AESGCMSecretProtector,
-    RateLimited,
-    RateLimitPolicy,
-    RefreshTokenCodec,
-    SecretProtectorKey,
-    StoreRateLimiter,
-    TokenPair,
-)
+from litestar_security.accounts import RateLimited, RefreshTokenCodec, TokenPair
 from litestar_security.context import Principal
+from litestar_security.providers.api_key import APIKeyClaims, APIKeyState
+from litestar_security.providers.jwks import JWKSFetchOutcome, JWKSFetchTarget
 from litestar_security.providers.jwt import JWTValidationConfig
-from litestar_security.providers.oauth import ProtectedOAuthSecret, ProviderIdentity, ProviderTokenSet, SecretStr
+from litestar_security.providers.oauth import ProtectedOAuthSecret
 
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-
-    from litestar_security.providers.api_key import APIKeyClaims, APIKeyState
-    from litestar_security.providers.jwks import JWKSFetchOutcome, JWKSFetchTarget
-
-# A function-parameter default, so the dataclass-default rule in patterns.md does
-# not apply and no mutable-default suppression is needed.
-_NO_ATTRIBUTES: Mapping[str, str] = MappingProxyType({})
-
-# The kit's own default instant (``_DEFAULT_NOW``, testing.py:150), restated
-# because the kit's constant is private. A clock-driven backend and a
-# default-constructed one therefore agree on now.
 FIXED_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
-
-# Every store ``InMemorySecurityBackend`` owns, read from its ``__slots__``. The
-# OIDC session-logout store is deliberately absent: the backend cannot reach it,
-# which is what ``build_security_environment`` exists to work around.
-BACKEND_STORE_ATTRIBUTES: tuple[str, ...] = (
-    "accounts",
-    "api_keys",
-    "challenges",
-    "mfa",
-    "mfa_login",
-    "oauth_accounts",
-    "oauth_transactions",
-    "passkeys",
-    "step_up",
-    "websocket_connect_tokens",
-)
 
 _TOKEN_PEPPER = b"t" * 32
 _DEFAULT_EXPIRES_IN = 300
@@ -321,48 +271,6 @@ def build_recording_jwt_verifier(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class SecurityEnvironment:
-    """One aggregate backend and the OIDC logout store it cannot reach.
-
-    ``InMemoryOIDCSessionLogoutStore`` is absent from
-    ``InMemorySecurityBackend.__slots__``, so a test needing both would
-    otherwise construct two objects with independent clocks. Both here share
-    ``clock``.
-    """
-
-    backend: kit.InMemorySecurityBackend
-    clock: kit.FakeClock
-    oidc_session_logout: kit.InMemoryOIDCSessionLogoutStore
-
-
-def build_security_environment(
-    *,
-    now: datetime | None = None,
-    session_mappings: tuple[tuple[str, str, str | None, str | None], ...] = (),
-    frontchannel_bindings: Mapping[tuple[str, str, str], str] | None = None,
-) -> SecurityEnvironment:
-    """Build the aggregate backend and the OIDC logout store on one clock.
-
-    Args:
-        now: The instant the shared clock starts at. Defaults to ``FIXED_NOW``.
-        session_mappings: Session mappings the OIDC logout store starts with.
-        frontchannel_bindings: Front-channel bindings the logout store starts with.
-
-    Returns:
-        The backend, the clock both share, and the OIDC session-logout store.
-    """
-    clock = kit.FakeClock(FIXED_NOW if now is None else now)
-    return SecurityEnvironment(
-        backend=kit.InMemorySecurityBackend(clock=clock),
-        clock=clock,
-        oidc_session_logout=kit.InMemoryOIDCSessionLogoutStore(
-            session_mappings=session_mappings,
-            frontchannel_bindings={} if frontchannel_bindings is None else frontchannel_bindings,
-        ),
-    )
-
-
 def build_compact_jwt(*, claims: Mapping[str, object] | None = None, signature: bytes = b"signature") -> str:
     """Build a structurally valid compact JWT.
 
@@ -393,13 +301,13 @@ def build_token_pair(
     expires_in: int = _DEFAULT_EXPIRES_IN,
     codec: RefreshTokenCodec | None = None,
 ) -> TokenPair:
-    """Build a valid ``TokenPair``.
+    """Build a structurally valid ``TokenPair``.
 
-    ``TokenPair`` is the one public wire struct polyfactory cannot build: its
-    ``__post_init__`` demands a compact JWT, an ``rt_<identifier>.<secret>``
-    refresh token whose secret decodes, and an ``expires_in`` inside the
-    configured bounds. The refresh token here comes from the real
-    ``RefreshTokenCodec``, so it is a genuinely well-formed credential.
+    ``TokenPair.__post_init__`` requires a compact JWT, an
+    ``rt_<identifier>.<secret>`` refresh token whose secret decodes, and an
+    ``expires_in`` inside the configured bounds. The refresh token here comes
+    from the real ``RefreshTokenCodec`` so callers exercise a well-formed
+    credential.
 
     Args:
         access_token: Overrides the generated compact JWT.
@@ -417,104 +325,6 @@ def build_token_pair(
         refresh_token=issuer.issue().refresh_token if refresh_token is None else refresh_token,
         expires_in=expires_in,
     )
-
-
-def build_oauth_provider(
-    *,
-    name: str = "example",
-    issuer: str = "https://issuer.example",
-    subject: str = "subject-1",
-    scopes: frozenset[str] = frozenset({"openid"}),
-    expires_at: datetime | None = None,
-) -> kit.FakeOAuthProvider:
-    """Build the kit's recording OAuth provider with usable defaults.
-
-    Args:
-        name: The provider name.
-        issuer: The issuer the returned identity carries.
-        subject: The subject the returned identity carries.
-        scopes: Scopes on the returned token set.
-        expires_at: Token expiry. Defaults to one hour after ``FIXED_NOW``.
-
-    Returns:
-        A provider recording every exchange on ``calls``.
-    """
-    return kit.FakeOAuthProvider(
-        name=name,
-        tokens=ProviderTokenSet(
-            access_token=SecretStr("provider-access-token"),
-            token_type="Bearer",  # noqa: S106 - the RFC 6749 token type, not a credential
-            scopes=scopes,
-            expires_at=FIXED_NOW + timedelta(hours=1) if expires_at is None else expires_at,
-        ),
-        identity=ProviderIdentity(
-            provider=name,
-            issuer=issuer,
-            subject=subject,
-            display_name="Example Person",
-            email="person@example.com",
-            email_verified=True,
-            raw_claims={},
-        ),
-    )
-
-
-def build_oauth_transport(responses: Sequence[httpx.Response] = ()) -> kit.FakeOAuthHTTPTransport:
-    """Build the kit's OAuth transport over a queued response list.
-
-    Args:
-        responses: ``httpx.Response`` values the transport returns in order.
-
-    Returns:
-        A transport consuming the queue one response per request.
-    """
-    return kit.FakeOAuthHTTPTransport(list(responses))
-
-
-def build_revocation_source() -> kit.InMemoryWebSocketRevocationSource:
-    """Build the kit's WebSocket revocation source.
-
-    Returns:
-        An empty in-memory revocation source.
-    """
-    return kit.InMemoryWebSocketRevocationSource()
-
-
-def build_secret_protector(*, key_version: str = "v1", key: bytes = b"k" * 32) -> AESGCMSecretProtector:
-    """Build the production AES-GCM secret protector.
-
-    This is real library code, not a double: the kit ships no protector fake
-    because none is needed. The value is frozen, so it is safe at session scope.
-
-    Args:
-        key_version: The active key version label.
-        key: The 32-byte active key.
-
-    Returns:
-        A protector sealing with the given active key.
-    """
-    return AESGCMSecretProtector(active_key=SecretProtectorKey(key_version=key_version, key=key))
-
-
-def build_rate_limiter(
-    *, policies: Mapping[str, RateLimitPolicy] | None = None, store: MemoryStore | None = None
-) -> StoreRateLimiter:
-    """Build the production store-backed rate limiter over an in-memory store.
-
-    Args:
-        policies: Operation-to-policy mapping. Defaults to one permissive policy
-            under ``"conformance.rate_limit"``.
-        store: The backing store. Defaults to a fresh ``MemoryStore``.
-
-    Returns:
-        A limiter whose counters live only for the test.
-    """
-    resolved = (
-        {"conformance.rate_limit": RateLimitPolicy(limit=5, window=timedelta(minutes=5))}
-        if policies is None
-        else policies
-    )
-    return StoreRateLimiter(policies=resolved, store=MemoryStore() if store is None else store)
 
 
 @dataclass(slots=True)
@@ -542,7 +352,14 @@ class RecordingJWKSFetcher:
         Raises:
             AssertionError: If the script is exhausted.
         """
-        return _next_response(self.responses, self.requests, request)
+        self.requests.append(request)
+        if not self.responses:
+            message = "Unexpected JWKS fetch"
+            raise AssertionError(message)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return cast("JWKSFetchOutcome", response(request) if callable(response) else response)
 
     async def aclose(self) -> None:
         """Record one close."""
@@ -571,40 +388,6 @@ class DenyingRateLimitGuard:
         """
         self.calls.append((operation, client_key, identifier))
         return RateLimited(retry_after=self.retry_after)
-
-
-class ProbeController(Controller):
-    """Minimal controller for route-registration and guard-layering assertions.
-
-    Not a dataclass: a Litestar ``Controller`` subclass must stay a plain class.
-    """
-
-    path = "/probe"
-
-    @get("/", name="probe", sync_to_thread=False)
-    def probe(self) -> dict[str, str]:
-        """Return one constant body.
-
-        Returns:
-            A marker payload proving the route ran.
-        """
-        return {"probe": "ok"}
-
-
-def _segment(value: Mapping[str, object]) -> str:
-    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return urlsafe_b64encode(encoded).rstrip(b"=").decode("ascii")
-
-
-def _next_response(responses: list[object], requests: list[JWKSFetchTarget], request: object) -> object:
-    requests.append(request)
-    if not responses:
-        message = "Unexpected JWKS fetch"
-        raise AssertionError(message)
-    response = responses.pop(0)
-    if isinstance(response, Exception):
-        raise response
-    return response(request) if callable(response) else response
 
 
 class NotifyingLocalAccountStore(kit.InMemoryLocalAccountStore):
@@ -674,3 +457,8 @@ class NotifyingLocalAccountStore(kit.InMemoryLocalAccountStore):
         tokens = [command.token for command in self.delivered if command.template == template]
         assert tokens, f"no {template} token was delivered"
         return tokens[-1]
+
+
+def _segment(value: Mapping[str, object]) -> str:
+    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return urlsafe_b64encode(encoded).rstrip(b"=").decode("ascii")

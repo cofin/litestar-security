@@ -1,33 +1,51 @@
-"""Integration tests for the wire convention the generated routes are spelled in."""
+"""Integration tests for the wire convention the generated routes are spelled in.
+
+Three schemas (`OIDCBackchannelLogout`, `RouteError`, and `TokenPair`) keep their
+own member names across wire policies because two are specification-defined and
+one is rendered by Litestar exception handling.
+"""
 
 import re
+from collections.abc import Iterator
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any, cast, get_args, get_type_hints
 
+import msgspec
 import pytest
-from litestar import Litestar, get
+from litestar import Litestar, Response, get, post
 from litestar.config.csrf import CSRFConfig
 from litestar.enums import ScopeType
+from litestar.exceptions import ImproperlyConfiguredException
 from litestar.middleware.session.client_side import CookieBackendConfig
+from litestar.openapi.config import OpenAPIConfig
+from litestar.params import FromQuery, JSONBody
 from litestar.status_codes import HTTP_200_OK, HTTP_202_ACCEPTED, HTTP_400_BAD_REQUEST
 from litestar.testing import TestClient, create_test_client
 
 from litestar_security import SecurityConfig, SecurityPlugin
+from litestar_security._dto import MAX_NESTED_DEPTH, WireBackend, union_wire_dto, wire_dto, wire_struct
 from litestar_security.accounts import (
+    LocalAccount,
     LocalAuth,
     LocalAuthSecrets,
+    LocalCredentials,
+    LocalMFAChallenge,
+    LocalSession,
+    LocalSessionList,
+    OperationMessage,
     PurposeTokenCodec,
     RefreshReceiptKey,
     RefreshReceiptSealer,
     RefreshTokenCodec,
     RegistrationPolicy,
     SessionBindingConfig,
+    TokenPair,
 )
 from litestar_security.authentication import public
 from litestar_security.providers import LocalKeyRing, SigningKey
-from litestar_security.providers.oauth import ProtectedResourceConfig
-from litestar_security.schema import WirePolicy
-from tests.fixtures.collaborators import NotifyingLocalAccountStore
+from litestar_security.providers.oauth import OAuthOperationSummary, ProtectedResourceConfig
+from litestar_security.schema import WirePolicy, WireStruct
+from tests.fixtures.collaborators import NotifyingLocalAccountStore, build_token_pair
 from tests.integration.test_openapi_document import build_documented_app
 
 SNAKE = WirePolicy()
@@ -35,10 +53,7 @@ CAMEL = WirePolicy(rename="camel")
 SHOUTED = WirePolicy(rename=str.upper)
 LENIENT = WirePolicy(rename="camel", forbid_unknown_fields=False)
 
-# The three schemas that declare their member names are not this library's to
-# rename: two are specification-defined and one is rendered by Litestar.
 _EXEMPT_SCHEMAS = frozenset({"OIDCBackchannelLogout", "RouteError", "TokenPair"})
-
 _SNAKE_MEMBER = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)+$")
 _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _PASSWORD = "correct horse battery staple"  # noqa: S105 - a fixed test password
@@ -52,14 +67,116 @@ def _members(document: dict[str, Any], name: str) -> set[str]:
     return set(_schemas(document)[name].get("properties", {}))
 
 
+def _wire_document(app: Litestar) -> dict[str, Any]:
+    return cast("dict[str, Any]", msgspec.json.decode(msgspec.json.encode(app.openapi_schema.to_schema())))
+
+
+def _wire_app_schemas(app: Litestar) -> dict[str, Any]:
+    return cast("dict[str, Any]", _wire_document(app)["components"]["schemas"])
+
+
+def _wire_app(*handlers: Any) -> Litestar:
+    return Litestar(list(handlers), openapi_config=OpenAPIConfig(title="wire", version="1", create_examples=False))
+
+
+def _wire_session(identifier: str = "session-1") -> LocalSession:
+    return LocalSession(
+        session_id=identifier,
+        current=True,
+        created_at=_NOW,
+        last_seen_at=_NOW,
+        expires_at=_NOW,
+        display_metadata={"device": "laptop"},
+    )
+
+
+def _wire_structs(annotation: Any) -> Iterator[type[Any]]:
+    if isinstance(annotation, type) and issubclass(annotation, WireStruct):
+        yield annotation
+        return
+    for argument in get_args(annotation):
+        yield from _wire_structs(argument)
+
+
+def _nesting_depth(schema: type[Any], seen: frozenset[type[Any]] = frozenset()) -> int:
+    """Return how many struct layers sit below one generated schema."""
+    if schema in seen:
+        return 0
+    nested = [
+        _nesting_depth(found, seen | {schema}) + 1
+        for hint in get_type_hints(schema).values()
+        for found in _wire_structs(hint)
+    ]
+    return max(nested, default=0)
+
+
+async def _discard(*_args: object, **_kwargs: object) -> None:
+    return None
+
+
+@get("/csrf", auth=public(), csrf_required=True)
+async def _csrf_seed() -> None:
+    """Establish the CSRF cookie a session-establishing route requires."""
+    return
+
+
+def _runtime_app(policy: WirePolicy, accounts: NotifyingLocalAccountStore, private_key: bytes) -> Litestar:
+    local_auth = LocalAuth.hybrid(
+        accounts=cast("Any", accounts),
+        secrets=LocalAuthSecrets(
+            purpose_tokens=PurposeTokenCodec(pepper=b"p" * 32),
+            refresh_codec=RefreshTokenCodec(pepper=b"q" * 32),
+            refresh_receipts=RefreshReceiptSealer(active_key=RefreshReceiptKey("wire", b"r" * 32)),
+        ),
+        binding=SessionBindingConfig(
+            pepper=b"b" * 32, cookie_name="binding", max_age=600, secure=False, allow_insecure=True
+        ),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-client",  # noqa: S106 - a public JWT audience
+        registration=RegistrationPolicy.public(),
+    )
+    return Litestar(
+        route_handlers=[_csrf_seed],
+        csrf_config=CSRFConfig(secret="wire-casing-csrf-secret"),  # noqa: S106 - a fixed test secret
+        middleware=[
+            CookieBackendConfig(
+                secret=bytes(range(16)),
+                key="native-session",
+                max_age=600,
+                scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
+                secure=False,
+            ).middleware
+        ],
+        openapi_config=None,
+        plugins=[
+            SecurityPlugin(
+                SecurityConfig(
+                    local_auth=local_auth,
+                    wire_rename=policy.rename,
+                    wire_forbid_unknown_fields=policy.forbid_unknown_fields,
+                )
+            )
+        ],
+    )
+
+
 @pytest.fixture(scope="module")
-def documents(jwt_key_material: "dict[str, tuple[bytes, bytes]]") -> dict[str, dict[str, Any]]:
+def documents(jwt_key_material: dict[str, tuple[bytes, bytes]]) -> dict[str, dict[str, Any]]:
     """Return the document the whole generated tree emits under each policy."""
     private_key, _public_key = jwt_key_material["EdDSA"]
     return {
         name: cast("dict[str, Any]", build_documented_app(private_key, wire=policy).openapi_schema.to_schema())
         for name, policy in (("snake", SNAKE), ("camel", CAMEL), ("shouted", SHOUTED))
     }
+
+
+@pytest.fixture
+def private_key(jwt_key_material: dict[str, tuple[bytes, bytes]]) -> bytes:
+    """Return the signing key the runtime application issues access tokens with."""
+    return jwt_key_material["EdDSA"][0]
 
 
 def test_component_keys_are_the_same_under_every_casing(documents: dict[str, dict[str, Any]]) -> None:
@@ -88,9 +205,10 @@ def test_no_renameable_component_keeps_a_snake_case_member(documents: dict[str, 
 
 
 def test_every_exempt_schema_is_present_and_still_spelled_its_own_way(documents: dict[str, dict[str, Any]]) -> None:
-    """A schema opting out is only meaningful if it is in the document to opt out of."""
-    for name in _EXEMPT_SCHEMAS:
-        assert _members(documents["camel"], name) == _members(documents["snake"], name)
+    """Verify specification-defined and Litestar-rendered exempt schemas remain unrenamed."""
+    assert {name: _members(documents["camel"], name) for name in _EXEMPT_SCHEMAS} == {
+        name: _members(documents["snake"], name) for name in _EXEMPT_SCHEMAS
+    }
     assert _members(documents["camel"], "TokenPair") == {"access_token", "refresh_token", "expires_in", "token_type"}
 
 
@@ -163,61 +281,6 @@ def test_no_documented_response_publishes_an_empty_media_type(documents: dict[st
     ]
 
     assert not empty
-
-
-@get("/csrf", auth=public(), csrf_required=True)
-async def _csrf_seed() -> None:
-    """Establish the CSRF cookie a session-establishing route requires."""
-    return
-
-
-def _runtime_app(policy: WirePolicy, accounts: NotifyingLocalAccountStore, private_key: bytes) -> Litestar:
-    local_auth = LocalAuth.hybrid(
-        accounts=cast("Any", accounts),
-        secrets=LocalAuthSecrets(
-            purpose_tokens=PurposeTokenCodec(pepper=b"p" * 32),
-            refresh_codec=RefreshTokenCodec(pepper=b"q" * 32),
-            refresh_receipts=RefreshReceiptSealer(active_key=RefreshReceiptKey("wire", b"r" * 32)),
-        ),
-        binding=SessionBindingConfig(
-            pepper=b"b" * 32, cookie_name="binding", max_age=600, secure=False, allow_insecure=True
-        ),
-        key_ring=LocalKeyRing(
-            issuer="https://local.example",
-            active_signing_key=SigningKey(key_id="active", algorithm="EdDSA", private_key=private_key),
-        ),
-        token_audience="local-client",  # noqa: S106 - a public JWT audience
-        registration=RegistrationPolicy.public(),
-    )
-    return Litestar(
-        route_handlers=[_csrf_seed],
-        csrf_config=CSRFConfig(secret="wire-casing-csrf-secret"),  # noqa: S106 - a fixed test secret
-        middleware=[
-            CookieBackendConfig(
-                secret=bytes(range(16)),
-                key="native-session",
-                max_age=600,
-                scopes={ScopeType.HTTP, ScopeType.WEBSOCKET},
-                secure=False,
-            ).middleware
-        ],
-        openapi_config=None,
-        plugins=[
-            SecurityPlugin(
-                SecurityConfig(
-                    local_auth=local_auth,
-                    wire_rename=policy.rename,
-                    wire_forbid_unknown_fields=policy.forbid_unknown_fields,
-                )
-            )
-        ],
-    )
-
-
-@pytest.fixture
-def private_key(jwt_key_material: "dict[str, tuple[bytes, bytes]]") -> bytes:
-    """Return the signing key the runtime application issues access tokens with."""
-    return jwt_key_material["EdDSA"][0]
 
 
 @pytest.mark.parametrize(
@@ -308,10 +371,6 @@ def test_the_token_response_keeps_its_specification_member_names(private_key: by
     assert set(issued.json()) == {"access_token", "refresh_token", "expires_in", "token_type"}
 
 
-async def _discard(*_args: object, **_kwargs: object) -> None:
-    return None
-
-
 def test_the_protected_resource_metadata_is_unaffected_by_the_casing_policy() -> None:
     """RFC 9728 names every member of this document, and no policy reaches it."""
     config = SecurityConfig(
@@ -334,3 +393,176 @@ def test_the_protected_resource_metadata_is_unaffected_by_the_casing_policy() ->
         "scopes_supported",
     ]
     assert handler.resolve_return_dto() is None
+
+
+def test_component_keys_name_the_model_including_the_nested_one() -> None:
+    @post("/login", dto=wire_dto(LocalCredentials, SNAKE), return_dto=wire_dto(LocalAccount, SNAKE))
+    async def login(data: JSONBody[LocalCredentials]) -> LocalAccount:
+        return LocalAccount(account_id=data.identifier)
+
+    @get("/me", return_dto=wire_dto(LocalAccount, SNAKE))
+    async def me() -> LocalAccount:
+        return LocalAccount(account_id="a")
+
+    @get("/sessions", return_dto=wire_dto(LocalSessionList, SNAKE))
+    async def sessions() -> LocalSessionList:
+        return LocalSessionList(sessions=(_wire_session(),))
+
+    schemas = _wire_app_schemas(_wire_app(login, me, sessions))
+
+    assert set(schemas) == {"LocalAccount", "LocalCredentials", "LocalSession", "LocalSessionList"}
+    assert schemas["LocalSessionList"]["properties"]["sessions"]["items"]["$ref"].endswith("/LocalSession")
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [
+        (SNAKE, {"session_id", "current", "created_at", "last_seen_at", "expires_at", "display_metadata"}),
+        (CAMEL, {"sessionId", "current", "createdAt", "lastSeenAt", "expiresAt", "displayMetadata"}),
+        (SHOUTED, {"SESSION_ID", "CURRENT", "CREATED_AT", "LAST_SEEN_AT", "EXPIRES_AT", "DISPLAY_METADATA"}),
+    ],
+)
+def test_a_nested_schema_is_renamed_at_every_level(policy: WirePolicy, expected: set[str]) -> None:
+    @get("/sessions", return_dto=wire_dto(LocalSessionList, policy))
+    async def sessions() -> LocalSessionList:
+        return LocalSessionList(sessions=(_wire_session(),))
+
+    app = _wire_app(sessions)
+    schemas = _wire_app_schemas(app)
+    listed = next(iter(schemas["LocalSessionList"]["properties"]))
+
+    assert set(schemas["LocalSession"]["properties"]) == expected
+    with TestClient(app=app) as client:
+        assert set(client.get("/sessions").json()[listed][0]) == expected
+
+
+def test_a_schema_deeper_than_the_limit_loses_its_leaf_with_no_error_raised() -> None:
+    class Leaf(WireStruct, frozen=True):
+        leaf_name: str
+
+    class Mid(WireStruct, frozen=True):
+        leaf: Leaf
+
+    class Top(WireStruct, frozen=True):
+        mid: Mid
+
+    @get("/deep", return_dto=wire_dto(Top, CAMEL))
+    async def deep() -> Top:
+        return Top(mid=Mid(leaf=Leaf(leaf_name="l")))
+
+    app = _wire_app(deep)
+    with TestClient(app=app) as client:
+        body = client.get("/deep").json()
+
+    kept = _nesting_depth(Top) <= MAX_NESTED_DEPTH
+    assert kept, "raise MAX_NESTED_DEPTH or this schema silently loses its leaf"
+    assert body == {"mid": {"leaf": {"leafName": "l"}}}
+
+
+@pytest.mark.parametrize(
+    ("policy", "identifier", "accepted", "rejected"),
+    [(SNAKE, "account_id", "display_name", "displayName"), (CAMEL, "accountId", "displayName", "display_name")],
+)
+def test_a_request_body_decodes_in_the_configured_casing_and_rejects_the_other(
+    policy: WirePolicy, identifier: str, accepted: str, rejected: str
+) -> None:
+    @post("/accounts", dto=wire_dto(LocalAccount, policy), return_dto=wire_dto(LocalAccount, policy))
+    async def create(data: JSONBody[LocalAccount]) -> LocalAccount:
+        return data
+
+    with TestClient(app=_wire_app(create)) as client:
+        assert client.post("/accounts", json={identifier: "a", accepted: "Ada"}).status_code == 201
+        assert client.post("/accounts", json={identifier: "a", rejected: "Ada"}).status_code == 400
+
+
+def test_an_unknown_member_is_accepted_only_when_the_policy_allows_it() -> None:
+    @post("/strict", dto=wire_dto(LocalAccount, CAMEL), return_dto=wire_dto(LocalAccount, CAMEL))
+    async def strict(data: JSONBody[LocalAccount]) -> LocalAccount:
+        return data
+
+    @post("/lenient", dto=wire_dto(LocalAccount, LENIENT), return_dto=wire_dto(LocalAccount, LENIENT))
+    async def lenient(data: JSONBody[LocalAccount]) -> LocalAccount:
+        return data
+
+    with TestClient(app=_wire_app(strict, lenient)) as client:
+        body = {"accountId": "a", "unknown": "member"}
+        assert client.post("/strict", json=body).status_code == 400
+        assert client.post("/lenient", json=body).status_code == 201
+
+
+def test_wire_struct_is_the_struct_the_handler_transfers_through() -> None:
+    documented = wire_struct(LocalAccount, CAMEL)
+
+    @get("/me", return_dto=wire_dto(LocalAccount, CAMEL))
+    async def me() -> LocalAccount:
+        return LocalAccount(account_id="a")
+
+    app = _wire_app(me)
+
+    assert wire_struct(LocalAccount, CAMEL) is documented
+    assert WireBackend.transfer_model_for(LocalAccount, wire_dto(LocalAccount, CAMEL).config) is documented
+    assert set(_wire_app_schemas(app)["LocalAccount"]["properties"]) == {"accountId", "displayName"}
+
+
+def test_a_union_return_renames_each_arm_and_publishes_both() -> None:
+    arms = LocalAccount | LocalMFAChallenge
+
+    @get("/login", return_dto=union_wire_dto(arms, CAMEL))
+    async def login(*, mfa: FromQuery[bool] = False) -> Response[LocalAccount | LocalMFAChallenge]:
+        challenge = LocalMFAChallenge(challenge="c", account_id="a", expires_at=_NOW, methods=("totp",))
+        return Response(challenge if mfa else LocalAccount(account_id="a"))
+
+    app = _wire_app(login)
+    schemas = _wire_app_schemas(app)
+
+    assert set(schemas["LocalAccount"]["properties"]) == {"accountId", "displayName"}
+    assert "accountId" in schemas["LocalMFAChallenge"]["properties"]
+    with TestClient(app=app) as client:
+        assert set(client.get("/login").json()) == {"accountId", "displayName"}
+        assert "accountId" in client.get("/login", params={"mfa": True}).json()
+
+
+def test_a_union_arm_whose_members_belong_to_a_specification_is_left_alone() -> None:
+    @get("/token", return_dto=union_wire_dto(TokenPair | LocalMFAChallenge, CAMEL))
+    async def token() -> Response[TokenPair | LocalMFAChallenge]:
+        return Response(build_token_pair())
+
+    app = _wire_app(token)
+
+    with TestClient(app=app) as client:
+        assert set(client.get("/token").json()) == {"access_token", "refresh_token", "expires_in", "token_type"}
+
+
+def test_a_union_arm_carried_inside_a_response_is_still_renamed() -> None:
+    arms = Response[OAuthOperationSummary] | OAuthOperationSummary
+
+    @get("/logout", return_dto=union_wire_dto(arms, CAMEL))
+    async def logout(*, redirected: FromQuery[bool] = False) -> Response[OAuthOperationSummary] | OAuthOperationSummary:
+        status = OAuthOperationSummary(detail="Logged out.", revoked_sessions=2)
+        return Response(status, status_code=200) if redirected else status
+
+    with TestClient(app=_wire_app(logout)) as client:
+        assert client.get("/logout").json() == {"detail": "Logged out.", "revokedSessions": 2}
+        assert client.get("/logout", params={"redirected": True}).json() == {
+            "detail": "Logged out.",
+            "revokedSessions": 2,
+        }
+
+
+def test_a_union_cannot_narrow_a_request_body() -> None:
+    @post("/login", dto=union_wire_dto(LocalAccount | LocalCredentials, SNAKE))
+    async def login(data: JSONBody[LocalAccount | LocalCredentials]) -> OperationMessage:
+        del data
+        return OperationMessage(detail="ok")
+
+    with pytest.raises(ImproperlyConfiguredException, match="cannot be narrowed to a union"):
+        _ = _wire_app(login).openapi_schema
+
+
+def test_a_schema_that_omits_defaults_still_omits_them_after_renaming() -> None:
+    @get("/status", return_dto=wire_dto(OAuthOperationSummary, CAMEL))
+    async def status() -> OAuthOperationSummary:
+        return OAuthOperationSummary(detail="Linked.", provider_account_id="p1")
+
+    with TestClient(app=_wire_app(status)) as client:
+        assert client.get("/status").json() == {"detail": "Linked.", "providerAccountId": "p1"}

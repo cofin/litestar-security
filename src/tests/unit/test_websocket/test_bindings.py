@@ -1,8 +1,6 @@
-"""Unit tests for WebSocket handshake transport policy."""
+"""Unit tests for WebSocket binding contracts, hooks, and revocation sources."""
 
 from dataclasses import replace
-from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import anyio
 import anyio.lowlevel
@@ -11,12 +9,6 @@ from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.testing import InMemoryWebSocketRevocationSource
 from litestar_security.websocket import WebSocketBinding, WebSocketSecurityConfig
-
-_NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
-
-
-def _connection(*, headers: tuple[tuple[bytes, bytes], ...] = (), query_string: bytes = b"") -> SimpleNamespace:
-    return SimpleNamespace(scope={"headers": list(headers), "query_string": query_string})
 
 
 @pytest.mark.parametrize("field_name", ["clock", "sleeper"])
@@ -44,11 +36,8 @@ def test_websocket_binding_validates_and_freezes_identifiers(kwargs: dict[str, o
         "route_name": "reports.socket",
         **kwargs,
     }
-    if kwargs:
-        with pytest.raises(ValueError, match=match):
-            WebSocketBinding(**values)  # type: ignore[arg-type]
-    else:  # pragma: no cover - parametrization always supplies one invalid field
-        assert WebSocketBinding(**values).credential_ids == frozenset({"bearer:authorization"})  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match=match):
+        WebSocketBinding(**values)  # type: ignore[arg-type]
 
     binding = WebSocketBinding(
         connection_id="connection-1",

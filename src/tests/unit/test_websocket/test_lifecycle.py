@@ -1,7 +1,6 @@
-"""Unit tests for WebSocket handshake transport policy."""
+"""Unit tests for WebSocket lifetime supervision and close coordination."""
 
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 
 import anyio
 import anyio.lowlevel
@@ -11,10 +10,6 @@ from litestar.exceptions import PermissionDeniedException, ServiceUnavailableExc
 from litestar_security.websocket import WebSocketCloseCoordinator, supervise_websocket_lifetime
 
 _NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
-
-
-def _connection(*, headers: tuple[tuple[bytes, bytes], ...] = (), query_string: bytes = b"") -> SimpleNamespace:
-    return SimpleNamespace(scope={"headers": list(headers), "query_string": query_string})
 
 
 async def test_websocket_expiry_closes_once_and_cancels_idle_handler() -> None:

@@ -2,8 +2,9 @@
 
 Every generated route is filed under one tag group. A group is addressed by a
 stable key rather than by its display name, so an application that renames a
-group keeps addressing it by the same key. Declaration order below is display
-order in the emitted document.
+group keeps addressing it by the same key. Declaration order in ``ROUTE_TAGS``
+sets display order in the emitted document, presenting session and token login
+flows before account-repair and recovery flows.
 """
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -106,8 +107,6 @@ def describes_raised_denial(spec: ResponseSpec) -> bool:
 
 
 ROUTE_TAGS: Mapping[str, Tag] = MappingProxyType({
-    # A reader meets the two ways to log in before the flows that repair an
-    # account they cannot log in to.
     "local.sessions": Tag(
         name="Local sessions",
         description=(
@@ -181,22 +180,6 @@ ROUTE_TAGS: Mapping[str, Tag] = MappingProxyType({
 })
 
 
-def _no_overrides() -> "dict[str, str]":
-    return {}
-
-
-def _frozen_overrides(values: "Mapping[str, str]", *, subject: str) -> "Mapping[str, str]":
-    unknown = sorted(set(values) - set(ROUTE_TAGS))
-    if unknown:
-        message = f"Unknown generated-route tag group: {', '.join(unknown)}"
-        raise ImproperlyConfiguredException(detail=message)
-    blank = sorted(key for key, value in values.items() if value.__class__ is not str or not value.strip())
-    if blank:
-        message = f"Generated-route tag {subject} must be a non-blank string: {', '.join(blank)}"
-        raise ImproperlyConfiguredException(detail=message)
-    return MappingProxyType(dict(values))
-
-
 @dataclass(frozen=True, slots=True)
 class RouteDocs:
     """Application-owned OpenAPI documentation for generated routes.
@@ -208,9 +191,9 @@ class RouteDocs:
     differently.
     """
 
-    tags: Mapping[str, str] = field(default_factory=_no_overrides)
+    tags: Mapping[str, str] = field(default_factory=dict[str, str])
     """Replacement display name per stable tag-group key."""
-    tag_descriptions: Mapping[str, str] = field(default_factory=_no_overrides)
+    tag_descriptions: Mapping[str, str] = field(default_factory=dict[str, str])
     """Replacement description per stable tag-group key."""
     operation_id: Callable[[str], str] | None = None
     """Rewrite every generated ``operation_id``, which names the generated client function."""
@@ -224,13 +207,27 @@ class RouteDocs:
             ImproperlyConfiguredException: If a key names no generated tag group,
                 an override is blank, or a transform is not callable.
         """
-        object.__setattr__(self, "tags", _frozen_overrides(self.tags, subject="display name"))
-        object.__setattr__(self, "tag_descriptions", _frozen_overrides(self.tag_descriptions, subject="description"))
+        object.__setattr__(self, "tags", self._frozen_overrides(self.tags, subject="display name"))
+        object.__setattr__(
+            self, "tag_descriptions", self._frozen_overrides(self.tag_descriptions, subject="description")
+        )
         for name in ("operation_id", "route_name"):
             transform: object = getattr(self, name)
             if transform is not None and not callable(transform):
                 message = f"Generated-route {name} transform must be callable"
                 raise ImproperlyConfiguredException(detail=message)
+
+    @staticmethod
+    def _frozen_overrides(values: "Mapping[str, str]", *, subject: str) -> "Mapping[str, str]":
+        unknown = sorted(set(values) - set(ROUTE_TAGS))
+        if unknown:
+            message = f"Unknown generated-route tag group: {', '.join(unknown)}"
+            raise ImproperlyConfiguredException(detail=message)
+        blank = sorted(key for key, value in values.items() if value.__class__ is not str or not value.strip())
+        if blank:
+            message = f"Generated-route tag {subject} must be a non-blank string: {', '.join(blank)}"
+            raise ImproperlyConfiguredException(detail=message)
+        return MappingProxyType(dict(values))
 
 
 LOCAL_TAG_KEYS: frozenset[str] = frozenset(key for key in ROUTE_TAGS if key.startswith("local."))
@@ -288,7 +285,10 @@ def apply_route_docs(router: "Router", docs: "RouteDocs") -> "Router":
     Controller tags are class attributes fixed at import, so the effective name is
     resolved here instead: every layer of a freshly built router is private to the
     configuration that built it, and Litestar deep-copies the router again when the
-    application registers it.
+    application registers it. Handlers mounted across multiple paths are deduplicated
+    by identity so transforms never collide with themselves, and every generated
+    handler declares a literal ``operation_id`` string passed directly to any
+    configured transform.
 
     Args:
         router: The router the feature just built.
@@ -304,8 +304,6 @@ def apply_route_docs(router: "Router", docs: "RouteDocs") -> "Router":
     renames = {ROUTE_TAGS[key].name: name for key, name in docs.tags.items() if ROUTE_TAGS[key].name != name}
     if not renames and docs.operation_id is None and docs.route_name is None:
         return router
-    # A handler declaring several paths appears on several routes; identity keeps
-    # each one rewritten exactly once, so a transform cannot collide with itself.
     handlers: dict[int, HTTPRouteHandler] = {
         id(handler): handler
         for route in router.routes
@@ -320,8 +318,6 @@ def apply_route_docs(router: "Router", docs: "RouteDocs") -> "Router":
                 continue
             retagged.add(id(layer))
             layer.tags = _renamed(layer.tags, renames)
-        # Litestar also accepts a callable operation-id factory; every generated
-        # handler declares a literal, which is what a transform is given.
         handler.operation_id = _transformed(
             cast("str | None", handler.operation_id), docs.operation_id, operation_ids, subject="operation_id"
         )

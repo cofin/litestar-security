@@ -1,9 +1,7 @@
 """Integration tests for runnable local-auth example modes."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import Literal, cast
 
 import pytest
 from examples import app as example_app
@@ -14,7 +12,7 @@ from litestar.middleware.session.base import SessionMiddleware
 from litestar.routes import HTTPRoute
 from litestar.testing import TestClient
 
-from litestar_security import MFAConfig, SecurityConfig
+from litestar_security import MFAConfig, SecurityConfig, SecurityPlugin
 from litestar_security.accounts import (
     LocalAuthMode,
     LoginMethod,
@@ -25,9 +23,6 @@ from litestar_security.accounts import (
     SecurityEvent,
 )
 from litestar_security.testing import InMemoryMFALoginChallengeStore, InMemoryMFAStore
-
-if TYPE_CHECKING:
-    from litestar_security import SecurityPlugin
 
 
 @dataclass(slots=True)
@@ -100,6 +95,7 @@ def test_local_example_modes_boot_with_explicit_transports(
     monkeypatch.setenv("LITESTAR_SECURITY_EXAMPLE", mode)
     app = create_app()
     plugin = cast("SecurityPlugin[object]", app.plugins.init[0])
+    assert isinstance(plugin, SecurityPlugin)
 
     with TestClient(app) as client:
         response = client.get("/")

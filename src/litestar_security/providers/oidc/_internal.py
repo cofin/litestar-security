@@ -5,7 +5,6 @@ misconfigured issuer from an unreachable one without inspecting messages.
 """
 
 import json
-import math
 from typing import NoReturn, TypeAlias, cast
 
 from litestar_security.providers._internal import JSONValue, reject_non_finite, unique_object, validate_depth
@@ -30,7 +29,3 @@ def load_document(value: bytes) -> JSONObject:
         raise TypeError
     validate_depth(cast("JSONValue", decoded), maximum=_MAXIMUM_JSON_DEPTH)
     return cast("JSONObject", decoded)
-
-
-def positive_finite(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0

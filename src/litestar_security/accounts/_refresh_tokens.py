@@ -13,7 +13,7 @@ from enum import Enum
 from hashlib import sha256
 from hmac import digest as hmac_digest
 from secrets import token_bytes
-from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 from litestar.exceptions import ImproperlyConfiguredException
 
@@ -28,6 +28,7 @@ from litestar_security.accounts._internal import (
     decode_random_unbounded,
     encode_random,
     strict_context_text,
+    valid_compact_jwt,
     valid_identifier,
     valid_security_epoch,
 )
@@ -47,37 +48,13 @@ __all__ = (
     "TokenPair",
 )
 
-
-UserT = TypeVar("UserT")
-
-
-_REFRESH_TOKEN_PREFIX = "rt_"  # noqa: S105 - public token namespace, not a credential
-
-
-_REFRESH_FAMILY_PREFIX = "rf_"
-
-
+REFRESH_TOKEN_PREFIX = "rt_"  # noqa: S105 - public token namespace, not a credential
+REFRESH_FAMILY_PREFIX = "rf_"
 _REFRESH_TOKEN_DOMAIN = b"refresh-token\x00"
-
-
 _REFRESH_IDEMPOTENCY_DOMAIN = b"refresh-idempotency\x00"
-
-
 _MINIMUM_IDEMPOTENCY_CHARACTERS = 22
-
-
 _MAXIMUM_IDEMPOTENCY_CHARACTERS = 128
-
-
-_MAXIMUM_ACCESS_TOKEN_BYTES = 16_384
-
-
-_COMPACT_JWT_SEGMENTS = 3
-
-
 _MINIMUM_ACCESS_TOKEN_SECONDS = 30
-
-
 _MAXIMUM_ACCESS_TOKEN_SECONDS = 3_600
 
 
@@ -121,7 +98,7 @@ class RefreshTokenProof:
     def __post_init__(self) -> None:
         """Validate canonical lookup and digest material."""
         if (
-            not valid_identifier(self.token_id, prefix=_REFRESH_TOKEN_PREFIX)
+            not valid_identifier(self.token_id, prefix=REFRESH_TOKEN_PREFIX)
             or self.digest.__class__ is not bytes
             or len(self.digest) != DIGEST_BYTES
         ):
@@ -184,7 +161,7 @@ class RefreshTokenCodec:
         ):
             msg = "Refresh token entropy source returned invalid material"
             raise RuntimeError(msg)
-        token_id = f"{_REFRESH_TOKEN_PREFIX}{encode_random(lookup)}"
+        token_id = f"{REFRESH_TOKEN_PREFIX}{encode_random(lookup)}"
         refresh_token = f"{token_id}.{encode_random(secret)}"
         return RefreshTokenIssue(refresh_token=refresh_token, token_id=token_id, digest=self._digest(token_id, secret))
 
@@ -202,7 +179,7 @@ class RefreshTokenCodec:
         token_id, secret = (
             parsed
             if parsed is not None
-            else (f"{_REFRESH_TOKEN_PREFIX}{encode_random(bytes(LOOKUP_BYTES))}", bytes(SECRET_BYTES))
+            else (f"{REFRESH_TOKEN_PREFIX}{encode_random(bytes(LOOKUP_BYTES))}", bytes(SECRET_BYTES))
         )
         digest = self._digest(token_id, secret)
         return RefreshTokenProof(token_id=token_id, digest=digest) if parsed is not None else InvalidCredentials()
@@ -220,7 +197,7 @@ class RefreshTokenCodec:
             when the key carries too little entropy to be safe.
         """
         if (
-            not valid_identifier(token_id, prefix=_REFRESH_TOKEN_PREFIX)
+            not valid_identifier(token_id, prefix=REFRESH_TOKEN_PREFIX)
             or value.__class__ is not str
             or not _MINIMUM_IDEMPOTENCY_CHARACTERS <= len(value) <= _MAXIMUM_IDEMPOTENCY_CHARACTERS
         ):
@@ -246,7 +223,6 @@ class TokenPair(WireStruct, frozen=True):
     access_token: str
     refresh_token: str
     expires_in: int
-    # RFC 6749 section 5.1 member names, so none of these may be renamed.
     token_type: Literal["Bearer"] = "Bearer"  # noqa: S105 - the public RFC 6749 token type, not a credential
 
     def __repr__(self) -> str:
@@ -259,7 +235,7 @@ class TokenPair(WireStruct, frozen=True):
     def __post_init__(self) -> None:
         """Validate exact bearer response fields without exposing credentials."""
         if (
-            not _valid_compact_jwt(self.access_token)
+            not valid_compact_jwt(self.access_token)
             or _parse_refresh_token(self.refresh_token) is None
             or self.expires_in.__class__ is not int
             or self.expires_in < _MINIMUM_ACCESS_TOKEN_SECONDS
@@ -291,7 +267,7 @@ class RefreshFamilyContext:
             raise ValueError(msg) from None
         if (
             not strict_context_text(self.account_id)
-            or not valid_identifier(self.family_id, prefix=_REFRESH_FAMILY_PREFIX)
+            or not valid_identifier(self.family_id, prefix=REFRESH_FAMILY_PREFIX)
             or not valid_security_epoch(self.security_epoch)
             or token_expires_at > family_expires_at
             or any(not valid_refresh_scope(scope) for scope in self.scopes)
@@ -316,21 +292,9 @@ def _parse_refresh_token(value: object) -> tuple[str, bytes] | None:
     if (
         separator != "."
         or "." in encoded_secret
-        or not valid_identifier(token_id, prefix=_REFRESH_TOKEN_PREFIX)
+        or not valid_identifier(token_id, prefix=REFRESH_TOKEN_PREFIX)
         or len(encoded_secret) != SECRET_CHARACTERS
     ):
         return None
     secret = decode_random(encoded_secret, SECRET_BYTES)
     return (token_id, secret) if secret is not None else None
-
-
-def _valid_compact_jwt(value: object) -> bool:
-    if not isinstance(value, str) or value.__class__ is not str or len(value) > _MAXIMUM_ACCESS_TOKEN_BYTES:
-        return False
-    segments = value.split(".")
-    if len(segments) != _COMPACT_JWT_SEGMENTS or any(not segment for segment in segments):
-        return False
-    try:
-        return all(bool(decode_random_unbounded(segment)) for segment in segments)
-    except (BinasciiError, UnicodeEncodeError, ValueError):
-        return False

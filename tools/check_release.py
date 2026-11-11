@@ -9,10 +9,9 @@ from pathlib import Path
 from zipfile import ZipFile
 
 ROOT = Path(__file__).parents[1]
-EXPECTED_VERSION = "0.7.1"
+EXPECTED_VERSION = "0.7.2"
 SUPPORTED_PYTHONS = ("3.10", "3.11", "3.12", "3.13", "3.14")
 DIRECT_DEPENDENCIES = frozenset({"argon2-cffi", "httpx", "litestar", "pyotp", "pyjwt", "webauthn"})
-FORBIDDEN_DEPENDENCIES = frozenset({"advanced-alchemy", "litestar-mcp", "sqlalchemy", "sqlspec"})
 SMOKE_SCRIPT = r"""
 import asyncio
 import importlib
@@ -39,7 +38,7 @@ for module in walk_packages(litestar_security.__path__, "litestar_security."):
         importlib.import_module(module.name)
 
 assert "pytest" not in sys.modules
-assert litestar_security.__version__ == "0.7.1"
+assert litestar_security.__version__ == "0.7.2"
 assert files("litestar_security").joinpath("py.typed").is_file()
 assert StoreConformanceFactories is not None
 assert assert_security_backend_conformance is not None
@@ -58,7 +57,7 @@ async def protected(principal: NamedDependency[Principal[object]]) -> dict[str, 
 
 app = Litestar(
     route_handlers=[protected],
-    openapi_config=OpenAPIConfig(title="Release smoke", version="0.7.1"),
+    openapi_config=OpenAPIConfig(title="Release smoke", version="0.7.2"),
     plugins=[SecurityPlugin(SecurityConfig(api_key=api_key))],
 )
 with TestClient(app) as client:
@@ -139,7 +138,6 @@ def inspect_wheel(wheel: Path) -> None:
     requirements = tuple(metadata.get_all("Requires-Dist", []))
     dependencies = frozenset(dependency_name(requirement) for requirement in requirements)
     require(condition=dependencies == DIRECT_DEPENDENCIES, detail=requirements)
-    require(condition=dependencies.isdisjoint(FORBIDDEN_DEPENDENCIES), detail=requirements)
 
 
 def smoke_wheel(
