@@ -9,7 +9,7 @@ updated: "2026-11-11"
 
 # litestar-security Knowledge Bundle
 
-Root Open Knowledge Format (`v0.2`) index for `litestar-security` (`v0.7.1`). All links below are relative and resolve directly on disk.
+Root Open Knowledge Format (`v0.2`) index for `litestar-security` (`v0.7.2`). All links below are relative and resolve directly on disk.
 
 ## Sections
 

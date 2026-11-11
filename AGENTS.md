@@ -1,6 +1,6 @@
 # litestar-security Agent Context
 
-Unified, storage-agnostic authentication, authorization, provider verification, account lifecycle, and WebSocket security framework for Litestar (`v0.7.1`).
+Unified, storage-agnostic authentication, authorization, provider verification, account lifecycle, and WebSocket security framework for Litestar (`v0.7.2`).
 
 ## Knowledge & Skill Routing
 

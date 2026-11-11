@@ -26,7 +26,7 @@ sources:
 # Product Definition
 
 <!-- truth: start -->
-- **Product**: `litestar-security` (`v0.7.1`) is the unified authentication and authorization plugin for Litestar (`>=2.24.0`), configured through a single `SecurityPlugin(SecurityConfig(...))` entry point.[^pyproject][^readme]
+- **Product**: `litestar-security` (`v0.7.2`) is the unified authentication and authorization plugin for Litestar (`>=2.24.0`), configured through a single `SecurityPlugin(SecurityConfig(...))` entry point.[^pyproject][^readme]
 - **Target Consumers**: Litestar backend services, API gateways, SaaS multi-tenant applications, and downstream packages (`litestar-mcp`, database-backed services) that require composable authentication, predicate authorization, and OpenAPI 3.1 security projection without coupling to a specific ORM or cache.[^pyproject][^readme]
 - **Storage-Agnostic & Extra-Decoupled Contract**: The runtime package defines `@runtime_checkable` `Protocol` ports (`AccountLookup`, `RegistrationStore`, `SessionRegistry`, `NativeSessionStore`, `RefreshTokenFamilyStore`, `APIKeyStore`, `OAuthAccountStore`, `OAuthTransactionStore`, `MFAStore`, `PasskeyStore`, `StepUpStore`, `RateLimiter`, `SecurityEventSink`, `SecurityMetrics`), ships zero database/cache/cloud SDK adapters in its wheel, and keeps pure domain contracts and `litestar_security.testing` usable without optional extras.[^pyproject][^init-exports]
 - **Core Capability Pillars**:
