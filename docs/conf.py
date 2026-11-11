@@ -2,7 +2,9 @@
 
 Section auto-labels stay capped at ``autosectionlabel_maxdepth = 2`` (page titles
 and top-level sections) so repeated changelog subsection headings such as ``Added``
-never collide under ``sphinx-build -W``.
+never collide under ``sphinx-build -W``, and ``linkcheck_ignore`` skips immutable
+IETF Datatracker ``:rfc:`` targets because Datatracker's edge filter rejects
+automated GitHub Actions runner requests with HTTP ``404``.
 """
 
 from importlib import metadata
@@ -35,6 +37,7 @@ autosectionlabel_maxdepth = 2
 napoleon_google_docstring = True
 
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+linkcheck_ignore = [r"^https://datatracker\.ietf\.org/doc/html/rfc\d+\.html(?:#.*)?$"]
 html_theme = "shibuya"
 html_title = "Litestar Security"
 html_short_title = "Security"
