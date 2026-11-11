@@ -1,13 +1,12 @@
 """Generic OAuth provider and hardened HTTP boundary contracts."""
 
-from __future__ import annotations
-
 import asyncio
 import gzip
 import json
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, TypeAlias, cast
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -31,10 +30,9 @@ from litestar_security.providers.oauth import (
     SecretStr,
 )
 
-if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Sequence
-
-    Handler = Callable[[httpx.Request], httpx.Response] | Callable[[httpx.Request], Coroutine[Any, Any, httpx.Response]]
+Handler: TypeAlias = (
+    Callable[[httpx.Request], httpx.Response] | Callable[[httpx.Request], Coroutine[Any, Any, httpx.Response]]
+)
 
 
 _NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
@@ -532,6 +530,61 @@ async def test_literal_public_ip_endpoint_does_not_require_dns_resolution() -> N
 
     assert tokens.access_token == SecretStr("access-token")
     assert resolver_called is False
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://issuer.example/oauth/token",
+        "/oauth/token",
+        "https://user@issuer.example/oauth/token",
+        "https://[::1/invalid",
+    ],
+)
+async def test_stream_pinned_rejects_non_https_missing_host_and_userinfo(endpoint: str) -> None:
+    resolver_called = False
+    transport_called = False
+
+    async def resolver(_host: str, _port: int) -> tuple[str, ...]:
+        nonlocal resolver_called
+        resolver_called = True
+        return (_PUBLIC_IP,)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal transport_called
+        transport_called = True
+        return httpx.Response(200, request=request)
+
+    async with OAuthProviderClient(_config(), transport=httpx.MockTransport(handler), resolver=resolver) as client:
+
+        async def open_pinned() -> None:
+            async with client.stream_pinned("GET", endpoint):
+                return
+
+        with pytest.raises(OAuthProviderError, match="OAuth provider request failed"):
+            await open_pinned()
+
+    assert resolver_called is False
+    assert transport_called is False
+
+
+async def test_stream_pinned_overrides_host_header_case_insensitively_and_pins_sni() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _json_response(request, {"ok": True})
+
+    endpoint = "https://issuer.example:8443/oauth/token"
+    headers = {"host": "attacker.example", "Accept": "application/json"}
+    async with _client(handler) as client, client.stream_pinned("POST", endpoint, headers=headers) as response:
+        assert response.status_code == 200
+
+    request = seen[0]
+    assert request.url == f"https://{_PUBLIC_IP}:8443/oauth/token"
+    assert request.headers.get_list("host") == ["issuer.example:8443"]
+    assert request.headers["accept"] == "application/json"
+    assert request.extensions["sni_hostname"] == "issuer.example"
 
 
 @pytest.mark.parametrize("case", ["invalid-length", "stream"])

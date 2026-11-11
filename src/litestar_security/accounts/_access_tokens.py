@@ -1,7 +1,5 @@
 """Local access-token issuing and bearer identity resolution."""
 
-from base64 import urlsafe_b64decode, urlsafe_b64encode
-from binascii import Error as BinasciiError
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, cast
@@ -10,10 +8,11 @@ from unicodedata import normalize
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts._internal import (
+    ASCII_CONTROL_LIMIT,
     aware_utc_time,
     new_event_id,
-    strict_text,
     utc_now,
+    valid_compact_jwt,
     valid_security_epoch,
 )
 from litestar_security.accounts._records import LocalAccountState
@@ -41,13 +40,10 @@ if TYPE_CHECKING:
 __all__ = ("LocalAccessToken", "LocalAccessTokenIssuer", "LocalBearerIdentityResolver")
 
 UserT = TypeVar("UserT")
-_ASCII_CONTROL_LIMIT = 32
-_DEFAULT_ACCESS_TOKEN_LIFETIME = timedelta(minutes=10)
+DEFAULT_ACCESS_TOKEN_LIFETIME = timedelta(minutes=10)
+DEFAULT_LOCAL_CLIENT_ID = "local"
 _MINIMUM_ACCESS_TOKEN_LIFETIME = timedelta(seconds=30)
 _MAXIMUM_ACCESS_TOKEN_LIFETIME = timedelta(hours=1)
-_DEFAULT_LOCAL_CLIENT_ID = "local"
-_MAXIMUM_ACCESS_TOKEN_BYTES = 16_384
-_COMPACT_JWT_SEGMENTS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +58,7 @@ class LocalAccessToken:
         """Require one compact credential and a bounded whole-second lifetime."""
         token_value: object = self.access_token
         if (
-            not _valid_compact_access_token(token_value)
+            not valid_compact_jwt(token_value)
             or self.expires_in.__class__ is not int
             or not int(_MINIMUM_ACCESS_TOKEN_LIFETIME.total_seconds())
             <= self.expires_in
@@ -83,8 +79,8 @@ class LocalAccessTokenIssuer(Generic[UserT]):
     signer: TokenSigner = field(repr=False)
     issuer: str
     audience: str
-    client_id: str = _DEFAULT_LOCAL_CLIENT_ID
-    lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME
+    client_id: str = DEFAULT_LOCAL_CLIENT_ID
+    lifetime: timedelta = DEFAULT_ACCESS_TOKEN_LIFETIME
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
     token_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
 
@@ -177,9 +173,9 @@ class LocalAccessVerifier:
         outcome = await self.verifier.verify(token, now=now)
         if not isinstance(outcome, Authenticated):
             return outcome
-        methods = _claim_set(outcome.claims.raw.get("amr"))
-        traits = _claim_set(outcome.claims.raw.get("security_traits"))
-        authenticated_at = _claim_authentication_time(
+        methods = self._claim_set(outcome.claims.raw.get("amr"))
+        traits = self._claim_set(outcome.claims.raw.get("security_traits"))
+        authenticated_at = self._claim_authentication_time(
             outcome.claims.raw.get("auth_time"), fallback=outcome.claims.issued_at
         )
         if methods is None or traits is None or authenticated_at is None:
@@ -195,6 +191,29 @@ class LocalAccessVerifier:
             ),
             grants=AuthorizationSnapshot(scopes=outcome.claims.scopes),
         )
+
+    @staticmethod
+    def _claim_set(value: object) -> frozenset[str] | None:
+        if value is None:
+            return frozenset()
+        if not isinstance(value, (list, tuple)):
+            return None
+        values = cast("list[object] | tuple[object, ...]", value)
+        if any(not _strict_claim_text(item) for item in values):
+            return None
+        normalized = frozenset(cast("list[str] | tuple[str, ...]", values))
+        return normalized if len(normalized) == len(values) else None
+
+    @staticmethod
+    def _claim_authentication_time(value: object, *, fallback: datetime) -> datetime | None:
+        if value is None:
+            return fallback
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        try:
+            return datetime.fromtimestamp(value, tz=fallback.tzinfo)
+        except (OverflowError, OSError, ValueError):
+            return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,51 +284,5 @@ def _strict_claim_text(value: object) -> bool:
         and bool(value)
         and value == value.strip()
         and normalize("NFC", value) == value
-        and all(not character.isspace() and ord(character) >= _ASCII_CONTROL_LIMIT for character in value)
+        and all(not character.isspace() and ord(character) >= ASCII_CONTROL_LIMIT for character in value)
     )
-
-
-def _valid_compact_access_token(value: object) -> bool:
-    if not isinstance(value, str) or value.__class__ is not str:
-        return False
-    segments = value.split(".")
-    structurally_valid = (
-        strict_text(value)
-        and len(value.encode("ascii", errors="ignore")) == len(value)
-        and len(value) <= _MAXIMUM_ACCESS_TOKEN_BYTES
-        and len(segments) == _COMPACT_JWT_SEGMENTS
-        and all(segments)
-    )
-    if not structurally_valid:
-        return False
-    try:
-        return all(
-            urlsafe_b64encode(urlsafe_b64decode(f"{segment}{'=' * (-len(segment) % 4)}")).rstrip(b"=").decode("ascii")
-            == segment
-            for segment in segments
-        )
-    except (BinasciiError, UnicodeEncodeError, ValueError):
-        return False
-
-
-def _claim_set(value: object) -> frozenset[str] | None:
-    if value is None:
-        return frozenset()
-    if not isinstance(value, (list, tuple)):
-        return None
-    values = cast("list[object] | tuple[object, ...]", value)
-    if any(not _strict_claim_text(item) for item in values):
-        return None
-    normalized = frozenset(cast("list[str] | tuple[str, ...]", values))
-    return normalized if len(normalized) == len(values) else None
-
-
-def _claim_authentication_time(value: object, *, fallback: datetime) -> datetime | None:
-    if value is None:
-        return fallback
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    try:
-        return datetime.fromtimestamp(value, tz=fallback.tzinfo)
-    except (OverflowError, OSError, ValueError):
-        return None

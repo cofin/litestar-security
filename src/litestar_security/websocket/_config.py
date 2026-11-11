@@ -56,70 +56,68 @@ class WebSocketSecurityConfig:
     def __post_init__(self) -> None:
         """Validate and freeze security-sensitive transport settings."""
         object.__setattr__(self, "allowed_origins", normalize_allowed_origins(self.allowed_origins))
-        _validate_connect_token_settings(self)
-        _validate_refresh_settings(self)
-        _validate_close_codes(self.close_codes)
+        self._validate_connect_token_settings()
+        self._validate_refresh_settings()
+        self._validate_close_codes(self.close_codes)
         if not callable(self.clock) or not callable(self.sleeper):
             configuration_error("WebSocket clock and sleeper must be callable")
 
+    def _validate_connect_token_settings(self) -> None:
+        connect_token_store = cast("object | None", self.connect_token_store)
+        if connect_token_store is not None and not isinstance(connect_token_store, WebSocketConnectTokenStore):
+            configuration_error("WebSocket connect token store must implement atomic create and consume")
+        if self.current_security_epoch is not None and not callable(self.current_security_epoch):
+            configuration_error("WebSocket current security epoch must be an async callback")
+        maximum_connect_token_ttl = duration(self.maximum_connect_token_ttl, "maximum connect token TTL")
+        if maximum_connect_token_ttl > MAXIMUM_CONNECT_TOKEN_TTL:
+            configuration_error("WebSocket maximum connect token TTL cannot exceed two minutes")
+        connect_token_ttl = duration(self.connect_token_ttl, "connect token TTL")
+        if connect_token_ttl > maximum_connect_token_ttl:
+            configuration_error("WebSocket connect token TTL cannot exceed its configured maximum")
 
-def _validate_connect_token_settings(config: WebSocketSecurityConfig) -> None:
-    connect_token_store = cast("object | None", config.connect_token_store)
-    if connect_token_store is not None and not isinstance(connect_token_store, WebSocketConnectTokenStore):
-        configuration_error("WebSocket connect token store must implement atomic create and consume")
-    if config.current_security_epoch is not None and not callable(config.current_security_epoch):
-        configuration_error("WebSocket current security epoch must be an async callback")
-    maximum_connect_token_ttl = duration(config.maximum_connect_token_ttl, "maximum connect token TTL")
-    if maximum_connect_token_ttl > MAXIMUM_CONNECT_TOKEN_TTL:
-        configuration_error("WebSocket maximum connect token TTL cannot exceed two minutes")
-    connect_token_ttl = duration(config.connect_token_ttl, "connect token TTL")
-    if connect_token_ttl > maximum_connect_token_ttl:
-        configuration_error("WebSocket connect token TTL cannot exceed its configured maximum")
+        query_name_value = cast("object", self.connect_token_query_parameter)
+        if not isinstance(query_name_value, str) or query_name_value.__class__ is not str:
+            configuration_error("WebSocket connect token query parameter must be text")
+        query_name = query_name_value
+        if (
+            not query_name
+            or query_name != query_name.strip()
+            or not query_name.isascii()
+            or any(character in query_name for character in "&#=;")
+        ):
+            configuration_error("WebSocket connect token query parameter must be a non-empty safe name")
+        if query_name.casefold() in RESERVED_QUERY_PARAMETERS:
+            configuration_error("WebSocket connect token query parameter uses a reserved credential name")
 
-    query_name_value = cast("object", config.connect_token_query_parameter)
-    if not isinstance(query_name_value, str) or query_name_value.__class__ is not str:
-        configuration_error("WebSocket connect token query parameter must be text")
-    query_name = query_name_value
-    if (
-        not query_name
-        or query_name != query_name.strip()
-        or not query_name.isascii()
-        or any(character in query_name for character in "&#=;")
-    ):
-        configuration_error("WebSocket connect token query parameter must be a non-empty safe name")
-    if query_name.casefold() in RESERVED_QUERY_PARAMETERS:
-        configuration_error("WebSocket connect token query parameter uses a reserved credential name")
+    def _validate_refresh_settings(self) -> None:
+        refresher = cast("object | None", self.snapshot_refresher)
+        revocation_source = cast("object | None", self.revocation_source)
+        if refresher is not None and not isinstance(refresher, AuthorizationSnapshotRefresher):
+            configuration_error("WebSocket snapshot refresher must define refresh")
+        if revocation_source is not None and not isinstance(revocation_source, WebSocketRevocationSource):
+            configuration_error("WebSocket revocation source must define wait")
+        if self.refresh_interval is not None:
+            duration(self.refresh_interval, "refresh interval")
+            if refresher is None:
+                configuration_error("WebSocket refresh interval requires a snapshot refresher")
 
-
-def _validate_refresh_settings(config: WebSocketSecurityConfig) -> None:
-    refresher = cast("object | None", config.snapshot_refresher)
-    revocation_source = cast("object | None", config.revocation_source)
-    if refresher is not None and not isinstance(refresher, AuthorizationSnapshotRefresher):
-        configuration_error("WebSocket snapshot refresher must define refresh")
-    if revocation_source is not None and not isinstance(revocation_source, WebSocketRevocationSource):
-        configuration_error("WebSocket revocation source must define wait")
-    if config.refresh_interval is not None:
-        duration(config.refresh_interval, "refresh interval")
-        if refresher is None:
-            configuration_error("WebSocket refresh interval requires a snapshot refresher")
-
-
-def _validate_close_codes(value: object) -> None:
-    if not isinstance(value, WebSocketCloseCodes) or value.__class__ is not WebSocketCloseCodes:
-        configuration_error("WebSocket close codes must use WebSocketCloseCodes")
-    codes = value
-    values = (codes.unauthenticated, codes.unauthorized, codes.verification_unavailable)
-    if (
-        any(code.__class__ is not int for code in values)
-        or not _PRIVATE_CLOSE_CODE_MINIMUM <= codes.unauthenticated <= _PRIVATE_CLOSE_CODE_MAXIMUM
-        or not _PRIVATE_CLOSE_CODE_MINIMUM <= codes.unauthorized <= _PRIVATE_CLOSE_CODE_MAXIMUM
-        or (
-            codes.verification_unavailable != DEFAULT_UNAVAILABLE_CLOSE
-            and not _PRIVATE_CLOSE_CODE_MINIMUM <= codes.verification_unavailable <= _PRIVATE_CLOSE_CODE_MAXIMUM
-        )
-        or len(set(values)) != len(values)
-        or codes.unauthenticated == DEFAULT_UNAUTHORIZED_CLOSE
-        or codes.unauthorized == DEFAULT_UNAUTHENTICATED_CLOSE
-        or codes.verification_unavailable in {DEFAULT_UNAUTHENTICATED_CLOSE, DEFAULT_UNAUTHORIZED_CLOSE}
-    ):
-        configuration_error("WebSocket close code assignments are invalid")
+    @staticmethod
+    def _validate_close_codes(value: object) -> None:
+        if not isinstance(value, WebSocketCloseCodes) or value.__class__ is not WebSocketCloseCodes:
+            configuration_error("WebSocket close codes must use WebSocketCloseCodes")
+        codes = value
+        values = (codes.unauthenticated, codes.unauthorized, codes.verification_unavailable)
+        if (
+            any(code.__class__ is not int for code in values)
+            or not _PRIVATE_CLOSE_CODE_MINIMUM <= codes.unauthenticated <= _PRIVATE_CLOSE_CODE_MAXIMUM
+            or not _PRIVATE_CLOSE_CODE_MINIMUM <= codes.unauthorized <= _PRIVATE_CLOSE_CODE_MAXIMUM
+            or (
+                codes.verification_unavailable != DEFAULT_UNAVAILABLE_CLOSE
+                and not _PRIVATE_CLOSE_CODE_MINIMUM <= codes.verification_unavailable <= _PRIVATE_CLOSE_CODE_MAXIMUM
+            )
+            or len(set(values)) != len(values)
+            or codes.unauthenticated == DEFAULT_UNAUTHORIZED_CLOSE
+            or codes.unauthorized == DEFAULT_UNAUTHENTICATED_CLOSE
+            or codes.verification_unavailable in {DEFAULT_UNAUTHENTICATED_CLOSE, DEFAULT_UNAUTHORIZED_CLOSE}
+        ):
+            configuration_error("WebSocket close code assignments are invalid")

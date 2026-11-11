@@ -2,6 +2,12 @@
 
 Append-only chronological record of OKF v0.2 knowledge synthesis, spec promotion, and repository alignment for `litestar-security`.
 
+## [2026-11-11] synthesize | Completed Codebase Debloat, Dependabot Sync, & OKF/Skills/Agents Alignment (`dcce78d`)
+
+- Enforced repository-wide runtime annotations via `tools/hooks/no_future_annotations.py` (`types: [python]`), synced `ruff` (`v0.17.4`) and `uv run prek`, reconciled `[tool.uv].exclude-newer = "2026-11-02T00:00:00Z"` in `pyproject.toml` (retiring `uv.toml` and `tools/scripts/setup-env.sh`), refreshed `.agents/bundles/index.md` and `.agents/skills/index.md` (`updated: "2026-11-11"`), and removed unused `polyfactory` and `hypothesis` entries from `.agents/bundles/product/tech-stack.md`.
+- Synchronized `AGENTS.md`, `workflow.md`, `patterns/immutable-contracts-and-typing.md`, `architecture/{runtime-pipeline,provider-and-store-ports}.md`, `domains/{authentication-and-authorization,accounts-and-federation}.md`, `gotchas/route-compilation-and-csrf.md`, Sphinx `docs/`, `CONTRIBUTING.rst`, and all `.agents/skills/**` and `.agents/agents/*.md` files with consolidated class helpers (`SecurityMiddleware._plan_uses_bearer`, `Argon2PasswordHasher._run_worker`, `RefreshReceiptSealer._receipt_aad`, `SessionBindingConfig._validate_binding_cookie_scope`), `RouteCompiler(..., schemes=...)`, `GitHubOAuthProvider(..., resolver=...)`, `OAuthProviderClient.stream_pinned`, eager `OAuthLocalAuthTransport`, controller `_authorize_step_up`, and shared `providers._internal` / `verify_jwks_jwt` / `accounts._internal` helpers.
+- Synchronized `testing/test-organization-and-conformance.md`, testing skills, and subagents with unconditional zero-`Litestar` unit boundaries (`integration/test_cli.py`, `test_dto.py` / `integration/test_wire_casing.py` split, `unit/test_accounts/test_controllers.py`), `local_key_ring`-only `src/tests/unit/conftest.py` (`password_hasher` localized in `test_passwords.py`), docstring-only `src/tests/integration/conftest.py`, AST `anyio` checks in `unit/test_config.py`, retired `factories.py` and `test_fixture_vocabulary.py`, and `@pytest.mark.parametrize` conventions.
+
 ## [2026-11-10] setup | Aligned OKF v0.2 Bundle, Skills, & Agents (`v0.7.1` / `398fd57`, Shared Mode)
 
 - Transitioned `.agents/` and `AGENTS.md` to `shared` Git tracking on branch `chore/setup-flow`, updating `.gitignore` and `.git/info/exclude` to ignore only `.agents/scratch/` and `.agents/studio-live-state.json`.

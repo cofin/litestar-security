@@ -1,10 +1,9 @@
 """Configuration for the Litestar Security plugin."""
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from inspect import iscoroutinefunction
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast
 
 from litestar.exceptions import ImproperlyConfiguredException
@@ -52,10 +51,6 @@ __all__ = (
 )
 
 UserT = TypeVar("UserT")
-SyncT = TypeVar("SyncT")
-ResultT = TypeVar("ResultT")
-_EMPTY_METRIC_ATTRIBUTES: Mapping[str, str] = MappingProxyType({})
-_MAXIMUM_WORKER_TOKENS = 1_024
 _ASCII_CONTROL_LIMIT = 32
 
 
@@ -242,41 +237,6 @@ class PasskeyConfig:
             raise ImproperlyConfiguredException(detail=msg)
 
 
-def _feature_route_prefix(value: object) -> str:
-    if not isinstance(value, str):
-        msg = "MFA and passkey route prefixes must be absolute non-root paths"
-        raise ImproperlyConfiguredException(detail=msg)
-    normalized = value.rstrip("/")
-    if (
-        not normalized.startswith("/")
-        or normalized == ""
-        or "//" in normalized
-        or any(character.isspace() or ord(character) < _ASCII_CONTROL_LIMIT for character in normalized)
-    ):
-        msg = "MFA and passkey route prefixes must be absolute non-root paths"
-        raise ImproperlyConfiguredException(detail=msg)
-    return normalized
-
-
-def _exclusion_opt_key(value: object) -> str:
-    if not isinstance(value, str) or not value.strip():
-        msg = "Route exclusion opt key must be non-blank text"
-        raise ImproperlyConfiguredException(detail=msg)
-    return value.strip()
-
-
-def _exclude_patterns(value: object) -> tuple[str, ...] | str | None:
-    if value is None or isinstance(value, str):
-        return value
-    if isinstance(value, Sequence):
-        given = tuple(cast("Sequence[object]", value))
-        patterns = tuple(pattern for pattern in given if isinstance(pattern, str))
-        if len(patterns) == len(given):
-            return patterns
-    msg = "Route exclusion patterns must be text or a sequence of text"
-    raise ImproperlyConfiguredException(detail=msg)
-
-
 @dataclass(slots=True)
 class SecurityConfig(Generic[UserT]):
     """Configure the per-application security runtime."""
@@ -380,8 +340,8 @@ class SecurityConfig(Generic[UserT]):
             msg = "Raised-error schema must be a RaisedErrorSchema declaration"
             raise ImproperlyConfiguredException(detail=msg)
         self._validate_protected_resource()
-        self.exclude = _exclude_patterns(self.exclude)
-        self.exclude_opt_key = _exclusion_opt_key(self.exclude_opt_key)
+        self.exclude = self._exclude_patterns(self.exclude)
+        self.exclude_opt_key = self._exclusion_opt_key(self.exclude_opt_key)
         self.slots = tuple(self.slots)
         self.mechanisms = tuple(self.mechanisms)
         local_accounts = getattr(self.local_auth, "accounts", None)
@@ -422,3 +382,38 @@ class SecurityConfig(Generic[UserT]):
         if not isinstance(cast("object", self.protected_resource), ProtectedResourceConfig):
             msg = "Protected resource metadata must be a ProtectedResourceConfig"
             raise ImproperlyConfiguredException(detail=msg)
+
+    @staticmethod
+    def _exclusion_opt_key(value: object) -> str:
+        if not isinstance(value, str) or not value.strip():
+            msg = "Route exclusion opt key must be non-blank text"
+            raise ImproperlyConfiguredException(detail=msg)
+        return value.strip()
+
+    @staticmethod
+    def _exclude_patterns(value: object) -> tuple[str, ...] | str | None:
+        if value is None or isinstance(value, str):
+            return value
+        if isinstance(value, Sequence):
+            given = tuple(cast("Sequence[object]", value))
+            patterns = tuple(pattern for pattern in given if isinstance(pattern, str))
+            if len(patterns) == len(given):
+                return patterns
+        msg = "Route exclusion patterns must be text or a sequence of text"
+        raise ImproperlyConfiguredException(detail=msg)
+
+
+def _feature_route_prefix(value: object) -> str:
+    if not isinstance(value, str):
+        msg = "MFA and passkey route prefixes must be absolute non-root paths"
+        raise ImproperlyConfiguredException(detail=msg)
+    normalized = value.rstrip("/")
+    if (
+        not normalized.startswith("/")
+        or normalized == ""
+        or "//" in normalized
+        or any(character.isspace() or ord(character) < _ASCII_CONTROL_LIMIT for character in normalized)
+    ):
+        msg = "MFA and passkey route prefixes must be absolute non-root paths"
+        raise ImproperlyConfiguredException(detail=msg)
+    return normalized

@@ -3,9 +3,9 @@
 import hashlib
 import hmac
 import re
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
 
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException
@@ -21,19 +21,13 @@ from litestar_security.providers.api_key import (
 )
 from tests.fixtures.collaborators import build_api_key_store
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-
 _NOW = datetime(2026, 7, 28, 19, tzinfo=timezone.utc)
 _PEPPER = b"p" * 32
 _KEY_ID = "a2tra2tra2tra2tr"
 
-_MemoryAPIKeyStore = build_api_key_store
-
 
 def _codec(
-    *, entropy: "Callable[[int], bytes] | None" = None, comparator: "Callable[[bytes, bytes], bool] | None" = None
+    *, entropy: Callable[[int], bytes] | None = None, comparator: Callable[[bytes, bytes], bool] | None = None
 ) -> APIKeyCodec:
     return APIKeyCodec(
         pepper=_PEPPER,
@@ -279,14 +273,21 @@ def test_secret_bearing_values_are_redacted() -> None:
     )
 
 
-def test_codec_rejects_invalid_entropy_without_leaking_detail() -> None:
-    def raises(_length: int) -> bytes:
-        message = "entropy detail"
-        raise RuntimeError(message)
+def _raising_entropy(_length: int) -> bytes:
+    message = "entropy detail"
+    raise RuntimeError(message)
 
-    for entropy in (lambda _length: b"short", lambda _length: "not-bytes", raises):
-        with pytest.raises(RuntimeError, match="API-key generation unavailable"):
-            _codec(entropy=entropy).issue(subject_id="subject-1")  # type: ignore[arg-type]
+
+@pytest.mark.parametrize(
+    "entropy",
+    [lambda _length: b"short", lambda _length: "not-bytes", _raising_entropy],
+    ids=["short-bytes", "non-bytes", "raising-entropy"],
+)
+def test_codec_rejects_invalid_entropy_without_leaking_detail(entropy: Callable[[int], object]) -> None:
+    with pytest.raises(RuntimeError, match="API-key generation unavailable") as exc_info:
+        _codec(entropy=entropy).issue(subject_id="subject-1")  # type: ignore[arg-type]
+
+    assert "entropy detail" not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(

@@ -8,9 +8,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-02T01:45:00Z"
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-10T22:45:00Z"
-    commit: "398fd57"
+  - by: agent:flow-learn
+    at: "2026-11-11T20:45:00Z"
+    commit: "dcce78d"
 sources:
   - id: auth-domain
     resource: "src/litestar_security/authentication.py::AuthenticationRegistry"
@@ -35,7 +35,7 @@ sources:
 # Authentication, Authorization, & Evidence Domain Model
 
 <!-- truth: start -->
-- **`CredentialSlot` & Bearer Prefix Coordination**: Each physical slot (`"session"`, `"authorization.bearer"`, `"api-key"`, `"google-iap"`) has at most one owning `AuthenticationMechanism`. When `APIKeyConfig(accept_authorization_bearer=True)` coexists with `"authorization.bearer"`, `AuthenticationRegistry._coordinate_bearer_slots` sets `coexists_with_bearer_slot=True` on `_APIKeyCredentialSlot` and updates `excluded_prefixes` on dataclass bearer slots or wraps custom `"authorization.bearer"` slots in `_PrefixExcludingBearerSlot`; `_plan_uses_bearer` checks both `security_scheme` and `additional_security_schemes` (`APIKey` + `APIKeyBearer`) for RFC 9728 `WWW-Authenticate` challenges.[^auth-domain][^api-key-slot]
+- **`CredentialSlot` & Bearer Prefix Coordination**: Each physical slot (`"session"`, `"authorization.bearer"`, `"api-key"`, `"google-iap"`) has at most one owning `AuthenticationMechanism`. When `APIKeyConfig(accept_authorization_bearer=True)` coexists with `"authorization.bearer"`, `AuthenticationRegistry._coordinate_bearer_slots` sets `coexists_with_bearer_slot=True` on `_APIKeyCredentialSlot` and updates `excluded_prefixes` on dataclass bearer slots or wraps custom `"authorization.bearer"` slots in `_PrefixExcludingBearerSlot`; `SecurityMiddleware._plan_uses_bearer` checks both `security_scheme` and `additional_security_schemes` (`APIKey` + `APIKeyBearer`) for RFC 9728 `WWW-Authenticate` challenges.[^auth-domain][^api-key-slot]
 - **`CredentialVerifier` -> `IdentityResolver` -> `AuthorizationResolver`**:
   1. `CredentialVerifier.authenticate(credential, connection)` validates cryptographic/store integrity and yields `Authenticated(claims, evidence, grants, restrictions)`.
   2. `IdentityResolver.resolve(claims)` maps verified claims to an authenticated `Principal` or returns `InvalidCredentials` / `VerificationUnavailable`.

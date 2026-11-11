@@ -2,7 +2,6 @@
 
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -14,8 +13,6 @@ from litestar_security.websocket import (
     WebSocketSecurityConfig,
     extract_websocket_handshake,
 )
-
-_NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
 
 
 def _connection(*, headers: tuple[tuple[bytes, bytes], ...] = (), query_string: bytes = b"") -> SimpleNamespace:

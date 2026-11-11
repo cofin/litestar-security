@@ -65,14 +65,9 @@ from litestar_security.providers.oauth import (
     StepUpOAuthAuthorizer,
     build_oauth_routes,
 )
-from litestar_security.providers.oauth._routes import _exact_https_url
 from litestar_security.testing import FakeOAuthProvider, InMemoryStepUpStore
 
 NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
-
-
-class Provider:
-    name = "example"
 
 
 def oauth_fake_provider() -> FakeOAuthProvider:
@@ -780,21 +775,28 @@ async def test_concrete_lifecycle_composes_link_scope_revoke_unlink_and_logout()
     )
     assert isinstance(updated, OAuthOperationSummary)
     assert updated.detail == "Scopes updated."
-    for target_id, requested in (
-        ("another-provider-account", frozenset({"calendar"})),
-        (provider_account_id, frozenset({"email"})),
-    ):
-        with pytest.raises(OAuthAccountError):
-            await service.begin(
-                provider="example",
-                operation=OAuthOperation.SCOPE_UPGRADE,
-                account_id="account-1",
-                provider_account_id=target_id,
-                return_to="/",
-                scopes=requested,
-                step_up_grant="grant",
-                request=request,
-            )
+    with pytest.raises(OAuthAccountError):
+        await service.begin(
+            provider="example",
+            operation=OAuthOperation.SCOPE_UPGRADE,
+            account_id="account-1",
+            provider_account_id="another-provider-account",
+            return_to="/",
+            scopes=frozenset({"calendar"}),
+            step_up_grant="grant",
+            request=request,
+        )
+    with pytest.raises(OAuthAccountError):
+        await service.begin(
+            provider="example",
+            operation=OAuthOperation.SCOPE_UPGRADE,
+            account_id="account-1",
+            provider_account_id=provider_account_id,
+            return_to="/",
+            scopes=frozenset({"email"}),
+            step_up_grant="grant",
+            request=request,
+        )
     logout = await service.logout(provider="example", account_id="account-1", request=request)
     assert logout.redirect_url is not None
     assert "post_logout_redirect_uri=https%3A%2F%2Fapp.example%2Flogged-out" in logout.redirect_url
@@ -969,18 +971,6 @@ async def test_lifecycle_and_local_transport_reject_invalid_or_unavailable_paths
     async def token_logout(account_id: str) -> None:
         token_calls.append(account_id)
 
-    for result, exception in (
-        (VerificationUnavailable(), ServiceUnavailableException),
-        (object(), NotAuthorizedException),
-    ):
-        transport = OAuthLocalAuthTransport(
-            local_auth_service=cast("Any", ConfigurableLocalServices(result, session_auth=SessionLogout())),
-            transport="session",
-        )
-        with pytest.raises(exception):
-            await transport.establish(
-                account_id="account-1", identity=provider.identity, request=request, authenticated_at=NOW
-            )
     token_transport = OAuthLocalAuthTransport(
         local_auth_service=cast("Any", ConfigurableLocalServices(refresh_response, refresh_tokens=object())),
         transport="tokens",
@@ -994,6 +984,26 @@ async def test_lifecycle_and_local_transport_reject_invalid_or_unavailable_paths
     )
     await token_transport.logout(account_id="account-1", request=request)
     assert token_calls == ["account-1"]
+
+
+@pytest.mark.parametrize(
+    ("result", "exception"),
+    [(VerificationUnavailable(), ServiceUnavailableException), (object(), NotAuthorizedException)],
+    ids=["verification-unavailable", "unexpected-result"],
+)
+async def test_local_transport_rejects_failed_or_unexpected_session_login_results(
+    result: object, exception: type[Exception]
+) -> None:
+    provider = oauth_fake_provider()
+    request = cast("Request[Any, Any, Any]", type("BrowserRequest", (), {"cookies": {}})())
+    transport = OAuthLocalAuthTransport(
+        local_auth_service=cast("Any", ConfigurableLocalServices(result, session_auth=SessionLogout())),
+        transport="session",
+    )
+    with pytest.raises(exception):
+        await transport.establish(
+            account_id="account-1", identity=provider.identity, request=request, authenticated_at=NOW
+        )
 
 
 async def test_lifecycle_rejects_scope_upgrade_without_an_owned_unsatisfied_target() -> None:
@@ -1099,8 +1109,17 @@ def test_oauth_provider_registration_rejects_invalid_metadata(kwargs: dict[str, 
         (object(), False),
     ],
 )
-def test_exact_https_url_rejects_noncanonical_or_malformed_values(value: object, valid: object) -> None:
-    assert _exact_https_url(value) is valid  # type: ignore[arg-type]
+def test_exact_https_url_rejects_noncanonical_or_malformed_values(value: object, *, valid: bool) -> None:
+    if valid:
+        registration = OAuthProviderRegistration(
+            provider=oauth_fake_provider(), redirect_uri=cast("str", value), default_scopes=frozenset({"profile"})
+        )
+        assert registration.redirect_uri == value
+    else:
+        with pytest.raises(ImproperlyConfiguredException, match="OAuth provider registration is invalid"):
+            OAuthProviderRegistration(
+                provider=oauth_fake_provider(), redirect_uri=cast("str", value), default_scopes=frozenset({"profile"})
+            )
 
 
 def test_oauth_lifecycle_rejects_invalid_dependency_graph() -> None:
@@ -1232,6 +1251,7 @@ async def test_oidc_front_and_backchannel_logout_routes_delegate_verified_lifecy
 
 
 async def test_frontchannel_logout_requires_ownership_binding_and_consumes_replay_marker() -> None:
+    """Verify front-channel logout requires the bound browser cookie so a bare cross-site GET revokes nothing."""
     sessions = LogoutSessions()
     sessions.frontchannel_owners[("example", "https://issuer.example", "sid-front")] = "front-binding"
     oidc_logout = OIDCLogoutLifecycleService(
@@ -1256,7 +1276,6 @@ async def test_frontchannel_logout_requires_ownership_binding_and_consumes_repla
         owned = await client.get("/auth/oidc/example/frontchannel-logout", params=params)
         replayed = await client.get("/auth/oidc/example/frontchannel-logout", params=params)
 
-    # A bare cross-site GET carries no binding cookie, so a guessed sid revokes nothing.
     assert unbound.status_code == 401
     assert foreign.status_code == 401
     assert owned.status_code == 200
@@ -1266,6 +1285,7 @@ async def test_frontchannel_logout_requires_ownership_binding_and_consumes_repla
 
 
 async def test_frontchannel_logout_consumes_budget_and_rejects_bursts_with_retry_after() -> None:
+    """Verify rejected front-channel logout attempts consume budget so sid probing is bounded."""
     guard = RateLimitGuard(
         limiter=StoreRateLimiter(
             policies={"oidc.logout.frontchannel": RateLimitPolicy(limit=2, window=timedelta(minutes=5))},
@@ -1295,7 +1315,6 @@ async def test_frontchannel_logout_consumes_budget_and_rejects_bursts_with_retry
         ]
         limited = await client.get("/auth/oidc/example/frontchannel-logout", params=params)
 
-    # A rejected attempt still consumes budget, so unauthenticated sid probing is bounded.
     assert statuses == [401, 401, 429]
     assert limited.status_code == 429
     assert int(limited.headers["retry-after"]) >= 1
@@ -1378,6 +1397,10 @@ def test_oidc_logout_lifecycle_rejects_invalid_configuration(kwargs: dict[str, o
 
 
 async def test_oidc_logout_lifecycle_rejects_mismatches_unknown_provider_and_naive_clock() -> None:
+    """Verify OIDC logout lifecycle failures reject identically across invalid inputs.
+
+    Covers mismatched claims, unknown providers, unowned bindings, store outages, and naive clocks.
+    """
     sessions = LogoutSessions()
     request = cast(
         "Request[Any, Any, Any]",
@@ -1406,7 +1429,6 @@ async def test_oidc_logout_lifecycle_rejects_mismatches_unknown_provider_and_nai
         await service.frontchannel("example", "https://issuer.example", " ", request=request)
     with pytest.raises(NotAuthorizedException, match="request"):
         await service.frontchannel("example", "https://issuer.example", "sid", request=unbound_request)
-    # An unowned binding is rejected in the same shape as every other refusal.
     with pytest.raises(NotAuthorizedException, match="request"):
         await service.frontchannel("example", "https://issuer.example", "sid", request=request)
 
@@ -1522,6 +1544,10 @@ def test_oauth_dtos_redact_step_up_secrets() -> None:
 
 
 async def test_authenticated_routes_delegate_to_shared_service() -> None:
+    """Verify authenticated OAuth routes delegate without creating resources or nulling absent IDs.
+
+    Revoking tokens and logging out return 200, and operations without resolved identifiers omit the field.
+    """
     service = RouteService()
     app = oauth_app(openapi=False, oauth_service=service)
 
@@ -1547,9 +1573,7 @@ async def test_authenticated_routes_delegate_to_shared_service() -> None:
 
     assert link.status_code == 302
     assert scope.status_code == 302
-    # Neither revoking provider tokens nor logging out creates anything.
     assert (unlink.status_code, revoke.status_code, logout.status_code) == (200, 200, 200)
-    # An operation that resolved no identifier omits the member rather than nulling it.
     assert unlink.json() == {"detail": "Unlinked."}
     assert revoke.json() == {"detail": "Revoked."}
     assert logout.json() == {"detail": "Logged out."}
@@ -1558,6 +1582,7 @@ async def test_authenticated_routes_delegate_to_shared_service() -> None:
 
 
 async def test_lifecycle_response_names_each_identifier_it_carries() -> None:
+    """Verify back-channel logout returns revoked_sessions as a count rather than an account identifier."""
     oidc_logout = OIDCLogoutLifecycleService(
         provider_issuers={"example": "https://issuer.example"},
         consumer=LogoutConsumer(),
@@ -1574,7 +1599,6 @@ async def test_lifecycle_response_names_each_identifier_it_carries() -> None:
     async with AsyncTestClient(app=app) as client:
         logout = await client.post("/auth/oidc/example/backchannel-logout", data={"logout_token": "signed-token"})
 
-    # A revoked-session count is a count, not an account identifier.
     assert logout.json() == {"detail": "OIDC sessions revoked.", "revoked_sessions": 1}
 
 
@@ -1732,10 +1756,15 @@ async def test_replayed_callback_state_classifies_as_unauthorized() -> None:
     assert "Traceback" not in replayed.text
 
 
-def test_openapi_never_contains_provider_secrets_or_protocol_credentials() -> None:
-    app = oauth_app(openapi=True)
+@pytest.fixture(scope="module")
+def oauth_openapi_document() -> str:
+    return str(oauth_app(openapi=True).openapi_schema.to_schema()).lower()
 
-    document = str(app.openapi_schema.to_schema())
 
-    for forbidden in ("client_secret", "access_token", "refresh_token", "raw_claims", "nonce", "state"):
-        assert forbidden not in document.lower()
+@pytest.mark.parametrize(
+    "forbidden", ["client_secret", "access_token", "refresh_token", "raw_claims", "nonce", "state"]
+)
+def test_openapi_never_contains_provider_secrets_or_protocol_credentials(
+    forbidden: str, oauth_openapi_document: str
+) -> None:
+    assert forbidden not in oauth_openapi_document

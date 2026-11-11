@@ -118,9 +118,6 @@ CSRF_REQUIRED_OPT_KEY = "csrf_required"
 _SECURITY_RESPONSE_HEADERS_SCOPE_KEY = "_litestar_security_response_headers"
 
 
-_NATIVE_EXCEPTION_HANDLER = ExceptionHandlerMiddleware
-
-
 def queue_security_response_header(scope: Scope, header: tuple[bytes, bytes]) -> None:
     """Queue one encoded header for the next HTTP response start event."""
     if scope["type"] != ScopeType.HTTP:
@@ -524,7 +521,7 @@ class AuthenticationRegistry(Generic[UserT]):
         """Normalize names and reject ambiguous ownership before startup."""
         slots = tuple(self.slots)
         mechanisms = tuple(self.mechanisms)
-        _validate_authorization_resolver(self.authorization_resolver)
+        self._validate_authorization_resolver(self.authorization_resolver)
         slots_by_name: dict[str, CredentialSlot[Any]] = {}
         slot_names: list[str] = []
         for slot in slots:
@@ -630,6 +627,12 @@ class AuthenticationRegistry(Generic[UserT]):
             An evaluator that may be shared across requests.
         """
         return _AuthenticationEvaluator(self)
+
+    @staticmethod
+    def _validate_authorization_resolver(resolver: object | None) -> None:
+        if resolver is not None and not callable(getattr(resolver, "resolve", None)):
+            message = "Authorization resolver must define resolve"
+            raise ImproperlyConfiguredException(detail=message)
 
     @staticmethod
     def _coordinate_bearer_slots(
@@ -753,7 +756,7 @@ class SecurityRuntimeConfig(Generic[UserT]):
 
     def resolve_plan(self, scope: Scope) -> SecurityRuntimePlan:
         """Resolve generated OPTIONS, custom lookup, route opt, then default."""
-        if _is_generated_options(scope):
+        if self._is_generated_options(scope):
             return SecurityRuntimePlan(authenticate=False)
         if self.plan_lookup is not None:
             return self.plan_lookup(scope)
@@ -762,6 +765,16 @@ class SecurityRuntimeConfig(Generic[UserT]):
         if isinstance(opt, Mapping) and isinstance(plan := opt.get(RUNTIME_PLAN_OPT_KEY), SecurityRuntimePlan):
             return plan
         return self._default_plan
+
+    @staticmethod
+    def _is_generated_options(scope: Scope) -> bool:
+        if scope["type"] != ScopeType.HTTP:
+            return False
+        http_scope: HTTPScope = scope
+        if http_scope["method"] != "OPTIONS":
+            return False
+        route_handler = cast("Mapping[str, object]", scope).get("route_handler")
+        return is_generated_options_handler(getattr(route_handler, "fn", None))
 
 
 class SecurityMiddleware(Generic[UserT]):
@@ -791,7 +804,7 @@ class SecurityMiddleware(Generic[UserT]):
             try:
                 principal, context = await self.evaluator.evaluate(connection, session, plan=plan)
             except NotAuthorizedException as exc:
-                _advertise_resource_metadata(exc, config=self.config, plan=plan)
+                self._advertise_resource_metadata(exc, config=self.config, plan=plan)
                 raise
             scope["user"] = principal
             scope["auth"] = context
@@ -852,7 +865,7 @@ class SecurityMiddleware(Generic[UserT]):
             return
         coordinator = WebSocketCloseCoordinator(send)
         current_context = cast("SecurityContext", scope["auth"])
-        route_name = _websocket_route_name(scope)
+        route_name = self._websocket_route_name(scope)
         revocation_hook: Callable[[], Awaitable[None]] | None = None
         refresh_hook: Callable[[], Awaitable[None]] | None = None
         if (
@@ -860,7 +873,7 @@ class SecurityMiddleware(Generic[UserT]):
             and cast("Principal[Any]", scope["user"]).is_authenticated
         ):
             source = self.config.websocket.revocation_source
-            binding = _websocket_binding(
+            binding = self._websocket_binding(
                 principal=cast("Principal[Any]", scope["user"]), context=current_context, route_name=route_name
             )
 
@@ -936,10 +949,7 @@ class SecurityMiddleware(Generic[UserT]):
         extracted: Sequence[tuple[str, CredentialExtraction[Any]]],
     ) -> tuple[Principal[UserT], SecurityContext]:
         connect_token_store = self.config.websocket.connect_token_store
-        route_handler = cast("Mapping[str, object]", scope).get("route_handler")
-        route_name = cast("str | None", getattr(route_handler, "name", None)) or cast(
-            "str", getattr(route_handler, "handler_name", "")
-        )
+        route_name = self._websocket_route_name(scope)
         if connect_token_store is None or handshake.origin is None or not route_name or handshake.connect_token is None:
             raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
         connect_token = await WebSocketConnectTokenService(
@@ -976,19 +986,12 @@ class SecurityMiddleware(Generic[UserT]):
         else:
             principal = Principal(id=connect_token.subject_id)
             resolver = self.config.registry.authorization_resolver
-            if resolver is None:
-                authorization = AuthorizationSnapshot()
-            else:
-                try:
-                    resolution = await resolver.resolve(principal)
-                except Exception:  # noqa: BLE001 - a raising authorization resolver fails closed as one 503
-                    raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
-                if isinstance(resolution, VerificationUnavailable):
-                    raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
-                if isinstance(resolution, InvalidCredentials):
-                    raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-                authorization = resolution
-            authorization = resolve_authorization(authorization, (connect_token.restrictions,))
+            snapshot = (
+                AuthorizationSnapshot()
+                if resolver is None
+                else await _resolve_principal_authorization(resolver, principal)
+            )
+            authorization = resolve_authorization(snapshot, (connect_token.restrictions,))
         evidence = AuthenticationEvidence(
             mechanism="websocket-connect-token",
             slot=self.config.websocket.connect_token_query_parameter,
@@ -1003,6 +1006,66 @@ class SecurityMiddleware(Generic[UserT]):
             restrictions=(*context.restrictions, connect_token.restrictions),
         )
 
+    @staticmethod
+    def _advertise_resource_metadata(
+        exc: NotAuthorizedException, *, config: SecurityRuntimeConfig[Any], plan: SecurityRuntimePlan
+    ) -> None:
+        """Add RFC 9728 discovery to one applicable RFC 6750 challenge."""
+        metadata_url = config.resource_metadata_url
+        if metadata_url is None or not SecurityMiddleware._plan_uses_bearer(config.registry, plan):
+            return
+        headers = dict(exc.headers or {})
+        header_name = next((name for name in headers if name.lower() == "www-authenticate"), "WWW-Authenticate")
+        challenge = headers.get(header_name)
+        parameter = f'resource_metadata="{SecurityMiddleware._quote_challenge_value(metadata_url)}"'
+        if challenge is None:
+            headers[header_name] = f"Bearer {parameter}"
+        elif challenge.split(maxsplit=1)[0].lower() == "bearer" and "resource_metadata=" not in challenge.lower():
+            headers[header_name] = f"{challenge}, {parameter}"
+        else:
+            return
+        exc.headers = headers
+
+    @staticmethod
+    def _plan_uses_bearer(registry: AuthenticationRegistry[Any], plan: SecurityRuntimePlan) -> bool:
+        participants = plan.participant_names
+        names = registry.default_mechanism_names if participants is None else participants
+        for name in names:
+            mechanism = registry.get_mechanism(name)
+            for scheme in (mechanism.security_scheme, *mechanism.additional_security_schemes.values()):
+                if (
+                    scheme is not None
+                    and scheme.type == "http"
+                    and scheme.scheme is not None
+                    and scheme.scheme.lower() == "bearer"
+                ):
+                    return True
+        return False
+
+    @staticmethod
+    def _quote_challenge_value(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    @staticmethod
+    def _websocket_route_name(scope: Scope) -> str:
+        route_handler = cast("Mapping[str, object]", scope).get("route_handler")
+        return cast("str | None", getattr(route_handler, "name", None)) or cast(
+            "str", getattr(route_handler, "handler_name", "")
+        )
+
+    @staticmethod
+    def _websocket_binding(*, principal: Principal[Any], context: SecurityContext, route_name: str) -> WebSocketBinding:
+        session_value = context.session.get("_litestar_security")
+        session_mapping = cast("Mapping[str, object]", session_value) if isinstance(session_value, Mapping) else None
+        session_id = cast("str | None", session_mapping.get("session_id")) if session_mapping is not None else None
+        return WebSocketBinding(
+            connection_id=token_urlsafe(16),
+            subject_id=cast("str", principal.id),
+            credential_ids=frozenset(f"{evidence.mechanism}:{evidence.slot}" for evidence in context.evidence),
+            session_id=session_id,
+            route_name=route_name,
+        )
+
 
 class SecurityMiddlewareWrapper(Generic[UserT]):
     """Lazily build session -> native exception -> security."""
@@ -1014,14 +1077,6 @@ class SecurityMiddlewareWrapper(Generic[UserT]):
         self.app = app
         self.config = config
         self._wrapped: ASGIApp | None = None
-
-    def _build_stack(self) -> ASGIApp:
-        security = SecurityMiddleware(app=self.app, config=self.config)
-        wrapped: ASGIApp = ExceptionHandlerMiddleware(app=security, debug=None)
-        if self.config.owned_session_backend is not None:
-            session = self.config.owned_session_backend
-            wrapped = session.middleware.middleware(app=wrapped, backend=session.backend)
-        return wrapped
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Build the wrapper once and dispatch the connection."""
@@ -1037,45 +1092,28 @@ class SecurityMiddlewareWrapper(Generic[UserT]):
 
         await self._wrapped(scope, receive, send_with_security_headers)
 
-
-def _advertise_resource_metadata(
-    exc: NotAuthorizedException, *, config: SecurityRuntimeConfig[Any], plan: SecurityRuntimePlan
-) -> None:
-    """Add RFC 9728 discovery to one applicable RFC 6750 challenge."""
-    metadata_url = config.resource_metadata_url
-    if metadata_url is None or not _plan_uses_bearer(config.registry, plan):
-        return
-    headers = dict(exc.headers or {})
-    header_name = next((name for name in headers if name.lower() == "www-authenticate"), "WWW-Authenticate")
-    challenge = headers.get(header_name)
-    parameter = f'resource_metadata="{_quote_challenge_value(metadata_url)}"'
-    if challenge is None:
-        headers[header_name] = f"Bearer {parameter}"
-    elif challenge.split(maxsplit=1)[0].lower() == "bearer" and "resource_metadata=" not in challenge.lower():
-        headers[header_name] = f"{challenge}, {parameter}"
-    else:
-        return
-    exc.headers = headers
+    def _build_stack(self) -> ASGIApp:
+        security = SecurityMiddleware(app=self.app, config=self.config)
+        wrapped: ASGIApp = ExceptionHandlerMiddleware(app=security, debug=None)
+        if self.config.owned_session_backend is not None:
+            session = self.config.owned_session_backend
+            wrapped = session.middleware.middleware(app=wrapped, backend=session.backend)
+        return wrapped
 
 
-def _plan_uses_bearer(registry: AuthenticationRegistry[Any], plan: SecurityRuntimePlan) -> bool:
-    participants = plan.participant_names
-    names = registry.default_mechanism_names if participants is None else participants
-    for name in names:
-        mechanism = registry.get_mechanism(name)
-        for scheme in (mechanism.security_scheme, *mechanism.additional_security_schemes.values()):
-            if (
-                scheme is not None
-                and scheme.type == "http"
-                and scheme.scheme is not None
-                and scheme.scheme.lower() == "bearer"
-            ):
-                return True
-    return False
-
-
-def _quote_challenge_value(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+async def _resolve_principal_authorization(
+    resolver: AuthorizationResolver[UserT], principal: Principal[UserT]
+) -> AuthorizationSnapshot:
+    """Resolve application authorization for one principal and normalize failures."""
+    try:
+        resolution = await resolver.resolve(principal)
+    except Exception:  # noqa: BLE001 - a raising authorization resolver fails closed as one 503
+        raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
+    if isinstance(resolution, VerificationUnavailable):
+        raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
+    if isinstance(resolution, InvalidCredentials):
+        raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
+    return resolution
 
 
 def _normalize_name(value: str, label: str) -> str:
@@ -1173,29 +1211,6 @@ class _AuthenticationEvaluator(Generic[UserT]):
             restrictions=tuple(outcome.restrictions for outcome in authenticated),
         )
 
-    async def _resolve_authorization(
-        self, principal: Principal[UserT], outcomes: Sequence[Authenticated[Any]]
-    ) -> AuthorizationSnapshot:
-        resolver = self.registry.authorization_resolver
-        if resolver is None:
-            snapshot = _merge_authorization(outcomes)
-        else:
-            try:
-                resolution = await resolver.resolve(principal)
-            except Exception:  # noqa: BLE001 - a raising authorization resolver fails closed as one 503
-                raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
-            if isinstance(resolution, VerificationUnavailable):
-                raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE)
-            if isinstance(resolution, InvalidCredentials):
-                raise NotAuthorizedException(detail=_AUTHENTICATION_REQUIRED)
-            snapshot = resolution
-        return resolve_authorization(snapshot, tuple(outcome.restrictions for outcome in outcomes))
-
-    def _participant_names(self, participant_names: AbstractSet[str] | None) -> frozenset[str]:
-        if participant_names is None:
-            return frozenset(self.registry.default_mechanism_names)
-        return frozenset(_normalize_name(name, "Authentication participant") for name in participant_names)
-
     def extract(
         self, connection: ASGIConnection[Any, Any, Any, Any]
     ) -> tuple[tuple[str, CredentialExtraction[Any]], ...]:
@@ -1208,6 +1223,22 @@ class _AuthenticationEvaluator(Generic[UserT]):
                 raise ServiceUnavailableException(detail=_AUTHENTICATION_UNAVAILABLE) from None
             extracted.append((slot_name, extraction))
         return tuple(extracted)
+
+    async def _resolve_authorization(
+        self, principal: Principal[UserT], outcomes: Sequence[Authenticated[Any]]
+    ) -> AuthorizationSnapshot:
+        resolver = self.registry.authorization_resolver
+        snapshot = (
+            self._merge_authorization(outcomes)
+            if resolver is None
+            else await _resolve_principal_authorization(resolver, principal)
+        )
+        return resolve_authorization(snapshot, tuple(outcome.restrictions for outcome in outcomes))
+
+    def _participant_names(self, participant_names: AbstractSet[str] | None) -> frozenset[str]:
+        if participant_names is None:
+            return frozenset(self.registry.default_mechanism_names)
+        return frozenset(_normalize_name(name, "Authentication participant") for name in participant_names)
 
     async def _authenticate(
         self, extracted: Sequence[tuple[str, CredentialExtraction[Any]]], connection: ASGIConnection[Any, Any, Any, Any]
@@ -1263,66 +1294,30 @@ class _AuthenticationEvaluator(Generic[UserT]):
             resolved.append(_ResolvedAuthentication(name=name, outcome=authenticated, principal=principal))
         return resolved
 
-
-def _validate_authorization_resolver(resolver: object | None) -> None:
-    if resolver is not None and not callable(getattr(resolver, "resolve", None)):
-        message = "Authorization resolver must define resolve"
-        raise ImproperlyConfiguredException(detail=message)
-
-
-def _merge_authorization(outcomes: Sequence[Authenticated[Any]]) -> AuthorizationSnapshot:
-    scopes: set[str] = set()
-    roles: set[str] = set()
-    capabilities: set[str] = set()
-    tenant_roles: dict[str, set[str]] = {}
-    tenant_ids: set[str] = set()
-    resources: set[ResourcePermission] = set()
-    attributes: dict[str, object] = {}
-    for outcome in outcomes:
-        scopes.update(outcome.grants.scopes)
-        roles.update(outcome.grants.roles)
-        capabilities.update(outcome.grants.capabilities)
-        for tenant_id, grants in outcome.grants.tenant_roles.items():
-            tenant_roles.setdefault(tenant_id, set()).update(grants)
-        tenant_ids.update(outcome.grants.tenant_ids)
-        resources.update(outcome.grants.resources)
-        attributes.update(outcome.grants.attributes)
-    return AuthorizationSnapshot(
-        scopes=frozenset(scopes),
-        roles=frozenset(roles),
-        capabilities=frozenset(capabilities),
-        tenant_roles={tenant_id: frozenset(grants) for tenant_id, grants in tenant_roles.items()},
-        tenant_ids=frozenset(tenant_ids),
-        resources=frozenset(resources),
-        attributes=attributes,
-    )
-
-
-def _is_generated_options(scope: Scope) -> bool:
-    if scope["type"] != ScopeType.HTTP:
-        return False
-    http_scope: HTTPScope = scope
-    if http_scope["method"] != "OPTIONS":
-        return False
-    route_handler = cast("Mapping[str, object]", scope).get("route_handler")
-    return is_generated_options_handler(getattr(route_handler, "fn", None))
-
-
-def _websocket_route_name(scope: Scope) -> str:
-    route_handler = cast("Mapping[str, object]", scope).get("route_handler")
-    return cast("str | None", getattr(route_handler, "name", None)) or cast(
-        "str", getattr(route_handler, "handler_name", "")
-    )
-
-
-def _websocket_binding(*, principal: Principal[Any], context: SecurityContext, route_name: str) -> WebSocketBinding:
-    session_value = context.session.get("_litestar_security")
-    session_mapping = cast("Mapping[str, object]", session_value) if isinstance(session_value, Mapping) else None
-    session_id = cast("str | None", session_mapping.get("session_id")) if session_mapping is not None else None
-    return WebSocketBinding(
-        connection_id=token_urlsafe(16),
-        subject_id=cast("str", principal.id),
-        credential_ids=frozenset(f"{evidence.mechanism}:{evidence.slot}" for evidence in context.evidence),
-        session_id=session_id,
-        route_name=route_name,
-    )
+    @staticmethod
+    def _merge_authorization(outcomes: Sequence[Authenticated[Any]]) -> AuthorizationSnapshot:
+        scopes: set[str] = set()
+        roles: set[str] = set()
+        capabilities: set[str] = set()
+        tenant_roles: dict[str, set[str]] = {}
+        tenant_ids: set[str] = set()
+        resources: set[ResourcePermission] = set()
+        attributes: dict[str, object] = {}
+        for outcome in outcomes:
+            scopes.update(outcome.grants.scopes)
+            roles.update(outcome.grants.roles)
+            capabilities.update(outcome.grants.capabilities)
+            for tenant_id, grants in outcome.grants.tenant_roles.items():
+                tenant_roles.setdefault(tenant_id, set()).update(grants)
+            tenant_ids.update(outcome.grants.tenant_ids)
+            resources.update(outcome.grants.resources)
+            attributes.update(outcome.grants.attributes)
+        return AuthorizationSnapshot(
+            scopes=frozenset(scopes),
+            roles=frozenset(roles),
+            capabilities=frozenset(capabilities),
+            tenant_roles={tenant_id: frozenset(grants) for tenant_id, grants in tenant_roles.items()},
+            tenant_ids=frozenset(tenant_ids),
+            resources=frozenset(resources),
+            attributes=attributes,
+        )

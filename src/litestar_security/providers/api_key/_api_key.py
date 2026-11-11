@@ -52,10 +52,6 @@ _BASE64URL_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstu
 _PREFIX_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 @dataclass(frozen=True, slots=True)
 class APIKeyState:
     """Storage-safe API-key state containing only a keyed digest.
@@ -75,9 +71,9 @@ class APIKeyState:
     def __post_init__(self) -> None:
         """Validate canonical lookup, digest, timestamps, and rotation bounds."""
         try:
-            expires_at = _optional_utc(self.expires_at)
-            revoked_at = _optional_utc(self.revoked_at)
-            overlap_until = _optional_utc(self.overlap_until)
+            expires_at = self._optional_utc(self.expires_at)
+            revoked_at = self._optional_utc(self.revoked_at)
+            overlap_until = self._optional_utc(self.overlap_until)
         except (AttributeError, ValueError):
             message = "API-key record timestamps must be timezone-aware"
             raise ValueError(message) from None
@@ -89,7 +85,7 @@ class APIKeyState:
         )
         if (
             _decode_segment(self.key_id, expected_bytes=_KEY_ID_BYTES, expected_characters=_KEY_ID_CHARACTERS) is None
-            or not _strict_text(self.subject_id)
+            or not self._strict_text(self.subject_id)
             or self.digest.__class__ is not bytes
             or len(self.digest) != _DIGEST_BYTES
             or not isinstance(restrictions, CredentialRestrictions)
@@ -113,7 +109,7 @@ class APIKeyState:
         Raises:
             ValueError: If ``now`` is not timezone-aware.
         """
-        current = _utc(now)
+        current = aware_utc(now)
         if self.expires_at is not None and current >= self.expires_at:
             return False
         if self.revoked_at is None or current < self.revoked_at:
@@ -135,6 +131,20 @@ class APIKeyState:
             "revoked_at": self.revoked_at,
             "overlap_until": self.overlap_until,
         }
+
+    @staticmethod
+    def _strict_text(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and value.__class__ is str
+            and value == value.strip()
+            and bool(value)
+            and all(ord(character) >= _ASCII_CONTROL_LIMIT for character in value)
+        )
+
+    @staticmethod
+    def _optional_utc(value: datetime | None) -> datetime | None:
+        return None if value is None else aware_utc(value)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -370,7 +380,7 @@ class APIKeyConfig:
             or self.usage_buffer_capacity.__class__ is not int
             or not 1 <= self.usage_buffer_capacity <= _MAXIMUM_USAGE_BUFFER_CAPACITY
             or not _valid_prefix(self.prefix)
-            or not _valid_header_name(self.header_name)
+            or not self._valid_header_name(self.header_name)
             or self.header_name.lower() == "authorization"
             or self.accept_authorization_bearer.__class__ is not bool
         ):
@@ -395,7 +405,7 @@ class APIKeyConfig:
         self,
         resolver: "IdentityResolver[APIKeyClaims, UserT] | None" = None,
         *,
-        clock: "Callable[[], datetime]" = _utc_now,
+        clock: "Callable[[], datetime]" = lambda: datetime.now(timezone.utc),
         entropy: "Callable[[int], bytes]" = token_bytes,
         metrics: "SecurityMetrics | None" = None,
         participates_by_default: bool = True,
@@ -431,6 +441,15 @@ class APIKeyConfig:
             entropy=entropy,
             metrics=NoOpSecurityMetrics() if metrics is None else metrics,
             participates_by_default=participates_by_default,
+        )
+
+    @staticmethod
+    def _valid_header_name(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and value.__class__ is str
+            and bool(value)
+            and all(character.isascii() and (character.isalnum() or character == "-") for character in value)
         )
 
 
@@ -503,7 +522,7 @@ class APIKeyCodec:
         record = APIKeyState(
             key_id=key_id,
             subject_id=subject_id,
-            digest=_digest(self.pepper, key_id, secret),
+            digest=self._digest(self.pepper, key_id, secret),
             restrictions=restrictions if restrictions is not None else CredentialRestrictions(),
             expires_at=expires_at,
         )
@@ -530,7 +549,7 @@ class APIKeyCodec:
             or _decode_segment(secret, expected_bytes=_SECRET_BYTES, expected_characters=_SECRET_CHARACTERS) is None
         ):
             return None
-        return APIKeyProof(key_id=key_id, digest=_digest(self.pepper, key_id, secret))
+        return APIKeyProof(key_id=key_id, digest=self._digest(self.pepper, key_id, secret))
 
     def matches(self, proof: APIKeyProof, record: APIKeyState) -> bool:
         """Compare one computed digest with a record through the configured comparator.
@@ -557,6 +576,18 @@ class APIKeyCodec:
             raise APIKeyGenerationError
         return value
 
+    @staticmethod
+    def _digest(pepper: bytes, key_id: str, secret: str) -> bytes:
+        return hmac_new(pepper, _DOMAIN + key_id.encode("ascii") + b"\x00" + secret.encode("ascii"), sha256).digest()
+
+
+def aware_utc(value: datetime) -> datetime:
+    """Normalize a timezone-aware API-key timestamp to UTC."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        message = "API-key timestamp must be timezone-aware"
+        raise ValueError(message)
+    return value.astimezone(timezone.utc)
+
 
 def _parse_key_value(value: object) -> tuple[str, str, str] | None:
     if not isinstance(value, str) or value.__class__ is not str:
@@ -571,31 +602,12 @@ def _parse_key_value(value: object) -> tuple[str, str, str] | None:
     return prefix, encoded[:_KEY_ID_CHARACTERS], encoded[_KEY_ID_CHARACTERS + 1 :]
 
 
-def _strict_text(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and value.__class__ is str
-        and value == value.strip()
-        and bool(value)
-        and all(ord(character) >= _ASCII_CONTROL_LIMIT for character in value)
-    )
-
-
 def _valid_prefix(value: object) -> bool:
     return (
         isinstance(value, str)
         and value.__class__ is str
         and 1 <= len(value) <= _MAXIMUM_PREFIX_CHARACTERS
         and all(character in _PREFIX_ALPHABET for character in value)
-    )
-
-
-def _valid_header_name(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and value.__class__ is str
-        and bool(value)
-        and all(character.isascii() and (character.isalnum() or character == "-") for character in value)
     )
 
 
@@ -617,18 +629,3 @@ def _decode_segment(value: object, *, expected_bytes: int, expected_characters: 
     except (BinasciiError, UnicodeError, ValueError):  # pragma: no cover - strict alphabet guards decoding
         return None
     return decoded if len(decoded) == expected_bytes and _encode_segment(decoded) == value else None
-
-
-def _digest(pepper: bytes, key_id: str, secret: str) -> bytes:
-    return hmac_new(pepper, _DOMAIN + key_id.encode("ascii") + b"\x00" + secret.encode("ascii"), sha256).digest()
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        message = "API-key timestamp must be timezone-aware"
-        raise ValueError(message)
-    return value.astimezone(timezone.utc)
-
-
-def _optional_utc(value: datetime | None) -> datetime | None:
-    return None if value is None else _utc(value)

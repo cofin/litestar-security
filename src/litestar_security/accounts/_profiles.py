@@ -5,7 +5,6 @@ from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from hashlib import sha256
 from hmac import digest as hmac_digest
-from logging import getLogger
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from litestar import Router
@@ -14,12 +13,15 @@ from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security._docs import LOCAL_TAG_KEYS, RouteDocs, resolve_tags
 from litestar_security.accounts._access_tokens import (
+    DEFAULT_ACCESS_TOKEN_LIFETIME,
+    DEFAULT_LOCAL_CLIENT_ID,
     LocalAccessTokenIssuer,
     LocalAccessVerifier,
     LocalBearerIdentityResolver,
     validate_access_token_lifetime,
 )
 from litestar_security.accounts._auth_service import LocalAuthService, trusted_client_key
+from litestar_security.accounts._internal import ASCII_CONTROL_LIMIT
 from litestar_security.accounts._login import PasswordLoginService, PasswordReauthenticationService
 from litestar_security.accounts._mfa import MFAService
 from litestar_security.accounts._mfa_login import MFALoginChallengeStore, MFALoginService
@@ -68,13 +70,9 @@ if TYPE_CHECKING:
 __all__ = ("LocalAuth", "LocalAuthConfig", "LocalAuthSecrets", "LocalAuthService", "trusted_client_key")
 
 UserT = TypeVar("UserT")
-_ASCII_CONTROL_LIMIT = 32
-_DEFAULT_ACCESS_TOKEN_LIFETIME = timedelta(minutes=10)
-_DEFAULT_LOCAL_CLIENT_ID = "local"
 _DISABLED_REGISTRATION = RegistrationPolicy.disabled()
 _RATE_LIMIT_PEPPER_LABEL = b"litestar-security/rate-limit/pepper"
 _MFA_LOGIN_PEPPER_LABEL = b"litestar-security/mfa-login-challenge/pepper"
-_LOGGER = getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +132,13 @@ class LocalAuthSecrets:
         )
 
     def __post_init__(self) -> None:
-        """Require exact codecs and a complete optional refresh pair."""
+        """Require exact codecs, a complete optional refresh pair, and derived peppers.
+
+        ``rate_limit_pepper`` and ``mfa_login_pepper`` are derived via
+        domain-separated HMAC from ``purpose_tokens.pepper`` so common setups do
+        not need separate static peppers while keeping each derived key unusable
+        for purpose-token verification.
+        """
         if self.purpose_tokens.__class__ is not PurposeTokenCodec:
             msg = "Local authentication purpose tokens must be a PurposeTokenCodec"
             raise ImproperlyConfiguredException(detail=msg)
@@ -149,9 +153,6 @@ class LocalAuthSecrets:
         if has_refresh_receipts and self.refresh_receipts.__class__ is not RefreshReceiptSealer:
             msg = "Local authentication refresh receipts must be a RefreshReceiptSealer"
             raise ImproperlyConfiguredException(detail=msg)
-        # Derived rather than configured: rate-limit buckets need a stable secret, and
-        # asking for a second pepper would make the common setup harder without making
-        # it safer. Domain separation keeps this value unusable as a purpose-token key.
         object.__setattr__(
             self, "rate_limit_pepper", hmac_digest(self.purpose_tokens.pepper, _RATE_LIMIT_PEPPER_LABEL, sha256)
         )
@@ -173,8 +174,8 @@ class LocalAuthConfig(Generic[UserT]):
     binding: SessionBindingConfig | None = field(default=None, repr=False)
     key_ring: LocalKeyRing | None = field(default=None, repr=False)
     token_audience: str | None = None
-    token_client_id: str = _DEFAULT_LOCAL_CLIENT_ID
-    access_token_lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME
+    token_client_id: str = DEFAULT_LOCAL_CLIENT_ID
+    access_token_lifetime: timedelta = DEFAULT_ACCESS_TOKEN_LIFETIME
     password_hasher: PasswordHasher = field(default_factory=Argon2PasswordHasher, repr=False, compare=False)
     password_policy: PasswordPolicy = field(default_factory=PasswordPolicy, repr=False)
     session_auth: NativeSessionAuth[UserT] | None = field(default=None, repr=False, compare=False)
@@ -236,7 +237,7 @@ class LocalAuthConfig(Generic[UserT]):
             or "//" in route_prefix
             or any(value in route_prefix for value in ("\\", "{", "}", "?", "#"))
             or any(segment in {".", ".."} for segment in route_prefix.split("/"))
-            or any(character.isspace() or ord(character) < _ASCII_CONTROL_LIMIT for character in route_prefix)
+            or any(character.isspace() or ord(character) < ASCII_CONTROL_LIMIT for character in route_prefix)
         ):
             msg = "Local authentication route prefix must be an absolute non-root path"
             raise ImproperlyConfiguredException(detail=msg)
@@ -301,6 +302,11 @@ class LocalAuthConfig(Generic[UserT]):
             raise ImproperlyConfiguredException(detail=msg)
 
     def _configure_rate_limits(self) -> None:
+        """Validate audit/client-key ports and attach ``StoreRateLimiter`` by default.
+
+        Rate limiting defaults to enabled because local login and lifecycle
+        routes are unauthenticated and run Argon2 password hashing.
+        """
         events_value: object = object.__getattribute__(self, "events")
         if not isinstance(events_value, SecurityEventSink):
             msg = "Local authentication events must implement SecurityEventSink"
@@ -310,8 +316,6 @@ class LocalAuthConfig(Generic[UserT]):
             raise ImproperlyConfiguredException(detail=msg)
         limiter_value: object = object.__getattribute__(self, "rate_limiter")
         if limiter_value is None:
-            # On by default: these routes are unauthenticated and run Argon2, so an
-            # unlimited default would ship the amplification surface switched on.
             limiter_value = StoreRateLimiter()
         elif not isinstance(limiter_value, RateLimiter):
             msg = "Local authentication rate limiter must implement RateLimiter"
@@ -652,8 +656,8 @@ class LocalAuth:
         secrets: LocalAuthSecrets,
         key_ring: LocalKeyRing,
         token_audience: str,
-        token_client_id: str = _DEFAULT_LOCAL_CLIENT_ID,
-        access_token_lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME,
+        token_client_id: str = DEFAULT_LOCAL_CLIENT_ID,
+        access_token_lifetime: timedelta = DEFAULT_ACCESS_TOKEN_LIFETIME,
         password_hasher: PasswordHasher | None = None,
         password_policy: PasswordPolicy | None = None,
         registration: RegistrationPolicy = _DISABLED_REGISTRATION,
@@ -729,8 +733,8 @@ class LocalAuth:
         binding: SessionBindingConfig,
         key_ring: LocalKeyRing,
         token_audience: str,
-        token_client_id: str = _DEFAULT_LOCAL_CLIENT_ID,
-        access_token_lifetime: timedelta = _DEFAULT_ACCESS_TOKEN_LIFETIME,
+        token_client_id: str = DEFAULT_LOCAL_CLIENT_ID,
+        access_token_lifetime: timedelta = DEFAULT_ACCESS_TOKEN_LIFETIME,
         session_auth: NativeSessionAuth[UserT] | None = None,
         session_resolver: UserAuthSessionResolver[UserT] | None = None,
         password_hasher: PasswordHasher | None = None,

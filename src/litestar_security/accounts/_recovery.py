@@ -10,6 +10,7 @@ from anyio import CancelScope
 from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.accounts._internal import (
+    MAXIMUM_SECURITY_EPOCH,
     aware_utc_time,
     new_event_id,
     strict_text,
@@ -34,9 +35,15 @@ from litestar_security.accounts._operations import (
     SESSION_REVOKE_ALL_SUFFIX,
 )
 from litestar_security.accounts._passwords import PasswordHasher, PasswordPolicy, PasswordPolicyDecision
-from litestar_security.accounts._purpose_tokens import PurposeTokenCodec, approved_return_url
+from litestar_security.accounts._purpose_tokens import (
+    DEFAULT_TOKEN_ATTEMPTS,
+    MAXIMUM_TOKEN_ATTEMPTS,
+    PurposeTokenCodec,
+    approved_return_url,
+)
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, validate_rate_limits
 from litestar_security.accounts._records import (
+    DEFAULT_REAUTHENTICATION_TTL,
     LifecycleAccepted,
     LifecycleRejected,
     PasswordChangeOutcome,
@@ -63,18 +70,6 @@ __all__ = ("PasswordChangeService", "RecoveryTokenService")
 UserT = TypeVar("UserT")
 
 
-_DEFAULT_REAUTHENTICATION_TTL = timedelta(minutes=5)
-
-
-_DEFAULT_TOKEN_ATTEMPTS = 5
-
-
-_MAXIMUM_TOKEN_ATTEMPTS = 100
-
-
-_MAXIMUM_SECURITY_EPOCH = 9_223_372_036_854_775_807
-
-
 _RECOVERY_TOKEN_LIFETIME = timedelta(minutes=30)
 
 
@@ -90,7 +85,7 @@ class PasswordChangeService:
     password_policy: PasswordPolicy = field(default_factory=PasswordPolicy, repr=False)
     sessions: SessionRegistry | None = field(default=None, repr=False)
     refresh_tokens: RefreshTokenFamilyStore | None = field(default=None, repr=False)
-    evidence_ttl: timedelta = _DEFAULT_REAUTHENTICATION_TTL
+    evidence_ttl: timedelta = DEFAULT_REAUTHENTICATION_TTL
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
     event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
 
@@ -116,7 +111,7 @@ class PasswordChangeService:
         if (
             self.evidence_ttl.__class__ is not timedelta
             or self.evidence_ttl <= timedelta(0)
-            or self.evidence_ttl > _DEFAULT_REAUTHENTICATION_TTL
+            or self.evidence_ttl > DEFAULT_REAUTHENTICATION_TTL
             or not callable(self.clock)
             or not callable(self.event_ids)
         ):
@@ -242,7 +237,7 @@ class PasswordChangeService:
             )
         ):
             return LifecycleRejected()
-        if expected_epoch == _MAXIMUM_SECURITY_EPOCH:
+        if expected_epoch == MAXIMUM_SECURITY_EPOCH:
             return PasswordChangeOutcome(PasswordChangeStatus.EPOCH_EXHAUSTED)
         try:
             policy_result = self.password_policy.check(password, normalized_identifier=normalized_identifier)
@@ -331,24 +326,21 @@ class PasswordChangeService:
         replacement_session: CreateSessionCommand | None,
         compromise: bool,
     ) -> None:
-        if self.refresh_tokens is not None:
-            try:
-                await self.refresh_tokens.revoke_for_account(
-                    account_id,
-                    event=lifecycle_event(
-                        self.event_ids,
-                        occurred_at,
-                        operation=PASSWORD_REFRESH_REVOKE,
-                        outcome=OUTCOME_REVOKED,
-                        account_id=account_id,
-                    ),
-                )
-            except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
-                _LOGGER.error("Password refresh cleanup failed")  # noqa: TRY400 - omit untrusted exception details
-        if self.sessions is None:
-            return
         if compromise or current_session_id is None or replacement_session is None:
-            await _revoke_all_sessions(self.sessions, account_id, occurred_at, self.event_ids)
+            await _revoke_all_credentials(
+                account_id=account_id,
+                sessions=self.sessions,
+                refresh_tokens=self.refresh_tokens,
+                occurred_at=occurred_at,
+                event_ids=self.event_ids,
+                operation="local.password",
+            )
+            return
+        if self.refresh_tokens is not None:
+            await _revoke_refresh_tokens(
+                self.refresh_tokens, account_id, occurred_at, self.event_ids, operation=PASSWORD_REFRESH_REVOKE
+            )
+        if self.sessions is None:
             return
         try:
             await self.sessions.revoke_other_sessions(
@@ -392,7 +384,7 @@ class RecoveryTokenService(Generic[UserT]):
     sessions: SessionRegistry | None = field(default=None, repr=False)
     refresh_tokens: RefreshTokenFamilyStore | None = field(default=None, repr=False)
     lifetime: timedelta = _RECOVERY_TOKEN_LIFETIME
-    maximum_attempts: int = _DEFAULT_TOKEN_ATTEMPTS
+    maximum_attempts: int = DEFAULT_TOKEN_ATTEMPTS
     return_url: str | None = None
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
     normalizer: "Callable[[str], str]" = field(default=normalize_identifier, repr=False, compare=False)
@@ -458,7 +450,13 @@ class RecoveryTokenService(Generic[UserT]):
             The same acceptance for every identifier, ``RateLimited`` when the
             budget is spent, or ``VerificationUnavailable`` when a dependency failed.
         """
-        limited = await self._check_request_rate_limit(identifier, client_key)
+        limited = await check_identifier_rate_limit(
+            self.rate_limits,
+            operation=RECOVERY,
+            identifier=identifier,
+            normalizer=self.normalizer,
+            client_key=client_key,
+        )
         if limited is not None:
             return limited
         try:
@@ -549,23 +547,29 @@ class RecoveryTokenService(Generic[UserT]):
                 )
         return result
 
-    async def _check_request_rate_limit(
-        self, identifier: str, client_key: str | None
-    ) -> "RateLimited | VerificationUnavailable | None":
-        rate_limits = self.rate_limits
-        if rate_limits is None:
-            return None
-        try:
-            normalized_identifier = self.normalizer(identifier) or None
-        except Exception:  # noqa: BLE001 - a failed normalizer still consumes the client budget
-            normalized_identifier = None
-        return await rate_limits.check(RECOVERY, client_key=client_key, identifier=normalized_identifier)
-
     async def _check_reset_rate_limit(self, client_key: str | None) -> "RateLimited | VerificationUnavailable | None":
         rate_limits = self.rate_limits
         if rate_limits is None:
             return None
         return await rate_limits.check(PASSWORD_RESET, client_key=client_key)
+
+
+async def check_identifier_rate_limit(
+    rate_limits: RateLimitGuard | None,
+    *,
+    operation: str,
+    identifier: str,
+    normalizer: "Callable[[str], str]",
+    client_key: str | None,
+) -> "RateLimited | VerificationUnavailable | None":
+    """Normalize ``identifier`` fail-safely and charge both rate-limit buckets for ``operation``."""
+    if rate_limits is None:
+        return None
+    try:
+        normalized_identifier = normalizer(identifier) or None
+    except Exception:  # noqa: BLE001 - a failed normalizer still consumes the client budget
+        normalized_identifier = None
+    return await rate_limits.check(operation, client_key=client_key, identifier=normalized_identifier)
 
 
 def validate_lifecycle_configuration(  # noqa: PLR0913 - explicit configuration surface; every input is named
@@ -578,10 +582,11 @@ def validate_lifecycle_configuration(  # noqa: PLR0913 - explicit configuration 
     event_ids: object,
     name: str,
 ) -> None:
+    """Validate lifetime, attempt ceiling, optional return URL, and callable hooks."""
     if lifetime.__class__ is not timedelta or lifetime <= timedelta(0):
         msg = f"{name} lifetime must be positive"
         raise ImproperlyConfiguredException(detail=msg)
-    if attempts.__class__ is not int or not 1 <= attempts <= _MAXIMUM_TOKEN_ATTEMPTS:
+    if attempts.__class__ is not int or not 1 <= attempts <= MAXIMUM_TOKEN_ATTEMPTS:
         msg = f"{name} attempts must be a positive bounded integer"
         raise ImproperlyConfiguredException(detail=msg)
     if return_url is not None and not approved_return_url(return_url):
@@ -611,6 +616,25 @@ async def _revoke_all_sessions(
         _LOGGER.error("Password session cleanup failed")  # noqa: TRY400 - omit untrusted exception details
 
 
+async def _revoke_refresh_tokens(
+    refresh_tokens: RefreshTokenFamilyStore,
+    account_id: str,
+    occurred_at: datetime,
+    event_ids: "Callable[[], str]",
+    *,
+    operation: str,
+) -> None:
+    try:
+        await refresh_tokens.revoke_for_account(
+            account_id,
+            event=lifecycle_event(
+                event_ids, occurred_at, operation=operation, outcome=OUTCOME_REVOKED, account_id=account_id
+            ),
+        )
+    except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
+        _LOGGER.error("Password refresh cleanup failed")  # noqa: TRY400 - omit untrusted exception details
+
+
 async def _revoke_all_credentials(  # noqa: PLR0913 - explicit configuration surface; every input is named
     *,
     account_id: str,
@@ -625,16 +649,6 @@ async def _revoke_all_credentials(  # noqa: PLR0913 - explicit configuration sur
             sessions, account_id, occurred_at, event_ids, operation=f"{operation}{SESSION_REVOKE_ALL_SUFFIX}"
         )
     if refresh_tokens is not None:
-        try:
-            await refresh_tokens.revoke_for_account(
-                account_id,
-                event=lifecycle_event(
-                    event_ids,
-                    occurred_at,
-                    operation=f"{operation}.refresh_revoke",
-                    outcome=OUTCOME_REVOKED,
-                    account_id=account_id,
-                ),
-            )
-        except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
-            _LOGGER.error("Password refresh cleanup failed")  # noqa: TRY400 - omit untrusted exception details
+        await _revoke_refresh_tokens(
+            refresh_tokens, account_id, occurred_at, event_ids, operation=f"{operation}.refresh_revoke"
+        )

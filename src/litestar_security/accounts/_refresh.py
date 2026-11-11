@@ -37,9 +37,16 @@ from litestar_security.accounts._operations import (
     REFRESH_ROTATE,
 )
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, validate_rate_limits
-from litestar_security.accounts._receipts import RefreshReceiptContext, RefreshReceiptReplay, RefreshReceiptSealer
+from litestar_security.accounts._receipts import (
+    MAXIMUM_RECEIPT_BYTES,
+    RefreshReceiptContext,
+    RefreshReceiptReplay,
+    RefreshReceiptSealer,
+)
 from litestar_security.accounts._records import LocalAccountState, SecurityEvent
 from litestar_security.accounts._refresh_tokens import (
+    REFRESH_FAMILY_PREFIX,
+    REFRESH_TOKEN_PREFIX,
     RefreshFamilyContext,
     RefreshRotationStatus,
     RefreshTokenCodec,
@@ -65,13 +72,10 @@ __all__ = (
 )
 
 UserT = TypeVar("UserT")
-_REFRESH_TOKEN_PREFIX = "rt_"  # noqa: S105 - public token namespace, not a credential
-_REFRESH_FAMILY_PREFIX = "rf_"
 _DEFAULT_REFRESH_IDLE_LIFETIME = timedelta(days=7)
 _DEFAULT_REFRESH_ABSOLUTE_LIFETIME = timedelta(days=30)
 _DEFAULT_REFRESH_RECEIPT_WINDOW = timedelta(seconds=30)
 _MAXIMUM_REFRESH_RECEIPT_WINDOW = timedelta(seconds=30)
-_MAXIMUM_RECEIPT_BYTES = 32_768
 REFRESH_RESPONSE_HEADERS: "Mapping[str, str]" = MappingProxyType({"Cache-Control": "no-store", "Pragma": "no-cache"})
 
 
@@ -100,11 +104,11 @@ class CreateRefreshFamilyCommand:
             msg = "Refresh family timestamps must be timezone-aware"
             raise ValueError(msg) from None
         if (
-            not valid_identifier(self.token_id, prefix=_REFRESH_TOKEN_PREFIX)
+            not valid_identifier(self.token_id, prefix=REFRESH_TOKEN_PREFIX)
             or self.token_digest.__class__ is not bytes
             or len(self.token_digest) != DIGEST_BYTES
             or not strict_context_text(self.account_id)
-            or not valid_identifier(self.family_id, prefix=_REFRESH_FAMILY_PREFIX)
+            or not valid_identifier(self.family_id, prefix=REFRESH_FAMILY_PREFIX)
             or not valid_security_epoch(self.security_epoch)
             or not created_at < token_expires_at <= family_expires_at
             or any(not valid_refresh_scope(scope) for scope in self.scopes)
@@ -152,13 +156,13 @@ class RotateRefreshCommand:
             msg = "Refresh rotation timestamps must be timezone-aware"
             raise ValueError(msg) from None
         if (
-            not valid_identifier(self.token_id, prefix=_REFRESH_TOKEN_PREFIX)
+            not valid_identifier(self.token_id, prefix=REFRESH_TOKEN_PREFIX)
             or self.token_digest.__class__ is not bytes
             or len(self.token_digest) != DIGEST_BYTES
             or not strict_context_text(self.account_id)
-            or not valid_identifier(self.family_id, prefix=_REFRESH_FAMILY_PREFIX)
+            or not valid_identifier(self.family_id, prefix=REFRESH_FAMILY_PREFIX)
             or not valid_security_epoch(self.security_epoch)
-            or not valid_identifier(self.successor_id, prefix=_REFRESH_TOKEN_PREFIX)
+            or not valid_identifier(self.successor_id, prefix=REFRESH_TOKEN_PREFIX)
             or self.successor_id == self.token_id
             or self.successor_digest.__class__ is not bytes
             or len(self.successor_digest) != DIGEST_BYTES
@@ -166,7 +170,7 @@ class RotateRefreshCommand:
             or receipt_expires_at > family_expires_at
             or self.sealed_receipt.__class__ is not bytes
             or not self.sealed_receipt
-            or len(self.sealed_receipt) > _MAXIMUM_RECEIPT_BYTES
+            or len(self.sealed_receipt) > MAXIMUM_RECEIPT_BYTES
             or (
                 self.idempotency_digest is not None
                 and (self.idempotency_digest.__class__ is not bytes or len(self.idempotency_digest) != DIGEST_BYTES)
@@ -209,7 +213,7 @@ class RefreshRotationOutcome:
                 and (
                     self.sealed_receipt.__class__ is not bytes
                     or not self.sealed_receipt
-                    or len(self.sealed_receipt) > _MAXIMUM_RECEIPT_BYTES
+                    or len(self.sealed_receipt) > MAXIMUM_RECEIPT_BYTES
                 )
             )
         ):
@@ -368,14 +372,6 @@ class RefreshTokenFamilyStore(Protocol):
         ...  # pragma: no cover
 
 
-def _new_refresh_family_id() -> str:
-    return f"{_REFRESH_FAMILY_PREFIX}{encode_random(token_bytes(LOOKUP_BYTES))}"
-
-
-def _new_refresh_event_id() -> str:
-    return f"event_{encode_random(token_bytes(LOOKUP_BYTES))}"
-
-
 @dataclass(frozen=True, slots=True)
 class RefreshTokenService(Generic[UserT]):
     """Issue, strictly rotate, and revoke opaque local refresh families."""
@@ -389,8 +385,12 @@ class RefreshTokenService(Generic[UserT]):
     absolute_lifetime: timedelta = _DEFAULT_REFRESH_ABSOLUTE_LIFETIME
     receipt_window: timedelta = _DEFAULT_REFRESH_RECEIPT_WINDOW
     clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
-    family_ids: Callable[[], str] = field(default=_new_refresh_family_id, repr=False, compare=False)
-    event_ids: Callable[[], str] = field(default=_new_refresh_event_id, repr=False, compare=False)
+    family_ids: Callable[[], str] = field(
+        default=lambda: f"{REFRESH_FAMILY_PREFIX}{encode_random(token_bytes(LOOKUP_BYTES))}", repr=False, compare=False
+    )
+    event_ids: Callable[[], str] = field(
+        default=lambda: f"event_{encode_random(token_bytes(LOOKUP_BYTES))}", repr=False, compare=False
+    )
     rate_limits: RateLimitGuard | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -473,17 +473,11 @@ class RefreshTokenService(Generic[UserT]):
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
         if not isinstance(access, LocalAccessToken):
-            return (
-                access
-                if isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
-                    access, (InvalidCredentials, VerificationUnavailable)
-                )
-                else VerificationUnavailable()
-            )
+            return self._narrow_access_token_failure(access)
         try:
             refresh = self.codec.issue()
             family_id = self.family_ids()
-            if not valid_identifier(family_id, prefix=_REFRESH_FAMILY_PREFIX):
+            if not valid_identifier(family_id, prefix=REFRESH_FAMILY_PREFIX):
                 raise ValueError  # noqa: TRY301 - customization failure is sanitized below
             family_expires_at = issued_at + self.absolute_lifetime
             token_expires_at = min(issued_at + self.idle_lifetime, family_expires_at)
@@ -604,13 +598,7 @@ class RefreshTokenService(Generic[UserT]):
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
         if not isinstance(access, LocalAccessToken):
-            return (
-                access
-                if isinstance(  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
-                    access, (InvalidCredentials, VerificationUnavailable)
-                )
-                else VerificationUnavailable()
-            )
+            return self._narrow_access_token_failure(access)
         response = TokenPair(
             access_token=access.access_token, refresh_token=successor.refresh_token, expires_in=access.expires_in
         )
@@ -736,7 +724,6 @@ class RefreshTokenService(Generic[UserT]):
     async def _resolve_account(
         self, context: RefreshFamilyContext
     ) -> "LocalAccountState[UserT] | InvalidCredentials | VerificationUnavailable":
-
         try:
             account = await cast("Any", self.accounts).get_by_id(context.account_id)
             current_epoch = await cast("Any", self.accounts).current_epoch(context.account_id)
@@ -794,7 +781,6 @@ class RefreshTokenService(Generic[UserT]):
     def _event(
         self, occurred_at: datetime, *, operation: str, outcome: str, account_id: str | None, family_id: str | None
     ) -> "SecurityEvent":
-
         event_id = self.event_ids()
         if not strict_context_text(event_id):
             raise ValueError
@@ -806,4 +792,10 @@ class RefreshTokenService(Generic[UserT]):
             account_id=account_id,
             family_id=family_id,
             mechanism="refresh",
+        )
+
+    @staticmethod
+    def _narrow_access_token_failure(access: object) -> InvalidCredentials | VerificationUnavailable:
+        return (
+            access if isinstance(access, (InvalidCredentials, VerificationUnavailable)) else VerificationUnavailable()
         )

@@ -40,9 +40,9 @@ You are the WebSocket & Testing Specialist for `litestar-security`, owning imple
 
 # Verification & Constraints
 
-- Keep new tests in `src/tests/unit/` free of `Litestar`, `TestClient`, and `AsyncTestClient`; place WebSocket/ASGI tests in `src/tests/integration/` (or `src/tests/examples/`) and static type checks in `src/tests/helpers/typing.py`.
+- Keep tests in `src/tests/unit/` free of `Litestar`, `TestClient`, and `AsyncTestClient` (placing CLI and WireDTO HTTP tests in `src/tests/integration/test_cli.py` and `src/tests/integration/test_wire_casing.py`); keep ASGI/WebSocket tests in `src/tests/integration/` (or `src/tests/examples/`) and static type checks in `src/tests/helpers/typing.py`.
 - Run verification before completing:
-  - `uv run pytest src/tests/unit/test_websocket/ src/tests/unit/test_in_memory_backend.py src/tests/unit/test_testing_kit.py src/tests/unit/test_context.py src/tests/unit/test_fixture_vocabulary.py src/tests/unit/test_accounts/test_conformance.py src/tests/integration/test_runtime.py src/tests/integration/test_fixture_vocabulary.py src/tests/examples/test_websocket_admin_modes.py -q`
+  - `uv run pytest src/tests/unit/test_websocket/ src/tests/unit/test_in_memory_backend.py src/tests/unit/test_testing_kit.py src/tests/unit/test_context.py src/tests/unit/test_config.py src/tests/unit/test_accounts/test_conformance.py src/tests/integration/test_runtime.py src/tests/integration/test_cli.py src/tests/integration/test_wire_casing.py src/tests/examples/test_websocket_admin_modes.py -q`
   - `uv run python tools/check_import_boundaries.py`
   - `uv run ruff check src/litestar_security/ src/tests/`
   - `uv run mypy`

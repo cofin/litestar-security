@@ -8,9 +8,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-02T01:45:00Z"
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-10T22:45:00Z"
-    commit: "398fd57"
+  - by: agent:flow-learn
+    at: "2026-11-11T20:45:00Z"
+    commit: "dcce78d"
 sources:
   - id: plugin-csrf
     resource: "src/litestar_security/plugin.py::SecurityPlugin"
@@ -45,14 +45,14 @@ sources:
   - `public()`, `exclude()`, and `PublicController` are module-level policy helpers and controller bases (`authentication.py`, `controllers.py`).
   - `public()` sets `plan.authenticate=False`, emits OpenAPI `security=[{}]`, keeps anonymous `Principal`/`SecurityContext` in `SecurityMiddleware`, and sets `route_handler.opt[csrf_exclude_key] = True` unless `csrf_required=True` (`CSRF_REQUIRED_OPT_KEY`) is explicitly set on the HTTP handler (required on cookie-establishing public routes such as session login).
   - `exclude()` (`opt={exclude_opt_key: True}` or `SecurityConfig(exclude=...)`) sets `plan.authenticate=False, plan.bypass_authentication=True`, emits OpenAPI `security=[{}]`, leaves Litestar's native CSRF middleware untouched unless `csrf_required=True` is set, initializes anonymous HTTP `scope["user"]`/`scope["auth"]`, bypasses `_handle_websocket` on WebSocket, and still inherits cumulative parent Litestar `guards=[...]`.[^plugin-csrf][^openapi-compiler][^auth-coord]
-- **`CompositeBearerConfig` vs. `APIKeyConfig(accept_authorization_bearer=True)`**: Multiple JWT/OIDC/service-token verifiers share `"authorization.bearer"` through `CompositeBearerConfig` (`extend_composite_bearer`). `APIKeyConfig(accept_authorization_bearer=True)` retains `"api-key"` (`header_name != "Authorization"`), sets `additional_security_schemes={"APIKeyBearer": ...}` (inspected by `_plan_uses_bearer` for RFC 9728 challenges), and `AuthenticationRegistry._coordinate_bearer_slots` sets `coexists_with_bearer_slot=True` and updates `excluded_prefixes` or wraps custom `"authorization.bearer"` slots in `_PrefixExcludingBearerSlot`.[^auth-coord][^composite-bearer][^api-key-runtime]
+- **`CompositeBearerConfig` vs. `APIKeyConfig(accept_authorization_bearer=True)`**: Multiple JWT/OIDC/service-token verifiers share `"authorization.bearer"` through `CompositeBearerConfig` (`extend_composite_bearer`). `APIKeyConfig(accept_authorization_bearer=True)` retains `"api-key"` (`header_name != "Authorization"`), sets `additional_security_schemes={"APIKeyBearer": ...}` (inspected by `SecurityMiddleware._plan_uses_bearer` for RFC 9728 challenges), and `AuthenticationRegistry._coordinate_bearer_slots` sets `coexists_with_bearer_slot=True` and updates `excluded_prefixes` or wraps custom `"authorization.bearer"` slots in `_PrefixExcludingBearerSlot`.[^auth-coord][^composite-bearer][^api-key-runtime]
 - **Python 3.10 `mypy` Starred Subscript & Python 3.11+ `MappingProxyType` Traps**: Bind `cache_key = (*name_key, shape)` before indexing `cls._transfer_models[cache_key]` so `mypy` (`ast-serialize`) under Python 3.10 never flags PEP 646 syntax; declare `MappingProxyType` dataclass defaults with `field(default_factory=lambda: MappingProxyType({}))` (such as on `AuthenticationMechanism.additional_security_schemes`) so Python 3.11+ does not raise `ValueError`.[^auth-coord][^dto-cache-key]
-- **Diagnostics & Built-In OpenAPI Routes**: `SecurityPlugin._configure_exclusion_report` and `RouteCompiler._report_customized_response_class` emit `LitestarWarning` (no custom warning class). `RouteCompiler._is_openapi_handler` identifies Litestar schema handlers via `_OPENAPI_HANDLER_MODULES` (`OpenAPIPlugin`, `OpenAPIController`, `OpenAPIRenderPlugin`), never by URL path.[^plugin-csrf][^openapi-compiler]
+- **Diagnostics, Precomputed Schemes, & Built-In OpenAPI Routes**: `SecurityPlugin.on_app_init` passes precomputed schemes to `RouteCompiler(..., schemes=schemes)`, where `RouteCompiler._resolve_route_policy` and `RouteCompiler._resolve_effective_policy` resolve hierarchical `auth` and `exclude_from_auth` layers (rejecting same-layer declaration of both). `SecurityPlugin._configure_exclusion_report` and `RouteCompiler._report_customized_response_class` emit `LitestarWarning` (no custom warning class), while `RouteCompiler._is_openapi_handler` identifies Litestar schema handlers via `_OPENAPI_HANDLER_MODULES` (`OpenAPIPlugin`, `OpenAPIController`, `OpenAPIRenderPlugin`), never by URL path.[^plugin-csrf][^openapi-compiler]
 <!-- truth: end -->
 
 ## Cookie `__Host-` Prefix Invariants
 
-`SessionBindingConfig` (`accounts/_sessions.py`, `_validate_binding_cookie_scope`) enforces `(secure=True, path="/", domain=None)` when `cookie_name` starts with `"__Host-"`, and `OAUTH_BINDING_COOKIE_NAME` (`__Host-litestar-security-oauth` in `providers/oauth/_transactions.py`) enforces the same attributes in `oauth_binding_cookie`. Tests over plain `http://testserver.local` must use `https://testserver.local` or configure `SessionBindingConfig(..., cookie_name="...", secure=False, allow_insecure=True)` (also checked by `SecurityPlugin._validate_local_session_backend`).[^plugin-csrf][^sessions-cookie][^oauth-cookie]
+`SessionBindingConfig._validate_binding_cookie_scope` (`accounts/_sessions.py`) enforces `(secure=True, path="/", domain=None)` when `cookie_name` starts with `"__Host-"`, and `OAUTH_BINDING_COOKIE_NAME` (`__Host-litestar-security-oauth` in `providers/oauth/_transactions.py`) enforces the same attributes in `oauth_binding_cookie`. Tests over plain `http://testserver.local` must use `https://testserver.local` or configure `SessionBindingConfig(..., cookie_name="...", secure=False, allow_insecure=True)` (also checked by `SecurityPlugin._validate_local_session_backend`).[^plugin-csrf][^sessions-cookie][^oauth-cookie]
 
 ## References
 

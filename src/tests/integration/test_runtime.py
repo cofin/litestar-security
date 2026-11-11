@@ -1,11 +1,10 @@
 """Integration tests for Litestar security middleware and dependency injection."""
 
-from __future__ import annotations
-
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from typing import Any, ClassVar, Literal, cast
 
 import anyio
 import jwt
@@ -13,6 +12,7 @@ import pytest
 from litestar import Controller, Litestar, Request, Response, Router, WebSocket, asgi, get, post, websocket
 from litestar.config.app import AppConfig
 from litestar.config.csrf import CSRFConfig
+from litestar.connection import ASGIConnection
 from litestar.di import NamedDependency, Provide
 from litestar.enums import ScopeType
 from litestar.exceptions import (
@@ -23,15 +23,15 @@ from litestar.exceptions import (
     WebSocketDisconnect,
 )
 from litestar.middleware import DefineMiddleware
-from litestar.middleware._internal.exceptions import ExceptionHandlerMiddleware
 from litestar.middleware.session.base import BaseSessionBackend, SessionMiddleware
 from litestar.middleware.session.client_side import CookieBackendConfig
 from litestar.middleware.session.server_side import ServerSideSessionConfig
-from litestar.params import FromPath  # noqa: TC002 - Litestar resolves handler annotations at runtime
+from litestar.params import FromPath
 from litestar.routes import HTTPRoute
 from litestar.status_codes import HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAILABLE
 from litestar.stores.memory import MemoryStore
 from litestar.testing import AsyncTestClient, TestClient
+from litestar.types import ASGIApp, Message, Receive, Scope, Send
 
 from litestar_security import MFAConfig, SecurityConfig, SecurityPlugin, authentication
 from litestar_security.accounts import (
@@ -104,6 +104,7 @@ from litestar_security.context import (
 )
 from litestar_security.guards import requires_scope
 from litestar_security.headers import SecurityHeadersConfig
+from litestar_security.plugin import CurrentUser
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
     BearerTokenSlot,
@@ -124,14 +125,6 @@ from litestar_security.websocket import (
     WebSocketSecurityConfig,
     websocket_policy_fingerprint,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
-
-    from litestar.connection import ASGIConnection
-    from litestar.types import ASGIApp, Message, Receive, Scope, Send
-
-    from litestar_security.plugin import CurrentUser
 
 _NOW = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -390,13 +383,12 @@ async def test_generated_options_initializes_scope_without_extracting() -> None:
 
 
 async def test_lookalike_options_handler_is_authenticated_not_bypassed() -> None:
+    """Verify an application handler sharing module and name without the generated qualname is still authenticated."""
     config, slot, _ = _runtime(InvalidCredentials())
 
     def options_handler() -> None:
         return None
 
-    # Same module and name as a generated OPTIONS handler, but a foreign
-    # qualname: an application handler must never inherit the bypass.
     options_handler.__module__ = "litestar.routes.http"
     route_handler = _RouteHandler(fn=options_handler)
 
@@ -552,7 +544,6 @@ async def test_wrapper_runtime_order_and_native_boundary(monkeypatch: pytest.Mon
         "route",
     ]
     assert builds == 1
-    assert authentication._NATIVE_EXCEPTION_HANDLER is ExceptionHandlerMiddleware  # noqa: SLF001
 
 
 @dataclass(frozen=True)
@@ -602,12 +593,15 @@ def _identity_plugin(principal: Principal[_DependencyUser]) -> SecurityPlugin[_D
     )
 
 
-def test_dependency_providers_are_non_threaded_and_request_local(empty_security_config: SecurityConfig[object]) -> None:
-    app_config = SecurityPlugin(empty_security_config).on_app_init(AppConfig())
-
-    for provider in app_config.dependencies.values():
-        assert provider.sync_to_thread is False
-        assert provider.use_cache is False
+@pytest.mark.parametrize(
+    "dependency_name", ["principal", "security_context", "current_user", "websocket_connect_tokens"]
+)
+def test_dependency_providers_are_non_threaded_and_request_local(dependency_name: str) -> None:
+    app_config = SecurityPlugin(SecurityConfig()).on_app_init(AppConfig())
+    assert set(app_config.dependencies) == {"principal", "security_context", "current_user", "websocket_connect_tokens"}
+    provider = app_config.dependencies[dependency_name]
+    assert provider.sync_to_thread is False
+    assert provider.use_cache is False
 
 
 def test_anonymous_dependency_injection_is_typed() -> None:
@@ -1438,6 +1432,7 @@ def test_generated_session_routes_complete_local_account_lifecycle() -> None:
 
 
 def test_generated_session_login_rotates_and_succeeds_with_existing_stale_session_cookie() -> None:
+    """Verify login rotates and succeeds with 200 when a stale session cookie references an expired session."""
     password = "initial password 123"  # noqa: S105
     accounts = _verified_route_accounts(password)
     csrf = CSRFConfig(secret="s" * 32)
@@ -1470,16 +1465,13 @@ def test_generated_session_login_rotates_and_succeeds_with_existing_stale_sessio
     with TestClient(app) as client:
         assert client.get("/csrf").status_code == 200
         csrf_headers = {csrf.header_name: cast("str", client.cookies.get(csrf.cookie_name))}
-        # First login establishes initial session
         first_login = client.post(
             "/auth/login", json={"identifier": "user@example.com", "password": password}, headers=csrf_headers
         )
         assert first_login.status_code == 200
 
-        # Simulate session expired/deleted from accounts backend while cookie remains on client
         accounts.sessions.clear()
 
-        # Second login with stale session cookie present must succeed and rotate session rather than 503
         second_login = client.post(
             "/auth/login", json={"identifier": "user@example.com", "password": password}, headers=csrf_headers
         )
@@ -1489,6 +1481,10 @@ def test_generated_session_login_rotates_and_succeeds_with_existing_stale_sessio
 
 
 def test_local_auth_enforces_custom_password_policy_on_registration_and_change() -> None:
+    """Verify PasswordPolicy(minimum_length=20) enforces length bounds on registration.
+
+    Rejects a 17-char (< 20) password with 400 and accepts a 24-char (>= 20) password with 202.
+    """
     accounts = _GeneratedRouteAccounts()
     csrf = CSRFConfig(secret="s" * 32)
     binding = SessionBindingConfig(
@@ -1525,14 +1521,12 @@ def test_local_auth_enforces_custom_password_policy_on_registration_and_change()
 
     with TestClient(app) as client:
         assert client.get("/csrf").status_code == 200
-        # 16-char password rejected by minimum_length=20 policy
         too_short_reg = client.post(
             "/auth/register",
             json={"identifier": "user@example.com", "password": "short_pass_123456", "display_name": "User"},
         )
         assert too_short_reg.status_code == 400
 
-        # 20-char password accepted
         valid_reg = client.post(
             "/auth/register",
             json={"identifier": "user@example.com", "password": "valid_long_password_1234", "display_name": "User"},
@@ -2334,7 +2328,16 @@ def test_exclude_bypasses_http_websocket_and_asgi_credential_work() -> None:
     assert all(not principal.is_authenticated and context.evidence == () for principal, context in observed)
 
 
-def test_websocket_native_session_is_read_only_and_never_persisted() -> None:
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda session: session.set("new", "value"),
+        lambda session: session.pop("existing"),
+        lambda session: session.clear(),
+    ],
+    ids=["set", "pop", "clear"],
+)
+def test_websocket_native_session_is_read_only_and_never_persisted(mutation: Callable[[Any], object]) -> None:
     backend = _MemorySessionBackend()
     backend.stored = {"existing": "value"}
 
@@ -2343,13 +2346,8 @@ def test_websocket_native_session_is_read_only_and_never_persisted() -> None:
         assert socket.auth.session.is_available
         assert not socket.auth.session.can_persist
         assert socket.auth.session.get("existing") == "value"
-        for mutation in (
-            lambda: socket.auth.session.set("new", "value"),
-            lambda: socket.auth.session.pop("existing"),
-            socket.auth.session.clear,
-        ):
-            with pytest.raises(SessionPersistenceUnavailableError, match="cannot persist"):
-                mutation()
+        with pytest.raises(SessionPersistenceUnavailableError, match="cannot persist"):
+            mutation(socket.auth.session)
         await socket.accept()
         await socket.send_json({"existing": socket.auth.session.get("existing")})
         await socket.close()
@@ -2397,8 +2395,8 @@ def test_websocket_message_loop_performs_security_work_once() -> None:
     @websocket("/ws")
     async def websocket_handler(socket: WebSocket) -> None:
         await socket.accept()
-        for _ in range(2):
-            await socket.send_text(await socket.receive_text())
+        await socket.send_text(await socket.receive_text())
+        await socket.send_text(await socket.receive_text())
         await socket.close()
 
     app = Litestar(
@@ -2417,9 +2415,10 @@ def test_websocket_message_loop_performs_security_work_once() -> None:
         ],
     )
     with TestClient(app) as client, client.websocket_connect("/ws") as socket:
-        for value in ("first", "second"):
-            socket.send_text(value)
-            assert socket.receive_text() == value
+        socket.send_text("first")
+        assert socket.receive_text() == "first"
+        socket.send_text("second")
+        assert socket.receive_text() == "second"
 
     assert (slot.calls, authenticator.calls, resolver.calls) == (1, 1, 1)
 

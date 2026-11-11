@@ -41,10 +41,13 @@ SECRET_CHARACTERS = 43
 DIGEST_BYTES = 32
 SESSION_ID_BYTES = 32
 MINIMUM_PEPPER_BYTES = 32
+AES_256_KEY_BYTES = 32
+ASCII_CONTROL_LIMIT = 32
+MAXIMUM_SECURITY_EPOCH = 9_223_372_036_854_775_807
 
-_MAXIMUM_SECURITY_EPOCH = 9_223_372_036_854_775_807
 _MAXIMUM_CONTEXT_TEXT_BYTES = 512
-_ASCII_CONTROL_LIMIT = 32
+_MAXIMUM_ACCESS_TOKEN_BYTES = 16_384
+_COMPACT_JWT_SEGMENTS = 3
 
 
 def strict_text(value: object) -> bool:
@@ -56,12 +59,12 @@ def strict_context_text(value: object) -> bool:
         strict_text(value)
         and cast("str", value) == cast("str", value).strip()
         and len(cast("str", value).encode("utf-8")) <= _MAXIMUM_CONTEXT_TEXT_BYTES
-        and all(ord(character) >= _ASCII_CONTROL_LIMIT for character in cast("str", value))
+        and all(ord(character) >= ASCII_CONTROL_LIMIT for character in cast("str", value))
     )
 
 
 def valid_security_epoch(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAXIMUM_SECURITY_EPOCH
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= MAXIMUM_SECURITY_EPOCH
 
 
 def utc_now() -> datetime:
@@ -83,6 +86,8 @@ def encode_random(value: bytes) -> str:
 
 
 def decode_random(value: str, expected_bytes: int) -> bytes | None:
+    if len(value) != (expected_bytes * 4 + 2) // 3:
+        return None
     try:
         decoded = urlsafe_b64decode(f"{value}{'=' * (-len(value) % 4)}".encode("ascii"))
     except (BinasciiError, UnicodeEncodeError, ValueError):
@@ -106,3 +111,15 @@ def valid_identifier(value: object, *, prefix: str | None = None) -> bool:
     encoded = text[len(prefix) :] if prefix is not None else text
     expected_bytes = LOOKUP_BYTES if prefix is not None else SESSION_ID_BYTES
     return decode_random(encoded, expected_bytes) is not None
+
+
+def valid_compact_jwt(value: object) -> bool:
+    if not isinstance(value, str) or value.__class__ is not str or len(value) > _MAXIMUM_ACCESS_TOKEN_BYTES:
+        return False
+    segments = value.split(".")
+    if len(segments) != _COMPACT_JWT_SEGMENTS or any(not segment for segment in segments):
+        return False
+    try:
+        return all(bool(decode_random_unbounded(segment)) for segment in segments)
+    except (BinasciiError, UnicodeEncodeError, ValueError):
+        return False

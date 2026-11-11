@@ -1,17 +1,14 @@
 """Integration tests for deterministic provider example modes."""
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import pytest
 from examples.app import create_app
 from litestar.testing import TestClient
 
-if TYPE_CHECKING:
-    from litestar_security import SecurityPlugin
+from litestar_security import SecurityPlugin
 
 
 @pytest.mark.parametrize("mode", ["google-iap", "google-oauth", "github-oauth", "keycloak", "api-tenant-service"])
@@ -19,6 +16,7 @@ def test_provider_modes_boot_with_native_openapi(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("LITESTAR_SECURITY_EXAMPLE", mode)
     app = create_app()
     plugin = cast("SecurityPlugin[object]", app.plugins.init[0])
+    assert isinstance(plugin, SecurityPlugin)
 
     with TestClient(app) as client:
         response = client.get("/")

@@ -154,14 +154,16 @@ that does not change when its display name does:
    * - ``passkeys``
      - ``Passkeys``
      - ``PasskeyRegistrationOptions``, ``PasskeyRegistrationVerify``,
-       ``PasskeyAuthenticationOptions``, ``PasskeySessionAuthenticationVerify``,
+       ``PasskeyAuthenticationOptions``, ``PasskeyAuthenticationVerify``,
+       ``PasskeySessionAuthenticationVerify``,
        ``PasskeyTokenAuthenticationVerify``, ``PasskeyList``, ``PasskeyRemove``
    * - ``step_up``
      - ``Step-up authentication``
      - ``SecurityStepUp``
    * - ``oauth.providers``
      - ``OAuth providers``
-     - ``OAuthLogin``, ``OAuthCallback``, ``OAuthLink``, ``OAuthUnlink``,
+     - ``OAuthLogin``, ``OAuthCallback``, ``OAuthRevalidate``,
+       ``OAuthReauthenticate``, ``OAuthLink``, ``OAuthUnlink``,
        ``OAuthScopeUpgrade``, ``OAuthRevoke``, ``OAuthLogout``
    * - ``oidc.logout``
      - ``OIDC logout``
@@ -278,11 +280,13 @@ Operation identifiers
 =====================
 
 Every generated operation declares an explicit ``operationId``, so a generated
-client keeps stable method names across releases. The identifiers are the same
-whichever transport profile is active, with one exception: a hybrid profile
-serves password change on two paths, so the bearer variant is
-``LocalTokenPasswordChange`` while ``LocalPasswordChange`` stays on
-``/password/change``.
+client keeps stable method names across releases. Two operations split by
+transport profile: a hybrid profile serves bearer password change as
+``LocalTokenPasswordChange`` alongside ``LocalPasswordChange`` on
+``/password/change``, and splits single-transport passkey verification
+(``PasskeyAuthenticationVerify`` on ``/passkeys/authentication/verify``) into
+``PasskeySessionAuthenticationVerify`` and ``PasskeyTokenAuthenticationVerify``
+on their dedicated session and token paths.
 
 Documented failures
 ===================

@@ -12,7 +12,6 @@ ROOT = Path(__file__).parents[1]
 EXPECTED_VERSION = "0.7.1"
 SUPPORTED_PYTHONS = ("3.10", "3.11", "3.12", "3.13", "3.14")
 DIRECT_DEPENDENCIES = frozenset({"argon2-cffi", "httpx", "litestar", "pyotp", "pyjwt", "webauthn"})
-FORBIDDEN_DEPENDENCIES = frozenset({"advanced-alchemy", "litestar-mcp", "sqlalchemy", "sqlspec"})
 SMOKE_SCRIPT = r"""
 import asyncio
 import importlib
@@ -139,7 +138,6 @@ def inspect_wheel(wheel: Path) -> None:
     requirements = tuple(metadata.get_all("Requires-Dist", []))
     dependencies = frozenset(dependency_name(requirement) for requirement in requirements)
     require(condition=dependencies == DIRECT_DEPENDENCIES, detail=requirements)
-    require(condition=dependencies.isdisjoint(FORBIDDEN_DEPENDENCIES), detail=requirements)
 
 
 def smoke_wheel(

@@ -92,7 +92,8 @@ def test_rfc9728_member_names_are_specification_defined_and_must_not_be_renamed(
     These names are defined by RFC 9728 section 2 and are read by authorization
     servers and clients that never see this codebase. They are **not** an
     application casing preference and must never be routed through a
-    rename strategy, a DTO, or any other field-naming policy.
+    rename strategy, a DTO, or any other field-naming policy. No DTO may sit
+    between the precomputed document and the wire.
 
     If a change makes this test fail, the change is wrong. Do not update the
     expected names to match it, and do not delete this test.
@@ -116,7 +117,6 @@ def test_rfc9728_member_names_are_specification_defined_and_must_not_be_renamed(
         "resource_documentation",
         "scopes_supported",
     ]
-    # No DTO may sit between the precomputed document and the wire.
     assert handler.resolve_data_dto() is None
     assert handler.resolve_return_dto() is None
 

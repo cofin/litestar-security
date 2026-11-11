@@ -188,9 +188,12 @@ class LocalSession(WireStruct, frozen=True):
 
 
 class LocalSessionList(WireStruct, frozen=True):
-    """Safe caller-owned session inventory."""
+    """Safe caller-owned session inventory.
 
-    # Unquoted deliberately: the reference is backward, and on Python 3.10 a quoted
-    # forward reference nested in a subscript stays an unresolved string, which drops
-    # the element type from the generated schema.
+    ``sessions`` keeps ``tuple[LocalSession, ...]`` unquoted because
+    ``LocalSession`` is already defined above and quoting subscript element
+    types on Python 3.10 leaves an unresolved string that drops the element
+    schema from generated OpenAPI payloads.
+    """
+
     sessions: Annotated[tuple[LocalSession, ...], msgspec.Meta(description="The caller's own active sessions.")]

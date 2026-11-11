@@ -12,12 +12,10 @@ from functools import partial
 from inspect import iscoroutinefunction
 from math import isfinite
 from types import MappingProxyType
-from typing import Generic, Protocol, TypeAlias, TypeVar, cast, runtime_checkable
+from typing import Generic, Protocol, TypeVar, cast, runtime_checkable
 
 import jwt
 from anyio import CapacityLimiter
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
-from jwt import PyJWK
 from jwt.exceptions import PyJWTError
 
 from litestar_security.authentication import (
@@ -41,19 +39,11 @@ from litestar_security.providers.jwt._internal import (
     freeze_json,
     strict_identifier,
 )
-from litestar_security.providers.jwt._keys import prepare_key
+from litestar_security.providers.jwt._keys import PreparedVerificationKey, VerificationKeyInput, prepare_key
 from litestar_security.providers.jwt._workers import metric_sink, run_worker, validate_limiter
 from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 
 __all__ = ("JWTVerifier", "SyncJWTVerifier", "normalize_verifier")
-
-
-VerificationKeyInput: TypeAlias = bytes | str | PyJWK | Mapping[str, JSONValue]
-
-
-PreparedVerificationKey: TypeAlias = (
-    bytes | str | PyJWK | rsa.RSAPublicKey | ec.EllipticCurvePublicKey | ed25519.Ed25519PublicKey
-)
 
 
 ClaimsT = TypeVar("ClaimsT")
@@ -234,7 +224,7 @@ class PyJWTVerifier:
         claims = normalize_claims(route.payload, self.config, now=now)
         if isinstance(claims, InvalidCredentials):
             return claims
-        verify = partial(_verify_signature, token, self._prepared_keys[algorithm], algorithm)
+        verify = partial(verify_signature, token, self._prepared_keys[algorithm], algorithm)
         try:
             await run_worker(
                 verify,
@@ -255,6 +245,26 @@ class PyJWTVerifier:
         )
 
 
+def verify_signature(token: str, key: PreparedVerificationKey, algorithm: str) -> None:
+    """Verify a compact JWT cryptographic signature without evaluating claims."""
+    jwt.decode_complete(
+        token,
+        key=key,  # pyright: ignore[reportArgumentType] - third-party signature is wider than its runtime contract
+        algorithms=[algorithm],
+        options={
+            "require": [],
+            "verify_aud": False,
+            "verify_exp": False,
+            "verify_iat": False,
+            "verify_iss": False,
+            "verify_jti": False,
+            "verify_nbf": False,
+            "verify_signature": True,
+            "verify_sub": False,
+        },
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _WorkerJWTVerifier(Generic[ClaimsT]):
     config: JWTValidationConfig
@@ -273,22 +283,3 @@ class _WorkerJWTVerifier(Generic[ClaimsT]):
             )
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
             return VerificationUnavailable()
-
-
-def _verify_signature(token: str, key: PreparedVerificationKey, algorithm: str) -> None:
-    jwt.decode_complete(
-        token,
-        key=key,  # pyright: ignore[reportArgumentType] - third-party signature is wider than its runtime contract
-        algorithms=[algorithm],
-        options={
-            "require": [],
-            "verify_aud": False,
-            "verify_exp": False,
-            "verify_iat": False,
-            "verify_iss": False,
-            "verify_jti": False,
-            "verify_nbf": False,
-            "verify_signature": True,
-            "verify_sub": False,
-        },
-    )

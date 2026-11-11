@@ -17,6 +17,9 @@ implementation over a native Litestar :class:`~litestar.stores.base.Store`,
 resolved by name from the application store registry. A shared backend shares
 bucket values, but the native store contract has no compare-and-increment, so
 the bundled read-modify-write implementation is exact only within one process.
+In ``DEFAULT_RATE_LIMIT_POLICIES``, second-factor re-verifications of an
+already-authenticated principal (``PASSWORD_VERIFY``) and single-use
+``VERIFICATION_CONSUME`` attempts match ``MFA_TOTP_VERIFY``'s five-minute cadence.
 """
 
 from _thread import LockType
@@ -159,8 +162,6 @@ DEFAULT_RATE_LIMIT_POLICIES: "Mapping[str, RateLimitPolicy]" = MappingProxyType(
     REGISTRATION: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     RECOVERY: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     PASSWORD_RESET: RateLimitPolicy(limit=10, window=timedelta(hours=1)),
-    # Second-factor re-verifications of an already-authenticated principal share
-    # MFA_TOTP_VERIFY's cadence; VERIFICATION_CONSUME mirrors it for the same reason.
     PASSWORD_VERIFY: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
     VERIFICATION_RESEND: RateLimitPolicy(limit=5, window=timedelta(hours=1)),
     VERIFICATION_CONSUME: RateLimitPolicy(limit=10, window=timedelta(minutes=5)),
@@ -503,8 +504,11 @@ class RateLimitGuard:
         return hmac_digest(self.pepper, _SUBJECT_DIGEST_LABEL + identifier.encode("utf-8"), sha256).hex()
 
     async def _emit_denial(self, operation: str) -> None:
-        # The account is deliberately absent: a denial is keyed on a digest, and
-        # resolving it back to an account would defeat the point of digesting it.
+        """Emit a secret-free rate-limit denial event without reversing the decision.
+
+        ``account_id`` stays ``None`` because denials are keyed strictly on
+        subject digests rather than resolved back to stored accounts.
+        """
         try:
             event = SecurityEvent(
                 event_id=self.event_ids(),

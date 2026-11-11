@@ -90,10 +90,6 @@ async def _observe(*_args: object, **_kwargs: object) -> None:
     return None
 
 
-class _Provider:
-    name = "example"
-
-
 class _OAuthLifecycle:
     """Route-shaped OAuth service: the document depends on signatures, not behavior."""
 

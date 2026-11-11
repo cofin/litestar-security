@@ -8,9 +8,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-02T01:45:00Z"
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-10T22:45:00Z"
-    commit: "398fd57"
+  - by: agent:flow-learn
+    at: "2026-11-11T20:45:00Z"
+    commit: "dcce78d"
 sources:
   - id: pyproject-stack
     resource: "pyproject.toml"
@@ -41,8 +41,8 @@ sources:
   - `passkeys`: `webauthn>=3,<4` (`PyWebAuthnVerifier`, gated by `WEBAUTHN_INSTALLED` / `ensure_webauthn`).[^pyproject-stack][^typing-facade]
   - `oauth`: `[]` (uses core `httpx` + `PyJWT[crypto]`).[^pyproject-stack]
 - **Verification Toolchain**:
-  - Static analysis: `ruff` (`select = ["ALL"]`, `line-length = 120`), `mypy` (`strict = true`), `pyright` (`typeCheckingMode = "strict"`, `pythonVersion = "3.10"`), `slotscheck`, `codespell`, `prek`, and `zizmor`.[^pyproject-stack][^makefile]
-  - Testing & coverage: `pytest` (`anyio_mode = "auto"`, `pytest-xdist` `-n auto`, `pytest-benchmark`, `polyfactory`, `hypothesis`) and `pytest-cov` (`95%` overall threshold + `100%` branch coverage on `CORE_COVERAGE` modules).[^pyproject-stack][^makefile]
+  - Static analysis: `ruff` (`v0.17.4`, `select = ["ALL"]`, `line-length = 120`), `mypy` (`strict = true`), `pyright` (`typeCheckingMode = "strict"`, `pythonVersion = "3.10"`), `slotscheck`, `codespell`, `prek`, and `zizmor`.[^pyproject-stack][^makefile]
+  - Testing & coverage: `pytest` (`anyio_mode = "auto"`, `pytest-xdist` `-n auto`, `pytest-benchmark`) and `pytest-cov` (`95%` overall threshold + `100%` branch coverage on `CORE_COVERAGE` modules).[^pyproject-stack][^makefile]
 <!-- truth: end -->
 
 ## CLI Entrypoint & Documentation Stack

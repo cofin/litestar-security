@@ -1,29 +1,56 @@
-"""Primitives shared by every provider package.
+"""Primitives shared across provider packages.
 
-These helpers are message-free and transport-free except for the shared DNS
-resolver. They reject malformed JSON by shape, keep observability failures from
-reaching the caller, and resolve addresses for provider network boundaries.
-Provider-specific wording belongs in the provider that raises it, so nothing
-here formats an error beyond the message it is handed.
+These helpers centralize message-free SSRF address validation, bounded HTTP
+response reading, conditional ETag handling, JSON depth/uniqueness checks,
+finite numeric validation, and bounded worker execution with isolated metrics.
+Provider-specific error types and wording remain in each calling provider.
 """
 
+import hashlib
 import ipaddress
+import json
 import socket
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
-from typing import Generic, NoReturn, TypeAlias, TypeVar
+from math import isfinite
+from time import perf_counter
+from typing import Any, Generic, Literal, NoReturn, TypeAlias, TypeVar
 
-from anyio import getaddrinfo
+import httpx
+from anyio import CapacityLimiter, fail_after, getaddrinfo, to_thread
+from litestar import Request, Response
+from litestar.enums import MediaType
 from litestar.exceptions import ImproperlyConfiguredException
+from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
-from litestar_security.workers import SecurityMetrics
+from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics
 
 __all__ = ("AddressResolver", "JSONValue", "public_address", "resolve_addresses")
 
 JSONValue: TypeAlias = bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"] | None
 AddressResolver: TypeAlias = Callable[[str, int], Awaitable[Sequence[str]]]
+AddressResolutionReason: TypeAlias = Literal["unavailable", "empty", "invalid", "non_public"]
+BoundedBodyReason: TypeAlias = Literal["unsupported_encoding", "too_large"]
 VerifierT = TypeVar("VerifierT")
+ResultT = TypeVar("ResultT")
+MAXIMUM_WORKER_TOKENS = 1_024
+
+
+class AddressResolutionError(Exception):
+    """Message-free SSRF address-resolution failure carrying a structural reason."""
+
+    def __init__(self, reason: AddressResolutionReason) -> None:
+        self.reason: AddressResolutionReason = reason
+        super().__init__(reason)
+
+
+class BoundedBodyError(Exception):
+    """Message-free bounded HTTP body failure carrying a structural reason."""
+
+    def __init__(self, reason: BoundedBodyReason) -> None:
+        self.reason: BoundedBodyReason = reason
+        super().__init__(reason)
 
 
 class DynamicVerifierCache(Generic[VerifierT]):
@@ -83,6 +110,134 @@ async def resolve_addresses(host: str, port: int) -> tuple[str, ...]:
     return tuple(dict.fromkeys(result[4][0] for result in results))
 
 
+async def resolve_public_addresses(
+    host: str, port: int, *, resolver: AddressResolver = resolve_addresses
+) -> tuple[str, ...]:
+    """Resolve stream addresses for ``host`` and verify all addresses are globally routable."""
+    reason: AddressResolutionReason
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            addresses = tuple(await resolver(host, port))
+        except (OSError, RuntimeError) as exc:
+            reason = "unavailable"
+            raise AddressResolutionError(reason) from exc
+    else:
+        addresses = (str(literal),)
+    if not addresses:
+        reason = "empty"
+        raise AddressResolutionError(reason)
+    try:
+        parsed = tuple(ipaddress.ip_address(address) for address in addresses)
+    except ValueError as exc:
+        reason = "invalid"
+        raise AddressResolutionError(reason) from exc
+    if any(not public_address(address) for address in parsed):
+        reason = "non_public"
+        raise AddressResolutionError(reason)
+    return tuple(str(address) for address in parsed)
+
+
+async def read_bounded_body(response: httpx.Response, maximum_bytes: int) -> bytes:
+    """Read an unencoded HTTP response stream without exceeding ``maximum_bytes``."""
+    reason: BoundedBodyReason
+    content_encoding = response.headers.get("content-encoding", "identity").strip().lower()
+    if content_encoding not in {"", "identity"}:
+        reason = "unsupported_encoding"
+        raise BoundedBodyError(reason)
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(chunk) > maximum_bytes - len(body):
+            reason = "too_large"
+            raise BoundedBodyError(reason)
+        body.extend(chunk)
+    return bytes(body)
+
+
+def positive_finite(value: object) -> bool:
+    """Return whether ``value`` is a finite positive int or float, excluding booleans."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value) and value > 0
+
+
+def validate_metrics(metrics: SecurityMetrics | None, *, message: str) -> SecurityMetrics:
+    """Normalize optional security metrics or reject non-conforming sinks."""
+    sink = NoOpSecurityMetrics() if metrics is None else metrics
+    if not callable(getattr(sink, "increment", None)) or not callable(getattr(sink, "observe", None)):
+        raise_config(message)
+    return sink
+
+
+def validate_worker_limiter(limiter: object, *, message: str) -> CapacityLimiter:
+    """Validate that ``limiter`` is a bounded ``CapacityLimiter``."""
+    total_tokens: object = getattr(limiter, "total_tokens", None)
+    if (
+        not isinstance(limiter, CapacityLimiter)
+        or not isinstance(total_tokens, int)
+        or isinstance(total_tokens, bool)
+        or not 1 <= total_tokens <= MAXIMUM_WORKER_TOKENS
+    ):
+        raise_config(message)
+    return limiter
+
+
+async def run_worker_operation(
+    operation: Callable[[], ResultT],
+    *,
+    limiter: CapacityLimiter,
+    worker_timeout: float,
+    metrics: SecurityMetrics,
+    operation_metric: str | None = None,
+) -> ResultT:
+    """Run one blocking operation inside a bounded worker thread with metrics and timeout."""
+    if limiter.borrowed_tokens >= limiter.total_tokens:
+        safe_increment(metrics, "security.worker.saturation")
+    queued_at = perf_counter()
+
+    def run() -> ResultT:
+        started = perf_counter()
+        safe_observe(metrics, "security.worker.wait", started - queued_at)
+        try:
+            return operation()
+        finally:
+            elapsed = perf_counter() - started
+            safe_observe(metrics, "security.worker.duration", elapsed)
+            if operation_metric is not None:
+                safe_observe(metrics, operation_metric, elapsed)
+
+    with fail_after(worker_timeout):
+        return await to_thread.run_sync(run, abandon_on_cancel=True, limiter=limiter)
+
+
+def if_none_match(value: str | None, etag: str) -> bool:
+    """Return whether an HTTP ``If-None-Match`` header matches ``etag``."""
+    if value is None:
+        return False
+    return any(
+        candidate == "*" or candidate.removeprefix("W/") == etag for candidate in map(str.strip, value.split(","))
+    )
+
+
+def canonical_json_etag(document: object) -> tuple[bytes, str]:
+    """Serialize ``document`` as canonical ASCII JSON and return its strong SHA-256 ETag."""
+    canonical_bytes = json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()
+    return canonical_bytes, f'"{hashlib.sha256(canonical_bytes).hexdigest()}"'
+
+
+def conditional_etag_response(
+    request: Request[Any, Any, Any],
+    *,
+    canonical_bytes: bytes,
+    etag: str,
+    headers: Mapping[str, str],
+    media_type: MediaType | str,
+) -> Response[bytes]:
+    """Return ``304 Not Modified`` when ``If-None-Match`` matches ``etag``, else ``200 OK``."""
+    if if_none_match(request.headers.get("if-none-match"), etag):
+        return Response(b"", headers=headers, status_code=HTTP_304_NOT_MODIFIED)
+    return Response(canonical_bytes, headers=headers, media_type=media_type, status_code=HTTP_200_OK)
+
+
 def raise_config(message: str) -> NoReturn:
     raise ImproperlyConfiguredException(detail=message)
 
@@ -114,10 +269,12 @@ def validate_depth(value: JSONValue, *, maximum: int) -> None:
 
 
 def safe_increment(metrics: SecurityMetrics, name: str) -> None:
-    with suppress(Exception):  # observability must never alter authentication behavior
+    """Increment ``name`` while suppressing metric sink failures."""
+    with suppress(Exception):
         metrics.increment(name)
 
 
 def safe_observe(metrics: SecurityMetrics, name: str, value: float) -> None:
-    with suppress(Exception):  # observability must never alter authentication behavior
+    """Observe ``value`` for ``name`` while suppressing metric sink failures."""
+    with suppress(Exception):
         metrics.observe(name, value)

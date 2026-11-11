@@ -1,16 +1,23 @@
-"""Native Litestar route bundle for MFA, passkeys, and step-up."""
+"""Native Litestar route bundle for MFA, passkeys, and step-up.
+
+``_PURPOSE_METHODS`` enforces deny-by-default step-up factor admission (only
+``password`` and ``passkey`` satisfy sensitive enrollment, removal, and
+recovery-code replacement purposes) and stays synchronized with
+``_PURPOSE_OPERATIONS`` in ``_authorize_step_up``. Error statuses in
+``_MFA_BAD_REQUEST_RESPONSES`` document raised denials, while ``409`` conflict
+responses keep their explicit ``OperationMessage`` schema.
+"""
 
 from base64 import urlsafe_b64decode
 from collections.abc import Callable
 from dataclasses import dataclass
 from secrets import token_urlsafe
-from typing import Any, NoReturn, TypeVar
+from typing import Any
 
 from litestar import Controller, Request, Response, Router, get, post
 from litestar.connection import ASGIConnection
 from litestar.datastructures import CacheControlHeader
 from litestar.di import NamedDependency, Provide
-from litestar.exceptions import NotAuthorizedException, ServiceUnavailableException, TooManyRequestsException
 from litestar.openapi.datastructures import ResponseSpec
 from litestar.params import FromPath, JSONBody, SkipValidation
 from litestar.status_codes import (
@@ -48,6 +55,7 @@ from litestar_security.accounts._records import (
     RevokeLoginMethodStatus,
 )
 from litestar_security.accounts._stores import SecurityEpochStore
+from litestar_security.accounts.controllers._local import principal_id, route_error
 from litestar_security.accounts.schemas import (
     OperationMessage,
     PasskeyAuthenticationStart,
@@ -72,11 +80,6 @@ __all__ = ("build_mfa_routes",)
 _MFA_TAG = ROUTE_TAGS["mfa"].name
 _PASSKEY_TAG = ROUTE_TAGS["passkeys"].name
 _STEP_UP_TAG = ROUTE_TAGS["step_up"].name
-# Every step-up purpose the controller consumes, mapped to the factors that may
-# satisfy it. Deny-by-default: a purpose absent here is rejected (see issue()),
-# never treated as "any factor allowed". Only password and passkey prove
-# possession of a strong factor, so totp and recovery-code stay excluded. Keep
-# in sync with the purpose literals passed to _consume_step_up.
 _PURPOSE_METHODS = {
     "totp-enroll": frozenset({"password", "passkey"}),
     "totp-remove": frozenset({"password", "passkey"}),
@@ -84,7 +87,13 @@ _PURPOSE_METHODS = {
     "passkey-register": frozenset({"password", "passkey"}),
     "passkey-remove": frozenset({"password", "passkey"}),
 }
-ContentT = TypeVar("ContentT")
+_PURPOSE_OPERATIONS = {
+    "totp-enroll": MFA_TOTP_ENROLL,
+    "totp-remove": MFA_TOTP_REMOVE,
+    "recovery-codes": MFA_RECOVERY_REPLACE,
+    "passkey-register": PASSKEY_REGISTER_OPTIONS,
+    "passkey-remove": PASSKEY_REMOVE,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,23 +184,6 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
     )
 
 
-def _response(content: ContentT, status_code: int = HTTP_200_OK) -> Response[ContentT]:
-    return Response(content=content, status_code=status_code)
-
-
-def _error(outcome: object) -> NoReturn:
-    if isinstance(outcome, RateLimited):
-        headers = {"Retry-After": str(outcome.retry_after)} if outcome.retry_after is not None else None
-        raise TooManyRequestsException(detail="Too many requests.", headers=headers)
-    if isinstance(outcome, VerificationUnavailable):
-        raise ServiceUnavailableException(detail="Authentication service is unavailable.")
-    raise NotAuthorizedException(detail="Authentication required.")
-
-
-def _principal_id(principal: Principal[Any]) -> str | None:
-    return principal.id if principal.is_authenticated else None
-
-
 def _transport_binding(request: Request[Any, Any, Any]) -> bytes:
     authorization = request.headers.get("authorization")
     cookies = request.headers.get("cookie")
@@ -220,23 +212,49 @@ async def _check_rate_limit(
     return await guard.check(operation, client_key=client_key, identifier=account_id)
 
 
-async def _consume_step_up(
-    *, mfa_service: _MFAFeatureService, request: Request[Any, Any, Any], account_id: str, purpose: str, grant: str
-) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+async def _authorize_step_up(
+    mfa_service: _MFAFeatureService,
+    request: Request[Any, Any, Any],
+    principal: Principal[Any],
+    *,
+    purpose: str,
+    grant: str,
+) -> str:
+    account_id = principal_id(principal)
+    if account_id is None:  # pragma: no cover - controller registration and auth guarantee both
+        route_error(InvalidCredentials(), credentials=True)
+    limited = await _check_rate_limit(mfa_service, request, _PURPOSE_OPERATIONS[purpose], account_id)
+    if limited is not None:
+        route_error(limited, credentials=True)
     epoch = await _current_epoch(mfa_service, account_id)
     if isinstance(epoch, VerificationUnavailable):
-        return epoch
-    return await mfa_service.step_up.consume(
+        route_error(epoch, credentials=True)
+    assurance = await mfa_service.step_up.consume(
         grant,
         principal_id=account_id,
         security_epoch=epoch,
         purpose=purpose,
         transport_binding=_transport_binding(request),
     )
+    if not isinstance(assurance, AuthenticationEvidence):
+        route_error(assurance, credentials=True)
+    return account_id
 
 
-# Raised denials carry the exception body; the 409 below is returned by the
-# handler and keeps its own schema.
+def removal_response(result: RevokeLoginMethodOutcome | VerificationUnavailable) -> Response[OperationMessage]:
+    """Project a login-method removal outcome onto its typed HTTP response."""
+    if isinstance(result, VerificationUnavailable):
+        route_error(result, credentials=True)
+    if result.status is RevokeLoginMethodStatus.REVOKED:
+        return Response(content=OperationMessage(detail="Login method removed."), status_code=HTTP_200_OK)
+    if result.status is RevokeLoginMethodStatus.FINAL_METHOD:
+        return Response(
+            content=OperationMessage(detail="At least one viable login method is required."),
+            status_code=HTTP_409_CONFLICT,
+        )
+    return Response(content=OperationMessage(detail="The request is invalid."), status_code=HTTP_400_BAD_REQUEST)
+
+
 _MFA_BAD_REQUEST_RESPONSES = {
     HTTP_400_BAD_REQUEST: raised_denial("The request is invalid."),
     HTTP_401_UNAUTHORIZED: raised_denial("Authentication or step-up is required."),
@@ -278,22 +296,22 @@ class _StepUpController(Controller):
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[StepUpGrant]:
         """Verify one factor and issue a purpose-bound grant."""
-        account_id = _principal_id(principal)
+        account_id = principal_id(principal)
         if account_id is None:  # pragma: no cover - required authentication rejects anonymous requests first
-            _error(InvalidCredentials())
+            route_error(InvalidCredentials(), credentials=True)
         allowed_methods = _PURPOSE_METHODS.get(purpose)
         if allowed_methods is None or data.method not in allowed_methods:
-            _error(InvalidCredentials())
+            route_error(InvalidCredentials(), credentials=True)
         operation = PASSWORD_VERIFY if data.method == "password" else PASSKEY_ASSERT
         limited = await _check_rate_limit(mfa_service, request, operation, account_id)
         if limited is not None:
-            _error(limited)
+            route_error(limited, credentials=True)
         evidence = await self._verify_factor(account_id, data, request, mfa_service)
         if not isinstance(evidence, AuthenticationEvidence):
-            _error(evidence)
+            route_error(evidence, credentials=True)
         epoch = await _current_epoch(mfa_service, account_id)
         if isinstance(epoch, VerificationUnavailable):
-            _error(epoch)
+            route_error(epoch, credentials=True)
         grant = await mfa_service.step_up.issue(
             principal_id=account_id,
             security_epoch=epoch,
@@ -302,8 +320,11 @@ class _StepUpController(Controller):
             evidence=evidence,
         )
         if not isinstance(grant, StepUpCredential):
-            _error(grant)
-        return _response(StepUpGrant(grant=grant.token, purpose=grant.purpose, expires_at=grant.expires_at))
+            route_error(grant, credentials=True)
+        return Response(
+            content=StepUpGrant(grant=grant.token, purpose=grant.purpose, expires_at=grant.expires_at),
+            status_code=HTTP_200_OK,
+        )
 
     @staticmethod
     async def _verify_factor(
@@ -353,35 +374,23 @@ class _MFAController(Controller):
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[TOTPProvisioning]:
         """Begin TOTP enrollment after consuming exact step-up."""
-        account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
-        if (
-            account_id is None or totp_service is None
-        ):  # pragma: no cover - controller registration and auth guarantee both
-            _error(InvalidCredentials())
-        limited = await _check_rate_limit(mfa_service, request, MFA_TOTP_ENROLL, account_id)
-        if limited is not None:
-            _error(limited)
-        assurance = await _consume_step_up(
-            mfa_service=mfa_service,
-            request=request,
-            account_id=account_id,
-            purpose="totp-enroll",
-            grant=data.step_up_grant,
+        if totp_service is None:  # pragma: no cover - controller registration guarantees mfa service
+            route_error(InvalidCredentials(), credentials=True)
+        account_id = await _authorize_step_up(
+            mfa_service, request, principal, purpose="totp-enroll", grant=data.step_up_grant
         )
-        if not isinstance(assurance, AuthenticationEvidence):
-            _error(assurance)
         result = await totp_service.begin_totp_enrollment(account_id, label=data.label)
         if isinstance(result, VerificationUnavailable):
-            _error(result)
-        return _response(
-            TOTPProvisioning(
+            route_error(result, credentials=True)
+        return Response(
+            content=TOTPProvisioning(
                 enrollment_id=result.enrollment_id,
                 method_id=result.method_id,
                 provisioning_uri=result.provisioning_uri,
                 expires_at=result.expires_at,
             ),
-            HTTP_201_CREATED,
+            status_code=HTTP_201_CREATED,
         )
 
     @post(
@@ -406,19 +415,19 @@ class _MFAController(Controller):
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[RecoveryCodes]:
         """Activate TOTP and return a recovery-code set once."""
-        account_id = _principal_id(principal)
+        account_id = principal_id(principal)
         totp_service = mfa_service.mfa
         if (
             account_id is None or totp_service is None
         ):  # pragma: no cover - controller registration and auth guarantee both
-            _error(InvalidCredentials())
+            route_error(InvalidCredentials(), credentials=True)
         limited = await _check_rate_limit(mfa_service, request, MFA_TOTP_VERIFY, account_id)
         if limited is not None:
-            _error(limited)
+            route_error(limited, credentials=True)
         recovery = await totp_service.activate_totp_with_recovery_codes(account_id, data.enrollment_id, data.code)
         if not isinstance(recovery, RecoveryCodeGrant):
-            _error(recovery)
-        return _response(RecoveryCodes(codes=recovery.codes))
+            route_error(recovery, credentials=True)
+        return Response(content=RecoveryCodes(codes=recovery.codes), status_code=HTTP_200_OK)
 
     @post(
         "/mfa/totp/{method_id:str}/remove",
@@ -443,26 +452,14 @@ class _MFAController(Controller):
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[OperationMessage]:
         """Remove TOTP through exact step-up and final-method protection."""
-        account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
-        if (
-            account_id is None or totp_service is None
-        ):  # pragma: no cover - controller registration and auth guarantee both
-            _error(InvalidCredentials())
-        limited = await _check_rate_limit(mfa_service, request, MFA_TOTP_REMOVE, account_id)
-        if limited is not None:
-            _error(limited)
-        assurance = await _consume_step_up(
-            mfa_service=mfa_service,
-            request=request,
-            account_id=account_id,
-            purpose="totp-remove",
-            grant=data.step_up_grant,
+        if totp_service is None:  # pragma: no cover - controller registration guarantees mfa service
+            route_error(InvalidCredentials(), credentials=True)
+        account_id = await _authorize_step_up(
+            mfa_service, request, principal, purpose="totp-remove", grant=data.step_up_grant
         )
-        if not isinstance(assurance, AuthenticationEvidence):
-            _error(assurance)
         result = await totp_service.remove_totp_method(account_id, method_id)
-        return _removal_response(result)
+        return removal_response(result)
 
     @post(
         "/mfa/recovery-codes",
@@ -486,28 +483,16 @@ class _MFAController(Controller):
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[RecoveryCodes]:
         """Replace recovery codes after exact step-up."""
-        account_id = _principal_id(principal)
         totp_service = mfa_service.mfa
-        if (
-            account_id is None or totp_service is None
-        ):  # pragma: no cover - controller registration and auth guarantee both
-            _error(InvalidCredentials())
-        limited = await _check_rate_limit(mfa_service, request, MFA_RECOVERY_REPLACE, account_id)
-        if limited is not None:
-            _error(limited)
-        assurance = await _consume_step_up(
-            mfa_service=mfa_service,
-            request=request,
-            account_id=account_id,
-            purpose="recovery-codes",
-            grant=data.step_up_grant,
+        if totp_service is None:  # pragma: no cover - controller registration guarantees mfa service
+            route_error(InvalidCredentials(), credentials=True)
+        account_id = await _authorize_step_up(
+            mfa_service, request, principal, purpose="recovery-codes", grant=data.step_up_grant
         )
-        if not isinstance(assurance, AuthenticationEvidence):
-            _error(assurance)
         result = await totp_service.generate_recovery_codes(account_id)
         if not isinstance(result, RecoveryCodeGrant):
-            _error(result)
-        return _response(RecoveryCodes(codes=result.codes))
+            route_error(result, credentials=True)
+        return Response(content=RecoveryCodes(codes=result.codes), status_code=HTTP_200_OK)
 
 
 class _PasskeyController(Controller):
@@ -535,28 +520,16 @@ class _PasskeyController(Controller):
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[PasskeyOptions]:
         """Create registration options after exact step-up."""
-        account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys
-        if (
-            account_id is None or passkey_service is None
-        ):  # pragma: no cover - controller registration and auth guarantee both
-            _error(InvalidCredentials())
-        limited = await _check_rate_limit(mfa_service, request, PASSKEY_REGISTER_OPTIONS, account_id)
-        if limited is not None:
-            _error(limited)
-        assurance = await _consume_step_up(
-            mfa_service=mfa_service,
-            request=request,
-            account_id=account_id,
-            purpose="passkey-register",
-            grant=data.step_up_grant,
+        if passkey_service is None:  # pragma: no cover - controller registration guarantees passkey service
+            route_error(InvalidCredentials(), credentials=True)
+        account_id = await _authorize_step_up(
+            mfa_service, request, principal, purpose="passkey-register", grant=data.step_up_grant
         )
-        if not isinstance(assurance, AuthenticationEvidence):
-            _error(assurance)
         result = await passkey_service.begin_registration(
             account_id, user_name=data.user_name, binding=_transport_binding(request)
         )
-        return _options_response(result)
+        return self._options_response(result)
 
     @post(
         "/passkeys/registration/verify",
@@ -577,19 +550,19 @@ class _PasskeyController(Controller):
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[OperationMessage]:
         """Verify and store one passkey registration."""
-        account_id = _principal_id(principal)
+        account_id = principal_id(principal)
         passkey_service = mfa_service.passkeys
         if account_id is None or passkey_service is None or data.account_id != account_id:
-            _error(InvalidCredentials())
+            route_error(InvalidCredentials(), credentials=True)
         limited = await _check_rate_limit(mfa_service, request, PASSKEY_REGISTER_VERIFY, account_id)
         if limited is not None:
-            _error(limited)
+            route_error(limited, credentials=True)
         result = await passkey_service.verify_registration(
             account_id, binding=_transport_binding(request), response=data.response
         )
         if not hasattr(result, "credential_id"):
-            _error(result)
-        return _response(OperationMessage(detail="Passkey registered."), HTTP_201_CREATED)
+            route_error(result, credentials=True)
+        return Response(content=OperationMessage(detail="Passkey registered."), status_code=HTTP_201_CREATED)
 
     @post(
         "/passkeys/authentication/options",
@@ -614,13 +587,13 @@ class _PasskeyController(Controller):
         """Create public account-bound assertion options."""
         passkey_service = mfa_service.passkeys
         if passkey_service is None:  # pragma: no cover - this controller is registered only with a passkey service
-            _error(VerificationUnavailable())
+            route_error(VerificationUnavailable(), credentials=True)
         limited = await _check_rate_limit(mfa_service, request, PASSKEY_AUTH_OPTIONS, data.account_id)
         if limited is not None:
-            _error(limited)
+            route_error(limited, credentials=True)
         binding = token_urlsafe(32)
         result = await passkey_service.begin_authentication(data.account_id, binding=binding.encode("ascii"))
-        return _options_response(result, binding=binding)
+        return self._options_response(result, binding=binding)
 
     @get(
         "/passkeys",
@@ -639,16 +612,16 @@ class _PasskeyController(Controller):
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[tuple[PasskeySummary, ...]]:
         """List only caller-owned safe credential metadata."""
-        account_id = _principal_id(principal)
+        account_id = principal_id(principal)
         passkey_service = mfa_service.passkeys
         if (
             account_id is None or passkey_service is None
         ):  # pragma: no cover - controller registration and auth guarantee both
-            _error(InvalidCredentials())
+            route_error(InvalidCredentials(), credentials=True)
         result = await passkey_service.list_credentials(account_id)
         if isinstance(result, VerificationUnavailable):
-            _error(result)
-        return _response(tuple(_summary_response(summary) for summary in result))
+            route_error(result, credentials=True)
+        return Response(content=tuple(self._summary_response(summary) for summary in result), status_code=HTTP_200_OK)
 
     @post(
         "/passkeys/{credential_id:str}/remove",
@@ -673,30 +646,43 @@ class _PasskeyController(Controller):
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[OperationMessage]:
         """Remove a passkey through exact step-up and final-method protection."""
-        account_id = _principal_id(principal)
         passkey_service = mfa_service.passkeys
-        if (
-            account_id is None or passkey_service is None
-        ):  # pragma: no cover - controller registration and auth guarantee both
-            _error(InvalidCredentials())
-        limited = await _check_rate_limit(mfa_service, request, PASSKEY_REMOVE, account_id)
-        if limited is not None:
-            _error(limited)
-        assurance = await _consume_step_up(
-            mfa_service=mfa_service,
-            request=request,
-            account_id=account_id,
-            purpose="passkey-remove",
-            grant=data.step_up_grant,
+        if passkey_service is None:  # pragma: no cover - controller registration guarantees passkey service
+            route_error(InvalidCredentials(), credentials=True)
+        account_id = await _authorize_step_up(
+            mfa_service, request, principal, purpose="passkey-remove", grant=data.step_up_grant
         )
-        if not isinstance(assurance, AuthenticationEvidence):
-            _error(assurance)
         try:
             raw_id = urlsafe_b64decode(credential_id + "=" * (-len(credential_id) % 4))
         except (ValueError, TypeError):
-            return _response(OperationMessage(detail="The request is invalid."), HTTP_400_BAD_REQUEST)
+            return Response(
+                content=OperationMessage(detail="The request is invalid."), status_code=HTTP_400_BAD_REQUEST
+            )
         result = await passkey_service.remove_credential(account_id, raw_id)
-        return _removal_response(result)
+        return removal_response(result)
+
+    @staticmethod
+    def _options_response(
+        result: WebAuthnOptions | VerificationUnavailable, *, binding: str | None = None
+    ) -> Response[Any]:
+        if isinstance(result, VerificationUnavailable):
+            route_error(result, credentials=True)
+        return Response(
+            content=PasskeyOptions(options=result.json, expires_at=result.expires_at, binding=binding),
+            status_code=HTTP_200_OK,
+        )
+
+    @staticmethod
+    def _summary_response(summary: PasskeyMetadata) -> PasskeySummary:
+        return PasskeySummary(
+            credential_id=summary.credential_id,
+            display_name=summary.display_name,
+            created_at=summary.created_at,
+            last_used_at=summary.last_used_at,
+            backup_eligible=summary.backup_eligible,
+            backup_state=summary.backup_state,
+            suspect=summary.suspect,
+        )
 
 
 class _PasskeySessionAuthenticationController(Controller):
@@ -827,51 +813,21 @@ async def _verify_passkey_authentication(
     if (
         passkey_service is None or local_auth_service is None
     ):  # pragma: no cover - plugin validates both before route registration
-        _error(VerificationUnavailable())
+        route_error(VerificationUnavailable(), credentials=True)
     limited = await _check_rate_limit(mfa_service, request, PASSKEY_ASSERT, data.account_id)
     if limited is not None:
-        _error(limited)
+        route_error(limited, credentials=True)
     if data.binding is None:
-        _error(InvalidCredentials())
+        route_error(InvalidCredentials(), credentials=True)
     evidence = await passkey_service.verify_authentication(
         data.account_id, binding=data.binding.encode("utf-8"), response=data.response
     )
     if not isinstance(evidence, AuthenticationEvidence):
-        _error(evidence)
+        route_error(evidence, credentials=True)
     selected_transport = transport if transport is not None else data.transport
     result = await local_auth_service.passkey_login(
         request, data.account_id, transport=selected_transport, evidence=evidence
     )
     if isinstance(result, (InvalidCredentials, VerificationUnavailable)):
-        _error(result)
-    return _response(result)
-
-
-def _options_response(
-    result: WebAuthnOptions | VerificationUnavailable, *, binding: str | None = None
-) -> Response[Any]:
-    if isinstance(result, VerificationUnavailable):
-        _error(result)
-    return _response(PasskeyOptions(options=result.json, expires_at=result.expires_at, binding=binding))
-
-
-def _summary_response(summary: PasskeyMetadata) -> PasskeySummary:
-    return PasskeySummary(
-        credential_id=summary.credential_id,
-        display_name=summary.display_name,
-        created_at=summary.created_at,
-        last_used_at=summary.last_used_at,
-        backup_eligible=summary.backup_eligible,
-        backup_state=summary.backup_state,
-        suspect=summary.suspect,
-    )
-
-
-def _removal_response(result: RevokeLoginMethodOutcome | VerificationUnavailable) -> Response[OperationMessage]:
-    if isinstance(result, VerificationUnavailable):
-        _error(result)
-    if result.status is RevokeLoginMethodStatus.REVOKED:
-        return _response(OperationMessage(detail="Login method removed."))
-    if result.status is RevokeLoginMethodStatus.FINAL_METHOD:
-        return _response(OperationMessage(detail="At least one viable login method is required."), HTTP_409_CONFLICT)
-    return _response(OperationMessage(detail="The request is invalid."), HTTP_400_BAD_REQUEST)
+        route_error(result, credentials=True)
+    return Response(content=result, status_code=HTTP_200_OK)

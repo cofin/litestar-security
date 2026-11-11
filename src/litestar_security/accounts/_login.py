@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from logging import getLogger
 from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 from litestar.exceptions import ImproperlyConfiguredException
@@ -20,13 +19,14 @@ from litestar_security.accounts._operations import (
 from litestar_security.accounts._passwords import PasswordHasher
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
+    DEFAULT_REAUTHENTICATION_TTL,
     LocalAccountState,
     NoOpSecurityEventSink,
     PasswordReauthenticationProof,
     PasswordVerificationStatus,
-    SecurityEvent,
     SecurityEventSink,
-    emit_security_event,
+    emit_lifecycle_event,
+    lifecycle_event,
     normalize_identifier,
 )
 from litestar_security.accounts._stores import AccountLookup, PasswordCredentialStore
@@ -39,8 +39,6 @@ if TYPE_CHECKING:
 __all__ = ("PasswordLoginService", "PasswordReauthenticationService")
 
 UserT = TypeVar("UserT")
-_DEFAULT_REAUTHENTICATION_TTL = timedelta(minutes=5)
-_LOGGER = getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +47,7 @@ class PasswordReauthenticationService:
 
     accounts: PasswordCredentialStore = field(repr=False)
     hasher: PasswordHasher = field(repr=False)
-    evidence_ttl: timedelta = _DEFAULT_REAUTHENTICATION_TTL
+    evidence_ttl: timedelta = DEFAULT_REAUTHENTICATION_TTL
     clock: "Callable[[], datetime]" = field(default=utc_now, repr=False, compare=False)
     events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
     event_ids: "Callable[[], str]" = field(default=new_event_id, repr=False, compare=False)
@@ -71,7 +69,7 @@ class PasswordReauthenticationService:
         if (
             not isinstance(evidence_ttl_value, timedelta)
             or evidence_ttl_value <= timedelta(0)
-            or evidence_ttl_value > _DEFAULT_REAUTHENTICATION_TTL
+            or evidence_ttl_value > DEFAULT_REAUTHENTICATION_TTL
         ):
             msg = "Password reauthentication evidence lifetime must be positive and at most five minutes"
             raise ImproperlyConfiguredException(detail=msg)
@@ -139,7 +137,9 @@ class PasswordReauthenticationService:
 
     async def _rehash(self, account_id: str, expected_hash: str, replacement_hash: str, occurred_at: datetime) -> bool:
         try:
-            event = self._event(account_id, occurred_at, operation=PASSWORD_REHASH, outcome=OUTCOME_UPDATED)
+            event = lifecycle_event(
+                self.event_ids, occurred_at, operation=PASSWORD_REHASH, outcome=OUTCOME_UPDATED, account_id=account_id
+            )
             replaced: object = await self.accounts.compare_and_replace_password(
                 account_id, expected_hash, replacement_hash, event=event
             )
@@ -147,26 +147,15 @@ class PasswordReauthenticationService:
             return False
         return replaced is True
 
-    def _event(self, account_id: str, occurred_at: datetime, *, operation: str, outcome: str) -> SecurityEvent:
-        event_id = self.event_ids().strip()
-        if not event_id:
-            raise ValueError
-        return SecurityEvent(
-            event_id=event_id,
-            occurred_at=occurred_at,
-            operation=operation,
-            outcome=outcome,
-            account_id=account_id,
-            mechanism="password",
-        )
-
     async def _emit_malformed(self, account_id: str, occurred_at: datetime) -> None:
-        try:
-            event = self._event(account_id, occurred_at, operation=PASSWORD_VERIFY, outcome=OUTCOME_MALFORMED_HASH)
-        except ValueError:
-            _LOGGER.error("Security event could not be built for %s", PASSWORD_VERIFY)  # noqa: TRY400 - omit details
-            return
-        await emit_security_event(self.events, event)
+        await emit_lifecycle_event(
+            self.events,
+            self.event_ids,
+            occurred_at,
+            operation=PASSWORD_VERIFY,
+            outcome=OUTCOME_MALFORMED_HASH,
+            account_id=account_id,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,8 +272,7 @@ class PasswordLoginService(Generic[UserT]):
     async def _absent_account_outcome(
         self, password: str, *, unavailable: bool
     ) -> "InvalidCredentials | VerificationUnavailable":
-        # Hash against nothing anyway: skipping the work here would make a missing
-        # account measurably faster to probe than a present one.
+        """Run dummy password verification so absent accounts share constant-work timing."""
         try:
             await self.hasher.verify(None, password)
         except Exception:  # noqa: BLE001 - application port failures become one sanitized outcome
@@ -303,16 +291,6 @@ class PasswordLoginService(Generic[UserT]):
         return await rate_limits.check(LOGIN, client_key=client_key, identifier=normalized_identifier or None)
 
     async def _emit_decision(self, account_id: str | None, outcome: str) -> None:
-        try:
-            event = SecurityEvent(
-                event_id=self.event_ids(),
-                occurred_at=aware_utc_time(self.clock()),
-                operation=LOGIN,
-                outcome=outcome,
-                account_id=account_id,
-                mechanism="password",
-            )
-        except Exception:  # noqa: BLE001 - a failed clock or id factory cannot change a settled decision
-            _LOGGER.error("Security event could not be built for %s", LOGIN)  # noqa: TRY400 - omit untrusted details
-            return
-        await emit_security_event(self.events, event)
+        await emit_lifecycle_event(
+            self.events, self.event_ids, self.clock, operation=LOGIN, outcome=outcome, account_id=account_id
+        )

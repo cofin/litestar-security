@@ -132,21 +132,26 @@ async def test_jwks_async_fetcher_normalization_exposes_async_close(close_mode: 
     assert closes == ([] if close_mode == "absent" else [close_mode])
 
 
-def test_jwks_fetcher_normalization_rejects_invalid_configuration() -> None:
-    cases = (
-        (object(), 1.0, None, "must define fetch"),
-        (_RecordingJWKSFetcher(), 0.0, None, "timeout must be finite and positive"),
-        (_RecordingJWKSFetcher(), 1.0, object(), "must implement SecurityMetrics"),
-        (_RecordingJWKSFetcher(), 1.0, None, "limiter must have finite bounded capacity"),
-    )
-    for index, (fetcher, timeout, metrics, match) in enumerate(cases):
-        with pytest.raises(ImproperlyConfiguredException, match=match):
-            normalize_fetcher(  # type: ignore[arg-type]
-                fetcher,
-                limiter=CapacityLimiter(inf if index == 3 else 1),
-                timeout=timeout,
-                metrics=metrics,  # type: ignore[arg-type]
-            )
+@pytest.mark.parametrize(
+    ("fetcher", "limiter_tokens", "timeout", "metrics", "match"),
+    [
+        (object(), 1, 1.0, None, "must define fetch"),
+        (RecordingJWKSFetcher(), 1, 0.0, None, "timeout must be finite and positive"),
+        (RecordingJWKSFetcher(), 1, 1.0, object(), "must implement SecurityMetrics"),
+        (RecordingJWKSFetcher(), inf, 1.0, None, "limiter must have finite bounded capacity"),
+    ],
+    ids=["missing-fetch", "zero-timeout", "invalid-metrics", "unbounded-limiter"],
+)
+def test_jwks_fetcher_normalization_rejects_invalid_configuration(
+    fetcher: object, limiter_tokens: float, timeout: float, metrics: object, match: str
+) -> None:
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        normalize_fetcher(  # type: ignore[arg-type]
+            fetcher,
+            limiter=CapacityLimiter(limiter_tokens),
+            timeout=timeout,
+            metrics=metrics,  # type: ignore[arg-type]
+        )
 
 
 async def test_jwks_sync_fetcher_is_bounded_without_blocking_the_event_loop() -> None:
@@ -316,63 +321,90 @@ async def test_sync_crypto_timeout_is_sanitized() -> None:
     assert isinstance(outcome, VerificationUnavailable)
 
 
-def test_crypto_worker_configuration_rejects_invalid_values(
-    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
-) -> None:
-    signing_key = SigningKey(key_id="active", algorithm="EdDSA", private_key=jwt_key_material["EdDSA"][0])
-    verification_key = VerificationKey(key_id="active", algorithm="EdDSA", key=jwt_key_material["EdDSA"][1])
+class _TestSyncSigner:
+    def sign(self, _claims: Mapping[str, object], *, now: datetime) -> str:
+        del now
+        return "token"
 
-    class SyncSigner:
-        def sign(self, _claims: Mapping[str, object], *, now: datetime) -> str:
-            del now
-            return "token"
 
-    class SyncVerifier:
-        config = _jwt_config("EdDSA")
+class _TestSyncVerifier:
+    def __init__(self) -> None:
+        self.config = _jwt_config("EdDSA")
 
-        def verify(self, _token: str, *, now: datetime) -> InvalidCredentials:
-            del now
-            return InvalidCredentials()
+    def verify(self, _token: str, *, now: datetime) -> InvalidCredentials:
+        del now
+        return InvalidCredentials()
 
-    cases = (
-        (lambda: normalize_signer(object()), "must define sign"),
-        (lambda: normalize_signer(SyncSigner(), worker_limits=object()), "worker limits must be WorkerLimits"),
-        (lambda: normalize_signer(SyncSigner(), metrics=object()), "metrics must implement SecurityMetrics"),
-        (lambda: normalize_verifier(object()), "must define verify"),
-        (lambda: normalize_verifier(SyncVerifier(), worker_limits=object()), "worker limits must be WorkerLimits"),
+
+@pytest.mark.parametrize(
+    ("factory", "match"),
+    [
+        (lambda _sk, _vk: normalize_signer(object()), "must define sign"),
         (
-            lambda: VerificationKeySet(issuer=_JWT_ISSUER, keys=(verification_key,)).build_verifier(
+            lambda _sk, _vk: normalize_signer(_TestSyncSigner(), worker_limits=object()),
+            "worker limits must be WorkerLimits",
+        ),
+        (
+            lambda _sk, _vk: normalize_signer(_TestSyncSigner(), metrics=object()),
+            "metrics must implement SecurityMetrics",
+        ),
+        (lambda _sk, _vk: normalize_verifier(object()), "must define verify"),
+        (
+            lambda _sk, _vk: normalize_verifier(_TestSyncVerifier(), worker_limits=object()),
+            "worker limits must be WorkerLimits",
+        ),
+        (
+            lambda _sk, vk: VerificationKeySet(issuer=_JWT_ISSUER, keys=(vk,)).build_verifier(
                 _jwt_config("EdDSA"),
                 worker_limits=object(),  # type: ignore[arg-type]
             ),
             "worker limits must be WorkerLimits",
         ),
         (
-            lambda: LocalKeyRing(
+            lambda sk, _vk: LocalKeyRing(
                 issuer=_JWT_ISSUER,
-                active_signing_key=signing_key,
+                active_signing_key=sk,
                 worker_limits=object(),  # type: ignore[arg-type]
             ),
             "worker limits must be WorkerLimits",
         ),
         (
-            lambda: PyJWTVerifier(config=_jwt_config("EdDSA"), key=verification_key, limiter=CapacityLimiter(inf)),
+            lambda _sk, vk: PyJWTVerifier(config=_jwt_config("EdDSA"), key=vk, limiter=CapacityLimiter(inf)),
             "limiter must have finite bounded capacity",
         ),
         (
-            lambda: PyJWTVerifier(config=_jwt_config("EdDSA"), key=verification_key, worker_timeout=inf),
+            lambda _sk, vk: PyJWTVerifier(config=_jwt_config("EdDSA"), key=vk, worker_timeout=inf),
             "timeout must be finite and positive",
         ),
         (
-            lambda: jwt_keyring._LocalJWTSigner(  # noqa: SLF001
-                issuer=_JWT_ISSUER, signing_key=signing_key, worker_timeout=inf
+            lambda sk, _vk: jwt_keyring._LocalJWTSigner(  # noqa: SLF001 - worker timeout validation boundary
+                issuer=_JWT_ISSUER, signing_key=sk, worker_timeout=inf
             ),
             "timeout must be finite and positive",
         ),
-    )
-    for factory, match in cases:
-        with pytest.raises(ImproperlyConfiguredException, match=match):
-            factory()
+    ],
+    ids=[
+        "signer-missing-sign",
+        "signer-invalid-worker-limits",
+        "signer-invalid-metrics",
+        "verifier-missing-verify",
+        "verifier-invalid-worker-limits",
+        "keyset-invalid-worker-limits",
+        "keyring-invalid-worker-limits",
+        "pyjwt-unbounded-limiter",
+        "pyjwt-infinite-timeout",
+        "local-signer-infinite-timeout",
+    ],
+)
+def test_crypto_worker_configuration_rejects_invalid_values(
+    factory: Callable[[SigningKey, VerificationKey], object],
+    match: str,
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    signing_key = SigningKey(key_id="active", algorithm="EdDSA", private_key=jwt_key_material["EdDSA"][0])
+    verification_key = VerificationKey(key_id="active", algorithm="EdDSA", key=jwt_key_material["EdDSA"][1])
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        factory(signing_key, verification_key)
 
 
 async def test_jwks_sync_fetcher_timeout_maps_to_unavailable(
@@ -411,12 +443,6 @@ def _jwt_config(
         subject_required=subject_required,
         maximum_lifetime=maximum_lifetime,
     )
-
-
-def _RecordingJWKSFetcher(  # noqa: N802 - constructor-shaped adapter over the shared collaborator
-    *responses: JWKSFetchOutcome | Exception | Callable[[JWKSFetchTarget], JWKSFetchOutcome],
-) -> RecordingJWKSFetcher:
-    return RecordingJWKSFetcher(list(responses))
 
 
 def _verification_jwk(

@@ -1,4 +1,9 @@
-"""JSON Web Token signing, verification, and bearer slot composition."""
+"""JSON Web Token signing, verification, and bearer slot composition.
+
+``PyJWTVerifier``, ``UnverifiedJWTRoute``, and ``parse_unverified_jwt_route``
+remain directly importable from ``litestar_security.providers.jwt`` for sibling
+providers and tests while staying deliberately omitted from ``__all__``.
+"""
 
 from litestar_security.providers._internal import JSONValue
 from litestar_security.providers.jwt._bearer import (
@@ -19,9 +24,6 @@ from litestar_security.providers.jwt._keyring import (
 from litestar_security.providers.jwt._keys import SigningKey, VerificationKey
 from litestar_security.providers.jwt._signing import SyncTokenSigner, TokenSigner, normalize_signer
 from litestar_security.providers.jwt._verification import JWTVerifier, SyncJWTVerifier, normalize_verifier
-
-# Importable from this package but deliberately absent from ``__all__``, matching the
-# surface the flat module exposed: sibling providers and tests reach for these directly.
 from litestar_security.providers.jwt._verification import PyJWTVerifier as PyJWTVerifier
 from litestar_security.providers.jwt._verification import UnverifiedJWTRoute as UnverifiedJWTRoute
 from litestar_security.providers.jwt._verification import parse_unverified_jwt_route as parse_unverified_jwt_route

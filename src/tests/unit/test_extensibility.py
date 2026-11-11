@@ -6,6 +6,7 @@ from threading import Event as ThreadEvent
 from threading import Lock
 from typing import Protocol
 
+import pytest
 from anyio import CancelScope, CapacityLimiter, Event, create_task_group, from_thread
 from anyio.lowlevel import checkpoint
 
@@ -27,35 +28,39 @@ from litestar_security.providers.api_key import APIKeyStore
 from litestar_security.providers.oauth import OAuthAccountStore, OAuthTransactionStore, OIDCSessionLogoutStore
 from litestar_security.websocket import WebSocketConnectTokenStore
 
-_ATOMIC_METHODS = {
-    RegistrationStore: ("register",),
-    PasswordCredentialStore: ("compare_and_replace_password", "replace_password_and_bump_epoch"),
-    LoginMethodStore: ("revoke_login_method",),
-    RefreshTokenFamilyStore: ("rotate",),
-    MFAStore: ("advance_totp_counter", "consume_recovery_code"),
-    OIDCSessionLogoutStore: ("consume_backchannel", "revoke_frontchannel"),
-    MFALoginChallengeStore: ("consume",),
-    WebAuthnChallengeStore: ("consume",),
-    PasskeyStore: ("record_assertion",),
-    OAuthTransactionStore: ("consume",),
-    OAuthAccountStore: ("login", "link", "upgrade", "unlink", "stage_revocation_retry"),
-    APIKeyStore: ("rotate",),
-    StepUpStore: ("consume",),
-    WebSocketConnectTokenStore: ("consume",),
-}
+_ATOMIC_METHODS: tuple[tuple[type[object], tuple[str, ...]], ...] = (
+    (RegistrationStore, ("register",)),
+    (PasswordCredentialStore, ("compare_and_replace_password", "replace_password_and_bump_epoch")),
+    (LoginMethodStore, ("revoke_login_method",)),
+    (RefreshTokenFamilyStore, ("rotate",)),
+    (MFAStore, ("advance_totp_counter", "consume_recovery_code")),
+    (OIDCSessionLogoutStore, ("consume_backchannel", "revoke_frontchannel")),
+    (MFALoginChallengeStore, ("consume",)),
+    (WebAuthnChallengeStore, ("consume",)),
+    (PasskeyStore, ("record_assertion",)),
+    (OAuthTransactionStore, ("consume",)),
+    (OAuthAccountStore, ("login", "link", "upgrade", "unlink", "stage_revocation_retry")),
+    (APIKeyStore, ("rotate",)),
+    (StepUpStore, ("consume",)),
+    (WebSocketConnectTokenStore, ("consume",)),
+)
 
 
-def test_atomic_protocols_are_feature_owned_and_async() -> None:
-    for protocol, methods in _ATOMIC_METHODS.items():
-        assert issubclass(protocol, Protocol)
-        assert protocol.__module__ != "litestar_security.testing"
-        for method in methods:
-            assert inspect.iscoroutinefunction(protocol.__dict__[method])
+@pytest.mark.parametrize(("protocol_type", "method_names"), _ATOMIC_METHODS)
+def test_atomic_protocols_are_feature_owned_and_async(
+    protocol_type: type[object], method_names: tuple[str, ...]
+) -> None:
+    assert issubclass(protocol_type, Protocol)
+    assert protocol_type.__module__ != "litestar_security.testing"
+    assert {name for name in method_names if not inspect.iscoroutinefunction(protocol_type.__dict__[name])} == set()
 
 
-def test_capability_protocols_do_not_expose_generic_persistence_methods() -> None:
-    for protocol in _ATOMIC_METHODS:
-        assert not {"add", "update", "delete", "query", "transaction", "connection"}.intersection(protocol.__dict__)
+@pytest.mark.parametrize(("protocol_type", "method_names"), _ATOMIC_METHODS)
+def test_capability_protocols_do_not_expose_generic_persistence_methods(
+    protocol_type: type[object], method_names: tuple[str, ...]
+) -> None:
+    assert set(method_names).issubset(protocol_type.__dict__)
+    assert not {"add", "update", "delete", "query", "transaction", "connection"}.intersection(protocol_type.__dict__)
 
 
 async def test_mfa_login_challenge_reference_store_is_atomic_and_burns_mismatches() -> None:

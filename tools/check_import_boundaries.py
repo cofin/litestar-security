@@ -12,7 +12,9 @@ R5  ``import litestar_security`` loads neither the test kit nor its exports.
     A runtime property of the import graph; no linter can observe it.
 
 Run by ``make import-boundaries``, which ``make lint`` depends on. ``--self-test``
-proves both checks fail on a deliberate violation.
+proves both checks fail on a deliberate violation. ``AWAITABILITY_EXEMPTIONS`` maps
+paths relative to ``PACKAGE_ROOT`` to their rationale; an empty dictionary enforces
+zero runtime exemptions.
 """
 
 import ast
@@ -24,8 +26,6 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).parents[1] / "src" / "litestar_security"
 
-# R4 exemptions, by path relative to PACKAGE_ROOT. Each entry states why the
-# branch is still there. An empty dict is the goal.
 AWAITABILITY_EXEMPTIONS: dict[str, str] = {}
 
 R5_SCRIPT = (

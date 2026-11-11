@@ -7,6 +7,20 @@ them here keeps one spelling per concept instead of a literal per call site.
 
 Operations read ``local.<area>.<verb>``. Outcomes are past-tense verbs describing
 what the operation settled on, not whether the request succeeded.
+``SESSION_REVOKE_ALL_SUFFIX`` is appended to a caller-supplied operation when one
+request revokes every session an account holds so the derived name still reports
+which operation caused the cleanup.
+
+Rate-limited entry points define separate operation names from durable outcome
+events because a limiter buckets the attempt before an outcome exists. Session
+and token login intentionally share the single ``LOGIN`` budget because both
+routes present the same credential against the same account store; separate
+budgets would let an attacker double their allowance by alternating routes.
+
+``RATE_LIMITED_OPERATIONS`` records the exact set of entry points that built-in
+routes and services pass to a ``RateLimiter``. ``DEFAULT_RATE_LIMIT_POLICIES``
+must map every member because ``StoreRateLimiter.acquire`` admits unmapped
+operations without limiting them.
 """
 
 __all__ = (
@@ -83,17 +97,8 @@ SESSION_REBIND = "local.session.rebind"
 SESSION_REVOKE = "local.session.revoke"
 VERIFICATION_CONSUME = "local.verification.consume"
 VERIFICATION_ISSUE = "local.verification.issue"
-
-# Appended to a caller-supplied operation when one request revokes every session
-# an account holds, so the derived name still reports which operation caused it.
 SESSION_REVOKE_ALL_SUFFIX = ".session_revoke_all"
 
-# Rate-limited entry points. These are separate operations from the events above
-# because a limiter buckets the *attempt*, which happens before any of those
-# outcomes exist. Session and token login share one ``LOGIN`` budget on purpose:
-# they present the same credential to the same account store, so giving them
-# separate budgets would let an attacker double their allowance by alternating
-# between the two routes.
 LOGIN = "local.login"
 LOGIN_MFA = "local.login.mfa"
 MFA_RECOVERY_CONSUME = "local.mfa.recovery.consume"
@@ -109,10 +114,6 @@ PASSKEY_REMOVE = "local.passkey.remove"
 PASSWORD_RESET = "local.password.reset"
 VERIFICATION_RESEND = "local.verification.resend"
 
-# The exact set of operations the library's own routes/services hand to a
-# RateLimiter. DEFAULT_RATE_LIMIT_POLICIES MUST map every one of these: an
-# operation limited by a route but absent from the default map is silently
-# unlimited (StoreRateLimiter.acquire admits unmapped operations).
 RATE_LIMITED_OPERATIONS = frozenset({
     LOGIN,
     LOGIN_MFA,

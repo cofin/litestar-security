@@ -4,8 +4,6 @@ This is where key material, signers, and verifiers are composed. It sits above a
 three so that keys, protocols, and primitives stay independently testable.
 """
 
-import hashlib
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -22,10 +20,15 @@ from litestar.datastructures import ResponseHeader
 from litestar.handlers.http_handlers import HTTPRouteHandler, get
 from litestar.openapi.datastructures import ResponseSpec
 from litestar.response import Response
-from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
+from litestar.status_codes import HTTP_304_NOT_MODIFIED
 
 from litestar_security.authentication import AuthenticationOutcome, InvalidCredentials, VerificationUnavailable, public
-from litestar_security.providers._internal import JSONValue, raise_config
+from litestar_security.providers._internal import (
+    JSONValue,
+    canonical_json_etag,
+    conditional_etag_response,
+    raise_config,
+)
 from litestar_security.providers.jwt._capabilities import (
     CAPABILITY_TOKEN_TYPE,
     VerifiedCapability,
@@ -37,13 +40,17 @@ from litestar_security.providers.jwt._claims import JWTClaims, JWTValidationConf
 from litestar_security.providers.jwt._internal import aware_utc, strict_identifier
 from litestar_security.providers.jwt._keys import (
     LocalJWKSDocument,
-    PreparedVerificationKey,
     SigningKey,
     VerificationKey,
     prepared_verification_key,
 )
 from litestar_security.providers.jwt._signing import TokenSigner
-from litestar_security.providers.jwt._verification import JWTVerifier, PyJWTVerifier, parse_unverified_jwt_route
+from litestar_security.providers.jwt._verification import (
+    JWTVerifier,
+    PyJWTVerifier,
+    parse_unverified_jwt_route,
+    verify_signature,
+)
 from litestar_security.providers.jwt._workers import metric_sink, run_worker, validate_limiter
 from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics, WorkerLimits
 
@@ -246,24 +253,15 @@ class LocalKeyRing:
             claims={} if claims is None else claims,
             now=now,
         )
-        sign = partial(
-            jwt.encode,
-            dict(payload),
-            cast("Any", self.active_signing_key)._prepared_key,  # noqa: SLF001 - read the prepared key material PyJWT exposes only privately
-            algorithm=self.active_signing_key.algorithm,
-            headers={"kid": self.active_signing_key.key_id, "typ": CAPABILITY_TOKEN_TYPE},
+        return await _sign_jwt(
+            payload,
+            signing_key=self.active_signing_key,
+            jose_type=CAPABILITY_TOKEN_TYPE,
+            limiter=self.worker_limits.crypto_limiter,
+            worker_timeout=self.worker_limits.timeout,
+            metrics=self.metrics,
+            error_message="Capability minting unavailable",
         )
-        try:
-            return await run_worker(
-                sign,
-                limiter=self.worker_limits.crypto_limiter,
-                worker_timeout=self.worker_limits.timeout,
-                metrics=self.metrics,
-                operation_metric="security.jwt.sign_duration",
-            )
-        except Exception:  # noqa: BLE001 - fail closed
-            message = "Capability minting unavailable"
-            raise RuntimeError(message) from None
 
     async def verify_capability(  # noqa: PLR0911 - preserve explicit sanitized outcomes at each security boundary
         self, raw: str, *, purpose: str, audience: str, now: datetime
@@ -304,7 +302,7 @@ class LocalKeyRing:
         )
         if key is None:
             return _INVALID
-        verify = partial(_verify_capability_signature, raw, prepared_verification_key(key), algorithm)
+        verify = partial(verify_signature, raw, prepared_verification_key(key), algorithm)
         try:
             await run_worker(
                 verify,
@@ -340,7 +338,6 @@ class LocalJWKSConfig:
         route_prefix = self.route_prefix.rstrip("/")
         if (
             not route_prefix.startswith("/")
-            or route_prefix == ""
             or "//" in route_prefix
             or any(value in route_prefix for value in ("\\", "{", "}", "?", "#"))
             or any(segment in {".", ".."} for segment in route_prefix.split("/"))
@@ -367,14 +364,12 @@ class LocalJWKSConfig:
         if not public_keys:
             raise_config("local JWKS publication requires at least one asymmetric verification key")
         encoded_document = {"keys": [dict(key) for key in public_keys]}
-        canonical_bytes = json.dumps(
-            encoded_document, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-        ).encode()
+        canonical_bytes, etag = canonical_json_etag(encoded_document)
 
         object.__setattr__(self, "route_prefix", route_prefix)
         object.__setattr__(self, "document", MappingProxyType({"keys": public_keys}))
         object.__setattr__(self, "canonical_bytes", canonical_bytes)
-        object.__setattr__(self, "etag", f'"{hashlib.sha256(canonical_bytes).hexdigest()}"')
+        object.__setattr__(self, "etag", etag)
         object.__setattr__(self, "path", f"{route_prefix}/.well-known/jwks.json")
         object.__setattr__(self, "cache_control", f"public, max-age={self.cache_max_age}")
 
@@ -419,13 +414,15 @@ def build_local_jwks_handler(config: LocalJWKSConfig) -> HTTPRouteHandler:
         summary="Local JSON Web Key Set",
     )
     async def local_jwks(request: Request[Any, Any, Any]) -> Response[LocalJWKSDocument]:
-        if _if_none_match(request.headers.get("if-none-match"), config.etag):
-            return Response(cast("LocalJWKSDocument", b""), headers=headers, status_code=HTTP_304_NOT_MODIFIED)
-        return Response(
-            cast("LocalJWKSDocument", config.canonical_bytes),
-            headers=headers,
-            media_type="application/jwk-set+json",
-            status_code=HTTP_200_OK,
+        return cast(
+            "Response[LocalJWKSDocument]",
+            conditional_etag_response(
+                request,
+                canonical_bytes=config.canonical_bytes,
+                etag=config.etag,
+                headers=headers,
+                media_type="application/jwk-set+json",
+            ),
         )
 
     return local_jwks
@@ -475,50 +472,41 @@ class _LocalJWTSigner:
         """Validate and sign one minimal local access token in a worker."""
         normalized_now = aware_utc(now)
         payload = validate_local_access_claims(claims, issuer=self.issuer, now=normalized_now)
-        sign = partial(
-            jwt.encode,
+        return await _sign_jwt(
             payload,
-            cast("Any", self.signing_key)._prepared_key,  # noqa: SLF001 - read the prepared key material PyJWT exposes only privately
-            algorithm=self.signing_key.algorithm,
-            headers={"kid": self.signing_key.key_id, "typ": "at+jwt"},
+            signing_key=self.signing_key,
+            jose_type="at+jwt",
+            limiter=cast("CapacityLimiter", self.limiter),
+            worker_timeout=self.worker_timeout,
+            metrics=self.metrics,
+            error_message="Token signing unavailable",
         )
-        try:
-            token = await run_worker(
-                sign,
-                limiter=cast("CapacityLimiter", self.limiter),
-                worker_timeout=self.worker_timeout,
-                metrics=self.metrics,
-                operation_metric="security.jwt.sign_duration",
-            )
-        except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
-            message = "Token signing unavailable"
-            raise RuntimeError(message) from None
-        return token
 
 
-def _if_none_match(value: str | None, etag: str) -> bool:
-    if value is None:
-        return False
-    return any(
-        candidate == "*" or candidate.removeprefix("W/") == etag for candidate in map(str.strip, value.split(","))
+async def _sign_jwt(  # noqa: PLR0913 - explicit key, header, worker, and failure boundary
+    payload: Mapping[str, JSONValue],
+    *,
+    signing_key: SigningKey,
+    jose_type: str,
+    limiter: CapacityLimiter,
+    worker_timeout: float,
+    metrics: SecurityMetrics,
+    error_message: str,
+) -> str:
+    sign = partial(
+        jwt.encode,
+        dict(payload),
+        cast("Any", signing_key)._prepared_key,  # noqa: SLF001 - package-owned prepared key material
+        algorithm=signing_key.algorithm,
+        headers={"kid": signing_key.key_id, "typ": jose_type},
     )
-
-
-def _verify_capability_signature(token: str, key: PreparedVerificationKey, algorithm: str) -> None:
-    """Verify only one selected capability JWT signature."""
-    jwt.decode_complete(
-        token,
-        key=key,  # pyright: ignore[reportArgumentType] - third-party signature is wider than its runtime contract
-        algorithms=[algorithm],
-        options={
-            "require": [],
-            "verify_aud": False,
-            "verify_exp": False,
-            "verify_iat": False,
-            "verify_iss": False,
-            "verify_jti": False,
-            "verify_nbf": False,
-            "verify_signature": True,
-            "verify_sub": False,
-        },
-    )
+    try:
+        return await run_worker(
+            sign,
+            limiter=limiter,
+            worker_timeout=worker_timeout,
+            metrics=metrics,
+            operation_metric="security.jwt.sign_duration",
+        )
+    except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
+        raise RuntimeError(error_message) from None

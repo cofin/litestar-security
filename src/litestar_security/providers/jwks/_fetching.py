@@ -6,25 +6,27 @@ fetchers are shared and run through an explicit finite worker limit.
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from inspect import iscoroutinefunction
-from math import isfinite
-from time import perf_counter
 from types import MappingProxyType
 from typing import Protocol, cast, runtime_checkable
 
 from anyio import CapacityLimiter, fail_after, to_thread
 
-from litestar_security.providers._internal import raise_config, safe_increment, safe_observe
+from litestar_security.providers._internal import (
+    positive_finite,
+    raise_config,
+    run_worker_operation,
+    validate_metrics,
+    validate_worker_limiter,
+)
 from litestar_security.providers.jwks._internal import empty_headers
-from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics
+from litestar_security.workers import SecurityMetrics
 
 __all__ = ("AsyncJWKSFetcher", "JWKSFetchOutcome", "JWKSFetchTarget", "SyncJWKSFetcher", "normalize_fetcher")
 
 
 _DEFAULT_WORKER_TIMEOUT = 10.0
-
-
-_MAXIMUM_WORKER_TOKENS = 1_024
 
 
 _MINIMUM_HTTP_STATUS = 100
@@ -155,18 +157,10 @@ def normalize_fetcher(
     fetch_method = getattr(fetcher, "fetch", None)
     if not callable(fetch_method):
         raise_config("JWKS fetcher must define fetch")
-    total_tokens: object = limiter.total_tokens
-    if (
-        not isinstance(total_tokens, int)
-        or isinstance(total_tokens, bool)
-        or not 1 <= total_tokens <= _MAXIMUM_WORKER_TOKENS
-    ):
-        raise_config("JWKS worker limiter must have finite bounded capacity")
-    if timeout.__class__ not in {int, float} or not isfinite(timeout) or timeout <= 0:
+    validate_worker_limiter(limiter, message="JWKS worker limiter must have finite bounded capacity")
+    if not positive_finite(timeout):
         raise_config("JWKS worker timeout must be finite and positive")
-    metric_sink = NoOpSecurityMetrics() if metrics is None else metrics
-    if not callable(getattr(metric_sink, "increment", None)) or not callable(getattr(metric_sink, "observe", None)):
-        raise_config("JWKS metrics must implement SecurityMetrics")
+    metric_sink = validate_metrics(metrics, message="JWKS metrics must implement SecurityMetrics")
     if iscoroutinefunction(fetch_method):
         close_method = getattr(fetcher, "aclose", None)
         if iscoroutinefunction(close_method):
@@ -222,20 +216,9 @@ class _WorkerJWKSFetcher:
 
     async def fetch(self, request: JWKSFetchTarget) -> JWKSFetchOutcome:
         """Execute one blocking fetch without blocking the event loop."""
-        if self.limiter.borrowed_tokens >= self.limiter.total_tokens:
-            safe_increment(self.metrics, "security.worker.saturation")
-        queued_at = perf_counter()
-
-        def fetch_sync() -> JWKSFetchOutcome:
-            started = perf_counter()
-            safe_observe(self.metrics, "security.worker.wait", started - queued_at)
-            try:
-                return self.fetch_sync(request)
-            finally:
-                safe_observe(self.metrics, "security.worker.duration", perf_counter() - started)
-
-        with fail_after(self.timeout):
-            return await to_thread.run_sync(fetch_sync, abandon_on_cancel=True, limiter=self.limiter)
+        return await run_worker_operation(
+            partial(self.fetch_sync, request), limiter=self.limiter, worker_timeout=self.timeout, metrics=self.metrics
+        )
 
     async def aclose(self) -> None:
         """Close a blocking source when its provider explicitly owns it."""

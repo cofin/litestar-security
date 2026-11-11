@@ -203,9 +203,9 @@ def test_a_problem_details_plugin_that_converts_nothing_changes_nothing(
 def test_detection_reads_the_plugin_class_not_its_name(
     jwt_key_material: Mapping[str, tuple[bytes, bytes]], documented_schema: Mapping[str, Any]
 ) -> None:
-    """Matching on a name string would follow any impostor and miss a Litestar reorganization."""
+    """Matching on a name string would follow any impostor sharing only the name and miss a Litestar reorganization."""
 
-    class ProblemDetailsPlugin:  # the impostor shares the name and nothing else
+    class ProblemDetailsPlugin:
         config = ProblemDetailsConfig(enable_for_all_http_exceptions=True)
 
     app = build_documented_app(jwt_key_material["EdDSA"][0], plugins=[ProblemDetailsPlugin()])

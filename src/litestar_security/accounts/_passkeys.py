@@ -1,6 +1,5 @@
 """Project-owned WebAuthn challenge, credential, and service boundary."""
 
-from base64 import urlsafe_b64encode
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -15,7 +14,13 @@ from urllib.parse import urlsplit
 from anyio import CapacityLimiter, fail_after, to_thread
 from litestar.exceptions import ImproperlyConfiguredException
 
-from litestar_security.accounts._internal import aware_utc_time, new_event_id, strict_context_text, utc_now
+from litestar_security.accounts._internal import (
+    aware_utc_time,
+    encode_random,
+    new_event_id,
+    strict_context_text,
+    utc_now,
+)
 from litestar_security.accounts._operations import (
     OUTCOME_CLONE_RISK,
     OUTCOME_CREATED,
@@ -31,6 +36,7 @@ from litestar_security.accounts._records import (
     RevokeLoginMethodOutcome,
     SecurityEvent,
     SecurityEventSink,
+    emit_security_event,
 )
 from litestar_security.accounts._stores import LoginMethodStore
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
@@ -694,7 +700,7 @@ class PasskeyService:
             message = "Passkey service requires exact relying-party, origin, algorithm, and expiry configuration"
             raise ImproperlyConfiguredException(detail=message)
         if not all(
-            _valid_origin(origin, self.rp_id, allow_insecure_localhost=self.allow_insecure_localhost)
+            self._valid_origin(origin, self.rp_id, allow_insecure_localhost=self.allow_insecure_localhost)
             for origin in self.origins
         ):
             message = (
@@ -747,7 +753,10 @@ class PasskeyService:
             challenge = await self._run_worker(self.verifier.registration_challenge, response)
             now = aware_utc_time(self.clock())
             record = await self.challenge_store.consume(
-                sha256(challenge).digest(), binding_digest=_binding_digest(binding), purpose="registration", now=now
+                sha256(challenge).digest(),
+                binding_digest=self._binding_digest(binding),
+                purpose="registration",
+                now=now,
             )
             if record is None or record.account_id != account_id:
                 return InvalidCredentials()
@@ -755,7 +764,7 @@ class PasskeyService:
             root_certificates: Mapping[str, Sequence[bytes]] = {}
             if mapper is not None:
                 root_certificates = await self._run_worker(mapper.root_certificates)
-                if not _valid_attestation_roots(root_certificates):
+                if not self._valid_attestation_roots(root_certificates):
                     return InvalidCredentials()
             verified = await self._run_worker(
                 partial(
@@ -795,7 +804,7 @@ class PasskeyService:
                 created_at=now,
                 hardware_backed=hardware_backed,
             )
-            method_id = _passkey_method_id(credential.credential_id)
+            method_id = self._passkey_method_id(credential.credential_id)
             if not await self.store.add_credential(
                 credential,
                 login_method=LoginMethod(method_id=method_id, kind="passkey", created_at=now),
@@ -812,8 +821,15 @@ class PasskeyService:
             return InvalidCredentials()
         except Exception:  # noqa: BLE001 - sanitize application stores and dependency failures
             return VerificationUnavailable()
-        await self._emit_event(
-            operation=PASSKEY_REGISTER_VERIFY, outcome=OUTCOME_CREATED, account_id=account_id, occurred_at=now
+        await emit_security_event(
+            self.events,
+            SecurityEvent(
+                event_id=self.event_ids(),
+                occurred_at=now,
+                operation=PASSKEY_REGISTER_VERIFY,
+                outcome=OUTCOME_CREATED,
+                account_id=account_id,
+            ),
         )
         return credential
 
@@ -826,7 +842,10 @@ class PasskeyService:
             credential_id = await self._run_worker(self.verifier.credential_id, response)
             now = aware_utc_time(self.clock())
             record = await self.challenge_store.consume(
-                sha256(challenge).digest(), binding_digest=_binding_digest(binding), purpose="authentication", now=now
+                sha256(challenge).digest(),
+                binding_digest=self._binding_digest(binding),
+                purpose="authentication",
+                now=now,
             )
             credential = await self.store.get_credential(credential_id)
             if (
@@ -871,14 +890,28 @@ class PasskeyService:
         except Exception:  # noqa: BLE001 - sanitize application stores and dependency failures
             return VerificationUnavailable()
         if result is PasskeyAssertionStatus.CLONE_RISK:
-            await self._emit_event(
-                operation=PASSKEY_ASSERT, outcome=OUTCOME_CLONE_RISK, account_id=account_id, occurred_at=now
+            await emit_security_event(
+                self.events,
+                SecurityEvent(
+                    event_id=self.event_ids(),
+                    occurred_at=now,
+                    operation=PASSKEY_ASSERT,
+                    outcome=OUTCOME_CLONE_RISK,
+                    account_id=account_id,
+                ),
             )
             if self.clone_risk_policy is CloneRiskPolicy.REJECT:
                 return InvalidCredentials()
         else:
-            await self._emit_event(
-                operation=PASSKEY_ASSERT, outcome=OUTCOME_VERIFIED, account_id=account_id, occurred_at=now
+            await emit_security_event(
+                self.events,
+                SecurityEvent(
+                    event_id=self.event_ids(),
+                    occurred_at=now,
+                    operation=PASSKEY_ASSERT,
+                    outcome=OUTCOME_VERIFIED,
+                    account_id=account_id,
+                ),
             )
         traits = {"phishing-resistant"}
         if verified.user_verified and record.user_verification is UserVerification.REQUIRED:
@@ -899,7 +932,9 @@ class PasskeyService:
         try:
             credentials = await self.store.list_credentials(account_id)
             return tuple(
-                _credential_summary(credential) for credential in credentials if credential.account_id == account_id
+                self._credential_summary(credential)
+                for credential in credentials
+                if credential.account_id == account_id
             )
         except Exception:  # noqa: BLE001 - sanitize application store failures
             return VerificationUnavailable()
@@ -914,7 +949,7 @@ class PasskeyService:
             credential = await self.store.rename_credential(account_id, credential_id, display_name.strip())
         except Exception:  # noqa: BLE001 - sanitize application store failures
             return VerificationUnavailable()
-        return _credential_summary(credential) if credential is not None else None
+        return self._credential_summary(credential) if credential is not None else None
 
     async def remove_credential(
         self, account_id: str, credential_id: bytes
@@ -925,7 +960,7 @@ class PasskeyService:
             return VerificationUnavailable()
         try:
             now = aware_utc_time(self.clock())
-            method_id = _passkey_method_id(credential_id)
+            method_id = self._passkey_method_id(credential_id)
             event = SecurityEvent(
                 event_id=self.event_ids(),
                 occurred_at=now,
@@ -936,20 +971,6 @@ class PasskeyService:
             return await login_methods.revoke_login_method(account_id, method_id, require_remaining=True, event=event)
         except Exception:  # noqa: BLE001 - sanitize application login-method store failures
             return VerificationUnavailable()
-
-    async def _emit_event(self, *, operation: str, outcome: str, account_id: str, occurred_at: datetime) -> None:
-        try:
-            await self.events.emit(
-                SecurityEvent(
-                    event_id=self.event_ids(),
-                    occurred_at=occurred_at,
-                    operation=operation,
-                    outcome=outcome,
-                    account_id=account_id,
-                )
-            )
-        except Exception:  # noqa: BLE001 - observational audit failure cannot change a settled decision
-            return
 
     async def _run_worker(self, function: Callable[..., WorkerT], *args: object) -> WorkerT:
         with fail_after(self.worker_timeout):
@@ -968,7 +989,7 @@ class PasskeyService:
             json_options = await self._run_worker(options, challenge)
             record = WebAuthnChallenge(
                 challenge_digest=sha256(challenge).digest(),
-                binding_digest=_binding_digest(binding),
+                binding_digest=self._binding_digest(binding),
                 purpose=purpose,
                 account_id=account_id,
                 rp_id=self.rp_id,
@@ -980,77 +1001,77 @@ class PasskeyService:
             await self.challenge_store.put(record)
         except Exception:  # noqa: BLE001 - sanitize application store, entropy, and dependency failures
             return VerificationUnavailable()
-        encoded = urlsafe_b64encode(challenge).rstrip(b"=").decode("ascii")
-        return WebAuthnOptions(challenge=encoded, json=json_options, expires_at=expires_at)
+        return WebAuthnOptions(challenge=encode_random(challenge), json=json_options, expires_at=expires_at)
 
+    @staticmethod
+    def _binding_digest(binding: bytes) -> bytes:
+        value = cast("object", binding)
+        if not isinstance(value, bytes) or not value:
+            raise ValueError
+        return sha256(value).digest()
 
-def _binding_digest(binding: bytes) -> bytes:
-    value = cast("object", binding)
-    if not isinstance(value, bytes) or not value:
-        raise ValueError
-    return sha256(value).digest()
+    @staticmethod
+    def _credential_summary(credential: PasskeyCredential) -> PasskeyMetadata:
+        return PasskeyMetadata(
+            credential_id=encode_random(credential.credential_id),
+            display_name=credential.display_name,
+            backup_eligible=credential.backup_eligible,
+            backup_state=credential.backup_state,
+            suspect=credential.suspect,
+            created_at=credential.created_at,
+            last_used_at=credential.last_used_at,
+        )
 
+    @staticmethod
+    def _passkey_method_id(credential_id: bytes) -> str:
+        return f"pk_{encode_random(credential_id)}"
 
-def _credential_summary(credential: PasskeyCredential) -> PasskeyMetadata:
-    identifier = urlsafe_b64encode(credential.credential_id).rstrip(b"=").decode("ascii")
-    return PasskeyMetadata(
-        credential_id=identifier,
-        display_name=credential.display_name,
-        backup_eligible=credential.backup_eligible,
-        backup_state=credential.backup_state,
-        suspect=credential.suspect,
-        created_at=credential.created_at,
-        last_used_at=credential.last_used_at,
-    )
+    @classmethod
+    def _valid_attestation_roots(cls, value: object) -> bool:
+        if not isinstance(value, Mapping) or not value:
+            return False
+        roots = cast("Mapping[object, object]", value)
+        return all(
+            cls._valid_attestation_root_entry(format_name, certificates) for format_name, certificates in roots.items()
+        )
 
+    @staticmethod
+    def _valid_attestation_root_entry(format_name: object, certificates: object) -> bool:
+        if (
+            not isinstance(format_name, str)
+            or format_name == "none"
+            or not isinstance(certificates, Sequence)
+            or isinstance(certificates, (str, bytes))
+        ):
+            return False
+        certificate_values = cast("Sequence[object]", certificates)
+        return bool(certificate_values) and all(
+            isinstance(certificate, bytes) and bool(certificate) for certificate in certificate_values
+        )
 
-def _passkey_method_id(credential_id: bytes) -> str:
-    return f"pk_{urlsafe_b64encode(credential_id).rstrip(b'=').decode('ascii')}"
-
-
-def _valid_attestation_roots(value: object) -> bool:
-    if not isinstance(value, Mapping) or not value:
-        return False
-    roots = cast("Mapping[object, object]", value)
-    return all(_valid_attestation_root_entry(format_name, certificates) for format_name, certificates in roots.items())
-
-
-def _valid_attestation_root_entry(format_name: object, certificates: object) -> bool:
-    if (
-        not isinstance(format_name, str)
-        or format_name == "none"
-        or not isinstance(certificates, Sequence)
-        or isinstance(certificates, (str, bytes))
-    ):
-        return False
-    certificate_values = cast("Sequence[object]", certificates)
-    return bool(certificate_values) and all(
-        isinstance(certificate, bytes) and bool(certificate) for certificate in certificate_values
-    )
-
-
-def _valid_origin(origin: str, rp_id: str, *, allow_insecure_localhost: bool) -> bool:
-    try:
-        parsed = urlsplit(origin)
-        host = parsed.hostname
-        port = parsed.port
-    except ValueError:
-        return False
-    if (
-        host is None
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in {"", "/"}
-        or (host != rp_id and not host.endswith(f".{rp_id}"))
-    ):
-        return False
-    if parsed.scheme == "https":
-        return True
-    return (
-        allow_insecure_localhost
-        and parsed.scheme == "http"
-        and host in {"localhost", "127.0.0.1", "::1"}
-        and port is not None
-    )
+    @staticmethod
+    def _valid_origin(origin: str, rp_id: str, *, allow_insecure_localhost: bool) -> bool:
+        try:
+            parsed = urlsplit(origin)
+            host = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            return False
+        if (
+            host is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+            or (host != rp_id and not host.endswith(f".{rp_id}"))
+        ):
+            return False
+        if parsed.scheme == "https":
+            return True
+        return (
+            allow_insecure_localhost
+            and parsed.scheme == "http"
+            and host in {"localhost", "127.0.0.1", "::1"}
+            and port is not None
+        )

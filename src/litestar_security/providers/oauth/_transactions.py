@@ -2,7 +2,7 @@
 
 from base64 import urlsafe_b64encode
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from hashlib import sha256
@@ -376,7 +376,7 @@ class MemoryOAuthTransactionStore:
         Raises:
             ValueError: If an identical transaction lookup already exists.
         """
-        associated_data = _associated_data(transaction)
+        associated_data = self._associated_data(transaction)
         pkce_verifier = await self._protector.protect(
             transaction.pkce_verifier.get_secret_value().encode("ascii"), associated_data=associated_data + b"pkce"
         )
@@ -387,7 +387,7 @@ class MemoryOAuthTransactionStore:
             if transaction.nonce is not None
             else None
         )
-        redacted = _replace_secrets(transaction, pkce_verifier=SecretStr("*"), nonce=None)
+        redacted = replace(transaction, pkce_verifier=SecretStr("*"), nonce=None)
         key = (transaction.state_digest, transaction.binding_digest, transaction.provider)
         async with self._lock:
             if self._clock is not None:
@@ -428,17 +428,27 @@ class MemoryOAuthTransactionStore:
             stored = self._records.pop(key, None)
         if stored is None or now >= stored.transaction.expires_at:
             return None
-        associated_data = _associated_data(stored.transaction)
+        associated_data = self._associated_data(stored.transaction)
         pkce_verifier = await self._protector.unprotect(stored.pkce_verifier, associated_data=associated_data + b"pkce")
         nonce = (
             await self._protector.unprotect(stored.nonce, associated_data=associated_data + b"nonce")
             if stored.nonce is not None
             else None
         )
-        return _replace_secrets(
+        return replace(
             stored.transaction,
             pkce_verifier=SecretStr(pkce_verifier.decode("ascii")),
             nonce=SecretStr(nonce.decode("ascii")) if nonce is not None else None,
+        )
+
+    @staticmethod
+    def _associated_data(transaction: OAuthTransaction) -> bytes:
+        return (
+            _PROTECTED_SECRET_DOMAIN
+            + transaction.state_digest
+            + transaction.binding_digest
+            + transaction.provider.encode("utf-8")
+            + b"\x00"
         )
 
 
@@ -484,13 +494,13 @@ class OAuthRedirectPolicy:
                 message = "OAuth callback URI configuration is invalid"
                 raise ImproperlyConfiguredException(detail=message)
             for uri in uris:
-                callback_origins.add(_configured_absolute_uri(uri, allow_localhost=self.allow_insecure_localhost))
+                callback_origins.add(self._configured_absolute_uri(uri, allow_localhost=self.allow_insecure_localhost))
             normalized[provider] = uris
         if self.return_to.__class__ is not frozenset or not self.return_to:
             message = "OAuth return destination configuration must not be empty"
             raise ImproperlyConfiguredException(detail=message)
         for destination in self.return_to:
-            _configured_return_to(destination, callback_origins=callback_origins)
+            self._configured_return_to(destination, callback_origins=callback_origins)
         object.__setattr__(self, "callback_uris", MappingProxyType(normalized))
 
     def validate(self, *, provider: str, redirect_uri: str, return_to: str) -> None:
@@ -507,6 +517,52 @@ class OAuthRedirectPolicy:
         configured = self.callback_uris.get(provider)
         if configured is None or redirect_uri not in configured or return_to not in self.return_to:
             raise InvalidOAuthCallback
+
+    @classmethod
+    def _configured_absolute_uri(cls, value: str, *, allow_localhost: bool) -> str:
+        if value.__class__ is not str or not value or value != value.strip() or "*" in value or "\\" in value:
+            cls._raise_redirect_config()
+        try:
+            split = urlsplit(value)
+            hostname = split.hostname
+            port = split.port
+        except ValueError:
+            cls._raise_redirect_config()
+        local = hostname in {"localhost", "127.0.0.1", "::1"}
+        if (
+            not split.scheme
+            or not split.netloc
+            or split.username is not None
+            or split.password is not None
+            or split.fragment
+            or hostname is None
+            or (split.scheme != "https" and not (allow_localhost and local and split.scheme == "http"))
+        ):
+            cls._raise_redirect_config()
+        default_port = 443 if split.scheme == "https" else 80
+        authority_host = f"[{hostname.lower()}]" if ":" in hostname else hostname.lower()
+        authority = authority_host if port in {None, default_port} else f"{authority_host}:{port}"
+        return f"{split.scheme}://{authority}"
+
+    @classmethod
+    def _configured_return_to(cls, value: str, *, callback_origins: set[str]) -> None:
+        if value.__class__ is not str or not value or value != value.strip() or "*" in value or "\\" in value:
+            cls._raise_redirect_config()
+        split = urlsplit(value)
+        if split.fragment or split.username is not None or split.password is not None:
+            cls._raise_redirect_config()
+        if not split.scheme and not split.netloc:
+            if not value.startswith("/") or value.startswith("//"):
+                cls._raise_redirect_config()
+            return
+        origin = cls._configured_absolute_uri(value, allow_localhost=False)
+        if origin not in callback_origins:
+            cls._raise_redirect_config()
+
+    @staticmethod
+    def _raise_redirect_config() -> NoReturn:
+        message = "OAuth redirect configuration requires exact secure destinations"
+        raise ImproperlyConfiguredException(detail=message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -608,13 +664,13 @@ class OAuthTransactionService:
             raise InvalidOAuthCallback
         try:
             entropy = cast("Callable[[int], bytes]", self.entropy)
-            state = SecretStr(_encode_random(_entropy(entropy, _STATE_BYTES)))
+            state = SecretStr(_encode_random(self._entropy(entropy, _STATE_BYTES)))
             if browser_binding is None:
-                browser_binding = SecretStr(_encode_random(_entropy(entropy, _BINDING_BYTES)))
-            elif _callback_secret(browser_binding) is None:
+                browser_binding = SecretStr(_encode_random(self._entropy(entropy, _BINDING_BYTES)))
+            elif self._callback_secret(browser_binding) is None:
                 raise ValueError  # noqa: TRY301 - normalize invalid caller-supplied binding through one failure path
-            verifier = SecretStr(_encode_random(_entropy(entropy, _PKCE_BYTES)))
-            nonce = SecretStr(_encode_random(_entropy(entropy, _NONCE_BYTES))) if include_nonce else None
+            verifier = SecretStr(_encode_random(self._entropy(entropy, _PKCE_BYTES)))
+            nonce = SecretStr(_encode_random(self._entropy(entropy, _NONCE_BYTES))) if include_nonce else None
             transaction = OAuthTransaction(
                 state_digest=self._digest(_STATE_DIGEST_DOMAIN, state),
                 binding_digest=self._digest(_BINDING_DIGEST_DOMAIN, browser_binding),
@@ -673,8 +729,8 @@ class OAuthTransactionService:
             InvalidOAuthCallback: For every absent, expired, replayed, or mismatched callback.
             OAuthTransactionUnavailable: If persistence or protection fails.
         """
-        state_value = _callback_secret(state)
-        binding_value = _callback_secret(browser_binding)
+        state_value = self._callback_secret(state)
+        binding_value = self._callback_secret(browser_binding)
         if (
             state_value is None
             or binding_value is None
@@ -695,13 +751,37 @@ class OAuthTransactionService:
         if (
             transaction is None
             or (operation is not None and transaction.operation is not operation)
-            or not _session_matches(transaction.session_binding, session_binding)
+            or not self._session_matches(transaction.session_binding, session_binding)
         ):
             raise InvalidOAuthCallback
         return transaction
 
     def _digest(self, domain: bytes, secret: SecretStr) -> bytes:
         return hmac_digest(self.pepper, domain + secret.get_secret_value().encode("ascii"), sha256)
+
+    @staticmethod
+    def _callback_secret(value: SecretStr | str) -> SecretStr | None:
+        text = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if (
+            text.__class__ is not str
+            or len(text) != _MINIMUM_PKCE_CHARACTERS
+            or any(character not in _PKCE_CHARACTERS for character in text)
+        ):
+            return None
+        return SecretStr(text)
+
+    @staticmethod
+    def _session_matches(stored: str | None, presented: str | None) -> bool:
+        if stored is None or presented is None:
+            return stored is presented
+        return compare_digest(stored.encode("utf-8"), presented.encode("utf-8"))
+
+    @staticmethod
+    def _entropy(source: Callable[[int], bytes], length: int) -> bytes:
+        value = source(length)
+        if value.__class__ is not bytes or len(value) != length:
+            raise ValueError
+        return value
 
 
 def pkce_s256(verifier: SecretStr | str) -> str:
@@ -759,110 +839,6 @@ def oauth_binding_cookie(binding: SecretStr | str, *, max_age: int = 600) -> Coo
         path="/",
         domain=None,
     )
-
-
-def _configured_absolute_uri(value: str, *, allow_localhost: bool) -> str:
-    if value.__class__ is not str or not value or value != value.strip() or "*" in value or "\\" in value:
-        _raise_redirect_config()
-    try:
-        split = urlsplit(value)
-        hostname = split.hostname
-        port = split.port
-    except ValueError:
-        _raise_redirect_config()
-    local = hostname in {"localhost", "127.0.0.1", "::1"}
-    if (
-        not split.scheme
-        or not split.netloc
-        or split.username is not None
-        or split.password is not None
-        or split.fragment
-        or hostname is None
-        or (split.scheme != "https" and not (allow_localhost and local and split.scheme == "http"))
-    ):
-        _raise_redirect_config()
-    default_port = 443 if split.scheme == "https" else 80
-    authority_host = f"[{hostname.lower()}]" if ":" in hostname else hostname.lower()
-    authority = authority_host if port in {None, default_port} else f"{authority_host}:{port}"
-    return f"{split.scheme}://{authority}"
-
-
-def _configured_return_to(value: str, *, callback_origins: set[str]) -> None:
-    if value.__class__ is not str or not value or value != value.strip() or "*" in value or "\\" in value:
-        _raise_redirect_config()
-    split = urlsplit(value)
-    if split.fragment or split.username is not None or split.password is not None:
-        _raise_redirect_config()
-    if not split.scheme and not split.netloc:
-        if not value.startswith("/") or value.startswith("//"):
-            _raise_redirect_config()
-        return
-    origin = _configured_absolute_uri(value, allow_localhost=False)
-    if origin not in callback_origins:
-        _raise_redirect_config()
-
-
-def _raise_redirect_config() -> NoReturn:
-    message = "OAuth redirect configuration requires exact secure destinations"
-    raise ImproperlyConfiguredException(detail=message)
-
-
-def _replace_secrets(
-    transaction: OAuthTransaction, *, pkce_verifier: SecretStr, nonce: SecretStr | None
-) -> OAuthTransaction:
-    return OAuthTransaction(
-        state_digest=transaction.state_digest,
-        binding_digest=transaction.binding_digest,
-        operation=transaction.operation,
-        provider=transaction.provider,
-        expected_issuer=transaction.expected_issuer,
-        redirect_uri=transaction.redirect_uri,
-        return_to=transaction.return_to,
-        requested_scopes=transaction.requested_scopes,
-        pkce_verifier=pkce_verifier,
-        nonce=nonce,
-        account_id=transaction.account_id,
-        session_binding=transaction.session_binding,
-        security_epoch=transaction.security_epoch,
-        provider_account_id=transaction.provider_account_id,
-        step_up_purpose=transaction.step_up_purpose,
-        maximum_authentication_age=transaction.maximum_authentication_age,
-        expires_at=transaction.expires_at,
-    )
-
-
-def _associated_data(transaction: OAuthTransaction) -> bytes:
-    return (
-        _PROTECTED_SECRET_DOMAIN
-        + transaction.state_digest
-        + transaction.binding_digest
-        + transaction.provider.encode("utf-8")
-        + b"\x00"
-    )
-
-
-def _callback_secret(value: SecretStr | str) -> SecretStr | None:
-    text = value.get_secret_value() if isinstance(value, SecretStr) else value
-    if (
-        text.__class__ is not str
-        or len(text) != _MINIMUM_PKCE_CHARACTERS
-        or any(character not in _PKCE_CHARACTERS for character in text)
-    ):
-        return None
-    return SecretStr(text)
-
-
-def _session_matches(stored: str | None, presented: str | None) -> bool:
-    if stored is None or presented is None:
-        return stored is presented
-    return compare_digest(stored.encode("utf-8"), presented.encode("utf-8"))
-
-
-def _entropy(source: Callable[[int], bytes], length: int) -> bytes:
-    value = source(length)
-    if value.__class__ is not bytes or len(value) != length:
-        raise ValueError
-    return value
 
 
 def _encode_random(value: bytes) -> str:

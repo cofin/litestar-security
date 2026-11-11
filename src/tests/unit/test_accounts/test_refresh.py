@@ -1,4 +1,4 @@
-from __future__ import annotations
+"""Unit tests for refresh-token issuance, rotation, replay detection, and revocation."""
 
 import asyncio
 import base64
@@ -391,9 +391,9 @@ def test_refresh_response_headers_are_immutable_no_store_contract() -> None:
         accounts_module.REFRESH_RESPONSE_HEADERS["Cache-Control"] = "public"  # type: ignore[index]
 
 
-def testrefresh_service_rejects_invalid_composition_and_lifetimes() -> None:
-    service, _store, _accounts, _account = refresh_service()
-    invalid_values = (
+@pytest.mark.parametrize(
+    ("field_name", "value", "match"),
+    [
         ("accounts", object(), "accounts"),
         ("store", object(), "store"),
         ("codec", object(), "codec"),
@@ -409,14 +409,16 @@ def testrefresh_service_rejects_invalid_composition_and_lifetimes() -> None:
         ("clock", None, "factories"),
         ("family_ids", None, "factories"),
         ("event_ids", None, "factories"),
-    )
+    ],
+)
+def test_refresh_service_rejects_invalid_composition_and_lifetimes(field_name: str, value: object, match: str) -> None:
+    service, _store, _accounts, _account = refresh_service()
 
-    for field_name, value, match in invalid_values:
-        with pytest.raises(ImproperlyConfiguredException, match=match):
-            replace(service, **{field_name: value})
+    with pytest.raises(ImproperlyConfiguredException, match=match):
+        replace(service, **{field_name: value})
 
 
-async def testrefresh_service_default_clock_and_id_factories_issue_valid_family() -> None:
+async def test_refresh_service_default_clock_and_id_factories_issue_valid_family() -> None:
     service, store, accounts, account = refresh_service()
     defaulted = accounts_module.RefreshTokenService(
         accounts=accounts,

@@ -43,7 +43,6 @@ __all__ = (
 _MAXIMUM_VAULT_DOCUMENT_DEPTH = 8
 _PURPOSES = frozenset({"oauth-link", "oauth-unlink", "oauth-scope-upgrade"})
 _VAULT_UNAVAILABLE = "oauth_vault_unavailable"
-_TOKENS_NOT_RETAINED = "oauth_tokens_not_retained"
 _REAUTHORIZATION_REQUIRED = "oauth_reauthorization_required"
 _REFRESH_RACED = "oauth_refresh_raced"
 
@@ -326,7 +325,7 @@ class MemoryOAuthAccountStore:
         Raises:
             OAuthAccountError: If the identity is unknown and provisioning is disabled.
         """
-        key = _identity_key(identity)
+        key = self._identity_key(identity)
         if grant.__class__ is not ProviderGrant or not _aware(now):
             raise OAuthAccountError
         async with self._lock:
@@ -363,16 +362,6 @@ class MemoryOAuthAccountStore:
                 self._next_account -= 1
                 raise
             return OAuthLoginOutcome(linked=linked, provisioned=True)
-
-    async def _retain_or_discard(
-        self, provider_account_id: str, tokens: ProviderTokenSet, *, retain_tokens: bool, now: datetime
-    ) -> None:
-        if retain_tokens:
-            if self._vault is None:
-                raise OAuthAccountError(_VAULT_UNAVAILABLE)
-            await self._vault.put(provider_account_id, tokens, now=now)
-        elif self._vault is not None:
-            await self._vault.delete(provider_account_id)
 
     async def get_tokens(self, provider_account_id: str, *, now: datetime) -> StoredProviderTokens | None:
         """Return retained tokens when configured."""
@@ -440,7 +429,7 @@ class MemoryOAuthAccountStore:
         """Commit an exact identity and its token policy under one aggregate lock."""
         if not _strict_text(account_id) or not _aware(now):
             raise OAuthAccountError
-        key = _identity_key(identity)
+        key = self._identity_key(identity)
         async with self._lock:
             existing_id = self._identity_index.get(key)
             if existing_id is not None:
@@ -488,7 +477,7 @@ class MemoryOAuthAccountStore:
             if (
                 linked is None
                 or linked.account_id != account_id
-                or _identity_key(identity) != (linked.provider, linked.issuer, linked.subject)
+                or self._identity_key(identity) != (linked.provider, linked.issuer, linked.subject)
             ):
                 raise OAuthAccountError
             updated = replace(linked, grant=grant)
@@ -515,6 +504,22 @@ class MemoryOAuthAccountStore:
             del self._identity_index[(linked.provider, linked.issuer, linked.subject)]
             self._method_counts[account_id] = max(0, count - 1)
             return UnlinkOutcome(UnlinkStatus.UNLINKED, provider_account_id)
+
+    async def _retain_or_discard(
+        self, provider_account_id: str, tokens: ProviderTokenSet, *, retain_tokens: bool, now: datetime
+    ) -> None:
+        if retain_tokens:
+            if self._vault is None:
+                raise OAuthAccountError(_VAULT_UNAVAILABLE)
+            await self._vault.put(provider_account_id, tokens, now=now)
+        elif self._vault is not None:
+            await self._vault.delete(provider_account_id)
+
+    @staticmethod
+    def _identity_key(identity: ProviderIdentity) -> tuple[str, str, str]:
+        if identity.__class__ is not ProviderIdentity:
+            raise OAuthAccountError
+        return identity.provider, identity.issuer, identity.subject
 
 
 @dataclass(slots=True)
@@ -551,7 +556,7 @@ class _MemoryTokenVault:
 
     async def put(self, provider_account_id: str, tokens: ProviderTokenSet, *, now: datetime) -> ProviderTokenReference:
         """Encrypt and store a token set with a new version."""
-        _validate_vault_input(provider_account_id, tokens, now)
+        self._validate_vault_input(provider_account_id, tokens, now)
         async with self._lock:
             previous = self._records.get(provider_account_id)
             version = 1 if previous is None else previous.reference.version + 1
@@ -572,7 +577,7 @@ class _MemoryTokenVault:
                 record.protected,
                 associated_data=self._associated_data(provider_account_id, record.protected.key_version),
             )
-            tokens = _decode_tokens(body)
+            tokens = self._decode_tokens(body)
         except Exception as exc:
             raise OAuthAccountError(_VAULT_UNAVAILABLE) from exc
         return StoredProviderTokens(reference=record.reference, tokens=tokens)
@@ -581,7 +586,7 @@ class _MemoryTokenVault:
         self, provider_account_id: str, *, expected_version: int, tokens: ProviderTokenSet, now: datetime
     ) -> bool:
         """Encrypt then atomically compare-and-swap a rotated token set."""
-        _validate_vault_input(provider_account_id, tokens, now)
+        self._validate_vault_input(provider_account_id, tokens, now)
         if expected_version.__class__ is not int or expected_version < 1:
             raise OAuthAccountError
         replacement = await self._protect(provider_account_id, expected_version + 1, tokens)
@@ -614,6 +619,33 @@ class _MemoryTokenVault:
 
     def _associated_data(self, provider_account_id: str, key_version: str) -> bytes:
         return f"oauth-vault-v1\0{self.provider}\0{self.client_id}\0{provider_account_id}\0{key_version}".encode()
+
+    @staticmethod
+    def _validate_vault_input(provider_account_id: str, tokens: ProviderTokenSet, now: datetime) -> None:
+        if not _strict_text(provider_account_id) or tokens.__class__ is not ProviderTokenSet or not _aware(now):
+            raise OAuthAccountError
+
+    @staticmethod
+    def _decode_tokens(body: bytes) -> ProviderTokenSet:
+        document = json.loads(body, object_pairs_hook=unique_object, parse_constant=reject_non_finite)
+        validate_depth(document, maximum=_MAXIMUM_VAULT_DOCUMENT_DEPTH)
+        if not isinstance(document, dict):
+            raise TypeError
+        values = cast("dict[str, object]", document)
+        scopes = values.get("scopes")
+        scope_values = cast("list[object]", scopes)
+        if not isinstance(scopes, list) or any(not _strict_text(scope) for scope in scope_values):
+            raise ValueError
+        return ProviderTokenSet(
+            access_token=SecretStr(cast("str", values["access_token"])),
+            token_type=cast("str", values["token_type"]),
+            scopes=frozenset(cast("list[str]", scopes)),
+            expires_at=datetime.fromisoformat(cast("str", values["expires_at"])),
+            refresh_token=(
+                SecretStr(cast("str", values["refresh_token"])) if values.get("refresh_token") is not None else None
+            ),
+            id_token=SecretStr(cast("str", values["id_token"])) if values.get("id_token") is not None else None,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -812,21 +844,6 @@ class OAuthAccountService:
         finally:
             await self._release_refresh_lock(provider_account_id, entry)
 
-    async def _acquire_refresh_lock(self, provider_account_id: str) -> "_RefreshLock":
-        async with self._refresh_locks_guard:
-            entry = self._refresh_locks.get(provider_account_id)
-            if entry is None:
-                entry = _RefreshLock()
-                self._refresh_locks[provider_account_id] = entry
-            entry.references += 1
-            return entry
-
-    async def _release_refresh_lock(self, provider_account_id: str, entry: "_RefreshLock") -> None:
-        async with self._refresh_locks_guard:
-            entry.references -= 1
-            if entry.references == 0 and self._refresh_locks.get(provider_account_id) is entry:
-                del self._refresh_locks[provider_account_id]
-
     async def revoke(self, provider_account_id: str, provider: OAuthProvider, *, now: datetime) -> None:
         """Revoke retained credentials without losing material needed for retry."""
         stored = await self.store.get_tokens(provider_account_id, now=now)
@@ -857,16 +874,20 @@ class OAuthAccountService:
                 raise OAuthAccountError(msg)
             await self.store.discard_tokens(provider_account_id, expected_version=stored.reference.version)
 
+    async def _acquire_refresh_lock(self, provider_account_id: str) -> _RefreshLock:
+        async with self._refresh_locks_guard:
+            entry = self._refresh_locks.get(provider_account_id)
+            if entry is None:
+                entry = _RefreshLock()
+                self._refresh_locks[provider_account_id] = entry
+            entry.references += 1
+            return entry
 
-def _identity_key(identity: ProviderIdentity) -> tuple[str, str, str]:
-    if identity.__class__ is not ProviderIdentity:
-        raise OAuthAccountError
-    return identity.provider, identity.issuer, identity.subject
-
-
-def _validate_vault_input(provider_account_id: str, tokens: ProviderTokenSet, now: datetime) -> None:
-    if not _strict_text(provider_account_id) or tokens.__class__ is not ProviderTokenSet or not _aware(now):
-        raise OAuthAccountError
+    async def _release_refresh_lock(self, provider_account_id: str, entry: _RefreshLock) -> None:
+        async with self._refresh_locks_guard:
+            entry.references -= 1
+            if entry.references == 0 and self._refresh_locks.get(provider_account_id) is entry:
+                del self._refresh_locks[provider_account_id]
 
 
 def _encode_tokens(tokens: ProviderTokenSet) -> bytes:
@@ -879,28 +900,6 @@ def _encode_tokens(tokens: ProviderTokenSet) -> bytes:
         "id_token": tokens.id_token.get_secret_value() if tokens.id_token is not None else None,
     }
     return json.dumps(document, separators=(",", ":"), sort_keys=True).encode()
-
-
-def _decode_tokens(body: bytes) -> ProviderTokenSet:
-    document = json.loads(body, object_pairs_hook=unique_object, parse_constant=reject_non_finite)
-    validate_depth(document, maximum=_MAXIMUM_VAULT_DOCUMENT_DEPTH)
-    if not isinstance(document, dict):
-        raise TypeError
-    values = cast("dict[str, object]", document)
-    scopes = values.get("scopes")
-    scope_values = cast("list[object]", scopes)
-    if not isinstance(scopes, list) or any(not _strict_text(scope) for scope in scope_values):
-        raise ValueError
-    return ProviderTokenSet(
-        access_token=SecretStr(cast("str", values["access_token"])),
-        token_type=cast("str", values["token_type"]),
-        scopes=frozenset(cast("list[str]", scopes)),
-        expires_at=datetime.fromisoformat(cast("str", values["expires_at"])),
-        refresh_token=(
-            SecretStr(cast("str", values["refresh_token"])) if values.get("refresh_token") is not None else None
-        ),
-        id_token=SecretStr(cast("str", values["id_token"])) if values.get("id_token") is not None else None,
-    )
 
 
 def _strict_text(value: object) -> bool:

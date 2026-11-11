@@ -1,7 +1,7 @@
-from __future__ import annotations
+"""Unit tests for refresh token codecs, receipt sealing, and command contracts."""
 
 from base64 import urlsafe_b64encode
-from dataclasses import FrozenInstanceError, fields, replace
+from dataclasses import FrozenInstanceError, fields, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 import msgspec
@@ -32,61 +32,36 @@ _ACCESS_TOKEN = "e30.e30.YQ"  # noqa: S105
 
 
 def test_refresh_value_contracts_are_frozen_slotted_and_secret_safe() -> None:
-    now = _ACCOUNT_NOW
-    entropy_values = iter((b"i" * 16, b"s" * 32))
-    codec = accounts_module.RefreshTokenCodec(pepper=b"p" * 32, entropy=lambda _length: next(entropy_values))
-    issue = codec.issue()
-    proof = codec.verify(issue.refresh_token)
-    assert isinstance(proof, accounts_module.RefreshTokenProof)
-    response = accounts_module.TokenPair(
-        access_token="e30.e30.YQ",  # noqa: S106 - compact public test JWT
-        refresh_token=issue.refresh_token,
-        expires_in=600,
-    )
-    receipt_context = accounts_module.RefreshReceiptContext(
-        token_id=issue.token_id,
-        family_id=_REFRESH_FAMILY_ID,
-        account_id="account-1",
-        security_epoch=1,
-        idempotency_digest=b"k" * 32,
-    )
-    family_context = accounts_module.RefreshFamilyContext(
-        account_id="account-1",
-        family_id=_REFRESH_FAMILY_ID,
-        security_epoch=1,
-        token_expires_at=now + timedelta(days=7),
-        family_expires_at=now + timedelta(days=30),
-        scopes=frozenset({"read"}),
-    )
-    create = accounts_module.CreateRefreshFamilyCommand(
-        token_id=issue.token_id,
-        token_digest=issue.digest,
-        account_id="account-1",
-        family_id=_REFRESH_FAMILY_ID,
-        security_epoch=1,
-        created_at=now,
-        token_expires_at=now + timedelta(days=7),
-        family_expires_at=now + timedelta(days=30),
-        scopes=frozenset({"read"}),
-    )
-    key = accounts_module.RefreshReceiptKey("key-1", b"r" * 32)
-    sealer = accounts_module.RefreshReceiptSealer(active_key=key, entropy=lambda _length: b"n" * 12)
-    sealed = sealer.seal(response, receipt_context, expires_at=now + timedelta(seconds=30))
-    replay = accounts_module.RefreshReceiptReplay(context=family_context, sealed_receipt=sealed)
-    values = (codec, issue, proof, response, receipt_context, family_context, replay, create, key, sealer)
+    _contracts, _secrets, unsealed_matches = _refresh_value_contracts()
 
-    assert sealer.unseal(sealed, receipt_context, now=now) == response
-    for value in values:
-        assert not hasattr(value, "__dict__")
-        if isinstance(value, msgspec.Struct):
-            with pytest.raises(AttributeError):
-                setattr(value, value.__struct_fields__[0], None)
-            continue
+    assert unsealed_matches
+
+
+@pytest.mark.parametrize(
+    "contract_name",
+    ["codec", "issue", "proof", "response", "receipt_context", "family_context", "replay", "create", "key", "sealer"],
+)
+def test_refresh_value_contracts_are_frozen_and_slotted(contract_name: str) -> None:
+    contracts, _secrets, _unsealed_matches = _refresh_value_contracts()
+    value = contracts[contract_name]
+
+    assert not hasattr(value, "__dict__")
+    if isinstance(value, msgspec.Struct):
+        with pytest.raises(AttributeError):
+            setattr(value, value.__struct_fields__[0], None)
+    else:
+        assert is_dataclass(value)
+        assert not isinstance(value, type)
         with pytest.raises(FrozenInstanceError):
             setattr(value, fields(value)[0].name, None)
-    rendered = " ".join(repr(value) for value in values)
-    for secret in (issue.refresh_token, response.access_token, issue.digest.hex(), (b"r" * 32).hex()):
-        assert secret not in rendered
+
+
+@pytest.mark.parametrize("secret_name", ["refresh_token", "access_token", "issue_digest", "receipt_key"])
+def test_refresh_value_contracts_redact_secrets(secret_name: str) -> None:
+    contracts, secrets, _unsealed_matches = _refresh_value_contracts()
+    rendered = " ".join(repr(value) for value in contracts.values())
+
+    assert secrets[secret_name] not in rendered
 
 
 @pytest.mark.parametrize(
@@ -159,6 +134,69 @@ async def test_refresh_receipt_window_preserves_subsecond_precision() -> None:
     assert duplicate == first
 
 
+def _refresh_value_contracts() -> tuple[dict[str, object], dict[str, str], bool]:
+    now = _ACCOUNT_NOW
+    entropy_values = iter((b"i" * 16, b"s" * 32))
+    codec = accounts_module.RefreshTokenCodec(pepper=b"p" * 32, entropy=lambda _length: next(entropy_values))
+    issue = codec.issue()
+    proof = codec.verify(issue.refresh_token)
+    assert isinstance(proof, accounts_module.RefreshTokenProof)
+    response = accounts_module.TokenPair(
+        access_token="e30.e30.YQ",  # noqa: S106
+        refresh_token=issue.refresh_token,
+        expires_in=600,
+    )
+    receipt_context = accounts_module.RefreshReceiptContext(
+        token_id=issue.token_id,
+        family_id=_REFRESH_FAMILY_ID,
+        account_id="account-1",
+        security_epoch=1,
+        idempotency_digest=b"k" * 32,
+    )
+    family_context = accounts_module.RefreshFamilyContext(
+        account_id="account-1",
+        family_id=_REFRESH_FAMILY_ID,
+        security_epoch=1,
+        token_expires_at=now + timedelta(days=7),
+        family_expires_at=now + timedelta(days=30),
+        scopes=frozenset({"read"}),
+    )
+    create = accounts_module.CreateRefreshFamilyCommand(
+        token_id=issue.token_id,
+        token_digest=issue.digest,
+        account_id="account-1",
+        family_id=_REFRESH_FAMILY_ID,
+        security_epoch=1,
+        created_at=now,
+        token_expires_at=now + timedelta(days=7),
+        family_expires_at=now + timedelta(days=30),
+        scopes=frozenset({"read"}),
+    )
+    key = accounts_module.RefreshReceiptKey("key-1", b"r" * 32)
+    sealer = accounts_module.RefreshReceiptSealer(active_key=key, entropy=lambda _length: b"n" * 12)
+    sealed = sealer.seal(response, receipt_context, expires_at=now + timedelta(seconds=30))
+    replay = accounts_module.RefreshReceiptReplay(context=family_context, sealed_receipt=sealed)
+    contracts: dict[str, object] = {
+        "codec": codec,
+        "issue": issue,
+        "proof": proof,
+        "response": response,
+        "receipt_context": receipt_context,
+        "family_context": family_context,
+        "replay": replay,
+        "create": create,
+        "key": key,
+        "sealer": sealer,
+    }
+    secrets = {
+        "refresh_token": issue.refresh_token,
+        "access_token": response.access_token,
+        "issue_digest": issue.digest.hex(),
+        "receipt_key": (b"r" * 32).hex(),
+    }
+    return contracts, secrets, sealer.unseal(sealed, receipt_context, now=now) == response
+
+
 def _base_refresh_receipt_context(**overrides: object) -> dict[str, object]:
     values: dict[str, object] = {
         "token_id": _REFRESH_ID,
@@ -226,7 +264,7 @@ def _seal_refresh_test_payload(
     ciphertext = AESGCM(key.key).encrypt(
         nonce,
         payload,
-        receipts_module._receipt_aad(context, expiry, key.key_id),  # noqa: SLF001 - exercise public unseal validation
+        receipts_module.RefreshReceiptSealer._receipt_aad(context, expiry, key.key_id),  # noqa: SLF001
     )
     return (
         f"rr1.{key.key_id}.{expiry}.{_encode_refresh_test_segment(nonce)}.{_encode_refresh_test_segment(ciphertext)}"
@@ -409,7 +447,7 @@ def test_refresh_receipt_sealer_rejects_invalid_expiry(expiry: object) -> None:
     ],
 )
 def test_refresh_receipt_envelope_parser_rejects_malformed_values(receipt: object) -> None:
-    assert receipts_module._parse_receipt_envelope(receipt) is None  # noqa: SLF001
+    assert receipts_module.RefreshReceiptSealer._parse_receipt_envelope(receipt) is None  # noqa: SLF001
 
 
 @pytest.mark.parametrize(
@@ -434,7 +472,9 @@ def test_refresh_receipt_envelope_parser_rejects_malformed_values(receipt: objec
 def test_refresh_receipt_unseal_strictly_validates_decrypted_payload(payload: bytes) -> None:
     key = accounts_module.RefreshReceiptKey("key", b"k" * 32)
     context = accounts_module.RefreshReceiptContext(**_base_refresh_receipt_context())  # type: ignore[arg-type]
-    expiry = receipts_module._receipt_expiry(_ACCOUNT_NOW + timedelta(seconds=30))  # noqa: SLF001
+    expiry = receipts_module.RefreshReceiptSealer._receipt_expiry(  # noqa: SLF001
+        _ACCOUNT_NOW + timedelta(seconds=30)
+    )
     sealed = _seal_refresh_test_payload(payload, key=key, context=context, expiry=expiry)
     sealer = accounts_module.RefreshReceiptSealer(active_key=key)
     assert isinstance(sealer.unseal(sealed, context, now=_ACCOUNT_NOW), litestar_security.InvalidCredentials)

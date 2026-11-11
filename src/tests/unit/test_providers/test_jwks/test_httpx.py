@@ -1,11 +1,13 @@
 """HTTPX JWKS fetching tests."""
 
+from collections.abc import Awaitable, Callable
 from typing import cast
 
 import httpx
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException
 
+from litestar_security.providers import _internal as providers_internal
 from litestar_security.providers.jwks import HttpxJWKSFetcher, JWKSFetchOutcome, JWKSFetchTarget
 from litestar_security.providers.jwks import _httpx as jwks_httpx
 from tests.fixtures.collaborators import ChunkedByteStream as _ChunkedOIDCStream
@@ -115,7 +117,7 @@ async def test_httpx_jwks_fetcher_checks_byte_ceiling_before_extending(monkeypat
     async def resolver(_host: str, _port: int) -> tuple[str, ...]:
         return (_OIDC_PUBLIC_IP,)
 
-    monkeypatch.setattr(jwks_httpx, "bytearray", _CapacityCheckedBytearray, raising=False)
+    monkeypatch.setattr(providers_internal, "bytearray", _CapacityCheckedBytearray, raising=False)
     response = httpx.Response(200, stream=_ChunkedOIDCStream(b"x" * 40, b"x" * 40))
     fetcher = HttpxJWKSFetcher(
         maximum_response_bytes=64, transport=_RecordingMockTransport(lambda _request: response), resolver=resolver
@@ -150,28 +152,34 @@ async def test_httpx_jwks_fetcher_enforces_ssrf_boundary_unless_private_hosts_ar
     await allowed.aclose()
 
 
-async def test_httpx_jwks_fetcher_maps_resolution_failures_and_rejects_invalid_dns_answers() -> None:
+async def _failed_resolver(_host: str, _port: int) -> tuple[str, ...]:
+    message = "private resolver failure"
+    raise OSError(message)
+
+
+async def _empty_resolver(_host: str, _port: int) -> tuple[str, ...]:
+    return ()
+
+
+async def _malformed_resolver(_host: str, _port: int) -> tuple[str, ...]:
+    return ("not-an-ip",)
+
+
+@pytest.mark.parametrize(
+    "resolver", [_failed_resolver, _empty_resolver, _malformed_resolver], ids=["oserror", "empty", "malformed-ip"]
+)
+async def test_httpx_jwks_fetcher_maps_resolution_failures_and_rejects_invalid_dns_answers(
+    resolver: Callable[[str, int], Awaitable[tuple[str, ...]]],
+) -> None:
     """Resolver failures, empty results, and malformed answers cannot leave the boundary."""
-
-    async def failed_resolver(_host: str, _port: int) -> tuple[str, ...]:
-        message = "private resolver failure"
-        raise OSError(message)
-
-    async def empty_resolver(_host: str, _port: int) -> tuple[str, ...]:
-        return ()
-
-    async def malformed_resolver(_host: str, _port: int) -> tuple[str, ...]:
-        return ("not-an-ip",)
-
     request = JWKSFetchTarget(issuer=_JWT_ISSUER, jwks_uri=_JWKS_URI)
-    fetchers = tuple(
-        HttpxJWKSFetcher(transport=_RecordingMockTransport(lambda _request: httpx.Response(200)), resolver=resolver)
-        for resolver in (failed_resolver, empty_resolver, malformed_resolver)
+    fetcher = HttpxJWKSFetcher(
+        transport=_RecordingMockTransport(lambda _request: httpx.Response(200)), resolver=resolver
     )
-
-    for fetcher in fetchers:
-        with pytest.raises(jwks_httpx._FetchGuardError):  # noqa: SLF001 - assert the private transport boundary failure
+    try:
+        with pytest.raises(jwks_httpx._FetchGuardError):  # noqa: SLF001 - private transport boundary
             await fetcher.fetch(request)
+    finally:
         await fetcher.aclose()
 
 

@@ -1,11 +1,9 @@
 """External service JWT verification and userless principal resolution."""
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import cast
-
-from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.authentication import (
     Authenticated,
@@ -14,12 +12,12 @@ from litestar_security.authentication import (
     CredentialSlot,
     IdentityResolution,
     InvalidCredentials,
-    VerificationUnavailable,
 )
 from litestar_security.config import WorkerLimits
 from litestar_security.context import AuthenticationEvidence, CredentialRestrictions, Principal
-from litestar_security.providers._internal import DynamicVerifierCache
+from litestar_security.providers._internal import DynamicVerifierCache, raise_config
 from litestar_security.providers.jwks import JWKSProvider
+from litestar_security.providers.jwks._verification import verify_jwks_jwt
 from litestar_security.providers.jwt import (
     BearerSlotSelector,
     BearerTokenSlot,
@@ -28,8 +26,6 @@ from litestar_security.providers.jwt import (
     JWTClaims,
     JWTValidationConfig,
     PyJWTVerifier,
-    VerificationKey,
-    parse_unverified_jwt_route,
 )
 
 __all__ = ("ServiceTokenConfig",)
@@ -60,10 +56,10 @@ class ServiceTokenConfig:
             not isinstance(jwks, JWKSProvider)
             or not isinstance(cast("object", self.worker_limits), WorkerLimits)
             or not self.jwks_uri.startswith("https://")
-            or not _claim_name(self.scopes_claim)
-            or not _claim_name(self.actor_id_claim)
+            or not self._claim_name(self.scopes_claim)
+            or not self._claim_name(self.actor_id_claim)
         ):
-            raise ImproperlyConfiguredException(detail="Service token configuration is invalid")
+            raise_config("Service token configuration is invalid")
         validation = JWTValidationConfig(
             issuer=self.issuer,
             audiences=self.audiences,
@@ -96,6 +92,14 @@ class ServiceTokenConfig:
             _ServiceIdentityResolver(actor_id_claim=self.actor_id_claim), clock=clock
         )
 
+    @staticmethod
+    def _claim_name(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and bool(value)
+            and all(character.isalnum() or character == "_" for character in value)
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class _ServiceJWTVerifier:
@@ -105,47 +109,25 @@ class _ServiceJWTVerifier:
         default_factory=DynamicVerifierCache[PyJWTVerifier], init=False, repr=False, compare=False
     )
 
-    async def verify(  # noqa: PLR0911 - preserve structured trust outcomes at every verifier boundary
-        self, token: str, *, now: datetime
-    ) -> AuthenticationOutcome[JWTClaims]:
-        route = parse_unverified_jwt_route(token, maximum_token_bytes=_MAXIMUM_TOKEN_BYTES)
-        if isinstance(route, InvalidCredentials):  # pragma: no cover - composite bearer already parsed this token
-            return route
-        algorithm = route.header.get("alg")
-        key_id = route.header.get("kid")
-        if not isinstance(algorithm, str) or algorithm not in self.config.algorithms:
-            return InvalidCredentials()
-        if not isinstance(key_id, str) or not key_id:
-            return InvalidCredentials()
-        selection = cast(
-            "object",
-            await self.owner.jwks.select_key(self.config.issuer, self.owner.jwks_uri, key_id, algorithm, now=now),
+    async def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[JWTClaims]:
+        outcome = await verify_jwks_jwt(
+            token,
+            config=self.config,
+            jwks=self.owner.jwks,
+            jwks_uri=self.owner.jwks_uri,
+            verifiers=self._verifiers,
+            mechanism_name="service-jwt",
+            slot_name="authorization.bearer",
+            worker_limits=self.owner.worker_limits,
+            now=now,
+            maximum_token_bytes=_MAXIMUM_TOKEN_BYTES,
         )
-        if isinstance(selection, (InvalidCredentials, VerificationUnavailable)):
-            return selection
-        if not isinstance(selection, VerificationKey):
-            return VerificationUnavailable()
-        cache_key = (key_id, algorithm)
-        verifier = self._verifiers.get_or_create(
-            cache_key,
-            selection.key,
-            lambda: PyJWTVerifier(
-                config=replace(self.config, algorithms=frozenset({algorithm})),
-                key=selection.key,
-                mechanism_name="service-jwt",
-                slot_name="authorization.bearer",
-                maximum_token_bytes=_MAXIMUM_TOKEN_BYTES,
-                limiter=self.owner.worker_limits.crypto_limiter,
-                worker_timeout=self.owner.worker_limits.timeout,
-            ),
-        )
-        outcome = await verifier.verify(token, now=now)
         if not isinstance(outcome, Authenticated):
             return outcome
         claims = outcome.claims
-        scopes = _scopes(claims.raw.get(self.owner.scopes_claim))
-        acr = _optional_text(claims.raw.get("acr"))
-        amr = _methods(claims.raw.get("amr"))
+        scopes = self._scopes(claims.raw.get(self.owner.scopes_claim))
+        acr = self._optional_text(claims.raw.get("acr"))
+        amr = self._methods(claims.raw.get("amr"))
         if scopes is None or acr is False or amr is None:
             return InvalidCredentials()
         return Authenticated(
@@ -163,6 +145,32 @@ class _ServiceJWTVerifier:
             restrictions=CredentialRestrictions(scopes=scopes),
         )
 
+    @staticmethod
+    def _scopes(value: JSONValue | None) -> frozenset[str] | None:
+        if isinstance(value, str):
+            return frozenset(value.split())
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            return None
+        if any(not isinstance(item, str) or not item for item in value):
+            return None
+        return frozenset(cast("Sequence[str]", value))
+
+    @staticmethod
+    def _optional_text(value: JSONValue | None) -> str | bool | None:
+        if value is None:
+            return None
+        return value if isinstance(value, str) and value else False
+
+    @staticmethod
+    def _methods(value: JSONValue | None) -> tuple[str, ...] | None:
+        if value is None:
+            return ()
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            return None
+        if any(not isinstance(item, str) or not item for item in value):
+            return None
+        return tuple(cast("Sequence[str]", value))
+
 
 @dataclass(frozen=True, slots=True)
 class _ServiceIdentityResolver:
@@ -173,35 +181,3 @@ class _ServiceIdentityResolver:
         if not isinstance(actor_id, str) or not actor_id:
             return InvalidCredentials()
         return Principal(id=actor_id, display_name=claims.client_id or actor_id, user=None)
-
-
-def _scopes(value: JSONValue | None) -> frozenset[str] | None:
-    if isinstance(value, str):
-        return frozenset(value.split())
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        return None
-    if any(not isinstance(item, str) or not item for item in value):
-        return None
-    return frozenset(cast("Sequence[str]", value))
-
-
-def _optional_text(value: JSONValue | None) -> str | bool | None:
-    if value is None:
-        return None
-    return value if isinstance(value, str) and value else False
-
-
-def _methods(value: JSONValue | None) -> tuple[str, ...] | None:
-    if value is None:
-        return ()
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        return None
-    if any(not isinstance(item, str) or not item for item in value):
-        return None
-    return tuple(cast("Sequence[str]", value))
-
-
-def _claim_name(value: object) -> bool:
-    return (
-        isinstance(value, str) and bool(value) and all(character.isalnum() or character == "_" for character in value)
-    )

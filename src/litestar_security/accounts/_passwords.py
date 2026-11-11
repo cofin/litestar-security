@@ -112,10 +112,10 @@ class PasswordPolicy:
         """
         if password.__class__ is not str:
             return PasswordPolicyDecision(frozenset({PasswordPolicyViolation.INVALID_TEXT}))
-        violations = _password_shape_violations(password, self)
+        violations = self._password_shape_violations(password)
         if normalized_identifier is not None:
             try:
-                matches_identifier = _password_matches_identifier(password, normalized_identifier, self.normalizer)
+                matches_identifier = self._password_matches_identifier(password, normalized_identifier)
             except (TypeError, UnicodeError, ValueError):
                 violations.add(PasswordPolicyViolation.INVALID_TEXT)
             else:
@@ -129,6 +129,26 @@ class PasswordPolicy:
             if compromised_value:
                 violations.add(PasswordPolicyViolation.COMPROMISED)
         return PasswordPolicyDecision(frozenset(violations))
+
+    def _password_shape_violations(self, password: str) -> set[PasswordPolicyViolation]:
+        violations: set[PasswordPolicyViolation] = set()
+        if len(password) < self.minimum_length:
+            violations.add(PasswordPolicyViolation.TOO_SHORT)
+        if len(password) > self.maximum_length:
+            violations.add(PasswordPolicyViolation.TOO_LONG)
+        try:
+            password_bytes = password.encode("utf-8")
+        except UnicodeEncodeError:
+            violations.add(PasswordPolicyViolation.INVALID_TEXT)
+        else:
+            if len(password_bytes) > self.maximum_bytes:
+                violations.add(PasswordPolicyViolation.TOO_MANY_BYTES)
+        return violations
+
+    def _password_matches_identifier(self, password: str, normalized_identifier: str) -> bool:
+        candidate = self.normalizer(password).encode("utf-8")
+        expected = self.normalizer(normalized_identifier).encode("utf-8")
+        return compare_digest(candidate, expected)
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,7 +226,7 @@ class Argon2PasswordHasher:
     def __post_init__(self) -> None:
         """Validate bounded parameters and one policy-matched precomputed dummy."""
         ensure_argon2()
-        _validate_argon2_configuration(
+        self._validate_argon2_configuration(
             memory_cost=self.memory_cost,
             time_cost=self.time_cost,
             parallelism=self.parallelism,
@@ -214,11 +234,21 @@ class Argon2PasswordHasher:
             hash_len=self.hash_len,
             worker_limits=self.worker_limits,
         )
-        dummy_parameters = _safe_argon2_parameters(self.dummy_hash, self.worker_limits)
-        if dummy_parameters is None or not _parameters_match_hasher(dummy_parameters, self):
+        dummy_parameters = self._safe_argon2_parameters(self.dummy_hash, self.worker_limits)
+        if dummy_parameters is None or not self._parameters_match_hasher(dummy_parameters):
             msg = "Argon2 dummy hash must exactly match the configured policy"
             raise ImproperlyConfiguredException(detail=msg)
-        object.__setattr__(self, "_engine", _build_argon2_engine(self))
+        object.__setattr__(
+            self,
+            "_engine",
+            self._build_engine(
+                memory_cost=self.memory_cost,
+                time_cost=self.time_cost,
+                parallelism=self.parallelism,
+                salt_len=self.salt_len,
+                hash_len=self.hash_len,
+            ),
+        )
 
     @classmethod
     async def create(  # noqa: PLR0913 - explicit configuration surface; every input is named
@@ -247,7 +277,7 @@ class Argon2PasswordHasher:
         """
         ensure_argon2()
         workers = WorkerLimits() if worker_limits is None else worker_limits
-        _validate_argon2_configuration(
+        cls._validate_argon2_configuration(
             memory_cost=memory_cost,
             time_cost=time_cost,
             parallelism=parallelism,
@@ -255,16 +285,11 @@ class Argon2PasswordHasher:
             hash_len=hash_len,
             worker_limits=workers,
         )
-        engine = _Argon2Engine(
-            memory_cost=memory_cost,
-            time_cost=time_cost,
-            parallelism=parallelism,
-            salt_len=salt_len,
-            hash_len=hash_len,
-            type=Argon2Type.ID,
+        engine = cls._build_engine(
+            memory_cost=memory_cost, time_cost=time_cost, parallelism=parallelism, salt_len=salt_len, hash_len=hash_len
         )
         try:
-            dummy_hash = await _run_password_worker(partial(engine.hash, _DUMMY_PASSWORD), workers)
+            dummy_hash = await cls._run_worker(partial(engine.hash, _DUMMY_PASSWORD), workers)
         except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
             raise PasswordHashingUnavailableError from None
         return cls(
@@ -286,7 +311,7 @@ class Argon2PasswordHasher:
         Returns:
             The encoded Argon2id hash.
         """
-        password_bytes = _password_bytes(password)
+        password_bytes = self._password_bytes(password)
         return await self._hash_bytes(password_bytes)
 
     async def verify(self, encoded_hash: str | None, password: str) -> PasswordVerificationOutcome:
@@ -300,12 +325,12 @@ class Argon2PasswordHasher:
             The sanitized decision, carrying a rehash only when the password
             matched and the stored parameters are weaker than the current ones.
         """
-        password_input = _password_verification_input(password)
+        password_input = self._verification_input(password)
         if isinstance(password_input, PasswordVerificationOutcome):
             return password_input
         password_bytes = password_input
         candidate_hash = self.dummy_hash if encoded_hash is None else encoded_hash
-        parameters = _safe_argon2_parameters(candidate_hash, self.worker_limits)
+        parameters = self._safe_argon2_parameters(candidate_hash, self.worker_limits)
         if parameters is None:
             await self._verify_dummy(password_bytes)
             return PasswordVerificationOutcome(PasswordVerificationStatus.MALFORMED)
@@ -314,13 +339,13 @@ class Argon2PasswordHasher:
             return matched
         if encoded_hash is None or not matched:
             return PasswordVerificationOutcome(PasswordVerificationStatus.INVALID)
-        needs_rehash = not _parameters_match_hasher(parameters, self)
+        needs_rehash = not self._parameters_match_hasher(parameters)
         replacement = await self._hash_bytes(password_bytes) if needs_rehash else None
         return PasswordVerificationOutcome(PasswordVerificationStatus.VERIFIED, replacement_hash=replacement)
 
     async def _hash_bytes(self, password: bytes) -> str:
         try:
-            return await _run_password_worker(partial(self._engine.hash, password), self.worker_limits)
+            return await self._run_worker(partial(self._engine.hash, password), self.worker_limits)
         except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
             raise PasswordHashingUnavailableError from None
 
@@ -338,7 +363,7 @@ class Argon2PasswordHasher:
             raise PasswordHashingUnavailableError from None
 
     async def _verify_once(self, encoded_hash: str, password: bytes) -> bool:
-        return await _run_password_worker(partial(self._engine.verify, encoded_hash, password), self.worker_limits)
+        return await self._run_worker(partial(self._engine.verify, encoded_hash, password), self.worker_limits)
 
     async def _verify_dummy(self, password: bytes) -> None:
         try:
@@ -348,130 +373,109 @@ class Argon2PasswordHasher:
         except Exception:  # noqa: BLE001 - application-supplied code may raise anything; fail closed
             raise PasswordHashingUnavailableError from None
 
+    @staticmethod
+    def _password_bytes(password: str) -> bytes:
+        if password.__class__ is not str:
+            msg = "Password must be text"
+            raise ValueError(msg)
+        try:
+            value = password.encode("utf-8")
+        except UnicodeEncodeError:
+            msg = "Password must contain valid UTF-8 text"
+            raise ValueError(msg) from None
+        if len(value) > _MAXIMUM_PASSWORD_BYTES:
+            msg = "Password must not exceed 1,024 UTF-8 bytes"
+            raise _PasswordTooLongError(msg)
+        return value
+
+    @classmethod
+    def _verification_input(cls, password: str) -> bytes | PasswordVerificationOutcome:
+        try:
+            return cls._password_bytes(password)
+        except _PasswordTooLongError:
+            return PasswordVerificationOutcome(PasswordVerificationStatus.TOO_LONG)
+        except ValueError:
+            return PasswordVerificationOutcome(PasswordVerificationStatus.INVALID)
+
+    @staticmethod
+    async def _run_worker(operation: "Callable[[], UserT]", workers: WorkerLimits) -> UserT:
+        started = perf_counter()
+        result = await to_thread.run_sync(operation, abandon_on_cancel=False, limiter=workers.crypto_limiter)
+        if perf_counter() - started > workers.timeout:
+            raise TimeoutError
+        return result
+
+    @staticmethod
+    def _validate_argon2_configuration(  # noqa: PLR0913 - explicit configuration surface; every input is named
+        *, memory_cost: int, time_cost: int, parallelism: int, salt_len: int, hash_len: int, worker_limits: WorkerLimits
+    ) -> None:
+        values = (
+            (memory_cost, 19_456, _MAXIMUM_ARGON2_MEMORY_COST),
+            (time_cost, 2, _MAXIMUM_ARGON2_TIME_COST),
+            (parallelism, 1, _MAXIMUM_ARGON2_PARALLELISM),
+            (salt_len, 16, _MAXIMUM_ARGON2_SALT_LENGTH),
+            (hash_len, 32, _MAXIMUM_ARGON2_HASH_LENGTH),
+        )
+        if any(value.__class__ is not int or not minimum <= value <= maximum for value, minimum, maximum in values):
+            msg = "Argon2 password parameters must be strengthened within safe bounds"
+            raise ImproperlyConfiguredException(detail=msg)
+        if worker_limits.__class__ is not WorkerLimits:
+            msg = "Argon2 password worker limits must be WorkerLimits"
+            raise ImproperlyConfiguredException(detail=msg)
+        if memory_cost * worker_limits.crypto_tokens > _MAXIMUM_ARGON2_WORKER_MEMORY_KIB:
+            msg = "Argon2 password memory cost and crypto workers must not exceed 1 GiB"
+            raise ImproperlyConfiguredException(detail=msg)
+
+    @staticmethod
+    def _build_engine(
+        *, memory_cost: int, time_cost: int, parallelism: int, salt_len: int, hash_len: int
+    ) -> "_Argon2Engine":
+        try:
+            return _Argon2Engine(
+                memory_cost=memory_cost,
+                time_cost=time_cost,
+                parallelism=parallelism,
+                salt_len=salt_len,
+                hash_len=hash_len,
+                type=Argon2Type.ID,
+            )
+        except (Argon2Error, TypeError, ValueError):
+            msg = "Invalid Argon2 password parameters"
+            raise ImproperlyConfiguredException(detail=msg) from None
+
+    @staticmethod
+    def _safe_argon2_parameters(encoded_hash: object, worker_limits: WorkerLimits) -> "Argon2Parameters | None":
+        if not isinstance(encoded_hash, str):
+            return None
+        try:
+            encoded_bytes = encoded_hash.encode("ascii")
+            if len(encoded_bytes) > _MAXIMUM_ENCODED_PASSWORD_HASH_BYTES:
+                return None
+            parameters = extract_parameters(encoded_hash)
+        except (InvalidHashError, UnicodeError, ValueError):
+            return None
+        if (
+            parameters.type is not Argon2Type.ID
+            or parameters.version != _ARGON2_VERSION
+            or not 1 <= parameters.memory_cost <= _MAXIMUM_ARGON2_MEMORY_COST
+            or not 1 <= parameters.time_cost <= _MAXIMUM_ARGON2_TIME_COST
+            or not 1 <= parameters.parallelism <= _MAXIMUM_ARGON2_PARALLELISM
+            or not 1 <= parameters.salt_len <= _MAXIMUM_ARGON2_SALT_LENGTH
+            or not 1 <= parameters.hash_len <= _MAXIMUM_ARGON2_HASH_LENGTH
+            or parameters.memory_cost * worker_limits.crypto_tokens > _MAXIMUM_ARGON2_WORKER_MEMORY_KIB
+        ):
+            return None
+        return parameters
+
+    def _parameters_match_hasher(self, parameters: "Argon2Parameters") -> bool:
+        return (
+            parameters.memory_cost,
+            parameters.time_cost,
+            parameters.parallelism,
+            parameters.salt_len,
+            parameters.hash_len,
+        ) == (self.memory_cost, self.time_cost, self.parallelism, self.salt_len, self.hash_len)
+
 
 class _PasswordTooLongError(ValueError):
     pass
-
-
-def _password_shape_violations(password: str, policy: "PasswordPolicy") -> set[PasswordPolicyViolation]:
-    violations: set[PasswordPolicyViolation] = set()
-    if len(password) < policy.minimum_length:
-        violations.add(PasswordPolicyViolation.TOO_SHORT)
-    if len(password) > policy.maximum_length:
-        violations.add(PasswordPolicyViolation.TOO_LONG)
-    try:
-        password_bytes = password.encode("utf-8")
-    except UnicodeEncodeError:
-        violations.add(PasswordPolicyViolation.INVALID_TEXT)
-    else:
-        if len(password_bytes) > policy.maximum_bytes:
-            violations.add(PasswordPolicyViolation.TOO_MANY_BYTES)
-    return violations
-
-
-def _password_matches_identifier(password: str, normalized_identifier: str, normalizer: "Callable[[str], str]") -> bool:
-    candidate = normalizer(password).encode("utf-8")
-    expected = normalizer(normalized_identifier).encode("utf-8")
-    return compare_digest(candidate, expected)
-
-
-def _password_bytes(password: str) -> bytes:
-    if password.__class__ is not str:
-        msg = "Password must be text"
-        raise ValueError(msg)
-    try:
-        value = password.encode("utf-8")
-    except UnicodeEncodeError:
-        msg = "Password must contain valid UTF-8 text"
-        raise ValueError(msg) from None
-    if len(value) > _MAXIMUM_PASSWORD_BYTES:
-        msg = "Password must not exceed 1,024 UTF-8 bytes"
-        raise _PasswordTooLongError(msg)
-    return value
-
-
-def _password_verification_input(password: str) -> bytes | PasswordVerificationOutcome:
-    try:
-        return _password_bytes(password)
-    except _PasswordTooLongError:
-        return PasswordVerificationOutcome(PasswordVerificationStatus.TOO_LONG)
-    except ValueError:
-        return PasswordVerificationOutcome(PasswordVerificationStatus.INVALID)
-
-
-async def _run_password_worker(operation: "Callable[[], UserT]", workers: WorkerLimits) -> UserT:
-    started = perf_counter()
-    result = await to_thread.run_sync(operation, abandon_on_cancel=False, limiter=workers.crypto_limiter)
-    if perf_counter() - started > workers.timeout:
-        raise TimeoutError
-    return result
-
-
-def _validate_argon2_configuration(  # noqa: PLR0913 - explicit configuration surface; every input is named
-    *, memory_cost: int, time_cost: int, parallelism: int, salt_len: int, hash_len: int, worker_limits: WorkerLimits
-) -> None:
-    values = (
-        (memory_cost, 19_456, _MAXIMUM_ARGON2_MEMORY_COST),
-        (time_cost, 2, _MAXIMUM_ARGON2_TIME_COST),
-        (parallelism, 1, _MAXIMUM_ARGON2_PARALLELISM),
-        (salt_len, 16, _MAXIMUM_ARGON2_SALT_LENGTH),
-        (hash_len, 32, _MAXIMUM_ARGON2_HASH_LENGTH),
-    )
-    if any(value.__class__ is not int or not minimum <= value <= maximum for value, minimum, maximum in values):
-        msg = "Argon2 password parameters must be strengthened within safe bounds"
-        raise ImproperlyConfiguredException(detail=msg)
-    if worker_limits.__class__ is not WorkerLimits:
-        msg = "Argon2 password worker limits must be WorkerLimits"
-        raise ImproperlyConfiguredException(detail=msg)
-    if memory_cost * worker_limits.crypto_tokens > _MAXIMUM_ARGON2_WORKER_MEMORY_KIB:
-        msg = "Argon2 password memory cost and crypto workers must not exceed 1 GiB"
-        raise ImproperlyConfiguredException(detail=msg)
-
-
-def _build_argon2_engine(hasher: Argon2PasswordHasher) -> "_Argon2Engine":
-    try:
-        return _Argon2Engine(
-            memory_cost=hasher.memory_cost,
-            time_cost=hasher.time_cost,
-            parallelism=hasher.parallelism,
-            salt_len=hasher.salt_len,
-            hash_len=hasher.hash_len,
-            type=Argon2Type.ID,
-        )
-    except (Argon2Error, TypeError, ValueError):
-        msg = "Invalid Argon2 password parameters"
-        raise ImproperlyConfiguredException(detail=msg) from None
-
-
-def _safe_argon2_parameters(encoded_hash: object, worker_limits: WorkerLimits) -> "Argon2Parameters | None":
-    if not isinstance(encoded_hash, str):
-        return None
-    try:
-        encoded_bytes = encoded_hash.encode("ascii")
-        if len(encoded_bytes) > _MAXIMUM_ENCODED_PASSWORD_HASH_BYTES:
-            return None
-        parameters = extract_parameters(encoded_hash)
-    except (InvalidHashError, UnicodeError, ValueError):
-        return None
-    if (
-        parameters.type is not Argon2Type.ID
-        or parameters.version != _ARGON2_VERSION
-        or not 1 <= parameters.memory_cost <= _MAXIMUM_ARGON2_MEMORY_COST
-        or not 1 <= parameters.time_cost <= _MAXIMUM_ARGON2_TIME_COST
-        or not 1 <= parameters.parallelism <= _MAXIMUM_ARGON2_PARALLELISM
-        or not 1 <= parameters.salt_len <= _MAXIMUM_ARGON2_SALT_LENGTH
-        or not 1 <= parameters.hash_len <= _MAXIMUM_ARGON2_HASH_LENGTH
-        or parameters.memory_cost * worker_limits.crypto_tokens > _MAXIMUM_ARGON2_WORKER_MEMORY_KIB
-    ):
-        return None
-    return parameters
-
-
-def _parameters_match_hasher(parameters: "Argon2Parameters", hasher: Argon2PasswordHasher) -> bool:
-    return (
-        parameters.memory_cost,
-        parameters.time_cost,
-        parameters.parallelism,
-        parameters.salt_len,
-        parameters.hash_len,
-    ) == (hasher.memory_cost, hasher.time_cost, hasher.parallelism, hasher.salt_len, hasher.hash_len)

@@ -125,7 +125,7 @@ dev = [
 ]
 docs = ["shibuya", "sphinx>=7.1.2", "sphinx-copybutton>=0.5.2", "sphinx-design>=0.5.0"]
 lint = ["codespell", "mypy", "prek", "pyright", "ruff", "slotscheck"]
-tests = ["coverage[toml]", "polyfactory", "pytest", "pytest-cov", "pytest-xdist"]
+tests = ["coverage[toml]", "pytest", "pytest-cov", "pytest-xdist"]
 
 ###########
 # Testing #
@@ -162,32 +162,14 @@ skip_covered = true
 # UV    #
 #########
 [tool.uv]
-exclude-newer = "2026-07-19T00:00:00Z"
+exclude-newer = "2026-11-02T00:00:00Z"
 preview-features = ["index-exclude-newer"]
 
 [tool.uv.exclude-newer-package]
-advanced-alchemy = "2099-01-01T00:00:00Z"
-bump-my-version = "2026-10-16T07:57:28Z"
 litestar = "2099-01-01T00:00:00Z"
-litestar-asyncapi = "2099-01-01T00:00:00Z"
-litestar-asyncpg = "2099-01-01T00:00:00Z"
-litestar-autowire = "2099-01-01T00:00:00Z"
-litestar-email = "2099-01-01T00:00:00Z"
-litestar-granian = "2099-01-01T00:00:00Z"
 litestar-htmx = "2099-01-01T00:00:00Z"
-litestar-mcp = "2099-01-01T00:00:00Z"
-litestar-oracledb = "2099-01-01T00:00:00Z"
-litestar-queues = "2099-01-01T00:00:00Z"
-litestar-saq = "2099-01-01T00:00:00Z"
 litestar-security = "2099-01-01T00:00:00Z"
-litestar-vite = "2099-01-01T00:00:00Z"
-polyfactory = "2099-01-01T00:00:00Z"
-prek = "2026-10-14T08:17:43Z"
-pytest-databases = "2099-01-01T00:00:00Z"
 ruff = "2099-01-01T00:00:00Z"
-sqlglot = "2099-01-01T00:00:00Z"
-sqlglotc = "2099-01-01T00:00:00Z"
-sqlspec = "2099-01-01T00:00:00Z"
 
 #########
 # Ruff  #
@@ -231,11 +213,10 @@ convention = "google"
 ban-relative-imports = "all"
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
-# Runtime source must not depend on the shipped test kit. The package exposes it
-# only through the module __getattr__ in __init__.py, and
-# tools/check_import_boundaries.py proves at lint time that a bare
-# `import litestar_security` does not load it.
-"litestar_security.testing".msg = "Runtime source must not import the test kit. See .agents/patterns.md, Test layout."
+# Runtime source must not depend on the shipped test kit. Downstream callers
+# import litestar_security.testing explicitly, and tools/check_import_boundaries.py
+# proves at lint time that a bare `import litestar_security` does not load it.
+"litestar_security.testing".msg = "Runtime source must not import the test kit. See .agents/bundles/knowledge/testing/test-organization-and-conformance.md."
 
 # No storage, cache or cloud adapter may become a runtime dependency: this library
 # ships protocols, and an adapter belongs in the consumer. tools/check_downstream_consumer.py

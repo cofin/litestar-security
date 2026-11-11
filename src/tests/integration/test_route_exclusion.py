@@ -1,8 +1,8 @@
 """Integration tests for path-pattern route exclusion."""
 
-from __future__ import annotations
-
+from collections.abc import Sequence
 from datetime import datetime, timezone
+from pathlib import Path
 from re import escape
 from secrets import token_hex
 from typing import TYPE_CHECKING, Any, cast
@@ -18,6 +18,7 @@ from litestar.openapi.spec import SecurityScheme
 from litestar.routes import ASGIRoute, BaseRoute, WebSocketRoute
 from litestar.static_files import create_static_files_router
 from litestar.testing import TestClient
+from litestar.types import Receive, Scope, Send
 
 from litestar_security import PublicController, SecureController, SecurityConfig, SecurityPlugin
 from litestar_security.authentication import (
@@ -27,18 +28,13 @@ from litestar_security.authentication import (
     InvalidCredentials,
     NoCredentials,
     PresentedCredential,
+    SecurityRuntimePlan,
     required,
 )
 from litestar_security.context import Principal
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-    from pathlib import Path
-
     from litestar.handlers.base import BaseRouteHandler
-    from litestar.types import Receive, Scope, Send
-
-    from litestar_security.authentication import SecurityRuntimePlan
 
 
 class _HeaderSlot:
@@ -141,7 +137,7 @@ def _plan(app: Litestar, route_type: type[BaseRoute], path: str) -> SecurityRunt
 
 
 @pytest.fixture(name="static_directory")
-def fixture_static_directory(tmp_path: Path) -> Path:
+def _static_directory(tmp_path: Path) -> Path:
     """Write one asset into a request-local static directory."""
     (tmp_path / "app.css").write_text("body{}")
     return tmp_path

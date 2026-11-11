@@ -30,7 +30,6 @@ __all__ = (
     "is_scope_token",
     "is_strict_identifier",
     "raise_value",
-    "reject",
     "strict_identifier",
     "strict_identifier_value",
     "strict_key_id",
@@ -43,10 +42,6 @@ _BASE64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 def raise_value(message: str) -> NoReturn:
     raise ValueError(message)
-
-
-def reject() -> NoReturn:
-    raise ValueError
 
 
 def is_strict_identifier(value: str) -> bool:

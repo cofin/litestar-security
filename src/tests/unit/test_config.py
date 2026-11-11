@@ -1,7 +1,9 @@
 """Unit tests for security and wire configuration."""
 
+import ast
 from dataclasses import FrozenInstanceError, fields
 from importlib import import_module
+from pathlib import Path
 from typing import Any, cast
 
 import msgspec
@@ -10,6 +12,22 @@ from litestar.exceptions import ImproperlyConfiguredException
 
 import litestar_security
 from litestar_security.schema import WirePolicy
+
+_TESTS_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _anyio_marked_functions(path: Path) -> list[str]:
+    """Return function names decorated with an explicit ``anyio`` marker."""
+    module = ast.parse(path.read_text(encoding="utf-8"))
+    marked: list[str] = []
+    for node in ast.walk(module):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            target = decorator.func if isinstance(decorator, ast.Call) else decorator
+            if isinstance(target, ast.Attribute) and target.attr == "anyio":
+                marked.append(node.name)
+    return marked
 
 
 def test_security_config_declares_its_fields_in_order() -> None:
@@ -128,6 +146,11 @@ def test_security_config_freezes_exclude_patterns(exclude: object, expected: obj
 
 
 def test_every_wire_schema_in_the_tree_shares_one_casing_and_strictness_policy() -> None:
+    """Verify every wire schema is frozen and strict unless explicitly documented as tolerant.
+
+    Schemas that must tolerate members they do not model declare that policy on
+    themselves and are recorded in ``tolerant`` alongside the reason.
+    """
     import_module("litestar_security.accounts")
     import_module("litestar_security.providers.oauth")
 
@@ -139,8 +162,6 @@ def test_every_wire_schema_in_the_tree_shares_one_casing_and_strictness_policy()
         return found
 
     schemas = descendants(litestar_security.WireStruct)
-    # A schema that must tolerate members it does not model states so on itself and
-    # is listed here with the reason.
     tolerant = {
         "RouteError": "Litestar renders this body, and an application exception handler may add members.",
         "ProblemDetail": "RFC 9457 permits extension members, and Litestar renders this body.",
@@ -192,3 +213,37 @@ def test_wire_struct_subclasses_may_relax_strictness_without_losing_casing_or_im
     assert _Tolerant.__struct_config__.frozen
     assert not _Tolerant.__struct_config__.forbid_unknown_fields
     assert _Tolerant.__struct_encode_fields__ == _Tolerant.__struct_fields__
+
+
+def test_pyproject_configures_pytest_anyio_auto_mode() -> None:
+    """Verify ``pyproject.toml`` enables ``anyio_mode = "auto"`` under pytest options."""
+    pyproject = (_TESTS_ROOT.parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    in_pytest_section = False
+    anyio_modes: list[str] = []
+    for raw_line in pyproject.splitlines():
+        line = raw_line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_pytest_section = line == "[tool.pytest.ini_options]"
+        elif in_pytest_section and line.partition("=")[0].strip() == "anyio_mode":
+            anyio_modes.append(line.partition("=")[2].strip())
+    assert anyio_modes == ['"auto"']
+
+
+@pytest.mark.parametrize("suite", ["unit", "integration", "examples"])
+def test_active_test_suites_omit_explicit_anyio_markers(suite: str) -> None:
+    """Verify ``anyio_mode = 'auto'`` avoids redundant ``@pytest.mark.anyio`` decorators."""
+    offenders: dict[str, list[str]] = {}
+    for path in sorted((_TESTS_ROOT / suite).rglob("*.py")):
+        marked = _anyio_marked_functions(path)
+        if marked:
+            offenders[str(path.relative_to(_TESTS_ROOT))] = marked
+    assert offenders == {}
+
+
+def test_anyio_marker_detector_flags_decorated_functions() -> None:
+    """Verify the AST check detects ``@pytest.mark.anyio`` in isolated downstream tests."""
+    downstream_test = _TESTS_ROOT / "fixtures" / "downstream_consumer" / "tests" / "test_backend.py"
+    assert _anyio_marked_functions(downstream_test) == [
+        "test_backend_passes_the_imported_conformance_scenario",
+        "test_non_api_key_conformance_scenario_is_importable",
+    ]

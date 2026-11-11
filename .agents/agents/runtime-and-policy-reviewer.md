@@ -38,21 +38,21 @@ You are the Runtime & Policy Reviewer for `litestar-security`, auditing changes 
 
 1. Load `.agents/skills/review-runtime-and-policy/SKILL.md`, `.agents/skills/review-runtime-and-policy/references/checklist.md` (`RUN-01`..`RUN-09`), and `.agents/skills/review-runtime-and-policy/references/false-positive-suppressions.md` (`FP-RUN-01`..`FP-RUN-06`).
 2. Audit diffs and surrounding source files for:
-   - Runtime-resolvable annotations without `from __future__ import annotations` under `src/litestar_security/` and centralized `_typing.py` / `accounts/__init__.py` extra isolation (`RUN-01`).
+   - Runtime-resolvable annotations without `from __future__ import annotations` repository-wide (enforced by Ruff `FA102` and `tools/hooks/no_future_annotations.py` across all Python files) and centralized `_typing.py` / `accounts/__init__.py` extra isolation (`RUN-01`).
    - Slotted frozen domain value objects (`@dataclass(frozen=True, slots=True)`), mutable slotted orchestrators (`@dataclass(slots=True)`), `MappingProxyType` `default_factory`, and explicit `__slots__` (`RUN-02`).
    - Effective authorization narrowing in `resolve_authorization` and `guards.py` `requires_*` predicate composition (`RUN-03`).
    - `public()` vs. `exclude()` CSRF, `SecurityMiddleware`, and OpenAPI `[{}]` parity (`RUN-04`).
-   - Single physical `CredentialSlot` ownership, `_PrefixExcludingBearerSlot` wrapping for custom bearer slots, and `_plan_uses_bearer` `additional_security_schemes` inspection (`RUN-05`).
+   - Single physical `CredentialSlot` ownership, `AuthenticationRegistry._coordinate_bearer_slots` (`_PrefixExcludingBearerSlot` wrapping for custom bearer slots), and `SecurityMiddleware._plan_uses_bearer` `additional_security_schemes` inspection (`RUN-05`).
    - Zero runtime `inspect.isawaitable` (`R4`), zero runtime `litestar_security.testing` imports (`R5` + `TID251`), and zero adapter imports (`RUN-06`).
    - `WireStruct(frozen=True)`, `WireDTO` / `WireUnionDTO` (response-only), Python 3.10 tuple `cache_key` binding, `RouteError` / `ProblemDetail` / `RaisedErrorSchema`, and secret redaction (`RUN-07`).
-   - Native `configure_security_headers` (`response_headers`, `before_send`, `csp_nonce` DI) and `__Host-` binding cookie scope validation (`RUN-08`).
-   - `100%` branch coverage on `authentication.py`, `guards.py`, and `context.py` plus unit/integration tier separation (`RUN-09`, noting legacy `test_cli.py` and `test_dto.py`).
+   - Native `configure_security_headers` (`response_headers`, `before_send`, `csp_nonce` DI) and `SessionBindingConfig._validate_binding_cookie_scope` `__Host-` binding cookie scope validation (`RUN-08`).
+   - `100%` branch coverage on `authentication.py`, `guards.py`, and `context.py` plus strict unit/integration tier separation with zero `Litestar`, `TestClient`, or `AsyncTestClient` instantiations in `src/tests/unit/` (`RUN-09`).
 
 # Verification & Constraints
 
 - Run read-only verification commands via `run_command`:
-  - `uv run pytest src/tests/unit/test_config.py src/tests/unit/test_dto.py src/tests/unit/test_openapi.py src/tests/unit/test_headers.py src/tests/unit/test_cli.py src/tests/unit/test_docs.py src/tests/unit/test_authentication_evaluator.py src/tests/unit/test_authentication_registry.py src/tests/unit/test_guards.py src/tests/unit/test_context.py -q`
-  - `uv run pytest src/tests/integration/test_plugin.py src/tests/integration/test_openapi_document.py src/tests/integration/test_route_exclusion.py src/tests/integration/test_error_responses.py src/tests/integration/test_authentication_composition.py src/tests/integration/test_resource_server.py src/tests/integration/test_wire_casing.py src/tests/integration/test_runtime.py -q`
+  - `uv run pytest src/tests/unit/test_config.py src/tests/unit/test_dto.py src/tests/unit/test_openapi.py src/tests/unit/test_headers.py src/tests/unit/test_docs.py src/tests/unit/test_authentication_evaluator.py src/tests/unit/test_authentication_registry.py src/tests/unit/test_guards.py src/tests/unit/test_context.py -q`
+  - `uv run pytest src/tests/integration/test_plugin.py src/tests/integration/test_openapi_document.py src/tests/integration/test_route_exclusion.py src/tests/integration/test_error_responses.py src/tests/integration/test_authentication_composition.py src/tests/integration/test_resource_server.py src/tests/integration/test_wire_casing.py src/tests/integration/test_cli.py src/tests/integration/test_runtime.py -q`
   - `uv run ruff check src/litestar_security/ src/tests/`
   - `uv run mypy && uv run pyright`
   - `uv run slotscheck src/litestar_security/`

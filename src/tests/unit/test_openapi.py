@@ -7,7 +7,7 @@ from litestar.exceptions import ImproperlyConfiguredException
 from litestar.openapi.config import OpenAPIConfig
 from litestar.openapi.spec import Components, SecurityScheme, Tag
 
-from litestar_security._openapi import OpenAPISchemeSet, merge_openapi_tags, prepare_openapi_config
+from litestar_security._openapi import OpenAPISchemeSet, RouteCompiler, merge_openapi_tags, prepare_openapi_config
 from litestar_security.authentication import (
     AuthenticationMechanism,
     AuthenticationRegistry,
@@ -143,3 +143,26 @@ def test_openapi_scheme_set_projects_additional_security_schemes_and_rejects_con
     )
     with pytest.raises(ImproperlyConfiguredException, match="Conflicting native OpenAPI security scheme: APIKeyBearer"):
         OpenAPISchemeSet.from_registry(conflicting_registry)
+
+
+def test_route_compiler_normalizes_schemes_from_openapi_config_and_caller_input() -> None:
+    registry = AuthenticationRegistry(
+        slots=(_OpenAPISlot("token"),),
+        mechanisms=(
+            AuthenticationMechanism(
+                authenticator=_OpenAPIAuthenticator("token", "token"),  # type: ignore[arg-type]
+                resolver=_OpenAPIResolver(),
+                scheme_name="Token",
+                security_scheme=SecurityScheme(type="http", scheme="bearer"),
+            ),
+        ),
+    )
+    precomputed = _scheme_set()
+    disabled = RouteCompiler(registry, openapi_config=None, schemes=precomputed)
+    assert disabled.schemes is None
+
+    reused = RouteCompiler(registry, openapi_config=OpenAPIConfig(title="T", version="1.0"), schemes=precomputed)
+    assert reused.schemes is precomputed
+
+    built = RouteCompiler(registry, openapi_config=OpenAPIConfig(title="T", version="1.0"))
+    assert built.schemes == OpenAPISchemeSet.from_registry(registry)

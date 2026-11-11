@@ -56,6 +56,7 @@ Thumbs.db
 # Local Flow, Beads, Dolt, and agent harness state
 .agents/scratch/
 .agents/studio-live-state.json
+.agents/bundles/specs/*/
 .beads/
 .dolt/
 .codex/

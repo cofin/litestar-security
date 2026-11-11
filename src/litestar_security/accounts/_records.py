@@ -46,8 +46,8 @@ __all__ = (
 )
 
 UserT = TypeVar("UserT")
+DEFAULT_REAUTHENTICATION_TTL = timedelta(minutes=5)
 _EMPTY_CORRELATION: "Mapping[str, str]" = MappingProxyType({})
-_DEFAULT_REAUTHENTICATION_TTL = timedelta(minutes=5)
 _LOGGER = getLogger(__name__)
 
 
@@ -217,7 +217,7 @@ class PasswordReauthenticationProof:
             not strict_text(self.account_id)
             or not valid_security_epoch(self.security_epoch)
             or expires_at <= authenticated_at
-            or expires_at - authenticated_at > _DEFAULT_REAUTHENTICATION_TTL
+            or expires_at - authenticated_at > DEFAULT_REAUTHENTICATION_TTL
         ):
             msg = "Password reauthentication proof requires an account, epoch, and valid lifetime"
             raise ValueError(msg)
@@ -276,10 +276,13 @@ class NoOpSecurityEventSink:
 
 
 class LifecycleAccepted(WireStruct, frozen=True):
-    """Shared enumeration-resistant response body for lifecycle requests."""
+    """Shared enumeration-resistant response body for lifecycle requests.
 
-    # One fixed wording: an eligible and an ineligible request answer identically,
-    # so a caller cannot probe for account existence. Handlers never override it.
+    Uses one fixed wording so eligible and ineligible requests answer
+    identically without exposing account existence; handlers never override
+    ``detail``.
+    """
+
     detail: str = "If eligible, the request will be processed."
 
 
@@ -411,14 +414,16 @@ async def emit_security_event(sink: SecurityEventSink, event: SecurityEvent) -> 
         _LOGGER.error("Security event sink failed for %s", event.operation)  # noqa: TRY400 - omit untrusted details
 
 
-def lifecycle_event(
+def lifecycle_event(  # noqa: PLR0913 - shared security event constructor arguments
     event_ids: "Callable[[], str]",
     occurred_at: datetime,
     *,
     operation: str,
     outcome: str,
     account_id: str | None = None,
+    mechanism: str | None = "password",
 ) -> SecurityEvent:
+    """Build one strict-ID security event for an account lifecycle operation."""
     event_id = event_ids()
     if not strict_text(event_id):
         raise ValueError
@@ -428,5 +433,33 @@ def lifecycle_event(
         operation=operation,
         outcome=outcome,
         account_id=account_id,
-        mechanism="password",
+        mechanism=mechanism,
     )
+
+
+async def emit_lifecycle_event(  # noqa: PLR0913 - shared observational event builder and sink dispatcher
+    sink: SecurityEventSink,
+    event_ids: "Callable[[], str]",
+    occurred_at: "datetime | Callable[[], datetime]",
+    *,
+    operation: str,
+    outcome: str,
+    account_id: str | None = None,
+    mechanism: str | None = "password",
+) -> None:
+    """Build one observational lifecycle event and forward it to ``sink``.
+
+    Event-construction failures are logged without exception detail so clock or
+    event-ID hook errors cannot alter an already-settled authentication or
+    lifecycle decision. ``mechanism`` defaults to ``"password"``; non-password
+    callers pass ``mechanism=None`` explicitly.
+    """
+    try:
+        resolved_at = aware_utc_time(occurred_at() if callable(occurred_at) else occurred_at)
+        event = lifecycle_event(
+            event_ids, resolved_at, operation=operation, outcome=outcome, account_id=account_id, mechanism=mechanism
+        )
+    except Exception:  # noqa: BLE001 - failed clock or event id cannot alter a settled decision
+        _LOGGER.error("Security event could not be built for %s", operation)  # noqa: TRY400 - omit details
+        return
+    await emit_security_event(sink, event)

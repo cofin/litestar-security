@@ -131,10 +131,6 @@ def extend_composite_bearer(
     )
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 @dataclass(frozen=True, slots=True)
 class CompositeBearerConfig:
     """Own one bearer namespace and dispatch it to exactly one JWT verifier."""
@@ -163,6 +159,10 @@ class CompositeBearerConfig:
             selectors.add(selector)
         object.__setattr__(self, "mechanism_name", mechanism_name)
         object.__setattr__(self, "slots", slots)
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.now(timezone.utc)
 
     def build(
         self,
@@ -207,22 +207,6 @@ class _SelectedBearerResolver(Generic[UserT]):
     async def resolve(self, claims: JWTClaims) -> IdentityResolution[UserT]:
         resolver = self.selected if claims.bearer_slot == self.selected_slot else self.fallback
         return await resolver.resolve(claims)
-
-
-def _selector_matches(selector: BearerSlotSelector, route: UnverifiedJWTRoute) -> bool:
-    issuer = route.payload.get("iss")
-    token_type = route.header.get("typ")
-    audiences = normalize_audiences(route.payload.get("aud"))
-    return (
-        isinstance(issuer, str)
-        and is_strict_identifier(issuer)
-        and issuer in selector.issuers
-        and isinstance(token_type, str)
-        and is_strict_identifier(token_type)
-        and token_type.lower() in selector.token_types
-        and audiences is not None
-        and (not selector.audiences or bool(audiences.intersection(selector.audiences)))
-    )
 
 
 @dataclass(slots=True)
@@ -285,7 +269,7 @@ class _CompositeBearerAuthenticator:
         route = parse_unverified_jwt_route(credential, maximum_token_bytes=self.config.maximum_token_bytes)
         if isinstance(route, InvalidCredentials):
             return route
-        matches = tuple(slot for slot in self.config.slots if _selector_matches(slot.selector, route))
+        matches = tuple(slot for slot in self.config.slots if self._selector_matches(slot.selector, route))
         if len(matches) != 1:
             return InvalidCredentials(code="unknown_or_ambiguous_bearer_slot")
         selected = matches[0]
@@ -297,4 +281,20 @@ class _CompositeBearerAuthenticator:
         claims = replace(outcome.claims, bearer_slot=selected.name)
         return replace(
             outcome, claims=claims, evidence=replace(outcome.evidence, mechanism=self.name, slot=selected.name)
+        )
+
+    @staticmethod
+    def _selector_matches(selector: BearerSlotSelector, route: UnverifiedJWTRoute) -> bool:
+        issuer = route.payload.get("iss")
+        token_type = route.header.get("typ")
+        audiences = normalize_audiences(route.payload.get("aud"))
+        return (
+            isinstance(issuer, str)
+            and is_strict_identifier(issuer)
+            and issuer in selector.issuers
+            and isinstance(token_type, str)
+            and is_strict_identifier(token_type)
+            and token_type.lower() in selector.token_types
+            and audiences is not None
+            and (not selector.audiences or bool(audiences.intersection(selector.audiences)))
         )

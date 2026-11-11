@@ -1,12 +1,11 @@
-"""OAuth transaction behavior.."""
-
-from __future__ import annotations
+"""OAuth transaction behavior."""
 
 import asyncio
 from base64 import urlsafe_b64decode
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import pytest
 from cryptography.exceptions import InvalidTag
@@ -26,11 +25,7 @@ from litestar_security.providers.oauth import (
     oauth_binding_cookie,
     pkce_s256,
 )
-from litestar_security.providers.oauth import _transactions as oauth_transactions_module
 from tests.fixtures.collaborators import RecordingOAuthProtector as _Protector
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 _NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
 
@@ -754,7 +749,7 @@ async def test_aesgcm_oauth_transaction_protector_round_trips_bound_transaction_
 
 
 async def test_aesgcm_oauth_protector_rejects_invalid_configuration_entropy_and_envelopes() -> None:
-    """OAuth AES-GCM protection rejects malformed material before decrypting it."""
+    """OAuth AES-GCM protection rejects malformed configuration and entropy."""
     oauth_key = OAuthTransactionProtectorKey("v1", b"o" * 32)
     with pytest.raises(ImproperlyConfiguredException, match="unique keys"):
         AESGCMOAuthTransactionProtector(active_key=oauth_key, retained_keys=(oauth_key,))
@@ -763,13 +758,20 @@ async def test_aesgcm_oauth_protector_rejects_invalid_configuration_entropy_and_
     with pytest.raises(ValueError, match="entropy"):
         await protector.protect(b"secret", associated_data=b"bound")
 
-    protector = AESGCMOAuthTransactionProtector(active_key=oauth_key)
-    for protected in (
-        oauth_transactions_module.ProtectedOAuthSecret(ciphertext=b"x" * 12, key_version="unknown"),
-        oauth_transactions_module.ProtectedOAuthSecret(ciphertext=b"x" * 12, key_version="v1"),
-    ):
-        with pytest.raises(ValueError, match="envelope"):
-            await protector.unprotect(protected, associated_data=b"bound")
+
+@pytest.mark.parametrize(
+    "protected",
+    [
+        ProtectedOAuthSecret(ciphertext=b"x" * 12, key_version="unknown"),
+        ProtectedOAuthSecret(ciphertext=b"x" * 12, key_version="v1"),
+    ],
+    ids=["unknown-key-version", "nonce-only-ciphertext"],
+)
+async def test_aesgcm_oauth_protector_rejects_invalid_envelopes(protected: ProtectedOAuthSecret) -> None:
+    """OAuth AES-GCM protection rejects unknown key versions and truncated envelopes."""
+    protector = AESGCMOAuthTransactionProtector(active_key=OAuthTransactionProtectorKey("v1", b"o" * 32))
+    with pytest.raises(ValueError, match="envelope"):
+        await protector.unprotect(protected, associated_data=b"bound")
 
 
 @pytest.mark.parametrize(("key_version", "key"), [("", b"o" * 32), ("v1", b"o" * 31), ("v1", bytearray(b"o" * 32))])

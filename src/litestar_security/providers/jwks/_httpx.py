@@ -1,14 +1,21 @@
 """HTTPX-backed bounded transport for exact configured JWKS sources."""
 
-import ipaddress
-from collections.abc import Sequence
 from dataclasses import dataclass, field
-from math import isfinite
 from urllib.parse import urlsplit
 
 import httpx
 
-from litestar_security.providers._internal import AddressResolver, public_address, raise_config, resolve_addresses
+from litestar_security.providers._internal import (
+    AddressResolutionError,
+    AddressResolutionReason,
+    AddressResolver,
+    BoundedBodyError,
+    positive_finite,
+    raise_config,
+    read_bounded_body,
+    resolve_addresses,
+    resolve_public_addresses,
+)
 from litestar_security.providers.jwks._fetching import JWKSFetchOutcome, JWKSFetchTarget
 
 __all__ = ("HttpxJWKSFetcher",)
@@ -22,6 +29,12 @@ _NON_PUBLIC_RESOLVED_ADDRESS = "JWKS host resolved outside the public network bo
 _INVALID_URL = "JWKS URI must be an absolute HTTPS URL"
 _UNSUPPORTED_CONTENT_ENCODING = "JWKS response encoding is not allowed"
 _DEFAULT_HTTPS_PORT = 443
+_ADDRESS_ERROR_MESSAGES: dict[AddressResolutionReason, str] = {
+    "unavailable": _HOST_RESOLUTION_UNAVAILABLE,
+    "empty": _NO_RESOLVED_ADDRESSES,
+    "invalid": _INVALID_RESOLVED_ADDRESS,
+    "non_public": _NON_PUBLIC_RESOLVED_ADDRESS,
+}
 
 
 @dataclass(slots=True)
@@ -39,12 +52,7 @@ class HttpxJWKSFetcher:
 
     def __post_init__(self) -> None:
         """Validate resource limits and construct the owned HTTP client."""
-        if (
-            isinstance(self.timeout, bool)
-            or not isinstance(self.timeout, (int, float))  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime configuration boundary
-            or not isfinite(self.timeout)
-            or self.timeout <= 0
-        ):
+        if not positive_finite(self.timeout):
             raise_config("JWKS HTTPX timeout must be finite and positive")
         if (
             isinstance(self.maximum_response_bytes, bool)
@@ -83,7 +91,11 @@ class HttpxJWKSFetcher:
         if request.etag is not None:
             headers["if-none-match"] = request.etag
         async with self._client.stream("GET", request.jwks_uri, headers=headers) as response:
-            body = await self._read_bounded_body(response)
+            try:
+                body = await read_bounded_body(response, self.maximum_response_bytes)
+            except BoundedBodyError as exc:
+                message = _UNSUPPORTED_CONTENT_ENCODING if exc.reason == "unsupported_encoding" else _RESPONSE_TOO_LARGE
+                raise _FetchGuardError(message) from exc
             return JWKSFetchOutcome(status_code=response.status_code, body=body, headers=dict(response.headers))
 
     async def aclose(self) -> None:
@@ -103,37 +115,9 @@ class HttpxJWKSFetcher:
         host = parsed.host
         port = parsed.port or _DEFAULT_HTTPS_PORT
         try:
-            literal = ipaddress.ip_address(host)
-        except ValueError:
-            try:
-                addresses = tuple(await self._resolve(host, port))
-            except (OSError, RuntimeError) as exc:
-                raise _FetchGuardError(_HOST_RESOLUTION_UNAVAILABLE) from exc
-        else:
-            addresses = (str(literal),)
-        self._validate_resolved_addresses(addresses)
-
-    async def _read_bounded_body(self, response: httpx.Response) -> bytes:
-        content_encoding = response.headers.get("content-encoding", "identity").strip().lower()
-        if content_encoding not in {"", "identity"}:
-            raise _FetchGuardError(_UNSUPPORTED_CONTENT_ENCODING)
-        body = bytearray()
-        async for chunk in response.aiter_bytes():
-            if len(chunk) > self.maximum_response_bytes - len(body):
-                raise _FetchGuardError(_RESPONSE_TOO_LARGE)
-            body.extend(chunk)
-        return bytes(body)
-
-    @staticmethod
-    def _validate_resolved_addresses(addresses: Sequence[str]) -> None:
-        if not addresses:
-            raise _FetchGuardError(_NO_RESOLVED_ADDRESSES)
-        try:
-            parsed = tuple(ipaddress.ip_address(address) for address in addresses)
-        except ValueError as exc:
-            raise _FetchGuardError(_INVALID_RESOLVED_ADDRESS) from exc
-        if any(not public_address(address) for address in parsed):
-            raise _FetchGuardError(_NON_PUBLIC_RESOLVED_ADDRESS)
+            await resolve_public_addresses(host, port, resolver=self._resolve)
+        except AddressResolutionError as exc:
+            raise _FetchGuardError(_ADDRESS_ERROR_MESSAGES[exc.reason]) from exc
 
     @staticmethod
     def _parse_url(value: str) -> httpx.URL:

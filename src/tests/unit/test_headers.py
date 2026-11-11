@@ -1,7 +1,5 @@
 """Unit tests for browser response security headers."""
 
-from __future__ import annotations
-
 from types import MappingProxyType
 from typing import cast
 

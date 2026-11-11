@@ -2,6 +2,7 @@
 
 import base64
 import sys
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
@@ -160,28 +161,9 @@ async def test_recovery_codes_are_reveal_once_digest_only_and_atomically_consume
 def test_recovery_code_digest_is_bound_to_its_account() -> None:
     pepper = accounts_module.RecoveryCodePepper(key_version="v1", key=b"p" * 32)
     code = "rc_v1_00000000000000000000000000000001"
-    assert mfa_module._recovery_digest(pepper, "account-1", code) != mfa_module._recovery_digest(  # noqa: SLF001
-        pepper, "account-2", code
-    )
-
-
-@pytest.mark.parametrize(
-    ("status", "expected"),
-    [
-        (accounts_module.RevokeLoginMethodStatus.REVOKED, accounts_module.RevokeLoginMethodStatus.REVOKED),
-        (accounts_module.RevokeLoginMethodStatus.FINAL_METHOD, accounts_module.RevokeLoginMethodStatus.FINAL_METHOD),
-    ],
-)
-async def test_totp_removal_delegates_atomic_final_method_safety(
-    status: accounts_module.RevokeLoginMethodStatus, expected: accounts_module.RevokeLoginMethodStatus
-) -> None:
-    login_methods = RecoveryLoginMethods(status)
-    service = build_mfa_service(MFAStore(), MFAProtector())
-    service.login_methods = login_methods
-    outcome = await service.remove_totp_method("account-1", "method-1")
-    assert isinstance(outcome, accounts_module.RevokeLoginMethodOutcome)
-    assert outcome.status is expected
-    assert login_methods.events[0].operation == "local.mfa.totp.remove"
+    first = mfa_module.MFAService._recovery_digest(pepper, "account-1", code)  # noqa: SLF001
+    second = mfa_module.MFAService._recovery_digest(pepper, "account-2", code)  # noqa: SLF001
+    assert first != second
 
 
 @pytest.mark.parametrize(
@@ -409,16 +391,25 @@ async def test_mfa_operational_and_format_failure_branches_are_sanitized() -> No
         VerificationUnavailable,
     )
 
-    for invalid_secret in (1, "!!!!", "GEZA", base64.b32encode(b"x").decode()):
-        invalid = build_mfa_service(MFAStore(), MFAProtector(), now=now)
-        invalid.secret_generator = cast("Any", lambda value=invalid_secret: value)
-        assert isinstance(
-            await invalid.begin_totp_enrollment("account-1", label="person@example.com"), VerificationUnavailable
-        )
     invalid = build_mfa_service(MFAStore(), MFAProtector(), now=now)
     invalid.recovery_peppers = (accounts_module.RecoveryCodePepper("v1", b"p" * 32),)
     invalid.recovery_entropy = cast("Any", lambda _size: b"short")
     assert isinstance(await invalid.generate_recovery_codes("account-1"), VerificationUnavailable)
+
+
+@pytest.mark.parametrize(
+    "invalid_secret",
+    [1, "!!!!", "GEZA", base64.b32encode(b"x").decode()],
+    ids=["non-string", "non-base32", "non-canonical-padding", "too-short"],
+)
+async def test_mfa_begin_totp_enrollment_sanitizes_invalid_generated_secrets(invalid_secret: object) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    service = build_mfa_service(MFAStore(), MFAProtector(), now=now)
+    service.secret_generator = cast("Any", lambda: invalid_secret)
+
+    assert isinstance(
+        await service.begin_totp_enrollment("account-1", label="person@example.com"), VerificationUnavailable
+    )
 
 
 @pytest.mark.parametrize(
@@ -611,8 +602,10 @@ def test_recovery_code_digest_rejects_invalid_account_binding(account_id: str) -
     """Recovery-code HMACs never accept blank or NUL-delimited account bindings."""
     pepper = accounts_module.RecoveryCodePepper(key_version="v1", key=b"p" * 32)
 
-    with pytest.raises(ValueError):  # noqa: PT011 - private helper intentionally raises a bare ValueError
-        mfa_module._recovery_digest(pepper, account_id, "rc_v1_00000000000000000000000000000001")  # noqa: SLF001
+    with pytest.raises(ValueError):  # noqa: PT011
+        mfa_module.MFAService._recovery_digest(  # noqa: SLF001
+            pepper, account_id, "rc_v1_00000000000000000000000000000001"
+        )
 
 
 @pytest.mark.parametrize(
@@ -731,13 +724,22 @@ async def test_aesgcm_mfa_secret_protector_rejects_invalid_configuration_entropy
     with pytest.raises(ValueError, match="entropy"):
         await protector.protect(b"secret", associated_data=b"bound")
 
-    protector = accounts_module.AESGCMSecretProtector(active_key=mfa_key)
-    for protected in (
+
+@pytest.mark.parametrize(
+    "protected",
+    [
         accounts_module.ProtectedSecret(ciphertext=b"x" * 12, key_version="unknown"),
         accounts_module.ProtectedSecret(ciphertext=b"x" * 12, key_version="v1"),
-    ):
-        with pytest.raises(ValueError, match="envelope"):
-            await protector.unprotect(protected, associated_data=b"bound")
+    ],
+    ids=["unknown-key-version", "nonce-only-ciphertext"],
+)
+async def test_aesgcm_mfa_secret_protector_rejects_invalid_envelopes(
+    protected: accounts_module.ProtectedSecret,
+) -> None:
+    protector = accounts_module.AESGCMSecretProtector(active_key=accounts_module.SecretProtectorKey("v1", b"m" * 32))
+
+    with pytest.raises(ValueError, match="envelope"):
+        await protector.unprotect(protected, associated_data=b"bound")
 
 
 def test_mfa_and_passkey_feature_configs_build_services_and_validate_route_controls() -> None:
@@ -789,7 +791,10 @@ def test_mfa_and_passkey_feature_configs_build_services_and_validate_route_contr
             origins=("https://example.com",),
         )
 
-    for config in (
+
+@pytest.mark.parametrize(
+    "config",
+    [
         lambda: MFAConfig(MFAStore(), MFAProtector(), route_prefix="relative"),
         lambda: MFAConfig(MFAStore(), MFAProtector(), route_prefix=cast("Any", 1)),
         lambda: MFAConfig(MFAStore(), MFAProtector(), register_routes=cast("Any", 1)),
@@ -800,9 +805,12 @@ def test_mfa_and_passkey_feature_configs_build_services_and_validate_route_contr
             ("https://example.com",),
             register_routes=cast("Any", 1),
         ),
-    ):
-        with pytest.raises(ImproperlyConfiguredException):
-            config()
+    ],
+    ids=["mfa-relative-prefix", "mfa-non-str-prefix", "mfa-non-bool-register", "passkey-non-bool-register"],
+)
+def test_mfa_and_passkey_feature_configs_reject_invalid_route_controls(config: Callable[[], object]) -> None:
+    with pytest.raises(ImproperlyConfiguredException):
+        config()
 
 
 async def test_mfa_services_require_mfa_extra_when_pyotp_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:

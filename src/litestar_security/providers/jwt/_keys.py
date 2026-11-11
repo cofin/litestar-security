@@ -18,7 +18,7 @@ from litestar.exceptions import ImproperlyConfiguredException
 
 from litestar_security.providers._internal import JSONValue, raise_config
 from litestar_security.providers.jwt._claims import JWTAlgorithm
-from litestar_security.providers.jwt._internal import freeze_json, reject, strict_key_id
+from litestar_security.providers.jwt._internal import freeze_json, strict_key_id
 
 __all__ = ("SigningKey", "VerificationKey", "prepared_verification_key")
 
@@ -60,7 +60,7 @@ class SigningKey:
     def __post_init__(self) -> None:
         """Validate key strength, purpose, and public/private correspondence."""
         key_id = strict_key_id(self.key_id)
-        prepared, verification_key = _prepare_signing_material(self.private_key, self.algorithm)
+        prepared, verification_key = self._prepare_signing_material(self.private_key, self.algorithm)
         public_jwk = _prepare_public_jwk(self.public_jwk, prepared, self.algorithm, key_id)
         object.__setattr__(self, "key_id", key_id)
         object.__setattr__(self, "public_jwk", public_jwk)
@@ -77,6 +77,39 @@ class SigningKey:
             key_id=self.key_id, algorithm=self.algorithm, key=self._verification_key, public_jwk=self.public_jwk
         )
 
+    @staticmethod
+    def _prepare_signing_material(private_key: bytes, algorithm: JWTAlgorithm) -> tuple[PreparedSigningKey, bytes]:
+        if algorithm not in _SUPPORTED_ALGORITHMS:
+            raise_config(f"Unsupported local signing algorithm: {algorithm}")
+        key_value = _validate_bytes_key(private_key, algorithm, kind="signing")
+        if algorithm == "HS256":
+            return key_value, key_value
+        try:
+            loaded_key = serialization.load_pem_private_key(key_value, password=None)
+            prepared = SigningKey._validate_prepared_signing_key(loaded_key, algorithm)
+            asymmetric_key = cast(
+                "rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey | ed25519.Ed25519PrivateKey", prepared
+            )
+            verification_key = asymmetric_key.public_key().public_bytes(
+                encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+        except (TypeError, ValueError):
+            raise_config(f"Invalid {algorithm} JWT signing key")
+        else:
+            return prepared, verification_key
+
+    @staticmethod
+    def _validate_prepared_signing_key(key: object, algorithm: JWTAlgorithm) -> PreparedSigningKey:
+        if algorithm == "RS256" and (not isinstance(key, rsa.RSAPrivateKey) or key.key_size < _MINIMUM_RSA_BITS):
+            raise ValueError
+        if algorithm == "ES256" and (
+            not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1)
+        ):
+            raise ValueError
+        if algorithm == "EdDSA" and not isinstance(key, ed25519.Ed25519PrivateKey):
+            raise ValueError
+        return cast("PreparedSigningKey", key)
+
 
 @dataclass(frozen=True, slots=True)
 class VerificationKey:
@@ -91,11 +124,24 @@ class VerificationKey:
     def __post_init__(self) -> None:
         """Reject private, weak, mismatched, or publication-unsafe material."""
         key_id = strict_key_id(self.key_id)
-        prepared = _prepare_retained_verification_key(self.key, self.algorithm)
+        prepared = self._prepare_retained_verification_key(self.key, self.algorithm)
         public_jwk = _prepare_public_jwk(self.public_jwk, prepared, self.algorithm, key_id)
         object.__setattr__(self, "key_id", key_id)
         object.__setattr__(self, "public_jwk", public_jwk)
         object.__setattr__(self, "_prepared_key", prepared)
+
+    @staticmethod
+    def _prepare_retained_verification_key(key: bytes, algorithm: JWTAlgorithm) -> PreparedVerificationKey:
+        if algorithm not in _SUPPORTED_ALGORITHMS:
+            raise_config(f"Unsupported local verification algorithm: {algorithm}")
+        key_value = _validate_bytes_key(key, algorithm, kind="verification")
+        if algorithm == "HS256":
+            return key_value
+        try:
+            prepared = serialization.load_pem_public_key(key_value)
+            return _validate_prepared_key(prepared, algorithm)
+        except (TypeError, ValueError):
+            raise_config(f"Invalid {algorithm} JWT verification key")
 
 
 def prepared_verification_key(key: VerificationKey) -> PreparedVerificationKey:
@@ -157,65 +203,10 @@ class LocalJWKSDocument(TypedDict):
     keys: list[_RSAPublicJWK | _ECPublicJWK | _OKPPublicJWK]
 
 
-def _prepare_signing_material(private_key: bytes, algorithm: JWTAlgorithm) -> tuple[PreparedSigningKey, bytes]:
-    if algorithm not in _SUPPORTED_ALGORITHMS:
-        raise_config(f"Unsupported local signing algorithm: {algorithm}")
-    try:
-        key_value: object = private_key
-        if not isinstance(key_value, bytes):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
-            reject()
-        if algorithm == "HS256":
-            if len(key_value) < _MINIMUM_HMAC_BYTES:
-                reject()
-            return key_value, key_value
-        loaded_key = serialization.load_pem_private_key(key_value, password=None)
-        prepared = _validate_prepared_signing_key(loaded_key, algorithm)
-        asymmetric_key = cast("rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey | ed25519.Ed25519PrivateKey", prepared)
-        verification_key = asymmetric_key.public_key().public_bytes(
-            encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-    except (TypeError, ValueError):
-        raise_config(f"Invalid {algorithm} JWT signing key")
-    else:
-        return prepared, verification_key
-
-
-def _validate_prepared_signing_key(key: object, algorithm: JWTAlgorithm) -> PreparedSigningKey:
-    if algorithm == "RS256" and (not isinstance(key, rsa.RSAPrivateKey) or key.key_size < _MINIMUM_RSA_BITS):
-        reject()
-    if algorithm == "ES256" and (
-        not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1)
-    ):
-        reject()
-    if algorithm == "EdDSA" and not isinstance(key, ed25519.Ed25519PrivateKey):
-        reject()
-    return cast("PreparedSigningKey", key)
-
-
-def _prepare_retained_verification_key(key: bytes, algorithm: JWTAlgorithm) -> PreparedVerificationKey:
-    if algorithm not in _SUPPORTED_ALGORITHMS:
-        raise_config(f"Unsupported local verification algorithm: {algorithm}")
-    try:
-        key_value: object = key
-        if not isinstance(key_value, bytes):  # pyright: ignore[reportUnnecessaryIsInstance] - defend runtime port boundary
-            reject()
-        if algorithm == "HS256":
-            if len(key_value) < _MINIMUM_HMAC_BYTES:
-                reject()
-            return key_value
-        prepared = serialization.load_pem_public_key(key_value)
-        expected_type: type[object]
-        if algorithm == "RS256":
-            expected_type = rsa.RSAPublicKey
-        elif algorithm == "ES256":
-            expected_type = ec.EllipticCurvePublicKey
-        else:
-            expected_type = ed25519.Ed25519PublicKey
-        if not isinstance(prepared, expected_type):
-            reject()
-        return _validate_prepared_key(prepared, algorithm)
-    except (TypeError, ValueError):
-        raise_config(f"Invalid {algorithm} JWT verification key")
+def _validate_bytes_key(key: object, algorithm: JWTAlgorithm, *, kind: str) -> bytes:
+    if not isinstance(key, bytes) or (algorithm == "HS256" and len(key) < _MINIMUM_HMAC_BYTES):
+        raise_config(f"Invalid {algorithm} JWT {kind} key")
+    return key
 
 
 def _prepare_public_jwk(
@@ -234,10 +225,10 @@ def _prepare_public_jwk(
         raw.update({"alg": algorithm, "kid": key_id, "key_ops": ["verify"], "use": "sig"})
     else:
         raw = dict(value)
+        if raw.get("kid") not in {None, key_id}:
+            raise_config(f"Invalid {algorithm} public JWK")
         try:
             _validate_public_jwk(raw, algorithm)
-            if raw.get("kid") not in {None, key_id}:
-                reject()
             jwk_key = prepare_key(raw, algorithm)
         except (ImproperlyConfiguredException, PyJWTError, TypeError, ValueError):
             raise_config(f"Invalid {algorithm} public JWK")

@@ -227,22 +227,16 @@ class LocalAuthService(Generic[UserT]):
             The signed-in account projection, or a sanitized outcome. A rejected
             identifier and a rejected password produce the same outcome.
         """
-        client_key = self.client_key_for(request)
-        account = await self.password_login.authenticate(
-            credentials.identifier, credentials.password, client_key=client_key
-        )
-        if not isinstance(account, LocalAccountState):
-            return account
-        mfa_login = self.mfa_login
-        if mfa_login is not None and await self._requires_mfa_challenge(account.account_id):
-            return await mfa_login.issue(cast("LocalAccountState[object]", account), client_key=client_key)
+        outcome = await self._authenticate_password_step(request, credentials)
+        if not isinstance(outcome, LocalAccountState):
+            return outcome
         session_auth = self.session_auth
         if session_auth is None:
             return VerificationUnavailable()
-        established = await session_auth.establish(request, account)
+        established = await session_auth.establish(request, outcome)
         if not isinstance(established, SessionAuthentication):
             return established
-        return LocalAccount(account_id=account.account_id, display_name=account.display_name)
+        return LocalAccount(account_id=outcome.account_id, display_name=outcome.display_name)
 
     async def token_login(
         self, request: Request[Any, Any, Any], credentials: LocalCredentials
@@ -257,15 +251,9 @@ class LocalAuthService(Generic[UserT]):
             The issued token pair, or a sanitized outcome. A rejected identifier
             and a rejected password produce the same outcome.
         """
-        client_key = self.client_key_for(request)
-        account = await self.password_login.authenticate(
-            credentials.identifier, credentials.password, client_key=client_key
-        )
-        if not isinstance(account, LocalAccountState):
-            return account
-        mfa_login = self.mfa_login
-        if mfa_login is not None and await self._requires_mfa_challenge(account.account_id):
-            return await mfa_login.issue(cast("LocalAccountState[object]", account), client_key=client_key)
+        outcome = await self._authenticate_password_step(request, credentials)
+        if not isinstance(outcome, LocalAccountState):
+            return outcome
         refresh_tokens = self.refresh_tokens
         if refresh_tokens is None:
             return VerificationUnavailable()
@@ -276,7 +264,7 @@ class LocalAuthService(Generic[UserT]):
         evidence = AuthenticationEvidence(
             mechanism="bearer", slot="local", authenticated_at=issued_at, methods=frozenset({"password"}), amr=("pwd",)
         )
-        return await refresh_tokens.issue(account, evidence=evidence, now=issued_at)
+        return await refresh_tokens.issue(outcome, evidence=evidence, now=issued_at)
 
     async def passkey_login(
         self,
@@ -499,6 +487,21 @@ class LocalAuthService(Generic[UserT]):
         if not isinstance(proof, PasswordReauthenticationProof):
             return proof
         return await self.password_change.change(account_id, data.password, proof=proof, compromise=data.compromise)
+
+    async def _authenticate_password_step(
+        self, request: Request[Any, Any, Any], credentials: LocalCredentials
+    ) -> LocalAccountState[UserT] | MFARequired | RateLimited | InvalidCredentials | VerificationUnavailable:
+        """Verify password credentials and enforce any bound MFA login challenge."""
+        client_key = self.client_key_for(request)
+        account = await self.password_login.authenticate(
+            credentials.identifier, credentials.password, client_key=client_key
+        )
+        if not isinstance(account, LocalAccountState):
+            return account
+        mfa_login = self.mfa_login
+        if mfa_login is not None and await self._requires_mfa_challenge(account.account_id):
+            return await mfa_login.issue(cast("LocalAccountState[object]", account), client_key=client_key)
+        return account
 
     async def _requires_mfa_challenge(self, account_id: str) -> bool:
         """Return whether this login must present a second factor.

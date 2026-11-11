@@ -1,4 +1,9 @@
-"""Sphinx configuration for Litestar Security."""
+"""Sphinx configuration for Litestar Security.
+
+Section auto-labels stay capped at ``autosectionlabel_maxdepth = 2`` (page titles
+and top-level sections) so repeated changelog subsection headings such as ``Added``
+never collide under ``sphinx-build -W``.
+"""
 
 from importlib import metadata
 from typing import TYPE_CHECKING
@@ -26,9 +31,6 @@ autodoc_default_options = {"members": True, "show-inheritance": True, "special-m
 autodoc_member_order = "bysource"
 autodoc_typehints_format = "short"
 autosectionlabel_prefix_document = True
-# Label page titles and their top-level sections only. Deeper headings repeat by
-# design - every changelog version carries its own "Added" - and labelling them
-# collides within one document, which the -W build treats as an error.
 autosectionlabel_maxdepth = 2
 napoleon_google_docstring = True
 
@@ -49,7 +51,11 @@ html_theme_options = {
         {
             "title": "Documentation",
             "children": [
-                {"title": "Introduction", "url": "introduction", "summary": "Understand the stable 1.0 model."},
+                {
+                    "title": "Introduction",
+                    "url": "introduction",
+                    "summary": "Understand the authentication and authorization model.",
+                },
                 {
                     "title": "Getting started",
                     "url": "getting-started",
@@ -68,7 +74,7 @@ html_theme_options = {
             "title": "Project",
             "children": [
                 {"title": "Contributing", "url": "contributing", "summary": "Follow the development workflow."},
-                {"title": "Changelog", "url": "changelog", "summary": "Review unreleased and released changes."},
+                {"title": "Changelog", "url": "changelog", "summary": "Review released changes."},
             ],
         },
     ],

@@ -1,4 +1,4 @@
-"""Source-oriented accounts unit tests."""
+"""Unit tests for local access-token issuance, verification, and password login."""
 
 import json
 from collections.abc import Callable
@@ -26,16 +26,8 @@ from tests.fixtures.accounts import (
 )
 
 _JWT_NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
-_NAIVE_JWT_NOW = datetime(2026, 7, 26)  # noqa: DTZ001 - explicit rejection fixture
 _JWT_ISSUER = "https://issuer.example"
 _JWT_AUDIENCE = "litestar-security"
-_OIDC_ISSUER = "https://issuer.example/tenant"
-_OIDC_DISCOVERY_URL = f"{_OIDC_ISSUER}/.well-known/openid-configuration"
-_OIDC_PUBLIC_IP = "93.184.216.34"
-_JWKS_URI = f"{_JWT_ISSUER}/.well-known/jwks.json"
-_MFA_VECTOR_NOW = datetime.fromtimestamp(59, tz=timezone.utc)
-_MFA_ENCODED_SEED = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
-_MFA_POLICY = accounts_module.TOTPPolicy()
 
 
 @pytest.mark.parametrize("scope", ["admin read", "admin\tread", '"quoted', "back\\slash", "é"])
@@ -56,35 +48,10 @@ def test_access_token_claims_reject_non_oauth_scope_tokens(scope: str) -> None:
 async def test_local_access_issue_cross_verifies_exact_minimal_claims_without_generic_scope_grants(
     local_key_ring: LocalKeyRing,
 ) -> None:
-    account = _local_access_account()
-    issuer = accounts_module.LocalAccessTokenIssuer(
-        signer=local_key_ring.build_signer(),
-        issuer=local_key_ring.issuer,
-        audience=_JWT_AUDIENCE,
-        client_id="local-web",
-        clock=lambda: _JWT_NOW,
-        token_ids=lambda: "access-token-1",
-    )
+    issued, outcome = await _issue_and_verify_minimal_access_token(local_key_ring)
 
-    issued = await issuer.issue(account, scopes=frozenset({"write", "read"}))
-
-    assert isinstance(issued, accounts_module.LocalAccessToken)
     assert (issued.token_type, issued.expires_in) == ("Bearer", 600)
     assert "access_token" not in repr(issued)
-    verifier = local_key_ring.build_verifier(
-        JWTValidationConfig(
-            issuer=local_key_ring.issuer,
-            audiences=frozenset({_JWT_AUDIENCE}),
-            algorithms=frozenset(key.algorithm for key in local_key_ring.all_verification_keys),
-            required_claims=frozenset({"se"}),
-            maximum_lifetime=timedelta(minutes=10),
-        ),
-        mechanism_name="bearer",
-        slot_name="local",
-    )
-    outcome = await verifier.verify(issued.access_token, now=_JWT_NOW)
-
-    assert isinstance(outcome, Authenticated)
     assert outcome.grants == AuthorizationSnapshot()
     assert outcome.claims.raw == {
         "iss": local_key_ring.issuer,
@@ -97,9 +64,15 @@ async def test_local_access_issue_cross_verifies_exact_minimal_claims_without_ge
         "se": 3,
         "scope": "read write",
     }
-    serialized_claims = json.dumps(dict(outcome.claims.raw))
-    for forbidden in ("person@example.com", "Local Person", "application object", "password", "roles", "team"):
-        assert forbidden not in serialized_claims
+
+
+@pytest.mark.parametrize(
+    "forbidden", ["person@example.com", "Local Person", "application object", "password", "roles", "team"]
+)
+async def test_local_access_issue_omits_forbidden_claims(forbidden: str, local_key_ring: LocalKeyRing) -> None:
+    _, outcome = await _issue_and_verify_minimal_access_token(local_key_ring)
+
+    assert forbidden not in json.dumps(dict(outcome.claims.raw))
 
 
 async def test_local_access_token_preserves_passkey_assurance(local_key_ring: LocalKeyRing) -> None:
@@ -143,7 +116,7 @@ async def test_local_access_token_preserves_passkey_assurance(local_key_ring: Lo
         config=validation, verifier=cast("Any", InvalidAssuranceVerifier(outcome))
     )
     assert isinstance(await invalid.verify("token", now=_JWT_NOW), InvalidCredentials)
-    assert access_tokens_module._claim_set("passkey") is None  # noqa: SLF001 - defensive parser branch
+    assert access_tokens_module.LocalAccessVerifier._claim_set("passkey") is None  # noqa: SLF001
 
     malformed = dict(outcome.claims.raw)
     malformed["amr"] = []
@@ -165,9 +138,16 @@ async def test_local_access_token_preserves_passkey_assurance(local_key_ring: Lo
             authenticated_at=_JWT_NOW + timedelta(seconds=1),
         )
     invalid_time: object = True
-    assert access_tokens_module._claim_authentication_time(invalid_time, fallback=_JWT_NOW) is None  # noqa: SLF001
     assert (
-        access_tokens_module._claim_authentication_time(10**30, fallback=_JWT_NOW)  # noqa: SLF001
+        access_tokens_module.LocalAccessVerifier._claim_authentication_time(  # noqa: SLF001
+            invalid_time, fallback=_JWT_NOW
+        )
+        is None
+    )
+    assert (
+        access_tokens_module.LocalAccessVerifier._claim_authentication_time(  # noqa: SLF001
+            10**30, fallback=_JWT_NOW
+        )
         is None
     )
 
@@ -472,3 +452,33 @@ async def test_local_bearer_resolver_rejects_malformed_epoch_without_lookup(epoc
 
     assert isinstance(outcome, InvalidCredentials)
     assert store.id_lookups == []
+
+
+async def _issue_and_verify_minimal_access_token(
+    local_key_ring: LocalKeyRing,
+) -> tuple[accounts_module.LocalAccessToken, Authenticated[JWTClaims]]:
+    account = _local_access_account()
+    issuer = accounts_module.LocalAccessTokenIssuer(
+        signer=local_key_ring.build_signer(),
+        issuer=local_key_ring.issuer,
+        audience=_JWT_AUDIENCE,
+        client_id="local-web",
+        clock=lambda: _JWT_NOW,
+        token_ids=lambda: "access-token-1",
+    )
+    issued = await issuer.issue(account, scopes=frozenset({"write", "read"}))
+    assert isinstance(issued, accounts_module.LocalAccessToken)
+    verifier = local_key_ring.build_verifier(
+        JWTValidationConfig(
+            issuer=local_key_ring.issuer,
+            audiences=frozenset({_JWT_AUDIENCE}),
+            algorithms=frozenset(key.algorithm for key in local_key_ring.all_verification_keys),
+            required_claims=frozenset({"se"}),
+            maximum_lifetime=timedelta(minutes=10),
+        ),
+        mechanism_name="bearer",
+        slot_name="local",
+    )
+    outcome = await verifier.verify(issued.access_token, now=_JWT_NOW)
+    assert isinstance(outcome, Authenticated)
+    return issued, outcome

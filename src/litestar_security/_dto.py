@@ -28,7 +28,7 @@ one file is what makes them one deletion when they are exported.
 """
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, Union, cast, get_args
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, TypeVar, Union, cast, get_args
 
 from litestar import MediaType, Response
 from litestar.dto import DTOConfig, MsgspecDTO
@@ -82,7 +82,9 @@ def apply_wire_dtos(router: "Router", policy: WirePolicy) -> "Router":
     Handler decorators are module-level literals shared by every application in
     the process, so the policy is applied here instead: every layer of a freshly
     built router is private to the configuration that built it, and Litestar
-    copies the router again when an application registers it.
+    copies the router again when an application registers it. Handlers mounted
+    across multiple paths are deduplicated by identity so each handler is
+    visited once.
 
     Args:
         router: The router the feature just built.
@@ -91,8 +93,6 @@ def apply_wire_dtos(router: "Router", policy: WirePolicy) -> "Router":
     Returns:
         The same router.
     """
-    # A handler declaring several paths appears on several routes; identity
-    # keeps each one visited exactly once.
     handlers: dict[int, Any] = {
         id(handler): handler
         for route in router.routes
@@ -150,7 +150,9 @@ def wire_struct(schema: "type[WireStruct]", policy: WirePolicy) -> "type[msgspec
     A response specification names its schema directly, and a specification
     describing the un-renamed schema while the handler emits the renamed one is
     the drift this module exists to prevent. Naming this struct instead makes
-    the documented body and the emitted body one component.
+    the documented body and the emitted body one component. Response
+    specifications are constructed before handlers register, so building
+    :class:`WireBackend` eagerly populates the cache each handler later hits.
 
     Args:
         schema: The generated-route schema the specification documents.
@@ -163,9 +165,6 @@ def wire_struct(schema: "type[WireStruct]", policy: WirePolicy) -> "type[msgspec
     cached = WireBackend.transfer_model_for(schema, dto.config)
     if cached is not None:
         return cached
-    # Response specifications are built before any handler is registered, so the
-    # struct has to exist by then. Building the backend here puts the identical
-    # object in the cache the handler will later hit.
     return WireBackend(
         dto_factory=dto,
         field_definition=FieldDefinition.from_annotation(schema),
@@ -210,7 +209,7 @@ class WireBackend(DTOCodegenBackend):
         Returns:
             The cached struct, or ``None`` when nothing has built it yet.
         """
-        name_key = (model_type, _policy_key(config))
+        name_key = (model_type, cls._policy_key(config))
         shape = cls._transfer_shapes.get(name_key)
         if shape is None:
             return None
@@ -274,7 +273,7 @@ class WireBackend(DTOCodegenBackend):
         if entry is None or entry[0] is not field_definitions:  # pragma: no cover - every parse records its model
             return super().create_transfer_model_type(model_name=model_name, field_definitions=field_definitions)
         model_type = entry[1]
-        name_key = (model_type, _policy_key(cast("DTOConfig", cast("Any", self).dto_factory.config)))
+        name_key = (model_type, self._policy_key(cast("DTOConfig", cast("Any", self).dto_factory.config)))
         shape = tuple(
             (field.name, field.is_excluded, field.is_partial, field.serialization_name) for field in field_definitions
         )
@@ -289,7 +288,7 @@ class WireBackend(DTOCodegenBackend):
         cached = self._transfer_models.get(cache_key)
         if cached is not None:
             return cached
-        struct = _mirroring_defaults(
+        struct = self._mirroring_defaults(
             super().create_transfer_model_type(model_name=model_type.__name__, field_definitions=field_definitions),
             model_type,
         )
@@ -316,13 +315,42 @@ class WireBackend(DTOCodegenBackend):
 
     @property
     def _model_of_fields(self) -> "dict[int, tuple[Any, Any]]":
-        # parse_model runs inside super().__init__, before a subclass gets to
-        # initialize anything of its own.
+        """Return the field-to-model map populated before subclass ``__init__`` finishes."""
         store = getattr(self, "_models", None)
         if store is None:
             store = {}
             object.__setattr__(self, "_models", store)
         return cast("dict[int, tuple[Any, Any]]", store)
+
+    @staticmethod
+    def _mirroring_defaults(
+        struct: "type[msgspec.Struct]",
+        model_type: Any,  # noqa: ANN401 - the model a transfer struct mirrors
+    ) -> "type[msgspec.Struct]":
+        """Carry the model's ``omit_defaults`` onto the struct that replaces it on the wire.
+
+        Litestar builds every transfer struct with the same fixed configuration, so a
+        schema promising that a response carries only the members its operation
+        resolved would start sending explicit nulls for the rest. That promise is
+        part of the body, not of the schema, so nothing in the document would show
+        it had been broken.
+
+        Args:
+            struct: The transfer struct just built.
+            model_type: The schema it mirrors.
+
+        Returns:
+            The struct, or a restatement of it that omits defaults the way the model
+            does.
+        """
+        config = getattr(model_type, "__struct_config__", None)
+        if config is None or config.omit_defaults == struct.__struct_config__.omit_defaults:
+            return struct
+        return cast("type[msgspec.Struct]", type(struct.__name__, (struct,), {}, omit_defaults=config.omit_defaults))
+
+    @staticmethod
+    def _policy_key(config: DTOConfig) -> tuple[Any, ...]:
+        return (config.rename_strategy, config.forbid_unknown_fields, config.max_nested_depth)
 
 
 class WireUnionBackend(DTOBackend):
@@ -394,6 +422,9 @@ class WireUnionBackend(DTOBackend):
     def encode_data(self, data: Any) -> Any:  # noqa: ANN401 - Litestar transfers whatever the handler returned
         """Transfer whichever arm the handler actually returned.
 
+        For union arms carried inside ``Response[X]``, the wire policy transfers
+        the response body ``content`` rather than the ``Response`` container.
+
         Args:
             data: The value the handler returned.
 
@@ -405,18 +436,16 @@ class WireUnionBackend(DTOBackend):
         if self.wrapper_attribute_name is not None:
             wrapped = self.attribute_accessor(value, self.wrapper_attribute_name)
             if (backend := self._backend_for(wrapped)) is not None:
-                setattr(value, self.wrapper_attribute_name, _encoded(backend, wrapped))
+                setattr(value, self.wrapper_attribute_name, self._encoded(backend, wrapped))
             return value
         if (backend := self._backend_for(value)) is not None:
-            return _encoded(backend, value)
+            return self._encoded(backend, value)
         if not isinstance(value, Response):
             return value
-        # An arm spelled `Response[X]`: the policy applies to the body it
-        # carries, not to the response carrying it.
         response = cast("Any", value)
         content: Any = response.content
         if (inner := self._backend_for(content)) is not None:
-            response.content = _encoded(inner, content)
+            response.content = self._encoded(inner, content)
         return response
 
     def populate_data_from_raw(self, raw: bytes, asgi_connection: "ASGIConnection[Any, Any, Any, Any]") -> Any:  # noqa: ANN401 - the signature Litestar decodes a body with
@@ -437,6 +466,14 @@ class WireUnionBackend(DTOBackend):
 
     def _backend_for(self, value: Any) -> "WireBackend | None":  # noqa: ANN401 - any returned value may be an arm
         return next((backend for arm, backend in self.arm_backends.items() if isinstance(value, arm)), None)
+
+    @staticmethod
+    def _encoded(backend: "WireBackend", value: Any) -> Any:  # noqa: ANN401 - transfers whatever the handler returned
+        """Transfer one value through a backend without inheriting Litestar's open return type."""
+        return cast(
+            "Any",
+            backend.encode_data(value),  # pyright: ignore[reportUnknownMemberType] - unparameterized alias
+        )
 
 
 class WireDTO(MsgspecDTO[T]):
@@ -564,8 +601,6 @@ def _annotated(
     annotation: Any,  # noqa: ANN401 - carries a schema or a union of them
     policy: WirePolicy,
 ) -> Any:  # noqa: ANN401 - an Annotated alias is not a type
-    from typing import Annotated  # noqa: PLC0415 - subscripting Annotated needs the runtime name
-
     return Annotated[
         annotation,
         DTOConfig(
@@ -577,6 +612,12 @@ def _annotated(
 
 
 def _apply_wire_dto(handler: Any, policy: WirePolicy) -> None:  # noqa: ANN401 - one of several Litestar handler types
+    """Attach request, response, and error-response wire DTOs to one route handler.
+
+    Defaults ``handler.media_type`` to JSON when a DTO is attached without an
+    explicit media type so ``Response[X]`` return annotations never publish an
+    empty media-type key in OpenAPI.
+    """
     signature = ParsedSignature.from_fn(handler.fn, handler.resolve_signature_namespace())
     attached = False
     data_field = signature.parameters.get("data")
@@ -597,9 +638,6 @@ def _apply_wire_dto(handler: Any, policy: WirePolicy) -> None:  # noqa: ANN401 -
             for status, spec in cast("dict[int, Any]", handler.responses).items()
         }
     if attached and not handler.media_type:
-        # A handler returning `Response[X]` publishes an empty media-type key
-        # once it carries a response DTO: Litestar defaults the media type on
-        # every other branch of its success-response builder but that one.
         handler.media_type = MediaType.JSON
 
 
@@ -615,44 +653,6 @@ def _wire_model(field_definition: FieldDefinition) -> tuple[Any, bool] | None:
         if (found := _wire_model(inner)) is not None:
             return found
     return None
-
-
-def _encoded(backend: "WireBackend", value: Any) -> Any:  # noqa: ANN401 - transfers whatever the handler returned
-    """Transfer one value through a backend without inheriting Litestar's open return type."""
-    return cast(
-        "Any",
-        backend.encode_data(value),  # pyright: ignore[reportUnknownMemberType] - Litestar's encodable alias is unparameterized
-    )
-
-
-def _mirroring_defaults(
-    struct: "type[msgspec.Struct]",
-    model_type: Any,  # noqa: ANN401 - the model a transfer struct mirrors
-) -> "type[msgspec.Struct]":
-    """Carry the model's ``omit_defaults`` onto the struct that replaces it on the wire.
-
-    Litestar builds every transfer struct with the same fixed configuration, so a
-    schema promising that a response carries only the members its operation
-    resolved would start sending explicit nulls for the rest. That promise is
-    part of the body, not of the schema, so nothing in the document would show
-    it had been broken.
-
-    Args:
-        struct: The transfer struct just built.
-        model_type: The schema it mirrors.
-
-    Returns:
-        The struct, or a restatement of it that omits defaults the way the model
-        does.
-    """
-    config = getattr(model_type, "__struct_config__", None)
-    if config is None or config.omit_defaults == struct.__struct_config__.omit_defaults:
-        return struct
-    return cast("type[msgspec.Struct]", type(struct.__name__, (struct,), {}, omit_defaults=config.omit_defaults))
-
-
-def _policy_key(config: DTOConfig) -> tuple[Any, ...]:
-    return (config.rename_strategy, config.forbid_unknown_fields, config.max_nested_depth)
 
 
 def _renames(annotation: Any) -> bool:  # noqa: ANN401 - classifies any annotation a handler declares

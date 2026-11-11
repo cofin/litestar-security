@@ -1,14 +1,12 @@
 """Environment-selected Litestar Security example application."""
 
-from __future__ import annotations
-
 import os
 from secrets import token_hex
 from typing import Any
 
 from litestar import Controller, Litestar, WebSocket, get, post, websocket
 from litestar.config.csrf import CSRFConfig
-from litestar.di import NamedDependency  # noqa: TC002 - Litestar resolves handler annotations at runtime
+from litestar.di import NamedDependency
 from litestar.openapi import OpenAPIConfig
 
 from examples.support import (
@@ -93,7 +91,8 @@ def create_app() -> Litestar:
         message = f"Unknown LITESTAR_SECURITY_EXAMPLE {mode!r}; choose one of: {choices}"
         raise ValueError(message)
     config = _build_security_config(mode)
-    session_config = example_session_config() if _uses_session(mode) else None
+    uses_session = config.local_auth is not None and config.local_auth.session_auth is not None
+    session_config = example_session_config() if uses_session else None
     route_handlers: list[Any] = [example_home, csrf_seed] if session_config is not None else [example_home]
     if mode == "websocket":
         route_handlers.append(example_socket)
@@ -127,15 +126,3 @@ def _build_security_config(mode: str) -> SecurityConfig[object]:
         elif mode == "custom-admin":
             config.local_auth = build_local_auth("local-session")
     return config
-
-
-def _uses_session(mode: str) -> bool:
-    return mode in {
-        "custom-admin",
-        "github-oauth",
-        "google-oauth",
-        "keycloak",
-        "local-hybrid",
-        "local-session",
-        "websocket",
-    }

@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, TypeVar, cast
 
 from litestar.connection import ASGIConnection
@@ -22,7 +22,7 @@ from litestar_security.authentication import (
 )
 from litestar_security.context import AuthenticationEvidence, CredentialRestrictions
 from litestar_security.providers._internal import safe_increment
-from litestar_security.providers.api_key._api_key import APIKeyCodec, APIKeyConfig, APIKeyStore, IssuedAPIKey
+from litestar_security.providers.api_key._api_key import APIKeyCodec, APIKeyConfig, APIKeyStore, IssuedAPIKey, aware_utc
 from litestar_security.workers import NoOpSecurityMetrics, SecurityMetrics
 
 __all__ = ("APIKeyClaims", "APIKeyService", "BufferedAPIKeyUsage")
@@ -83,7 +83,7 @@ class BufferedAPIKeyUsage:
             key_id: The public key lookup.
             used_at: The timezone-aware usage timestamp.
         """
-        normalized = _utc(used_at)
+        normalized = aware_utc(used_at)
         if key_id in self._pending:
             self._pending[key_id] = max(self._pending[key_id], normalized)
             safe_increment(self.metrics, "security.api_key.usage_coalesced")
@@ -169,7 +169,7 @@ class APIKeyService:
         if overlap.__class__ is not timedelta or overlap < timedelta(0):
             message = "API-key rotation overlap must not be negative"
             raise ValueError(message)
-        now = _utc(self.clock())
+        now = aware_utc(self.clock())
         issued, replacement = self.codec.issue(subject_id=subject_id, restrictions=restrictions, expires_at=expires_at)
         await _runtime_store(self.config).rotate(
             current_key_id=current_key_id,
@@ -185,7 +185,7 @@ class APIKeyService:
         Args:
             key_id: The public lookup to revoke.
         """
-        await _runtime_store(self.config).revoke(key_id=key_id, now=_utc(self.clock()))
+        await _runtime_store(self.config).revoke(key_id=key_id, now=aware_utc(self.clock()))
 
     async def flush_usage(self) -> None:
         """Flush eligible buffered usage observations."""
@@ -295,7 +295,7 @@ class _APIKeyAuthenticator:
             return VerificationUnavailable()
         if record is None or not self.codec.matches(proof, record):
             return InvalidCredentials()
-        now = _utc(self.clock())
+        now = aware_utc(self.clock())
         if not record.is_valid_at(now):
             return InvalidCredentials()
         if self.usage is not None:
@@ -365,10 +365,3 @@ def build_api_key_runtime(  # noqa: PLR0913 - explicit runtime dependencies are 
 
 def _runtime_store(config: APIKeyConfig) -> APIKeyStore:
     return cast("APIKeyStore", config.store)
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        message = "API-key timestamp must be timezone-aware"
-        raise ValueError(message)
-    return value.astimezone(timezone.utc)

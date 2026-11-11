@@ -1,7 +1,7 @@
 ---
 title: "Project-Local Skills Index"
 summary: "Index of project-local engineering and review skills for litestar-security."
-updated: "2026-11-10"
+updated: "2026-11-11"
 ---
 
 # Project-Local Skills

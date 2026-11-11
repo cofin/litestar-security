@@ -4,7 +4,7 @@ bundle: litestar-security
 tracking_mode: "shared"
 title: "litestar-security Knowledge Bundle"
 summary: "Root OKF v0.2 index for litestar-security product definition, engineering knowledge, research, and active flow specifications."
-updated: "2026-11-10"
+updated: "2026-11-11"
 ---
 
 # litestar-security Knowledge Bundle

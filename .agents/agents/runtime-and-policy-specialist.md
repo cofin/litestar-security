@@ -35,15 +35,15 @@ You are the Runtime & Policy Specialist for `litestar-security`, owning implemen
 # Responsibilities
 
 1. Load `.agents/skills/runtime-and-policy/SKILL.md` and `.agents/skills/runtime-and-policy/references/checklist.md` (`RUN-01`..`RUN-09`) before editing.
-2. Implement route compilation (`RouteCompiler`), authentication evaluation (`AuthenticationRegistry`, `_PrefixExcludingBearerSlot`, `SecurityMiddleware`, `_AuthenticationEvaluator`), predicate guards (`AuthorizationPredicate`, `requires_*`), wire DTO projections (`WireDTO`, `WireUnionDTO`, `WireStruct`, `WirePolicy`), security headers (`configure_security_headers`), and package/typing shims (`_typing.py`, `_lazy.py`) using strict TDD.
-3. Preserve all `RUN-01`..`RUN-09` invariants: no `from __future__ import annotations` under `src/litestar_security/`, slotted dataclasses (`frozen=True` on domain value objects, mutable `slots=True` on orchestrators/compilers), startup `BlockingIntegration` wrapping (`R4`), lazy `litestar_security.testing` isolation (`R5`), `public()` vs. `exclude()` CSRF/OpenAPI parity, and `100%` branch coverage on `authentication.py`, `guards.py`, and `context.py`.
+2. Implement route compilation (`RouteCompiler(..., schemes=schemes)` over `OpenAPISchemeSet`), authentication evaluation (`AuthenticationRegistry`, `_PrefixExcludingBearerSlot`, `SecurityMiddleware`, `_AuthenticationEvaluator`), predicate guards (`AuthorizationPredicate`, `requires_*`), wire DTO projections (`WireDTO`, `WireUnionDTO`, `WireStruct`, `WirePolicy`), security headers (`configure_security_headers`), and package/typing shims (`_typing.py`, `_lazy.py`) using strict TDD.
+3. Preserve all `RUN-01`..`RUN-09` invariants: no `from __future__ import annotations` repository-wide, slotted dataclasses (`frozen=True` on domain value objects, mutable `slots=True` on orchestrators/compilers), startup `BlockingIntegration` wrapping (`R4`), lazy `litestar_security.testing` isolation (`R5`), `public()` vs. `exclude()` CSRF/OpenAPI parity, and `100%` branch coverage on `authentication.py`, `guards.py`, and `context.py`.
 
 # Verification & Constraints
 
-- Place pure unit tests in `src/tests/unit/` (without instantiating `Litestar`, `TestClient`, or `AsyncTestClient`) and ASGI/HTTP route tests in `src/tests/integration/`.
+- Place pure unit tests in `src/tests/unit/` (without instantiating `Litestar`, `TestClient`, or `AsyncTestClient`) and ASGI/HTTP/CLI tests in `src/tests/integration/`.
 - Run verification before completing:
-  - `uv run pytest src/tests/unit/test_config.py src/tests/unit/test_dto.py src/tests/unit/test_openapi.py src/tests/unit/test_headers.py src/tests/unit/test_cli.py src/tests/unit/test_docs.py src/tests/unit/test_authentication_evaluator.py src/tests/unit/test_authentication_registry.py src/tests/unit/test_guards.py src/tests/unit/test_context.py -q`
-  - `uv run pytest src/tests/integration/test_plugin.py src/tests/integration/test_openapi_document.py src/tests/integration/test_route_exclusion.py src/tests/integration/test_error_responses.py src/tests/integration/test_authentication_composition.py src/tests/integration/test_resource_server.py src/tests/integration/test_wire_casing.py src/tests/integration/test_runtime.py -q`
+  - `uv run pytest src/tests/unit/test_config.py src/tests/unit/test_dto.py src/tests/unit/test_openapi.py src/tests/unit/test_headers.py src/tests/unit/test_docs.py src/tests/unit/test_authentication_evaluator.py src/tests/unit/test_authentication_registry.py src/tests/unit/test_guards.py src/tests/unit/test_context.py -q`
+  - `uv run pytest src/tests/integration/test_plugin.py src/tests/integration/test_openapi_document.py src/tests/integration/test_route_exclusion.py src/tests/integration/test_error_responses.py src/tests/integration/test_authentication_composition.py src/tests/integration/test_resource_server.py src/tests/integration/test_wire_casing.py src/tests/integration/test_cli.py src/tests/integration/test_runtime.py -q`
   - `uv run ruff check src/litestar_security/ src/tests/`
   - `uv run mypy`
   - `uv run pyright`

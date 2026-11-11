@@ -1,6 +1,7 @@
-"""Compile route security policy for runtime and native OpenAPI projection."""
+"""Compile route security policy for runtime and native OpenAPI projection.
 
-# The compiler is the sole package-internal consumer of the closed policy AST.
+Acts as the sole package-internal consumer of the closed authentication policy AST.
+"""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -198,11 +199,11 @@ class OpenAPISchemeSet:
             if scheme_name is None or scheme is None:
                 message = f"Authentication mechanism {mechanism_name} has no native OpenAPI security scheme"
                 raise ImproperlyConfiguredException(detail=message)
-            _register_unique_scheme(unique_schemes, scheme_name, scheme)
+            cls._register_unique_scheme(unique_schemes, scheme_name, scheme)
             by_mechanism[mechanism_name] = (scheme_name, scheme)
             additional_items = tuple(mechanism_value.additional_security_schemes.items())
             for extra_name, extra_scheme in additional_items:
-                _register_unique_scheme(unique_schemes, extra_name, extra_scheme)
+                cls._register_unique_scheme(unique_schemes, extra_name, extra_scheme)
             if additional_items:
                 additional_by_mechanism[mechanism_name] = additional_items
         return cls(
@@ -252,16 +253,16 @@ class OpenAPISchemeSet:
                 projection.append(requirement)
         return projection
 
-
-def _register_unique_scheme(
-    unique_schemes: dict[str, SecurityScheme], scheme_name: str, scheme: SecurityScheme
-) -> None:
-    if existing := unique_schemes.get(scheme_name):
-        if existing != scheme:
-            message = f"Conflicting native OpenAPI security scheme: {scheme_name}"
-            raise ImproperlyConfiguredException(detail=message)
-    else:
-        unique_schemes[scheme_name] = scheme
+    @staticmethod
+    def _register_unique_scheme(
+        unique_schemes: dict[str, SecurityScheme], scheme_name: str, scheme: SecurityScheme
+    ) -> None:
+        if existing := unique_schemes.get(scheme_name):
+            if existing != scheme:
+                message = f"Conflicting native OpenAPI security scheme: {scheme_name}"
+                raise ImproperlyConfiguredException(detail=message)
+        else:
+            unique_schemes[scheme_name] = scheme
 
 
 def prepare_openapi_config(config: OpenAPIConfig, schemes: OpenAPISchemeSet) -> OpenAPIConfig:
@@ -326,15 +327,20 @@ class RouteCompiler(Generic[UserT]):
     exclude: Sequence[str] | str | None = None
     converts_to_problem_details: bool = False
     raised_error_schema: RaisedErrorSchema | None = None
+    schemes: OpenAPISchemeSet | None = field(default=None, repr=False)
     _policy_compiler: PolicyCompiler[UserT] = field(init=False, repr=False)
-    _schemes: OpenAPISchemeSet | None = field(init=False, repr=False)
     _exclude_pattern: Pattern[str] | None = field(init=False, repr=False)
     _reported_exclusions: tuple[tuple[str, Pattern[str]], ...] = field(init=False, repr=False)
     _matched_exclusions: set[str] = field(init=False, repr=False, default_factory=set[str])
     _reported_response_classes: set[type] = field(init=False, repr=False, default_factory=set[type])
 
     def __post_init__(self) -> None:
-        """Create one per-registry policy compiler."""
+        """Create the policy compiler, exclusion patterns, and OpenAPI scheme set.
+
+        ``build_exclude_path_pattern`` joins configured exclusion patterns into one
+        combined expression, so each source pattern is also compiled individually
+        solely to report unmatched exclusion patterns accurately.
+        """
         if self.csrf_exclude_key in _RESERVED_OPT_KEYS:
             message = "Native CSRF exclusion opt key collides with reserved Litestar Security metadata"
             raise ImproperlyConfiguredException(detail=message)
@@ -342,17 +348,13 @@ class RouteCompiler(Generic[UserT]):
             message = "Route exclusion opt key collides with reserved Litestar Security metadata"
             raise ImproperlyConfiguredException(detail=message)
         self._exclude_pattern = build_exclude_path_pattern(exclude=self.exclude, middleware_cls=type(self))
-        # build_exclude_path_pattern joins the sequence into one expression, so
-        # attributing a match back to the pattern that produced it needs the
-        # originals compiled separately. These are used for reporting only.
         sources = (self.exclude,) if isinstance(self.exclude, str) else tuple(self.exclude or ())
         self._reported_exclusions = tuple((source, recompile(source)) for source in sources)
         self._policy_compiler = PolicyCompiler(self.registry, max_openapi_combinations=self.max_openapi_combinations)
-        self._schemes = (
-            OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", self.registry))
-            if self.openapi_config is not None
-            else None
-        )
+        if self.openapi_config is None:
+            self.schemes = None
+        elif self.schemes is None:
+            self.schemes = OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", self.registry))
 
     def receive_route(self, route: BaseRoute) -> None:
         """Compile and attach runtime plans for one registered native route.
@@ -371,7 +373,9 @@ class RouteCompiler(Generic[UserT]):
             return
         if isinstance(route, WebSocketRoute):
             self._reject_csrf_metadata(route, route.route_handler)
-            plan = self._effective_plan(route, route.route_handler)
+            plan = self._compile_policy(
+                route, route.route_handler, self._resolve_route_policy(route, route.route_handler)
+            )
             if not self.websocket_config.allowed_origins and any(
                 self.registry.get_mechanism(name).session_capable for name in plan.participant_names or ()
             ):
@@ -383,7 +387,11 @@ class RouteCompiler(Generic[UserT]):
         asgi_route = cast("ASGIRoute", route)
         self._reject_csrf_metadata(asgi_route, asgi_route.route_handler)
         self._attach_plan(
-            asgi_route, asgi_route.route_handler, self._effective_plan(asgi_route, asgi_route.route_handler)
+            asgi_route,
+            asgi_route.route_handler,
+            self._compile_policy(
+                asgi_route, asgi_route.route_handler, self._resolve_route_policy(asgi_route, asgi_route.route_handler)
+            ),
         )
 
     def unmatched_exclusions(self) -> tuple[str, ...]:
@@ -413,7 +421,7 @@ class RouteCompiler(Generic[UserT]):
             route: The route being compiled, named as the representative one.
             route_handler: The handler whose resolved response class is read.
         """
-        if not route_handler.opt.get(GENERATED_ROUTE_OPT_KEY) or self._is_generated_options(route_handler):
+        if not route_handler.opt.get(GENERATED_ROUTE_OPT_KEY) or is_generated_options_handler(route_handler.fn):
             return
         resolved = cast(
             "type[object]",
@@ -468,30 +476,16 @@ class RouteCompiler(Generic[UserT]):
     def _compile_http_handler(self, route: HTTPRoute, route_handler: HTTPRouteHandler) -> None:
         self._report_customized_response_class(route, route_handler)
         self._restate_denials_as_problem_details(route_handler)
-        policy: AuthenticationPolicy
-        csrf_override: bool | None
-        resolved_policy = self._resolve_effective_policy(route, route_handler)
-        if self._is_excluded(route):
-            if resolved_policy is not None and not isinstance(resolved_policy, ExcludePolicy):
-                self._reject_excluded_policy(route, route_handler, resolved_policy)
-            policy = exclude()
-            csrf_override = self._http_csrf_override(route, route_handler)
-        elif self._is_generated_options(route_handler):
-            policy = public()
-            csrf_override = False
-        elif self._is_openapi_handler(route_handler):
-            policy = self._nearest_non_application_policy(route, route_handler) or public()
-            csrf_override = self._http_csrf_override(route, route_handler)
-        else:
-            if resolved_policy is None:
-                policy = required() if self.registry.mechanism_names else public()
-            else:
-                policy = resolved_policy
-            csrf_override = self._http_csrf_override(route, route_handler)
+        policy = self._resolve_route_policy(route, route_handler)
+        csrf_override = (
+            False
+            if not isinstance(policy, ExcludePolicy) and is_generated_options_handler(route_handler.fn)
+            else self._http_csrf_override(route, route_handler)
+        )
         plan = self._compile_http_policy(route, route_handler, policy, csrf_override=csrf_override)
         plan = self._apply_csrf_enforcement(route, route_handler, policy, plan)
         self._attach_plan(route, route_handler, plan)
-        if self._schemes is not None:
+        if self.schemes is not None:
             self._attach_openapi_security(route, route_handler, plan)
 
     def _compile_http_policy(
@@ -502,11 +496,13 @@ class RouteCompiler(Generic[UserT]):
         *,
         csrf_override: bool | None,
     ) -> SecurityRuntimePlan:
+        """Compile an HTTP policy with derived or handler-overridden CSRF semantics.
+
+        Excluded routes are unowned by this plugin and derive no implicit CSRF
+        requirement from default session-capable mechanisms, preventing excluded
+        asset routes from forcing application-wide CSRF configuration.
+        """
         base_plan = self._compile_policy(route, route_handler, policy)
-        # An exclusion states that this plugin does not own the route, so it
-        # derives no CSRF demand. Deriving one from the default mechanisms made a
-        # plugin-mounted asset route force the whole application to configure
-        # CSRF, which native Litestar never does.
         derived = not isinstance(policy, ExcludePolicy) and any(
             self.registry.get_mechanism(name).session_capable
             for name in self.registry.mechanism_names
@@ -518,16 +514,16 @@ class RouteCompiler(Generic[UserT]):
     def _apply_csrf_enforcement(
         self, route: HTTPRoute, route_handler: HTTPRouteHandler, policy: AuthenticationPolicy, plan: SecurityRuntimePlan
     ) -> SecurityRuntimePlan:
+        """Validate and attach native or external CSRF enforcement for an HTTP route.
+
+        Excluded routes without an explicit ``csrf_required=True`` override are left
+        untouched for Litestar's native CSRF middleware without writing exclusion
+        metadata. ``public()`` routes exclude native CSRF unless they explicitly opt
+        in via ``csrf_required=True`` when establishing cookie state.
+        """
         native = self.csrf_exclude_key is not None
-        # An excluded route is left to Litestar's own CSRF middleware exactly as
-        # `exclude_from_auth` leaves it there natively: this plugin neither
-        # demands coverage nor writes a native exclusion for it. An explicit
-        # csrf_required=True on the handler still applies.
         if isinstance(policy, ExcludePolicy) and plan.csrf_required is not True:
             return plan
-        # A public() plan is excluded from native CSRF. A public route that
-        # establishes cookie state must instead declare csrf_required=True;
-        # see patterns.md, "Local generated routes".
         desired_exclusion = not bool(plan.csrf_required)
         self._validate_csrf_metadata(route, route_handler, desired_exclusion=desired_exclusion)
         enforcement = self._resolve_csrf_enforcement(route, route_handler, plan, native=native)
@@ -555,10 +551,10 @@ class RouteCompiler(Generic[UserT]):
                 self._raise_route_error(route, route_handler, "Native CSRF exclusions must be exactly True")
             if not desired_exclusion:
                 self._raise_route_error(route, route_handler, "Session-capable routes cannot exclude native CSRF")
-        if marker is not None and marker != desired_exclusion:
-            self._raise_route_error(route, route_handler, "Conflicting compiled native CSRF coverage")
-        if marker is not None and (
-            (desired_exclusion and existing is not True) or (not desired_exclusion and existing is not _MISSING)
+        elif marker is not None and (
+            marker != desired_exclusion
+            or (desired_exclusion and existing is not True)
+            or (not desired_exclusion and existing is not _MISSING)
         ):
             self._raise_route_error(route, route_handler, "Conflicting compiled native CSRF coverage")
 
@@ -586,20 +582,27 @@ class RouteCompiler(Generic[UserT]):
                     route, route_handler, f"External CSRF integration {external.name} rejected coverage for {method}"
                 )
 
-    def _effective_plan(self, route: BaseRoute, route_handler: BaseRouteHandler) -> SecurityRuntimePlan:
+    def _resolve_route_policy(self, route: BaseRoute, route_handler: BaseRouteHandler) -> AuthenticationPolicy:
+        """Resolve the effective route policy across path exclusions, framework routes, and defaults.
+
+        A route that declares an explicit authentication policy while matching a path
+        exclusion pattern states contradictory intentions and fails startup rather than
+        silently preferring one rule over the other.
+        """
         resolved_policy = self._resolve_effective_policy(route, route_handler)
         if self._is_excluded(route):
             if resolved_policy is not None and not isinstance(resolved_policy, ExcludePolicy):
-                self._reject_excluded_policy(route, route_handler, resolved_policy)
-            return self._compile_policy(route, route_handler, exclude())
+                self._raise_route_error(
+                    route, route_handler, "Route declares auth but matches a security exclusion pattern"
+                )
+            return exclude()
+        if is_generated_options_handler(route_handler.fn):
+            return public()
+        if isinstance(route_handler, HTTPRouteHandler) and self._is_openapi_handler(route_handler):
+            return self._nearest_non_application_policy(route, route_handler) or public()
         if resolved_policy is not None:
-            return self._compile_policy(route, route_handler, resolved_policy)
-        return self._default_plan(route, route_handler)
-
-    def _default_plan(self, route: BaseRoute, route_handler: BaseRouteHandler) -> SecurityRuntimePlan:
-        if not self.registry.mechanism_names:
-            return self._compile_policy(route, route_handler, public())
-        return self._compile_policy(route, route_handler, required())
+            return resolved_policy
+        return required() if self.registry.mechanism_names else public()
 
     def _is_excluded(self, route: BaseRoute) -> bool:
         if self._exclude_pattern is None or not self._exclude_pattern.match(route.path):
@@ -608,15 +611,6 @@ class RouteCompiler(Generic[UserT]):
             source for source, pattern in self._reported_exclusions if pattern.match(route.path)
         )
         return True
-
-    def _reject_excluded_policy(
-        self, route: BaseRoute, route_handler: BaseRouteHandler, policy: AuthenticationPolicy | None
-    ) -> None:
-        # A route that declares a policy and also matches an exclusion pattern
-        # states two incompatible intentions, so neither is silently preferred.
-        if policy is not None:
-            message = "Route declares auth but matches a security exclusion pattern"
-            self._raise_route_error(route, route_handler, message)
 
     def _compile_policy(
         self,
@@ -640,7 +634,9 @@ class RouteCompiler(Generic[UserT]):
         ``opt`` by truthiness, exactly as Litestar's own
         ``should_bypass_middleware`` reads the key. Litestar has already merged
         the ownership layers innermost-wins, so a handler declaring a falsy value
-        opts back into authentication under an excluded owner.
+        opts back into authentication under an excluded owner, and an owning
+        layer's exclusion only stands while the resolved handler ``opt`` still
+        agrees.
 
         Precedence between a declared ``auth`` policy and an exclusion is
         resolved innermost-first across the owning layers, so the nearest owner
@@ -676,8 +672,6 @@ class RouteCompiler(Generic[UserT]):
         for owner_policy, owner_excluded in reversed(owners):
             if owner_policy is not None:
                 return owner_policy
-            # An owner's exclusion only stands while the resolved value agrees;
-            # a nearer layer may have opted back in with a falsy value.
             if owner_excluded and excluded:
                 return exclude()
 
@@ -778,7 +772,13 @@ class RouteCompiler(Generic[UserT]):
     def _attach_openapi_security(
         self, route: HTTPRoute, route_handler: HTTPRouteHandler, plan: SecurityRuntimePlan
     ) -> None:
-        schemes = cast("OpenAPISchemeSet", self._schemes)
+        """Project and attach native OpenAPI security requirements onto one HTTP handler.
+
+        Drops any cached ``_resolved_security`` memoized by an earlier plugin so
+        subsequent ``resolve_security()`` calls merge fresh layer requirements after
+        verifying no competing native declaration exists on owning layers.
+        """
+        schemes = cast("OpenAPISchemeSet", self.schemes)
         try:
             projection = schemes.project(plan)
         except ImproperlyConfiguredException as exc:
@@ -797,16 +797,8 @@ class RouteCompiler(Generic[UserT]):
                 continue
             self._raise_route_error(route, route_handler, "Competing native Litestar security declaration")
         route_handler.security = projection
-        # A plugin registered ahead of this one may already have memoized the
-        # stale resolution, so drop it and let the next resolve_security() flow
-        # through Litestar's own layer merge; the competing-declaration check
-        # above guarantees no other ownership layer contributes to that merge.
         route_handler._resolved_security = Empty  # noqa: SLF001 # pyright: ignore[reportPrivateUsage] - Litestar exposes no resolution-invalidation API
         route_handler.opt[_OPENAPI_SECURITY_OPT_KEY] = canonical
-
-    @staticmethod
-    def _is_generated_options(route_handler: BaseRouteHandler) -> bool:
-        return is_generated_options_handler(route_handler.fn)
 
     @staticmethod
     def _attach_plan(route: BaseRoute, route_handler: BaseRouteHandler, plan: SecurityRuntimePlan) -> None:

@@ -3,6 +3,7 @@
 import base64
 import json
 from collections.abc import Mapping
+from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
@@ -448,6 +449,10 @@ async def test_verified_claims_are_recursively_immutable_and_secret_safe(
 
     assert isinstance(outcome, Authenticated)
     claims = outcome.claims
+    with pytest.raises(FrozenInstanceError):
+        claims.subject = "changed"  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        verifier.config.issuer = "changed"  # type: ignore[misc]
     with pytest.raises(TypeError):
         claims.raw["sub"] = "changed"  # type: ignore[index]
     metadata = claims.raw["metadata"]

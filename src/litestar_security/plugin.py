@@ -86,9 +86,9 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         """Initialize the plugin."""
         self.config = config if config is not None else SecurityConfig[UserT]()
         self._providers = {
-            "principal": Provide(_provide_principal, sync_to_thread=False, use_cache=False),
-            "security_context": Provide(_provide_security_context, sync_to_thread=False, use_cache=False),
-            "current_user": Provide(_provide_current_user, sync_to_thread=False, use_cache=False),
+            "principal": Provide(self._provide_principal, sync_to_thread=False, use_cache=False),
+            "security_context": Provide(self._provide_security_context, sync_to_thread=False, use_cache=False),
+            "current_user": Provide(self._provide_current_user, sync_to_thread=False, use_cache=False),
             "websocket_connect_tokens": Provide(
                 self._provide_websocket_connect_tokens, sync_to_thread=False, use_cache=False
             ),
@@ -154,6 +154,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         runtime, middleware = self._get_runtime()
         self._configure_api_key_lifespan(app_config)
         openapi_config = app_config.openapi_config
+        schemes: OpenAPISchemeSet | None = None
         if openapi_config is not None:
             schemes = OpenAPISchemeSet.from_registry(cast("AuthenticationRegistry[object]", runtime.registry))
             openapi_config = prepare_openapi_config(openapi_config, schemes)
@@ -173,6 +174,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 exclude_opt_key=self.config.exclude_opt_key,
                 converts_to_problem_details=self._converts_to_problem_details(app_config),
                 raised_error_schema=self.config.raised_error_schema,
+                schemes=schemes,
             )
         self._configure_exclusion_report(app_config)
         app_config.dependencies.update(self._providers)
@@ -352,12 +354,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                     await cast("Any", api_key_service).close()
 
             self._api_key_lifespan = api_key_lifespan
-        lifespan_handlers = cast(
-            "list[Callable[[Litestar], AbstractAsyncContextManager[None]]]",
-            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType] - third-party callable is untyped
-        )
-        if self._api_key_lifespan not in lifespan_handlers:
-            lifespan_handlers.append(self._api_key_lifespan)
+        self._append_lifespan(app_config, self._api_key_lifespan)
 
     @staticmethod
     def _converts_to_problem_details(app_config: AppConfig) -> bool:
@@ -392,12 +389,12 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         )
 
     def _configure_exclusion_report(self, app_config: AppConfig) -> None:
-        # Every route is known once the application has finished building, so an
-        # exclusion pattern that still matches nothing is reported at startup.
-        # It warns rather than raises, matching Litestar's own posture towards
-        # exclude patterns: a pattern that greedily disables the middleware
-        # entirely is a warning there too, and a pattern for a route mounted
-        # only in production or only with an optional plugin stays legitimate.
+        """Warn at startup when configured exclusion patterns match no registered route.
+
+        All routes are compiled once application startup runs, and warning rather
+        than raising matches Litestar's own posture so environment-specific or
+        optional-plugin route patterns stay valid while surfacing accidental typos.
+        """
         if not self.config.exclude:
             return
         if self._exclusion_lifespan is None:
@@ -412,12 +409,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                 yield
 
             self._exclusion_lifespan = exclusion_lifespan
-        lifespan_handlers = cast(
-            "list[Callable[[Litestar], AbstractAsyncContextManager[None]]]",
-            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType] - third-party callable is untyped
-        )
-        if self._exclusion_lifespan not in lifespan_handlers:
-            lifespan_handlers.append(self._exclusion_lifespan)
+        self._append_lifespan(app_config, self._exclusion_lifespan)
 
     def _validate_dependency_map(self, dependencies: Mapping[str, object] | None, owner: str) -> None:
         for name in _RESERVED_DEPENDENCIES:
@@ -434,10 +426,11 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             message = "OpenAPI config contains competing root native security declarations"
             raise ImproperlyConfiguredException(detail=message)
         for route_handler in app_config.route_handlers:
-            for layer in _iter_route_handler_layers(route_handler):
+            for layer in SecurityPlugin._iter_route_handler_layers(route_handler):
                 native_security = getattr(layer, "security", None)
                 if isinstance(native_security, Sequence) and not isinstance(native_security, str) and native_security:
-                    message = f"{_owner_name(layer).title()} contains competing native Litestar security declarations"
+                    owner = SecurityPlugin._owner_name(layer).title()
+                    message = f"{owner} contains competing native Litestar security declarations"
                     raise ImproperlyConfiguredException(detail=message)
 
     def _configure_csrf(self, app_config: AppConfig) -> None:
@@ -477,26 +470,25 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             raise ImproperlyConfiguredException(detail=message)
 
     def _configure_local_auth_rate_limits(self, app_config: AppConfig) -> None:
+        """Validate local authentication and bind its named rate-limit store at startup.
+
+        The bundled limiter references a store name rather than holding an instance
+        so applications can map that name onto a shared backend in ``app.stores``
+        once the application is built.
+        """
         local_auth = self.config.local_auth
         if local_auth is None:
             return
-        _validate_local_auth(local_auth)
+        self._validate_local_auth(local_auth)
         if self._rate_limit_lifespan is None:
-            # The bundled limiter names a store rather than holding one, so the
-            # application can point that name at a shared backend. The registry only
-            # exists once the app is built, which is why this binds at startup.
+
             @asynccontextmanager
             async def rate_limit_lifespan(app: Litestar) -> AsyncGenerator[None, None]:
                 local_auth.bind_rate_limit_store(app.stores)
                 yield
 
             self._rate_limit_lifespan = rate_limit_lifespan
-        lifespan_handlers = cast(
-            "list[object]",
-            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType] - third-party callable is untyped at this boundary
-        )
-        if self._rate_limit_lifespan not in lifespan_handlers:
-            lifespan_handlers.append(self._rate_limit_lifespan)
+        self._append_lifespan(app_config, self._rate_limit_lifespan)
 
     def _configure_local_auth_routes(self, app_config: AppConfig) -> None:
         local_auth = self.config.local_auth
@@ -506,9 +498,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if route_handlers is None:
             route_handlers = local_auth.build_route_handlers(wire=self.config.wire_policy())
             self._local_auth_route_handlers = route_handlers
-        for route_handler in route_handlers:
-            if not any(existing is route_handler for existing in app_config.route_handlers):
-                app_config.route_handlers.append(route_handler)
+        self._append_route_handlers(app_config, route_handlers)
 
     def _configure_mfa_login(self) -> None:
         """Bind MFA-login challenges independently of generated MFA management routes."""
@@ -519,7 +509,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if local_auth is None:
             message = "MFA login requires local authentication"
             raise ImproperlyConfiguredException(detail=message)
-        _validate_local_auth(local_auth)
+        self._validate_local_auth(local_auth)
         local_auth.bind_mfa_login(mfa)
 
     @staticmethod
@@ -592,8 +582,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             raise ImproperlyConfiguredException(detail=message)
         route_handlers = self._mfa_route_handlers
         if route_handlers is None:
-            from litestar_security.accounts import PasskeyService, StepUpService, build_mfa_routes  # noqa: PLC0415 - route imports remain feature-local
-            from litestar_security.accounts._mfa import MFAService  # noqa: PLC0415 - route imports remain feature-local
+            from litestar_security.accounts import MFAService, PasskeyService, StepUpService, build_mfa_routes  # noqa: PLC0415 - route imports remain feature-local
 
             if not isinstance(step_up, StepUpService):
                 message = "Generated MFA and passkey routes require a StepUpService"
@@ -622,9 +611,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
             )
             route_handlers = (router,)
             self._mfa_route_handlers = route_handlers
-        for route_handler in route_handlers:
-            if not any(existing is route_handler for existing in app_config.route_handlers):
-                app_config.route_handlers.append(route_handler)
+        self._append_route_handlers(app_config, route_handlers)
 
     def _configure_oauth_routes(self, app_config: AppConfig) -> None:
         oauth = self.config.oauth
@@ -634,9 +621,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         if route_handlers is None:
             route_handlers = oauth.build_route_handlers(wire=self.config.wire_policy())
             self._oauth_route_handlers = route_handlers
-        for route_handler in route_handlers:
-            if not any(existing is route_handler for existing in app_config.route_handlers):
-                app_config.route_handlers.append(route_handler)
+        self._append_route_handlers(app_config, route_handlers)
 
     def _configure_oauth_lifespan(self, app_config: AppConfig) -> None:
         oauth = self.config.oauth
@@ -661,12 +646,7 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                         raise ImproperlyConfiguredException(detail=message)
 
             self._oauth_lifespan = oauth_lifespan
-        lifespan_handlers = cast(
-            "list[object]",
-            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType] - third-party callable is untyped
-        )
-        if self._oauth_lifespan not in lifespan_handlers:
-            lifespan_handlers.append(self._oauth_lifespan)
+        self._append_lifespan(app_config, self._oauth_lifespan)
 
     def _validate_local_session_backend(
         self, app_config: AppConfig, native_sessions: Sequence[tuple[int, DefineMiddleware]]
@@ -718,8 +698,11 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
         app_config.route_handlers.append(build_local_jwks_handler(self.config.local_jwks))
 
     def _configure_protected_resource(self, app_config: AppConfig) -> None:
-        # `register_route=False` keeps the metadata configured while another
-        # co-installed plugin owns the path RFC 9728 pins to the root.
+        """Register the RFC 9728 protected-resource route when route ownership is enabled.
+
+        ``register_route=False`` keeps bearer challenge advertisement active while
+        another co-installed plugin serves ``/.well-known/oauth-protected-resource``.
+        """
         if self.config.protected_resource is None or not self.config.protected_resource.register_route:
             return
         from litestar_security.providers.oauth import build_protected_resource_handler  # noqa: PLC0415 - the OAuth tree loads only when configured
@@ -758,12 +741,24 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
                         raise ImproperlyConfiguredException(detail=message)
 
             self._jwks_lifespan = jwks_lifespan
+        self._append_lifespan(app_config, self._jwks_lifespan)
+
+    @staticmethod
+    def _append_lifespan(
+        app_config: AppConfig, handler: Callable[[Litestar], AbstractAsyncContextManager[None]]
+    ) -> None:
         lifespan_handlers = cast(
-            "list[object]",
-            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType] - third-party callable is untyped at this boundary
+            "list[Callable[[Litestar], AbstractAsyncContextManager[None]]]",
+            app_config.lifespan,  # pyright: ignore[reportUnknownMemberType] - third-party callable is untyped
         )
-        if self._jwks_lifespan not in lifespan_handlers:
-            lifespan_handlers.append(self._jwks_lifespan)
+        if handler not in lifespan_handlers:
+            lifespan_handlers.append(handler)
+
+    @staticmethod
+    def _append_route_handlers(app_config: AppConfig, route_handlers: Sequence[Router]) -> None:
+        for route_handler in route_handlers:
+            if not any(existing is route_handler for existing in app_config.route_handlers):
+                app_config.route_handlers.append(route_handler)
 
     @staticmethod
     def _is_native_session_middleware(middleware: object) -> bool:
@@ -774,61 +769,61 @@ class SecurityPlugin(InitPlugin, ReceiveRoutePlugin, CLIPlugin, Generic[UserT]):
     def _iter_owned_dependency_maps(app_config: AppConfig) -> Iterator[tuple[Mapping[str, object] | None, str]]:
         seen: set[int] = set()
         for route_handler in app_config.route_handlers:
-            for layer in _iter_route_handler_layers(route_handler):
+            for layer in SecurityPlugin._iter_route_handler_layers(route_handler):
                 if id(layer) in seen:
                     continue
                 seen.add(id(layer))
-                yield (_layer_dependencies(layer), _owner_name(layer))
+                yield (SecurityPlugin._layer_dependencies(layer), SecurityPlugin._owner_name(layer))
 
+    @staticmethod
+    def _provide_principal(scope: Scope) -> Principal[Any]:
+        return cast("Principal[Any]", scope["user"])
 
-def _provide_principal(scope: Scope) -> Principal[Any]:
-    return cast("Principal[Any]", scope["user"])
+    @staticmethod
+    def _provide_security_context(scope: Scope) -> SecurityContext:
+        return cast("SecurityContext", scope["auth"])
 
+    @staticmethod
+    def _provide_current_user(scope: Scope) -> object:
+        return cast("Principal[object]", scope["user"]).require_user()
 
-def _provide_security_context(scope: Scope) -> SecurityContext:
-    return cast("SecurityContext", scope["auth"])
+    @staticmethod
+    def _owner_name(layer: object) -> str:
+        if isinstance(layer, Router):
+            return "router"
+        if isinstance(layer, Controller) or (isinstance(layer, type) and issubclass(layer, Controller)):
+            return "controller"
+        return "handler"
 
+    @staticmethod
+    def _validate_local_auth(value: object) -> None:
+        from litestar_security.accounts import LocalAuthConfig  # noqa: PLC0415 - account services load only when configured
 
-def _provide_current_user(scope: Scope) -> object:
-    return cast("Principal[object]", scope["user"]).require_user()
+        if not isinstance(value, LocalAuthConfig):
+            message = "Security local authentication must be a LocalAuthConfig"
+            raise ImproperlyConfiguredException(detail=message)
 
+    @staticmethod
+    def _iter_route_handler_layers(route_handler: object) -> Iterator[object]:
+        if isinstance(route_handler, Router):
+            for route in route_handler.routes:
+                candidates = (
+                    *cast("tuple[BaseRouteHandler, ...]", getattr(route, "route_handlers", ())),
+                    getattr(route, "route_handler", None),
+                )
+                for handler in candidates:
+                    if isinstance(handler, BaseRouteHandler):
+                        yield from handler.ownership_layers
+        elif isinstance(route_handler, type) and issubclass(route_handler, Controller):
+            yield route_handler
+            for name in dir(route_handler):
+                value = getattr(route_handler, name)
+                if isinstance(value, BaseRouteHandler):
+                    yield value
+        elif isinstance(route_handler, BaseRouteHandler):
+            yield route_handler
 
-def _owner_name(layer: object) -> str:
-    if isinstance(layer, Router):
-        return "router"
-    if isinstance(layer, Controller) or (isinstance(layer, type) and issubclass(layer, Controller)):
-        return "controller"
-    return "handler"
-
-
-def _validate_local_auth(value: object) -> None:
-    from litestar_security.accounts import LocalAuthConfig  # noqa: PLC0415 - account services load only when configured
-
-    if not isinstance(value, LocalAuthConfig):
-        message = "Security local authentication must be a LocalAuthConfig"
-        raise ImproperlyConfiguredException(detail=message)
-
-
-def _iter_route_handler_layers(route_handler: object) -> Iterator[object]:
-    if isinstance(route_handler, Router):
-        for route in route_handler.routes:
-            candidates = (
-                *cast("tuple[BaseRouteHandler, ...]", getattr(route, "route_handlers", ())),
-                getattr(route, "route_handler", None),
-            )
-            for handler in candidates:
-                if isinstance(handler, BaseRouteHandler):
-                    yield from handler.ownership_layers
-    elif isinstance(route_handler, type) and issubclass(route_handler, Controller):
-        yield route_handler
-        for name in dir(route_handler):
-            value = getattr(route_handler, name)
-            if isinstance(value, BaseRouteHandler):
-                yield value
-    elif isinstance(route_handler, BaseRouteHandler):
-        yield route_handler
-
-
-def _layer_dependencies(layer: object) -> Mapping[str, object] | None:
-    dependencies = getattr(layer, "dependencies", None)
-    return cast("Mapping[str, object]", dependencies) if isinstance(dependencies, Mapping) else None
+    @staticmethod
+    def _layer_dependencies(layer: object) -> Mapping[str, object] | None:
+        dependencies = getattr(layer, "dependencies", None)
+        return cast("Mapping[str, object]", dependencies) if isinstance(dependencies, Mapping) else None

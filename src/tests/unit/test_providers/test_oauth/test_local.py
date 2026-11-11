@@ -1,7 +1,8 @@
-from __future__ import annotations
+"""GitHub OAuth provider unit tests."""
 
+from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import Any, TypeAlias
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -18,12 +19,11 @@ from litestar_security.providers.oauth import (
     ProviderTokenSet,
     SecretStr,
 )
+from tests.fixtures.collaborators import RecordingDNSResolver
 
-if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
-    from typing import Any
-
-    Handler = Callable[[httpx.Request], httpx.Response] | Callable[[httpx.Request], Coroutine[Any, Any, httpx.Response]]
+Handler: TypeAlias = (
+    Callable[[httpx.Request], httpx.Response] | Callable[[httpx.Request], Coroutine[Any, Any, httpx.Response]]
+)
 
 
 NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
@@ -64,9 +64,13 @@ def tokens(*, scopes: frozenset[str] = frozenset({"read:user", "user:email"})) -
     )
 
 
-def provider(handler: Handler) -> GitHubOAuthProvider:
+def provider(handler: Handler, *, resolver: RecordingDNSResolver | None = None) -> GitHubOAuthProvider:
+    default_resolver = RecordingDNSResolver({"github.com": ("93.184.216.34",), "api.github.com": ("93.184.216.34",)})
     return GitHubOAuthProvider(
-        client_id="client-id", client_secret=SecretStr("client-secret"), transport=httpx.MockTransport(handler)
+        client_id="client-id",
+        client_secret=SecretStr("client-secret"),
+        transport=httpx.MockTransport(handler),
+        resolver=default_resolver if resolver is None else resolver,
     )
 
 
@@ -182,9 +186,44 @@ async def test_github_revocation_uses_application_endpoint_and_basic_auth() -> N
 
     request = seen[0]
     assert request.method == "DELETE"
-    assert request.url == "https://api.github.com/applications/client-id/token"
+    assert request.url == "https://93.184.216.34/applications/client-id/token"
+    assert request.headers["host"] == "api.github.com"
+    assert request.extensions["sni_hostname"] == "api.github.com"
     assert request.headers["authorization"].startswith("Basic ")
     assert request.read() == b'{"access_token":"access-token"}'
+
+
+async def test_github_closed_client_precedes_invalid_revoke_hint() -> None:
+    github = provider(lambda request: httpx.Response(204, request=request))
+    await github.aclose()
+
+    with pytest.raises(OAuthProviderError, match="OAuth provider client is closed"):
+        await github.revoke(SecretStr("access-token"), token_type_hint="invalid")  # noqa: S106 - invalid token hint
+
+
+@pytest.mark.parametrize("answers", [(), ("not-an-ip-address",), ("10.0.0.1",), ("93.184.216.34", "127.0.0.1")])
+async def test_github_api_rejects_empty_or_non_public_dns_answers(answers: tuple[str, ...]) -> None:
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={}, request=request)
+
+    resolver = RecordingDNSResolver({"github.com": ("93.184.216.34",), "api.github.com": answers})
+    github = provider(handler, resolver=resolver)
+    try:
+        with pytest.raises(OAuthProviderError, match="OAuth provider request failed"):
+            await github.resolve_identity(tokens(), transaction=transaction(), now=NOW)
+        with pytest.raises(OAuthProviderError, match="OAuth provider request failed"):
+            await github.revoke(
+                SecretStr("access-token"),
+                token_type_hint="access_token",  # noqa: S106 - OAuth token kind
+            )
+    finally:
+        await github.aclose()
+
+    assert called is False
 
 
 async def test_github_delegates_code_exchange_refresh_and_close() -> None:

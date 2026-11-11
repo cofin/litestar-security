@@ -16,7 +16,7 @@ Unified, storage-agnostic authentication, authorization, provider verification, 
 - **Install**: `make install` (`uv sync --all-groups --all-extras`)
 - **Focused Unit Tests**: `uv run pytest src/tests/unit/test_<module>.py -q`
 - **Focused Integration Tests**: `uv run pytest src/tests/integration/test_<module>.py -q`
-- **Static & Boundary Gates (`make lint`)**: `uvx prek run --all-files`, `uv run mypy`, `uv run pyright`, `uv run slotscheck src/litestar_security/`, `uv run python tools/check_import_boundaries.py`, `uvx zizmor .github/workflows`
+- **Static & Boundary Gates (`make lint`)**: `uv run prek run --all-files`, `uv run mypy`, `uv run pyright`, `uv run slotscheck src/litestar_security/`, `uv run python tools/check_import_boundaries.py`, `uvx zizmor .github/workflows`
 - **Full Suite & Coverage Gate**: `make check-all` (`>=95%` overall coverage + `100%` branch coverage on `CORE_COVERAGE` modules + wheel/downstream boundary check)
 
 ## Architectural Non-Negotiables

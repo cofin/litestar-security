@@ -1,8 +1,6 @@
 """Integration tests for WebSocket and application-owned admin examples."""
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import pytest
 from examples.app import ExampleSecurityAdmin, create_app
@@ -10,14 +8,14 @@ from litestar.config.csrf import CSRFConfig
 from litestar.exceptions import WebSocketDisconnect
 from litestar.testing import TestClient
 
-if TYPE_CHECKING:
-    from litestar_security import SecurityPlugin
+from litestar_security import SecurityPlugin
 
 
 def test_websocket_mode_accepts_exact_origin_session_and_rejects_url_bearer(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LITESTAR_SECURITY_EXAMPLE", "websocket")
     app = create_app()
     plugin = cast("SecurityPlugin[object]", app.plugins.init[0])
+    assert isinstance(plugin, SecurityPlugin)
     local_auth = plugin.config.local_auth
     assert local_auth is not None
     csrf = app.csrf_config

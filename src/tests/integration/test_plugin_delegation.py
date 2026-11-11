@@ -141,6 +141,7 @@ def _delegating_config(provider: CachedJWKSProvider) -> SecurityConfig[object]:
 
 
 def test_a_second_plugin_delegates_bearer_validation(workload_key: tuple[bytes, bytes]) -> None:
+    """Verify a companion plugin shares one JWKS key set, fetched once across verifying requests."""
     private_pem, public_pem = workload_key
     fetcher = _CountingFetcher(_jwks_document(public_pem))
     provider = CachedJWKSProvider(
@@ -168,7 +169,6 @@ def test_a_second_plugin_delegates_bearer_validation(workload_key: tuple[bytes, 
         "scopes": ["reports:read", "reports:write"],
     }
     assert repeated.status_code == HTTP_200_OK
-    # One key set, fetched once, however many components verify against it.
     assert fetcher.calls == 1
     assert manifest.json()["authorization_servers"] == [ISSUER]
 

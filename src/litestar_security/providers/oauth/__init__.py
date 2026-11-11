@@ -1,7 +1,5 @@
 """OAuth authorization transaction and provider lifecycle contracts."""
 
-from typing import TYPE_CHECKING, Any
-
 from litestar_security.providers.oauth._accounts import (
     AccountLinkError,
     LinkedProviderAccount,
@@ -17,6 +15,7 @@ from litestar_security.providers.oauth._accounts import (
     UnlinkOutcome,
     UnlinkStatus,
 )
+from litestar_security.providers.oauth._local import OAuthLocalAuthTransport
 from litestar_security.providers.oauth._provider import (
     GitHubOAuthProvider,
     InvalidProviderGrantError,
@@ -83,9 +82,6 @@ from litestar_security.providers.oauth._transactions import (
     oauth_binding_cookie,
     pkce_s256,
 )
-
-if TYPE_CHECKING:
-    from litestar_security.providers.oauth._local import OAuthLocalAuthTransport
 
 __all__ = (
     "OAUTH_BINDING_COOKIE_NAME",
@@ -161,13 +157,3 @@ __all__ = (
     "oauth_binding_cookie",
     "pkce_s256",
 )
-
-
-def __getattr__(name: str) -> Any:  # noqa: ANN401 - module lazy-export hooks are dynamically typed
-    """Resolve the local-auth bridge without introducing provider cycles."""
-    if name == "OAuthLocalAuthTransport":
-        from litestar_security.providers.oauth._local import OAuthLocalAuthTransport  # noqa: PLC0415
-
-        return OAuthLocalAuthTransport
-    message = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(message)

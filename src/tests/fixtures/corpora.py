@@ -1,110 +1,116 @@
 """Adversarial input corpora for the security parsers and serializers.
 
-One corpus per boundary, each entry commented with the failure class it stands
-for. ``src/tests/unit/test_input_corpora.py`` parametrizes over them and keeps
-the totality assertion each corpus exists to defend.
+Each boundary has one immutable ``tuple`` corpus whose failure classes and
+required caller arguments are cataloged in this docstring.
+``src/tests/unit/test_input_corpora.py`` parametrizes over them to enforce
+totality and sanitization guarantees.
 
-Every corpus is a ``tuple``, so it is immutable and safe to share at any scope.
-
-**A corpus is only half of a boundary.** The properties pass non-default
-arguments that make their boundary values meaningful, and those arguments die
-with the property file. They are restated here:
+**Caller arguments defining boundary values:**
 
 ===============================  =============================================
 Corpus                           Argument that makes its boundary meaningful
 ===============================  =============================================
 ``JWT_LIKE_TOKENS``              ``maximum_token_bytes=512``,
-                                 ``maximum_json_depth=8``. The library defaults
-                                 are 16,384 and 32, so the 512-boundary and
-                                 depth-8/9 entries mean nothing without them.
+                                 ``maximum_json_depth=8`` (library defaults are
+                                 16,384 and 32).
 ``ADVERSARIAL_TEXT`` (refresh)   ``RefreshTokenCodec(pepper=b"r" * 32)``
 ``ADVERSARIAL_TEXT`` (API key)   ``APIKeyCodec(pepper=b"p" * 32)``
 ``HANDSHAKE_BYTES``              ``WebSocketSecurityConfig()``,
                                  ``uses_cookie_credentials=False``
-``CSP_DIRECTIVES``               Parametrized as a product with
-                                 ``CSP_SOURCE_LISTS``, so the directive
-                                 name and the source arity vary
-                                 independently.
-``CSP_SOURCE_LISTS``             Its empty entry reaches the bare-directive
-                                 branch and its duplicate pair reaches the
-                                 deduplication branch.
+``CSP_DIRECTIVES``               Parametrized as a Cartesian product with
+                                 ``CSP_SOURCE_LISTS`` so directive name and
+                                 source arity vary independently.
+``CSP_SOURCE_LISTS``             Empty entry hits the bare-directive branch;
+                                 duplicate pair hits deduplication.
 ===============================  =============================================
 
-Confusable and bidirectional characters are written as escapes. Ruff runs
-``select = ["ALL"]`` and the test-tree ignores cover only ANN/D/PLR2004/S101, so
-a literal confusable trips RUF001/RUF003 and a literal bidi override trips
-PLE2502 -- and the escaped form is the readable one in a diff anyway.
-"""
+**Corpus inventory and entry failure classes:**
 
-from __future__ import annotations
+- ``ADVERSARIAL_TEXT``: untrusted text shared across refresh-token, API-key,
+  and CSP checks covering empty string, whitespace-only text, NUL, C0 control,
+  DEL, CRLF header injection, oversized 4096-byte text, astral-plane character,
+  Cyrillic ``a`` confusable, right-to-left bidi override, percent-encoded NUL,
+  and percent-encoded CRLF. Confusable and bidirectional code points remain
+  escaped in source so Ruff ``RUF001``/``RUF003``/``PLE2502`` stay satisfied.
+- ``IDENTIFIERS``: valid policy requirement names from
+  ``r"[a-z][a-z0-9-]{0,31}"`` covering 1-char minimum, 32-char maximum,
+  all-hyphen tail, trailing digit, unsorted pair preserving caller order,
+  multi-entry ordered tuple, and shared prefixes staying distinct.
+- ``ARBITRARY_RUNTIME_VALUES``: untyped inputs to ``APIKeyCodec.proof`` covering
+  empty/plausible text, empty/non-UTF-8/oversized bytes, zero/negative/65-bit
+  integers, ``None``, ``bool`` subclassing ``int``, bare ``object()``, and list
+  container.
+- ``JWT_LIKE_TOKENS``: malformed or boundary-sized compact JWT candidates under
+  ``maximum_token_bytes=512`` covering empty, 1/2/4 segments, three empty
+  segments, non-base64 segments, and 511/512/513-byte lengths.
+- ``JWT_DEPTH_BOMBS``: computed three-segment JWTs straddling
+  ``maximum_json_depth=8`` (7 nested objects accepted; 8 nested objects
+  rejected). Re-measure both if the depth bound changes.
+- ``CSP_SOURCES``: legal source expressions from
+  ``r"[A-Za-z0-9'/:._*+-]{1,64}"`` covering 1-char minimum, 64-char maximum,
+  quoted ``'self'``, HTTPS origin, wildcard host, base64 hash characters, bare
+  ``data:`` scheme, explicit port, and remaining punctuation ``-_.``.
+- ``CSP_DIRECTIVES``: legal directive names covering 1-char minimum, 32-char
+  maximum, digit suffix, all-hyphen tail, and canonical ``script-src``.
+- ``CSP_SOURCE_LISTS``: 0-to-8 source lists covering empty bare serialization,
+  single source, three mixed sources, duplicate collapse, and 8-host width.
+- ``PKCE_VERIFIERS``: RFC 7636 unreserved verifiers covering 43-char minimum,
+  128-char maximum, hyphen-terminated minimum, full unreserved alphabet, and
+  48-char punctuation-only verifier producing 43-char unpadded base64url S256.
+- ``HANDSHAKE_BYTES``: WebSocket ``(query_string, headers)`` pairs covering
+  empty input, non-UTF-8 query string, empty/oversized query token, 32/128-byte
+  query boundaries, embedded query NUL, duplicate ``cookie`` headers, empty
+  origin, non-UTF-8 header pair, oversized origin, and CRLF header injection.
+"""
 
 import json
 from base64 import urlsafe_b64encode
 
-# Shared by the refresh-token, API-key and CSP properties: untrusted text that
-# must produce one sanitized outcome rather than an exception or a leak.
-# Covers test_refresh_token_parser_returns_one_sanitized_outcome and
-# test_csp_rejects_or_safely_serializes_arbitrary_sources.
 ADVERSARIAL_TEXT: tuple[str, ...] = (
-    "",  # empty
-    " ",  # whitespace only
-    "\x00",  # NUL
-    "\x1f",  # C0 control
-    "\x7f",  # DEL
-    "\r\n",  # header injection
-    "a" * 4096,  # oversized
-    "\U0001f600",  # astral plane
-    "\u0430dmin",  # unicode-confusable: Cyrillic a
-    "\u202eadmin",  # bidi override
-    "%00",  # percent-encoded NUL
-    "%0d%0a",  # percent-encoded CRLF
+    "",
+    " ",
+    "\x00",
+    "\x1f",
+    "\x7f",
+    "\r\n",
+    "a" * 4096,
+    "\U0001f600",
+    "\u0430dmin",
+    "\u202eadmin",
+    "%00",
+    "%0d%0a",
 )
 
-# Policy requirement names, from r"[a-z][a-z0-9-]{0,31}".
-# Covers test_policy_normalization_preserves_explicit_unique_order, whose point
-# is that explicit order and uniqueness survive normalization.
 IDENTIFIERS: tuple[tuple[str, ...], ...] = (
-    ("a",),  # shortest legal name
-    ("a" + "b" * 31,),  # longest legal name, 32 characters
-    ("a---------------",),  # all-hyphen tail
-    ("a1",),  # digit after the leading letter
-    ("beta", "alpha"),  # order is significant and must not be sorted
-    ("alpha", "beta", "gamma"),  # multiple, already ordered
-    ("a", "a-b", "a-b-c"),  # shared prefixes must stay distinct
+    ("a",),
+    ("a" + "b" * 31,),
+    ("a---------------",),
+    ("a1",),
+    ("beta", "alpha"),
+    ("alpha", "beta", "gamma"),
+    ("a", "a-b", "a-b-c"),
 )
 
-# Values reaching APIKeyCodec.proof from a runtime that never type-checked them.
-# Covers test_api_key_parser_is_total_for_arbitrary_runtime_values: the parser
-# must be total, returning None or a 32-byte digest, for any object at all.
 ARBITRARY_RUNTIME_VALUES: tuple[object, ...] = (
-    "",  # empty text
-    "valid-looking-key",  # plausible text
-    b"",  # empty bytes
-    b"\xff\xfe",  # non-UTF-8 bytes
-    b"a" * 512,  # oversized bytes
-    0,  # falsy integer
-    -1,  # negative integer
-    2**64,  # integer beyond 64 bits
-    None,  # missing value
-    True,  # bool, which is also an int
-    object(),  # arbitrary object with no text protocol
-    ["key"],  # container instead of a scalar
+    "",
+    "valid-looking-key",
+    b"",
+    b"\xff\xfe",
+    b"a" * 512,
+    0,
+    -1,
+    2**64,
+    None,
+    True,
+    object(),
+    ["key"],
 )
 
-# Tokens presented where a compact JWT is expected.
-# Covers test_unverified_jwt_parser_is_bounded_and_total, which passes
-# maximum_token_bytes=512 and maximum_json_depth=8 -- both boundaries below
-# refer to those limits, not to the library defaults.
-JWT_LIKE_TOKENS: tuple[str, ...] = (
-    "",  # empty
-    "a",  # one segment
-    "a.b",  # two segments
-    "a.b.c.d",  # four segments
-    "..",  # three empty segments
-    "!!!.!!!.!!!",  # non-base64 segments
-    "a" * 511,  # one byte under the 512-byte bound
-    "a" * 512,  # exactly the 512-byte bound
-    "a" * 513,  # one byte over the 512-byte bound
+JWT_LIKE_TOKENS: tuple[str, ...] = ("", "a", "a.b", "a.b.c.d", "..", "!!!.!!!.!!!", "a" * 511, "a" * 512, "a" * 513)
+
+_SIGNATURE_SEGMENT = urlsafe_b64encode(b"signature").rstrip(b"=").decode("ascii")
+_HEADER_SEGMENT = (
+    urlsafe_b64encode(json.dumps({"alg": "none"}, separators=(",", ":")).encode("utf-8")).rstrip(b"=").decode("ascii")
 )
 
 
@@ -124,84 +130,49 @@ def _depth_bomb(depth: int) -> str:
     return f"{_HEADER_SEGMENT}.{encoded}.{_SIGNATURE_SEGMENT}"
 
 
-_SIGNATURE_SEGMENT = urlsafe_b64encode(b"signature").rstrip(b"=").decode("ascii")
-_HEADER_SEGMENT = (
-    urlsafe_b64encode(json.dumps({"alg": "none"}, separators=(",", ":")).encode("utf-8")).rstrip(b"=").decode("ascii")
-)
+JWT_DEPTH_BOMBS: tuple[str, ...] = (_depth_bomb(7), _depth_bomb(8))
 
-# Depth bombs, separate because they are computed rather than literal. The pair
-# straddles the limit: measured against the property's maximum_json_depth=8, a
-# payload of 7 nested objects parses and one of 8 does not. A pair that does not
-# straddle proves nothing, so re-measure before changing either number.
-JWT_DEPTH_BOMBS: tuple[str, ...] = (
-    _depth_bomb(7),  # deepest payload still accepted at maximum_json_depth=8
-    _depth_bomb(8),  # shallowest payload rejected at maximum_json_depth=8
-)
-
-# Content-Security-Policy source expressions, from r"[A-Za-z0-9'/:._*+-]{1,64}".
-# Covers test_csp_serialization_is_deterministic_and_control_free, whose
-# assertions are that serialization is idempotent and control-character free.
 CSP_SOURCES: tuple[str, ...] = (
-    "a",  # shortest legal source
-    "a" * 64,  # longest legal source
-    "'self'",  # quoted keyword
-    "https://cdn.example.com",  # scheme, colon and slashes
-    "*.example.com",  # wildcard host
-    "sha256-abc+def/ghi",  # plus and slash, as in a base64 hash
-    "data:",  # bare scheme
-    "example.com:8443",  # explicit port
-    "a-b_c.d",  # every remaining allowed punctuation
+    "a",
+    "a" * 64,
+    "'self'",
+    "https://cdn.example.com",
+    "*.example.com",
+    "sha256-abc+def/ghi",
+    "data:",
+    "example.com:8443",
+    "a-b_c.d",
 )
 
-# Directive names, from the same r"[a-z][a-z0-9-]{0,31}" the CSP boundary draws
-# its first argument from. CSP_SOURCES varies only the source expression, so
-# without these the directive-name axis is untested.
-CSP_DIRECTIVES: tuple[str, ...] = (
-    "a",  # shortest legal directive name
-    "a" + "b" * 31,  # longest legal directive name, 32 characters
-    "a1",  # digit after the leading letter
-    "a---------------",  # all-hyphen tail
-    "script-src",  # a real directive, for readability of the failure
-)
+CSP_DIRECTIVES: tuple[str, ...] = ("a", "a" + "b" * 31, "a1", "a---------------", "script-src")
 
-# Source lists, from lists of up to 8 unique sources. The minimum size is zero,
-# so an empty list is a live input reaching a distinct branch: a directive
-# serialized with no sources at all.
 CSP_SOURCE_LISTS: tuple[tuple[str, ...], ...] = (
-    (),  # empty: the directive serializes bare, verified -> "script-src"
-    ("a",),  # single source
-    ("'self'", "https://cdn.example.com", "*.example.com"),  # several
-    ("a", "a"),  # duplicates: deduplicated, verified -> "script-src a"
-    tuple(f"s{index}.example.com" for index in range(8)),  # the widest list
+    (),
+    ("a",),
+    ("'self'", "https://cdn.example.com", "*.example.com"),
+    ("a", "a"),
+    tuple(f"s{index}.example.com" for index in range(8)),
 )
 
-# PKCE code verifiers, from the RFC 7636 unreserved alphabet.
-# Covers test_pkce_challenges_are_unpadded_fixed_base64url, which asserts the
-# challenge is always exactly 43 unpadded base64url characters.
 PKCE_VERIFIERS: tuple[str, ...] = (
-    "a" * 43,  # RFC 7636 minimum length
-    "a" * 128,  # RFC 7636 maximum length
-    "a" * 42 + "-",  # minimum length ending in a hyphen
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~" + "a" * 44,  # full unreserved alphabet
-    "-._~" * 12,  # punctuation only, 48 characters
+    "a" * 43,
+    "a" * 128,
+    "a" * 42 + "-",
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~" + "a" * 44,
+    "-._~" * 12,
 )
 
-# WebSocket handshake scopes, as (query_string, headers) pairs.
-# Covers test_websocket_handshake_parser_fails_only_with_typed_transport_error,
-# which builds a scope with WebSocketSecurityConfig() and
-# uses_cookie_credentials=False: the parser must either return a handshake or
-# raise WebSocketException, never anything else.
 HANDSHAKE_BYTES: tuple[tuple[bytes, list[tuple[bytes, bytes]]], ...] = (
-    (b"", []),  # empty query string and no headers
-    (b"\xff\xfe", []),  # non-UTF-8 query string
-    (b"token=", []),  # present but empty parameter
-    (b"token=" + b"a" * 128, []),  # oversized parameter value
-    (b"a" * 32, []),  # 32-byte query-string boundary
-    (b"a" * 128, []),  # 128-byte query-string boundary
-    (b"token=a\x00b", []),  # embedded NUL in the query string
-    (b"", [(b"cookie", b"a=1"), (b"cookie", b"b=2")]),  # duplicate header names
-    (b"", [(b"origin", b"")]),  # empty origin
-    (b"", [(b"\xff", b"\xfe")]),  # non-UTF-8 header name and value
-    (b"", [(b"origin", b"a" * 128)]),  # oversized header value
-    (b"", [(b"origin", b"https://app.example\r\nx: y")]),  # header injection attempt
+    (b"", []),
+    (b"\xff\xfe", []),
+    (b"token=", []),
+    (b"token=" + b"a" * 128, []),
+    (b"a" * 32, []),
+    (b"a" * 128, []),
+    (b"token=a\x00b", []),
+    (b"", [(b"cookie", b"a=1"), (b"cookie", b"b=2")]),
+    (b"", [(b"origin", b"")]),
+    (b"", [(b"\xff", b"\xfe")]),
+    (b"", [(b"origin", b"a" * 128)]),
+    (b"", [(b"origin", b"https://app.example\r\nx: y")]),
 )
