@@ -432,6 +432,25 @@ def test_iap_build_rejects_non_callable_clock_and_accepts_audience_set(
         (
             GoogleIAPClaims(
                 subject=(
+                    "principal://agents.global.proj-789.system.id.goog/"
+                    "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+                )
+            ),
+            (
+                "principal://agents.global.proj-789.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+            (
+                "principal://agents.global.proj-789.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+            False,
+            True,
+            True,
+        ),
+        (
+            GoogleIAPClaims(
+                subject=(
                     "principalSet://agents.global.org-123456.system.id.goog/"
                     "resources/aiplatform/projects/789/locations/us-central1"
                 )
@@ -449,9 +468,123 @@ def test_iap_build_rejects_non_callable_clock_and_accepts_audience_set(
             True,
         ),
         (
+            GoogleIAPClaims(
+                subject=(
+                    "accounts.google.com:principalSet://agents.global.org-123456.system.id.goog/"
+                    "attribute.platformContainer/aiplatform/projects/789"
+                )
+            ),
+            (
+                "principalSet://agents.global.org-123456.system.id.goog/"
+                "attribute.platformContainer/aiplatform/projects/789"
+            ),
+            (
+                "principalSet://agents.global.org-123456.system.id.goog/"
+                "attribute.platformContainer/aiplatform/projects/789"
+            ),
+            False,
+            True,
+            True,
+        ),
+        (
+            GoogleIAPClaims(
+                subject=(
+                    "accounts.google.com:principal://agents-nonprod.global.org-123456.system.id.goog/"
+                    "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+                )
+            ),
+            (
+                "principal://agents-nonprod.global.org-123456.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+            (
+                "principal://agents-nonprod.global.org-123456.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+            False,
+            True,
+            True,
+        ),
+        (
+            GoogleIAPClaims(
+                subject=(
+                    "principal://agents-nonprod.global.proj-789.system.id.goog/"
+                    "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+                )
+            ),
+            (
+                "principal://agents-nonprod.global.proj-789.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+            (
+                "principal://agents-nonprod.global.proj-789.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+            False,
+            True,
+            True,
+        ),
+        (
+            GoogleIAPClaims(
+                subject=(
+                    "accounts.google.com:principalSet://agents-nonprod.global.org-123456.system.id.goog/"
+                    "attribute.platformContainer/staging-aiplatform/projects/789"
+                )
+            ),
+            (
+                "principalSet://agents-nonprod.global.org-123456.system.id.goog/"
+                "attribute.platformContainer/staging-aiplatform/projects/789"
+            ),
+            (
+                "principalSet://agents-nonprod.global.org-123456.system.id.goog/"
+                "attribute.platformContainer/staging-aiplatform/projects/789"
+            ),
+            False,
+            True,
+            True,
+        ),
+        (
+            GoogleIAPClaims(
+                subject=(
+                    "principalSet://agents-nonprod.global.org-123456.system.id.goog/"
+                    "attribute.platformContainer/staging-aiplatform/projects/789"
+                )
+            ),
+            (
+                "principalSet://agents-nonprod.global.org-123456.system.id.goog/"
+                "attribute.platformContainer/staging-aiplatform/projects/789"
+            ),
+            (
+                "principalSet://agents-nonprod.global.org-123456.system.id.goog/"
+                "attribute.platformContainer/staging-aiplatform/projects/789"
+            ),
+            False,
+            True,
+            True,
+        ),
+        (
             GoogleIAPClaims(subject="accounts.google.com:spiffe://trust.domain/ns/default/sa/agent"),
             "spiffe://trust.domain/ns/default/sa/agent",
             "spiffe://trust.domain/ns/default/sa/agent",
+            False,
+            True,
+            True,
+        ),
+        (
+            GoogleIAPClaims(
+                subject=(
+                    "spiffe://agents-nonprod.global.org-123456.system.id.goog/"
+                    "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+                )
+            ),
+            (
+                "spiffe://agents-nonprod.global.org-123456.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+            (
+                "spiffe://agents-nonprod.global.org-123456.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
             False,
             True,
             True,
@@ -463,6 +596,23 @@ def test_iap_build_rejects_non_callable_clock_and_accepts_audience_set(
                 external_identity=GoogleIAPExternalIdentity(subject="external-1"),
             ),
             "spiffe://trust.domain/ns/default/sa/agent",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(
+                subject=(
+                    "accounts.google.com:principalSet://agents-nonprod.global.org-123456.system.id.goog/"
+                    "attribute.platformContainer/staging-aiplatform/projects/789"
+                ),
+                external_identity=GoogleIAPExternalIdentity(subject="external-1"),
+            ),
+            (
+                "principalSet://agents-nonprod.global.org-123456.system.id.goog/"
+                "attribute.platformContainer/staging-aiplatform/projects/789"
+            ),
             None,
             False,
             False,
@@ -570,6 +720,91 @@ def test_iap_build_rejects_non_callable_clock_and_accepts_audience_set(
             False,
         ),
         (
+            GoogleIAPClaims(subject="principal://agents-nonprod.global./resources/agent-1"),
+            "principal://agents-nonprod.global./resources/agent-1",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(
+                subject=(
+                    "principalSet://agents-nonprod.global./attribute.platformContainer/staging-aiplatform/projects/789"
+                )
+            ),
+            "principalSet://agents-nonprod.global./attribute.platformContainer/staging-aiplatform/projects/789",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(subject="principalSet://agents-nonprod.global.org-123456.system.id.goog"),
+            "principalSet://agents-nonprod.global.org-123456.system.id.goog",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(subject="principalSet://agents-nonprod.global.org-123456.system.id.goog/"),
+            "principalSet://agents-nonprod.global.org-123456.system.id.goog/",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(
+                subject=(
+                    "principalSet://agents-nonprod.global.org-123456.system.id.goog/"
+                    "attribute.platformContainer/../admin"
+                )
+            ),
+            "principalSet://agents-nonprod.global.org-123456.system.id.goog/attribute.platformContainer/../admin",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(
+                subject="principal://agents-nonprod.global.org-123456.system.id.goog/resources/agent?env=staging"
+            ),
+            "principal://agents-nonprod.global.org-123456.system.id.goog/resources/agent?env=staging",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(
+                subject="principal://agents-nonprod.global.org-123456.system.id.goog/resources/agent#section"
+            ),
+            "principal://agents-nonprod.global.org-123456.system.id.goog/resources/agent#section",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(subject="principal://agents-nonprod.global-evil.org/resources/agent-1"),
+            "principal://agents-nonprod.global-evil.org/resources/agent-1",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
+            GoogleIAPClaims(subject="principalSet://agents-other.global.org-123456.system.id.goog/resources/agent-1"),
+            "principalSet://agents-other.global.org-123456.system.id.goog/resources/agent-1",
+            None,
+            False,
+            False,
+            False,
+        ),
+        (
             GoogleIAPClaims(subject="https://example.com/workload"),
             "https://example.com/workload",
             None,
@@ -603,3 +838,69 @@ def test_iap_claims_classify_human_service_account_and_spiffe_agent_identities( 
     assert claims.is_service_account is expected_service_account
     assert claims.is_agent_identity is expected_agent_identity
     assert claims.is_machine_principal is expected_machine_principal
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected_spiffe_id"),
+    [
+        (
+            (
+                "accounts.google.com:principal://agents.global.org-123456.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+            (
+                "principal://agents.global.org-123456.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+        ),
+        (
+            (
+                "principalSet://agents.global.org-123456.system.id.goog/"
+                "attribute.platformContainer/aiplatform/projects/789"
+            ),
+            (
+                "principalSet://agents.global.org-123456.system.id.goog/"
+                "attribute.platformContainer/aiplatform/projects/789"
+            ),
+        ),
+        (
+            (
+                "accounts.google.com:principal://agents-nonprod.global.org-123456.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+            (
+                "principal://agents-nonprod.global.org-123456.system.id.goog/"
+                "resources/aiplatform/projects/789/locations/us-central1/reasoningEngines/42"
+            ),
+        ),
+        (
+            (
+                "accounts.google.com:principalSet://agents-nonprod.global.org-123456.system.id.goog/"
+                "attribute.platformContainer/staging-aiplatform/projects/789"
+            ),
+            (
+                "principalSet://agents-nonprod.global.org-123456.system.id.goog/"
+                "attribute.platformContainer/staging-aiplatform/projects/789"
+            ),
+        ),
+    ],
+)
+async def test_iap_authenticates_prod_and_nonprod_agent_assertions_without_email(
+    iap_key_material: tuple[bytes, VerificationKey], subject: str, expected_spiffe_id: str
+) -> None:
+    private, key = iap_key_material
+    _, mechanism, _, _ = _runtime(key)
+    claims = _claims(sub=subject)
+    claims.pop("email")
+
+    outcome = await mechanism.authenticator.authenticate(
+        _token(private, claims=claims), type("Connection", (), {"scope": {"headers": []}})()
+    )
+
+    assert isinstance(outcome, Authenticated)
+    assert outcome.claims.email is None
+    assert outcome.claims.normalized_subject == expected_spiffe_id
+    assert outcome.claims.spiffe_id == expected_spiffe_id
+    assert outcome.claims.is_service_account is False
+    assert outcome.claims.is_agent_identity is True
+    assert outcome.claims.is_machine_principal is True
