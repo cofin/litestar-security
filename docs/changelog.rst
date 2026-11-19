@@ -1,6 +1,31 @@
 Changelog
 =========
 
+0.7.3
+-----
+
+Changed
+~~~~~~~
+
+* Upgrade ``ruff`` and ``ruff-pre-commit`` to v0.17.6
+  (`#89 <https://github.com/cofin/litestar-security/pull/89>`__,
+  `#92 <https://github.com/cofin/litestar-security/pull/92>`__),
+  and ``conventional-pre-commit`` to v4.5.0
+  (`#92 <https://github.com/cofin/litestar-security/pull/92>`__).
+
+Fixed
+~~~~~
+
+* :attr:`litestar_security.providers.iap.GoogleIAPClaims.spiffe_id` recognizes
+  nonprod Google Cloud Agent Identity subjects
+  (``principal://agents-nonprod.global....`` and
+  ``principalSet://agents-nonprod.global....``) issued by staging and autopush
+  environments, so
+  :attr:`~litestar_security.providers.iap.GoogleIAPClaims.is_agent_identity` and
+  :attr:`~litestar_security.providers.iap.GoogleIAPClaims.is_machine_principal`
+  return ``True`` for those callers
+  (`#91 <https://github.com/cofin/litestar-security/issues/91>`__, `#92 <https://github.com/cofin/litestar-security/pull/92>`__).
+
 0.7.2
 -----
 

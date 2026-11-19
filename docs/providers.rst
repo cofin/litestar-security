@@ -104,10 +104,12 @@ prefixes or ``email`` suffixes manually:
   (no ``external_identity`` or ``hosted_domain``) whose ``email`` ends with
   ``gserviceaccount.com`` or ``.gserviceaccount.com``.
 * ``claims.spiffe_id`` returns the validated ``principal://agents.global....``,
-  ``principalSet://agents.global....``, or ``spiffe://...`` URI when present
-  (and ``None`` for human users, service accounts, or GCIP external identities).
+  ``principalSet://agents.global....``, ``principal://agents-nonprod.global....``,
+  ``principalSet://agents-nonprod.global....``, or ``spiffe://...`` URI when
+  present (and ``None`` for human users, service accounts, or GCIP external
+  identities).
 * ``claims.is_agent_identity`` and ``claims.is_machine_principal`` classify
-  SPIFFE / Agent Engine workloads and combined non-human principals.
+  SPIFFE / Agent Identity workloads and combined non-human principals.
 
 .. code-block:: python
 

@@ -37,7 +37,13 @@ _IAP_ISSUER = "https://cloud.google.com/iap"
 _IAP_JWKS_URI = "https://www.gstatic.com/iap/verify/public_key-jwk"
 _IAP_HEADER = "X-Goog-IAP-JWT-Assertion"
 _IAP_SUBJECT_PREFIX = "accounts.google.com:"
-_SPIFFE_URI_PREFIXES = ("principal://agents.global.", "principalSet://agents.global.", "spiffe://")
+_SPIFFE_URI_PREFIXES = (
+    "principal://agents.global.",
+    "principalSet://agents.global.",
+    "principal://agents-nonprod.global.",
+    "principalSet://agents-nonprod.global.",
+    "spiffe://",
+)
 _SERVICE_ACCOUNT_DOMAIN = "gserviceaccount.com"
 _SERVICE_ACCOUNT_DOMAIN_SUFFIX = ".gserviceaccount.com"
 _MAXIMUM_ASSERTION_BYTES = 16_384
@@ -78,10 +84,12 @@ class GoogleIAPClaims:
 
     @property
     def spiffe_id(self) -> str | None:
-        """Return the SPIFFE or Vertex AI Agent Engine principal URI when present.
+        """Return the SPIFFE or Google Cloud Agent Identity principal URI when present.
 
+        Recognizes production (``agents.global.``) and nonprod (``agents-nonprod.global.``)
+        ``principal://`` and ``principalSet://`` URIs alongside ``spiffe://`` URIs.
         Returns ``None`` when ``external_identity`` is present (GCIP assertions)
-        or when ``normalized_subject`` is not a well-formed SPIFFE / Agent Engine URI.
+        or when ``normalized_subject`` is not a well-formed SPIFFE / Agent Identity URI.
         """
         if self.external_identity is not None:
             return None
@@ -122,7 +130,7 @@ class GoogleIAPClaims:
 
     @property
     def is_agent_identity(self) -> bool:
-        """Return ``True`` when the assertion represents a SPIFFE or Agent Engine identity."""
+        """Return ``True`` when the assertion represents a SPIFFE or Agent Identity principal."""
         return self.spiffe_id is not None
 
     @property

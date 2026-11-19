@@ -38,7 +38,7 @@ license = { text = "MIT" }
 name = "litestar-security"
 readme = "README.md"
 requires-python = ">=3.10"
-version = "0.7.2"
+version = "0.7.3"
 
 [project.optional-dependencies]
 argon2 = ["argon2-cffi>=25.1,<26"]
@@ -73,7 +73,7 @@ packages = ["src/litestar_security"]
 [tool.bumpversion]
 allow_dirty = true
 commit = false
-current_version = "0.7.2"
+current_version = "0.7.3"
 ignore_missing_files = false
 ignore_missing_version = false
 parse = """(?x)
