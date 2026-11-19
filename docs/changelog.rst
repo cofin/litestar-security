@@ -7,9 +7,11 @@ Changelog
 Changed
 ~~~~~~~
 
-* Upgrade ``ruff`` and ``ruff-pre-commit`` to v0.17.5
+* Upgrade ``ruff`` and ``ruff-pre-commit`` to v0.17.6
   (`#89 <https://github.com/cofin/litestar-security/pull/89>`__,
-  `#92 <https://github.com/cofin/litestar-security/pull/92>`__).
+  `#92 <https://github.com/cofin/litestar-security/pull/92>`__),
+  and ``conventional-pre-commit`` to v4.5.0
+  (`#92 <https://github.com/cofin/litestar-security/pull/92>`__).
 
 Fixed
 ~~~~~
