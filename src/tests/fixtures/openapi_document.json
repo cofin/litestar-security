@@ -98,6 +98,14 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "totp_method_ids": {
+            "default": [],
+            "description": "The active TOTP method identifiers enrolled for this account, when TOTP is permitted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -432,12 +440,17 @@
       "PasskeyAuthenticationStart": {
         "properties": {
           "account_id": {
-            "type": "string"
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
-        "required": [
-          "account_id"
-        ],
+        "required": [],
         "title": "PasskeyAuthenticationStart",
         "type": "object"
       },
@@ -539,7 +552,14 @@
       "PasskeyVerification": {
         "properties": {
           "account_id": {
-            "type": "string"
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "binding": {
             "oneOf": [
@@ -566,7 +586,6 @@
           }
         },
         "required": [
-          "account_id",
           "response"
         ],
         "title": "PasskeyVerification",

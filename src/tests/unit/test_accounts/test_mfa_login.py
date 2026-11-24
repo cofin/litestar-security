@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pyotp
 import pytest
 from litestar.exceptions import ImproperlyConfiguredException
 
@@ -22,6 +23,7 @@ from tests.fixtures.accounts import (
     MFALoginVerificationService,
     MFAProtector,
     MFAStore,
+    RecoveryLoginMethods,
     ScriptedTOTPVerificationService,
     build_mfa_service,
 )
@@ -166,6 +168,7 @@ async def test_mfa_login_verifies_only_the_selected_factor(
         ({"methods": frozenset()}, "methods"),
         ({"ttl": timedelta()}, "lifetime"),
         ({"clock": object()}, "callable"),
+        ({"login_methods": object()}, "login methods"),
     ],
 )
 def test_mfa_login_service_rejects_incomplete_or_unbounded_dependencies(kwargs: dict[str, object], match: str) -> None:
@@ -351,12 +354,17 @@ async def test_local_auth_mfa_completion_fail_closes_collaborator_failures(failu
 
 def test_local_mfa_wire_representations_redact_challenge_and_factor_proof() -> None:
     required = accounts_module.LocalMFAChallenge(
-        challenge="challenge-secret", account_id="account-1", expires_at=_NOW, methods=("totp",)
+        challenge="challenge-secret",
+        account_id="account-1",
+        expires_at=_NOW,
+        methods=("totp",),
+        totp_method_ids=("totp-1",),
     )
     completion = accounts_module.LocalMFACompletion(
         challenge="challenge-secret", account_id="account-1", method="totp", code="factor-secret"
     )
     assert "challenge-secret" not in repr(required)
+    assert "totp_method_ids=('totp-1',)" in repr(required)
     assert "challenge-secret" not in repr(completion)
     assert "factor-secret" not in repr(completion)
 
@@ -594,3 +602,176 @@ async def test_local_auth_mfa_completion_burns_a_wrong_factor_before_a_retry() -
             InvalidCredentials,
         )
     assert factors.codes == ["wrong"]
+
+
+class _ScriptedLoginMethodStore(RecoveryLoginMethods):
+    """Login-method store returning configured methods or raising on list."""
+
+    def __init__(self, methods: tuple[accounts_module.LoginMethod, ...] = (), *, fail_list: bool = False) -> None:
+        super().__init__(accounts_module.RevokeLoginMethodOutcome(accounts_module.RevokeLoginMethodStatus.REVOKED))
+        self.methods = methods
+        self.fail_list = fail_list
+        self.list_calls: list[str] = []
+
+    async def list_methods(self, account_id: str) -> tuple[accounts_module.LoginMethod, ...]:
+        self.list_calls.append(account_id)
+        if self.fail_list:
+            raise OSError
+        return self.methods
+
+
+class _StrSubclass(str):
+    __slots__ = ()
+
+
+async def test_mfa_login_issue_populates_sorted_totp_method_ids_and_fails_closed_before_put() -> None:
+    account = accounts_module.LocalAccountState(
+        account_id="account-1",
+        normalized_identifier="person@example.com",
+        display_name="Person",
+        active=True,
+        verified=True,
+        security_epoch=0,
+    )
+    methods_store = _ScriptedLoginMethodStore((
+        accounts_module.LoginMethod(method_id="password-1", kind="password", created_at=_NOW),
+        accounts_module.LoginMethod(method_id="totp-b", kind="totp", created_at=_NOW),
+        accounts_module.LoginMethod(method_id="passkey-1", kind="passkey", created_at=_NOW),
+        accounts_module.LoginMethod(method_id="totp-a", kind="totp", created_at=_NOW),
+    ))
+    store = testing_module.InMemoryMFALoginChallengeStore()
+    service = mfa_login_module.MFALoginService(
+        store=store,
+        mfa=accounts_module.MFAService(
+            store=MFAStore(), secret_protector=MFAProtector(), clock=lambda: _NOW, login_methods=methods_store
+        ),
+        pepper=b"p" * 32,
+        clock=lambda: _NOW,
+        entropy=lambda size: b"x" * size,
+    )
+    issued = await service.issue(account, client_key="127.0.0.1")
+    assert isinstance(issued, MFARequired)
+    assert issued.totp_method_ids == ("totp-a", "totp-b")
+    assert methods_store.list_calls == ["account-1"]
+
+    recovery_only = replace(service, methods=frozenset({"recovery-code"}))
+    recovery_issued = await recovery_only.issue(account, client_key="127.0.0.1")
+    assert isinstance(recovery_issued, MFARequired)
+    assert recovery_issued.totp_method_ids == ()
+    assert methods_store.list_calls == ["account-1"]
+
+    failing_store = testing_module.InMemoryMFALoginChallengeStore()
+    failing_methods = _ScriptedLoginMethodStore(fail_list=True)
+    failing_service = mfa_login_module.MFALoginService(
+        store=failing_store,
+        mfa=build_mfa_service(MFAStore(), MFAProtector(), now=_NOW),
+        pepper=b"p" * 32,
+        clock=lambda: _NOW,
+        entropy=lambda size: b"y" * size,
+        login_methods=failing_methods,
+    )
+    assert await failing_service.issue(account, client_key="127.0.0.1") == VerificationUnavailable()
+    assert failing_store.challenges == {}
+
+
+async def test_mfa_login_verify_totp_without_method_id_resolves_enrolled_factors() -> None:
+    seed_a = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    seed_b = "MFRGGZDFMZTWQ2LKNNWG23TPOBYXE43U"
+    seeds = iter((seed_a, seed_b))
+    identifiers = iter(("enroll-a", "totp-a", "enroll-b", "totp-b"))
+    current_time = [_NOW]
+    mfa_store = MFAStore()
+    login_methods = _ScriptedLoginMethodStore()
+    mfa = accounts_module.MFAService(
+        store=mfa_store,
+        secret_protector=MFAProtector(),
+        clock=lambda: current_time[0],
+        secret_generator=lambda: next(seeds),
+        identifiers=lambda: next(identifiers),
+        login_methods=login_methods,
+    )
+    grant_a = await mfa.begin_totp_enrollment("account-1", label="alice@example.com")
+    assert isinstance(grant_a, accounts_module.TOTPProvisioningGrant)
+    activated_a = await mfa.activate_totp("account-1", grant_a.enrollment_id, pyotp.TOTP(seed_a).at(current_time[0]))
+    assert isinstance(activated_a, accounts_module.TOTPMethod)
+
+    grant_b = await mfa.begin_totp_enrollment("account-1", label="alice@example.com")
+    assert isinstance(grant_b, accounts_module.TOTPProvisioningGrant)
+    activated_b = await mfa.activate_totp("account-1", grant_b.enrollment_id, pyotp.TOTP(seed_b).at(current_time[0]))
+    assert isinstance(activated_b, accounts_module.TOTPMethod)
+
+    login_methods.methods = (
+        accounts_module.LoginMethod(method_id="password-1", kind="password", created_at=_NOW),
+        accounts_module.LoginMethod(method_id="totp-b", kind="totp", created_at=_NOW),
+        accounts_module.LoginMethod(method_id="totp-a", kind="totp", created_at=_NOW),
+    )
+    service = mfa_login_module.MFALoginService(
+        store=testing_module.InMemoryMFALoginChallengeStore(), mfa=mfa, pepper=b"p" * 32, clock=lambda: current_time[0]
+    )
+    record = accounts_module.MFALoginChallenge(
+        challenge_digest=b"d" * 32,
+        account_id="account-1",
+        security_epoch=0,
+        client_key=None,
+        issued_at=_NOW,
+        expires_at=_NOW + timedelta(minutes=5),
+    )
+
+    current_time[0] = _NOW + timedelta(seconds=60)
+    code_a = pyotp.TOTP(seed_a).at(current_time[0])
+    code_b = pyotp.TOTP(seed_b).at(current_time[0])
+
+    evidence_b = await service.verify(record, method="totp", method_id=None, code=code_b)
+    assert isinstance(evidence_b, AuthenticationEvidence)
+    assert await service.verify(record, method="totp", method_id=None, code=code_b) == InvalidCredentials()
+
+    evidence_a = await service.verify(record, method="totp", method_id=None, code=code_a)
+    assert isinstance(evidence_a, AuthenticationEvidence)
+
+    assert await service.verify(record, method="totp", method_id=None, code="000000") == InvalidCredentials()
+    assert await service.verify(record, method="totp", method_id=cast("Any", 123), code=code_a) == InvalidCredentials()
+    assert (
+        await service.verify(record, method="totp", method_id=_StrSubclass("totp-a"), code=code_a)
+        == InvalidCredentials()
+    )
+
+    current_time[0] = _NOW + timedelta(seconds=120)
+    next_code_a = pyotp.TOTP(seed_a).at(current_time[0])
+    next_code_b = pyotp.TOTP(seed_b).at(current_time[0])
+    assert await service.verify(record, method="totp", method_id="totp-a", code=next_code_b) == InvalidCredentials()
+    assert isinstance(
+        await service.verify(record, method="totp", method_id="totp-a", code=next_code_a), AuthenticationEvidence
+    )
+
+    login_methods.methods = (accounts_module.LoginMethod(method_id="password-1", kind="password", created_at=_NOW),)
+    assert await service.verify(record, method="totp", method_id=None, code=next_code_b) == InvalidCredentials()
+
+    login_methods.fail_list = True
+    assert await service.verify(record, method="totp", method_id=None, code=next_code_b) == VerificationUnavailable()
+
+
+async def test_mfa_service_verify_any_totp_handles_defaults_and_store_failures() -> None:
+    mfa_without_methods = build_mfa_service(MFAStore(), MFAProtector(), now=_NOW)
+    assert await mfa_without_methods.verify_any_totp("account-1", "123456") == InvalidCredentials()
+    assert (
+        await mfa_without_methods.verify_any_totp("account-1", "123456", method_ids=(cast("Any", 42),))
+        == InvalidCredentials()
+    )
+
+    failing_methods = _ScriptedLoginMethodStore(fail_list=True)
+    mfa_failing_methods = accounts_module.MFAService(
+        store=MFAStore(), secret_protector=MFAProtector(), clock=lambda: _NOW, login_methods=failing_methods
+    )
+    assert await mfa_failing_methods.verify_any_totp("account-1", "123456") == VerificationUnavailable()
+
+    failing_mfa_store = MFAStore()
+    failing_mfa_store.fail = True
+    mfa_failing_store = accounts_module.MFAService(
+        store=failing_mfa_store,
+        secret_protector=MFAProtector(),
+        clock=lambda: _NOW,
+        login_methods=_ScriptedLoginMethodStore((
+            accounts_module.LoginMethod(method_id="totp-a", kind="totp", created_at=_NOW),
+        )),
+    )
+    assert await mfa_failing_store.verify_any_totp("account-1", "123456") == VerificationUnavailable()

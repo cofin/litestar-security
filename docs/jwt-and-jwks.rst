@@ -381,6 +381,41 @@ Sync fetchers implement ``fetch(request)`` and are normalized once by the
 provider through ``workers.network_limiter``. Async fetchers are used directly.
 Cancellation of one waiter does not cancel a shared refresh.
 
+Verifying JWTs with JWKSJWTVerifier
+-----------------------------------
+
+``JWKSJWTVerifier`` (exported from ``litestar_security.providers.jwks`` and
+re-exported from ``litestar_security.providers``) implements
+``JWTVerifier[JWTClaims]`` over any ``JWKSProvider``. It routes each token by
+unverified ``kid`` and ``alg`` headers, selects the pinned key from ``jwks``,
+caches prepared verifiers per ``(kid, alg)`` and key material, and executes
+signature verification within bounded ``WorkerLimits``:
+
+.. code-block:: python
+
+   from litestar_security.config import WorkerLimits
+   from litestar_security.providers.jwks import JWKSJWTVerifier
+   from litestar_security.providers.jwt import JWTValidationConfig
+
+
+   validation = JWTValidationConfig(
+       issuer="https://id.example.com/realms/production",
+       audiences=frozenset({"https://api.example.com"}),
+       algorithms=frozenset({"EdDSA", "RS256"}),
+   )
+   verifier = JWKSJWTVerifier(
+       config=validation,
+       jwks=jwks_provider,
+       jwks_uri="https://id.example.com/realms/production/protocol/openid-connect/certs",
+       worker_limits=WorkerLimits(network_tokens=8, crypto_tokens=32, timeout=10.0),
+   )
+
+``JWKSJWTVerifier`` validates its ``JWTValidationConfig``, ``JWKSProvider``,
+``jwks_uri``, ``worker_limits``, and ``maximum_token_bytes`` (default
+``16_384``) at construction time, raising ``ImproperlyConfiguredException`` on
+invalid inputs. Use it directly in ``BearerTokenSlot`` or pass a ``JWKSProvider``
+to the OIDC provider factories in :doc:`providers`.
+
 Stale keys fail closed by default
 ---------------------------------
 

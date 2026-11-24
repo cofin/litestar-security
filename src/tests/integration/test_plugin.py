@@ -508,11 +508,19 @@ class _RouteMFAService:
 class _RoutePasskeyService:
     failure: str | None = None
 
-    async def verify_authentication(self, account_id: str, *, binding: bytes, response: str) -> object:
+    async def verify_authentication(self, account_id: str | None = None, *, binding: bytes, response: str) -> object:
         del account_id, binding, response
         if self.failure == "authentication":
             return InvalidCredentials()
         return _route_factor_evidence()
+
+    async def authenticate(self, account_id: str | None = None, *, binding: bytes, response: str) -> object:
+        del binding, response
+        if self.failure == "authentication":
+            return InvalidCredentials()
+        return accounts_module.VerifiedPasskeyAuthentication(
+            account_id=account_id or "user", evidence=_route_factor_evidence()
+        )
 
     async def begin_registration(self, account_id: str, *, user_name: str, binding: bytes) -> object:
         del account_id, user_name, binding
@@ -1270,6 +1278,7 @@ def test_generated_mfa_login_routes_are_conditional_typed_and_transport_bound() 
         "account_id": "account-1",
         "expires_at": "2026-07-26T12:05:00Z",
         "methods": ["recovery-code", "totp"],
+        "totp_method_ids": [],
         "code": "mfa_required",
         "detail": "Multi-factor authentication is required.",
     }
@@ -1490,6 +1499,9 @@ def _feature_test_ports() -> tuple[object, object, object, object]:
     async def false(*_args: object, **_kwargs: object) -> bool:
         return False
 
+    async def empty(*_args: object, **_kwargs: object) -> tuple[object, ...]:
+        return ()
+
     mfa_store = SimpleNamespace(
         create_totp_enrollment=none,
         get_totp_enrollment=none,
@@ -1499,7 +1511,7 @@ def _feature_test_ports() -> tuple[object, object, object, object]:
         advance_totp_counter=false,
         replace_recovery_codes=none,
         consume_recovery_code=false,
-        list_methods=none,
+        list_methods=empty,
         register_login_method=none,
         revoke_login_method=none,
         put=none,
@@ -1512,7 +1524,7 @@ def _feature_test_ports() -> tuple[object, object, object, object]:
         record_assertion=none,
         list_credentials=none,
         rename_credential=none,
-        list_methods=none,
+        list_methods=empty,
         register_login_method=none,
         revoke_login_method=none,
     )

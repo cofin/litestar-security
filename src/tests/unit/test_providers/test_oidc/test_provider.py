@@ -13,7 +13,9 @@ import pytest
 from litestar.exceptions import ImproperlyConfiguredException, NotAuthorizedException
 
 from litestar_security.authentication import Authenticated, InvalidCredentials, VerificationUnavailable
+from litestar_security.config import WorkerLimits
 from litestar_security.context import AuthenticationEvidence
+from litestar_security.providers.jwks import JWKSJWTVerifier
 from litestar_security.providers.jwt import JSONValue, JWTClaims, JWTValidationConfig, VerificationKey
 from litestar_security.providers.oauth import (
     OAuthClientAuth,
@@ -865,3 +867,100 @@ async def test_discovered_oidc_verifier_rejects_naive_now_before_selecting_jwks_
 
     assert outcome == InvalidCredentials()
     assert jwks.calls == []
+
+
+async def test_sync_oidc_factories_accept_jwks_and_worker_limits(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    private_key, public_key = jwt_key_material["ES256"]
+    jwks = _DiscoveryJWKS(VerificationKey(key_id="oidc-key", algorithm="ES256", key=public_key))
+    limits = WorkerLimits()
+    generic_meta = replace(metadata(issuer=ISSUER), algorithms=frozenset({"ES256"}))
+    google_issuer = "https://accounts.google.com"
+    google_meta = replace(metadata(issuer=google_issuer), algorithms=frozenset({"ES256"}))
+    keycloak_issuer = "https://id.example.com/realms/acme"
+    keycloak_meta = replace(metadata(issuer=keycloak_issuer), algorithms=frozenset({"ES256"}))
+
+    generic = oidc_provider(
+        name="oidc",
+        client_id=CLIENT_ID,
+        client_secret=SecretStr("client-secret"),
+        metadata=generic_meta,
+        jwks=jwks,
+        worker_limits=limits,
+    )
+    google = google_oidc_provider(
+        client_id=CLIENT_ID,
+        client_secret=SecretStr("client-secret"),
+        metadata=google_meta,
+        jwks=jwks,
+        worker_limits=limits,
+    )
+    keycloak = keycloak_oidc_provider(
+        base_url="https://id.example.com",
+        realm="acme",
+        client_id=CLIENT_ID,
+        client_secret=SecretStr("client-secret"),
+        metadata=keycloak_meta,
+        jwks=jwks,
+        worker_limits=limits,
+    )
+    try:
+        for built, expected_name, expected_issuer in (
+            (generic, "oidc", ISSUER),
+            (google, "google", google_issuer),
+            (keycloak, "keycloak", keycloak_issuer),
+        ):
+            assert isinstance(built.verifier, JWKSJWTVerifier)
+            assert built.verifier.worker_limits is limits
+            tx = transaction(provider=expected_name, expected_issuer=expected_issuer)
+            identity = await built.resolve_identity(
+                tokens(id_token=SecretStr(_signed_id_token(private_key, issuer=expected_issuer))),
+                transaction=tx,
+                now=NOW,
+            )
+            assert identity.provider == expected_name
+            assert identity.issuer == expected_issuer
+            assert identity.subject == "subject-1"
+    finally:
+        await generic.aclose()
+        await google.aclose()
+        await keycloak.aclose()
+
+
+@pytest.mark.parametrize("mode", ["both", "neither", "verifier_with_worker_limits"])
+def test_sync_oidc_factories_reject_conflicting_verifier_and_jwks_arguments(
+    mode: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+) -> None:
+    jwks = _DiscoveryJWKS(VerificationKey(key_id="oidc-key", algorithm="ES256", key=jwt_key_material["ES256"][1]))
+    stub = verifier(InvalidCredentials())
+    kwargs: dict[str, object] = {}
+    if mode == "both":
+        kwargs = {"verifier": stub, "jwks": jwks}
+    elif mode == "verifier_with_worker_limits":
+        kwargs = {"verifier": stub, "worker_limits": WorkerLimits()}
+
+    with pytest.raises(ImproperlyConfiguredException):
+        oidc_provider(
+            name="oidc",
+            client_id=CLIENT_ID,
+            client_secret=SecretStr("secret"),
+            metadata=metadata(),
+            **kwargs,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ImproperlyConfiguredException):
+        google_oidc_provider(
+            client_id=CLIENT_ID,
+            client_secret=SecretStr("secret"),
+            metadata=metadata(issuer="https://accounts.google.com"),
+            **kwargs,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ImproperlyConfiguredException):
+        keycloak_oidc_provider(
+            base_url="https://id.example.com",
+            realm="acme",
+            client_id=CLIENT_ID,
+            client_secret=SecretStr("secret"),
+            metadata=metadata(issuer="https://id.example.com/realms/acme"),
+            **kwargs,  # type: ignore[arg-type]
+        )

@@ -75,6 +75,33 @@ async def test_totp_enrollment_uses_rfc_vectors_and_persists_only_protected_secr
     assert all(value in protector.associated_data[0] for value in (b"account-1", b"method-1", b"totp", b"test-key"))
 
 
+async def test_totp_enrollment_passes_keyword_only_arguments_to_provisioning_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TOTP enrollment remains compatible with pyotp >= 2.11 keyword-only provisioning_uri."""
+    received: list[tuple[str | None, str | None]] = []
+
+    class _KeywordOnlyTOTP:
+        def __init__(self, secret: str, **_kwargs: object) -> None:
+            self.secret = secret
+
+        def provisioning_uri(self, *, name: str | None = None, issuer_name: str | None = None) -> str:
+            received.append((name, issuer_name))
+            return f"otpauth://totp/{issuer_name}:{name}?secret={self.secret}&issuer={issuer_name}"
+
+    monkeypatch.setattr(pyotp, "TOTP", _KeywordOnlyTOTP)
+    service = build_mfa_service(MFAStore(), MFAProtector())
+    service.issuer = "Example App"
+
+    enrollment = await service.begin_totp_enrollment("account-1", label="person@example.com")
+
+    assert isinstance(enrollment, accounts_module.TOTPProvisioningGrant)
+    assert received == [("person@example.com", "Example App")]
+    assert enrollment.provisioning_uri == (
+        f"otpauth://totp/Example App:person@example.com?secret={_MFA_ENCODED_SEED}&issuer=Example App"
+    )
+
+
 async def test_totp_counter_advance_allows_one_concurrent_use_and_rejects_replay() -> None:
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     store, protector = MFAStore(), MFAProtector()

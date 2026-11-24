@@ -1,11 +1,15 @@
 """Native Litestar route bundle for MFA, passkeys, and step-up.
 
 ``_PURPOSE_METHODS`` enforces deny-by-default step-up factor admission (only
-``password`` and ``passkey`` satisfy sensitive enrollment, removal, and
-recovery-code replacement purposes) and stays synchronized with
-``_PURPOSE_OPERATIONS`` in ``_authorize_step_up``. Error statuses in
-``_MFA_BAD_REQUEST_RESPONSES`` document raised denials, while ``409`` conflict
-responses keep their explicit ``OperationMessage`` schema.
+``password`` and ``passkey`` satisfy sensitive enrollment, removal,
+recovery-code replacement, and OAuth account-management purposes). Local MFA
+and passkey purposes stay synchronized with ``_PURPOSE_OPERATIONS`` in
+``_authorize_step_up``; OAuth purposes (``oauth-link``, ``oauth-unlink``,
+``oauth-scope-upgrade``, and ``oauth-provider-token-management``) are issued by
+``_StepUpController`` and consumed by ``OAuthLifecycleService`` rather than
+``_authorize_step_up``. Error statuses in ``_MFA_BAD_REQUEST_RESPONSES``
+document raised denials, while ``409`` conflict responses keep their explicit
+``OperationMessage`` schema.
 """
 
 from base64 import urlsafe_b64decode
@@ -47,7 +51,12 @@ from litestar_security.accounts._operations import (
     PASSKEY_REMOVE,
     PASSWORD_VERIFY,
 )
-from litestar_security.accounts._passkeys import PasskeyMetadata, PasskeyService, WebAuthnOptions
+from litestar_security.accounts._passkeys import (
+    PasskeyMetadata,
+    PasskeyService,
+    VerifiedPasskeyAuthentication,
+    WebAuthnOptions,
+)
 from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
 from litestar_security.accounts._records import (
     PasswordReauthenticationProof,
@@ -86,6 +95,10 @@ _PURPOSE_METHODS = {
     "recovery-codes": frozenset({"password", "passkey"}),
     "passkey-register": frozenset({"password", "passkey"}),
     "passkey-remove": frozenset({"password", "passkey"}),
+    "oauth-link": frozenset({"password", "passkey"}),
+    "oauth-unlink": frozenset({"password", "passkey"}),
+    "oauth-scope-upgrade": frozenset({"password", "passkey"}),
+    "oauth-provider-token-management": frozenset({"password", "passkey"}),
 }
 _PURPOSE_OPERATIONS = {
     "totp-enroll": MFA_TOTP_ENROLL,
@@ -200,7 +213,7 @@ async def _current_epoch(mfa_service: _MFAFeatureService, account_id: str) -> in
 
 
 async def _check_rate_limit(
-    mfa_service: _MFAFeatureService, request: Request[Any, Any, Any], operation: str, account_id: str
+    mfa_service: _MFAFeatureService, request: Request[Any, Any, Any], operation: str, account_id: str | None
 ) -> RateLimited | VerificationUnavailable | None:
     guard = mfa_service.rate_limits
     if guard is None:
@@ -819,14 +832,14 @@ async def _verify_passkey_authentication(
         route_error(limited, credentials=True)
     if data.binding is None:
         route_error(InvalidCredentials(), credentials=True)
-    evidence = await passkey_service.verify_authentication(
+    verified = await passkey_service.authenticate(
         data.account_id, binding=data.binding.encode("utf-8"), response=data.response
     )
-    if not isinstance(evidence, AuthenticationEvidence):
-        route_error(evidence, credentials=True)
+    if not isinstance(verified, VerifiedPasskeyAuthentication):
+        route_error(verified, credentials=True)
     selected_transport = transport if transport is not None else data.transport
     result = await local_auth_service.passkey_login(
-        request, data.account_id, transport=selected_transport, evidence=evidence
+        request, verified.account_id, transport=selected_transport, evidence=verified.evidence
     )
     if isinstance(result, (InvalidCredentials, VerificationUnavailable)):
         route_error(result, credentials=True)

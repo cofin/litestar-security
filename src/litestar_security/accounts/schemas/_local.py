@@ -52,12 +52,19 @@ class LocalMFAChallenge(WireStruct, frozen=True):
     detail: Annotated[str, msgspec.Meta(description="The human-readable MFA challenge outcome.")] = (
         "Multi-factor authentication is required."
     )
+    totp_method_ids: Annotated[
+        tuple[str, ...],
+        msgspec.Meta(
+            description="The active TOTP method identifiers enrolled for this account, when TOTP is permitted."
+        ),
+    ] = ()
 
     def __repr__(self) -> str:
         """Redact the opaque challenge credential."""
         return (
             f"{type(self).__name__}(challenge=<redacted>, account_id={self.account_id!r}, "
-            f"expires_at={self.expires_at!r}, methods={self.methods!r}, code={self.code!r}, detail={self.detail!r})"
+            f"expires_at={self.expires_at!r}, methods={self.methods!r}, totp_method_ids={self.totp_method_ids!r}, "
+            f"code={self.code!r}, detail={self.detail!r})"
         )
 
 

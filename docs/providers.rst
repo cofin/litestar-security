@@ -88,6 +88,53 @@ application owns shared ``OIDCDiscoveryClient`` and ``JWKSProvider`` resources.
 The returned provider owns only its OAuth HTTP client; closing it does not close
 the shared discovery or JWKS resources.
 
+When discovery metadata is already available, the synchronous factories
+``oidc_provider()``, ``google_oidc_provider()``, and
+``keycloak_oidc_provider()`` accept either an explicit ``verifier=`` or a
+shared ``jwks=`` provider (mutually exclusive, with optional ``worker_limits=``
+when using ``jwks=``). Passing ``jwks=`` constructs a ``JWKSJWTVerifier``
+pinned to the metadata issuer, client audience, and allowed ID-token
+algorithms:
+
+.. code-block:: python
+
+   from litestar_security.providers.oidc import oidc_provider
+
+
+   provider = oidc_provider(
+       name="corp",
+       client_id="corp-web",
+       client_secret=client_secret,
+       metadata=metadata,
+       jwks=jwks_provider,
+       worker_limits=workers,
+   )
+
+OAuth step-up authorization
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Link, unlink, scope-upgrade, and provider-token-management routes require a
+purpose-bound step-up grant. Use
+``StepUpOAuthAuthorizer.from_step_up_service()`` to connect the local
+``StepUpService`` and ``SecurityEpochStore`` to ``OAuthConfig`` without
+re-implementing request transport-binding extraction:
+
+.. code-block:: python
+
+   from litestar_security.providers.oauth import StepUpOAuthAuthorizer
+
+
+   step_up_authorizer = StepUpOAuthAuthorizer.from_step_up_service(
+       step_up_service,
+       epochs=security_epoch_store,
+   )
+
+By default, ``from_step_up_service()`` derives the transport binding from the
+``Authorization`` header with ``Cookie`` fallback, matching the generated
+step-up controller, and fails closed when neither header is present. Supply
+custom ``transport_binding`` or ``session_binding`` callables when an
+application uses a different transport or callback-session binding.
+
 Google IAP human, service account, and agent identities
 -------------------------------------------------------
 

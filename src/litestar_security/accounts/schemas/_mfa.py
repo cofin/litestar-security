@@ -114,16 +114,16 @@ class PasskeyRegistrationStart(WireStruct, frozen=True):
 
 
 class PasskeyAuthenticationStart(WireStruct, frozen=True):
-    """Request bound passkey authentication options."""
+    """Request passkey authentication options."""
 
-    account_id: str
+    account_id: str | None = None
 
 
 class PasskeyVerification(WireStruct, frozen=True):
     """Submit one browser WebAuthn JSON response."""
 
-    account_id: str
     response: str
+    account_id: str | None = None
     binding: str | None = None
     transport: str | None = None
 

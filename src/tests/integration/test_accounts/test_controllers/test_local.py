@@ -1,15 +1,19 @@
 """HTTP integration coverage for the generated local-auth controller graph."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from secrets import token_hex
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pyotp
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from litestar import Litestar
 from litestar.config.csrf import CSRFConfig
 from litestar.connection import ASGIConnection
 from litestar.middleware.csrf import generate_csrf_token
+from litestar.middleware.session.client_side import CookieBackendConfig
 from litestar.openapi.spec import SecurityScheme
 from litestar.testing import TestClient
 
@@ -24,7 +28,15 @@ from litestar_security.authentication import (
     PresentedCredential,
     VerificationUnavailable,
 )
+from litestar_security.config import MFAConfig
 from litestar_security.context import AuthenticationEvidence, Principal
+from litestar_security.providers import LocalKeyRing, SigningKey
+from litestar_security.testing import (
+    InMemoryLocalAccountStore,
+    InMemoryMFALoginChallengeStore,
+    InMemoryMFAStore,
+    InMemoryStepUpStore,
+)
 from tests.fixtures.accounts import AsyncOutcome
 
 _ISSUED_AT = datetime(2026, 7, 26, tzinfo=timezone.utc)
@@ -407,6 +419,155 @@ def test_rate_limited_local_route_preserves_optional_retry_hint(retry_after: int
     assert response.status_code == 429
     assert response.json() == {"status_code": 429, "detail": "Too many requests."}
     assert response.headers.get("retry-after") == (None if retry_after is None else str(retry_after))
+
+
+async def _build_mfa_login_app(current_time: list[datetime], totp_seed: str) -> tuple[Litestar, str, str, str]:
+    async def observe(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    account_store = InMemoryLocalAccountStore(
+        observe, clock=lambda: current_time[0], identifiers=str.casefold, entropy=lambda size: b"e" * size
+    )
+    hasher = accounts.Argon2PasswordHasher()
+    password_hash = await hasher.hash("correct-horse-battery-staple")
+    registration = await account_store.register(
+        accounts.RegistrationCommand(normalized_identifier="alice@example.com", display_name="Alice"),
+        password_hash,
+        invitation_digest=None,
+        verification=None,
+        now=current_time[0],
+        event=accounts.SecurityEvent(
+            event_id="evt-register", occurred_at=current_time[0], operation="local.registration", outcome="created"
+        ),
+    )
+    assert registration.account is not None
+    account_id = registration.account.account_id
+    private_key = ed25519.Ed25519PrivateKey.generate().private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    local_auth = accounts.LocalAuth.hybrid(
+        accounts=cast("Any", account_store),
+        secrets=accounts.LocalAuthSecrets.tokens(
+            purpose_token_pepper=b"p" * 32,
+            refresh_token_pepper=b"q" * 32,
+            active_receipt_key_id="k1",
+            active_receipt_key=b"r" * 32,
+        ),
+        binding=accounts.SessionBindingConfig(pepper=b"b" * 32, max_age=600),
+        key_ring=LocalKeyRing(
+            issuer="https://local.example",
+            active_signing_key=SigningKey(key_id="active", algorithm="EdDSA", private_key=private_key),
+        ),
+        token_audience="local-client",  # noqa: S106 - public JWT audience
+        password_hasher=hasher,
+        rate_limiter=accounts.UnlimitedRateLimiter(),
+    )
+    mfa_config = MFAConfig(
+        store=InMemoryMFAStore(),
+        secret_protector=accounts.AESGCMSecretProtector(active_key=accounts.SecretProtectorKey("v1", b"s" * 32)),
+        recovery_peppers=(accounts.RecoveryCodePepper("v1", b"p" * 32),),
+        login_methods=cast("Any", account_store),
+        step_up_store=InMemoryStepUpStore(),
+        require_at_login="enrolled",
+        login_challenge_store=InMemoryMFALoginChallengeStore(),
+    )
+    object.__setattr__(mfa_config.mfa_service, "clock", lambda: current_time[0])
+    object.__setattr__(mfa_config.mfa_service, "secret_generator", lambda: totp_seed)
+
+    grant = await mfa_config.mfa_service.begin_totp_enrollment(account_id, label="alice@example.com")
+    assert isinstance(grant, accounts.TOTPProvisioningGrant)
+    activated = await mfa_config.mfa_service.activate_totp(
+        account_id, grant.enrollment_id, pyotp.TOTP(totp_seed).at(current_time[0])
+    )
+    assert isinstance(activated, accounts.TOTPMethod)
+    await account_store.register_login_method(
+        account_id,
+        accounts.LoginMethod(method_id=activated.method_id, kind="totp", created_at=current_time[0]),
+        event=accounts.SecurityEvent(
+            event_id="evt-totp",
+            occurred_at=current_time[0],
+            operation="mfa.totp.enroll",
+            outcome="created",
+            account_id=account_id,
+        ),
+    )
+
+    csrf_key = token_hex()
+    app = Litestar(
+        csrf_config=CSRFConfig(secret=csrf_key),
+        middleware=[CookieBackendConfig(secret=bytes(range(16)), secure=True, httponly=True).middleware],
+        openapi_config=None,
+        plugins=[SecurityPlugin(SecurityConfig(local_auth=local_auth, mfa=mfa_config))],
+    )
+    assert local_auth.mfa_login is not None
+    object.__setattr__(local_auth.mfa_login, "clock", lambda: current_time[0])
+    return app, csrf_key, account_id, activated.method_id
+
+
+async def test_mfa_login_challenge_exposes_totp_method_ids_and_completes_over_http() -> None:
+    """Verify 403 LocalMFAChallenge includes totp_method_ids and MFA completion works with or without method_id."""
+    current_time = [_ISSUED_AT]
+    totp_seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    app, csrf_key, account_id, method_id = await _build_mfa_login_app(current_time, totp_seed)
+
+    credentials = {"identifier": "alice@example.com", "password": "correct-horse-battery-staple"}
+    with TestClient(app) as client:
+        csrf_headers = _seed_csrf(client, csrf_key)
+        session_challenge = client.post("/auth/login", headers=csrf_headers, json=credentials)
+        assert session_challenge.status_code == 403
+        challenge_body = session_challenge.json()
+        assert challenge_body["code"] == "mfa_required"
+        assert challenge_body["totp_method_ids"] == [method_id]
+
+        current_time[0] = _ISSUED_AT + timedelta(seconds=60)
+        session_completed = client.post(
+            "/auth/login/mfa",
+            headers=csrf_headers,
+            json={
+                "challenge": challenge_body["challenge"],
+                "account_id": account_id,
+                "method": "totp",
+                "code": pyotp.TOTP(totp_seed).at(current_time[0]),
+            },
+        )
+        assert session_completed.status_code == 200
+        assert session_completed.json() == {"account_id": account_id, "display_name": "Alice"}
+
+        token_challenge = client.post("/auth/token", json=credentials)
+        assert token_challenge.status_code == 403
+        token_challenge_body = token_challenge.json()
+        assert token_challenge_body["totp_method_ids"] == [method_id]
+
+        current_time[0] = _ISSUED_AT + timedelta(seconds=120)
+        token_completed_omitted = client.post(
+            "/auth/token/mfa",
+            json={
+                "challenge": token_challenge_body["challenge"],
+                "account_id": account_id,
+                "method": "totp",
+                "code": pyotp.TOTP(totp_seed).at(current_time[0]),
+            },
+        )
+        assert token_completed_omitted.status_code == 200
+        assert "access_token" in token_completed_omitted.json()
+
+        token_challenge_explicit = client.post("/auth/token", json=credentials)
+        assert token_challenge_explicit.status_code == 403
+        current_time[0] = _ISSUED_AT + timedelta(seconds=180)
+        token_completed_explicit = client.post(
+            "/auth/token/mfa",
+            json={
+                "challenge": token_challenge_explicit.json()["challenge"],
+                "account_id": account_id,
+                "method": "totp",
+                "method_id": method_id,
+                "code": pyotp.TOTP(totp_seed).at(current_time[0]),
+            },
+        )
+        assert token_completed_explicit.status_code == 200
+        assert "access_token" in token_completed_explicit.json()
 
 
 class _HeaderSlot:

@@ -88,3 +88,48 @@ enrolled set is read from
 :meth:`~litestar_security.accounts.LoginMethodStore.list_methods` on the
 configured ``login_methods`` store, and binding fails when that store does not
 implement it.
+
+When TOTP is permitted, ``LocalMFAChallenge`` includes ``totp_method_ids``
+(serialized as ``totpMethodIds``) listing the account's active TOTP method
+identifiers. Clients completing a TOTP challenge on ``/login/mfa`` or
+``/token/mfa`` may pass an explicit ``method_id`` (``methodId``) or omit it;
+when omitted, ``MFALoginService`` resolves the account's active TOTP methods
+from ``LoginMethodStore`` and verifies the code against each until one succeeds
+atomically.
+
+Step-up purposes
+================
+
+The generated step-up route (``POST /auth/step-up/{purpose}``) accepts
+``password`` and ``passkey`` verification for local factor-management purposes
+(``totp-enroll``, ``totp-remove``, ``recovery-codes``, ``passkey-register``,
+``passkey-remove``) and OAuth account-management purposes:
+
+* ``oauth-link``
+* ``oauth-unlink``
+* ``oauth-scope-upgrade``
+* ``oauth-provider-token-management``
+
+Unknown purposes are denied by default with ``401``. Grants issued for OAuth
+purposes are consumed by ``OAuthLifecycleService`` via an
+``OAuthStepUpAuthorizer`` (such as
+``StepUpOAuthAuthorizer.from_step_up_service()``).
+
+Discoverable (usernameless) passkey authentication
+==================================================
+
+Passkey authentication supports both account-bound and usernameless
+(discoverable) ceremonies. Omit ``account_id`` (or pass ``account_id=None``) in
+``PasskeyAuthenticationStart``, ``PasskeyVerification``, and
+``PasskeyService.begin_authentication()`` to start a discoverable ceremony
+where the authenticator identifies the account from its stored credential.
+
+``WebAuthnChallenge`` allows ``account_id=None`` strictly when
+``purpose="authentication"``; registration challenges always require a
+non-empty ``account_id``. ``PasskeyService.authenticate()`` enforces exact
+ceremony symmetry—a bound challenge must be verified with the same
+``account_id``, and an unbound challenge must be verified with
+``account_id=None``—and returns
+``VerifiedPasskeyAuthentication(account_id, evidence)`` carrying the resolved
+credential owner. ``PasskeyService.verify_authentication()`` delegates to
+``authenticate()`` and returns the ``AuthenticationEvidence`` directly.
