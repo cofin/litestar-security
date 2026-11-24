@@ -143,4 +143,16 @@ one keep working in account-bound ceremonies but cannot sign in usernameless.
 
 A ``WebAuthnChallengeStore`` must persist ``account_id=None`` for
 authentication challenges; make the column nullable in SQL-backed stores.
-``assert_webauthn_challenge_store_conformance`` checks the round trip.
+``assert_webauthn_challenge_store_conformance`` checks the round trip. Until a
+store is migrated, set ``PasskeyConfig(discoverable_authentication=False)`` (or
+the same field on ``PasskeyService``): the options route then answers ``400``
+when ``account_id`` is omitted and no unbound challenge is ever stored.
+
+Every generated passkey route, including step-up, verifies assertions through
+``PasskeyService.authenticate()``, so override that method to extend assertion
+policy.
+
+A usernameless request names no account, so only the client bucket limits it.
+When the client key is also unavailable, the request is charged to one shared
+bucket instead of going unlimited; configure a client-key extractor so callers
+are limited individually.

@@ -280,7 +280,7 @@ def test_transport_binding_extraction_precedence_over_http(
     assert options.status_code == 200
     assert verified.status_code == 201
     assert harness.bindings == [
-        ("passkeys.verify_authentication", expected_binding),
+        ("passkeys.authenticate", expected_binding),
         ("step_up.issue", expected_binding),
         ("step_up.consume", expected_binding),
         ("passkeys.begin_registration", expected_binding),
@@ -484,7 +484,7 @@ def test_passkey_ceremony_inventory_and_removal_validation_over_http() -> None:
         InvalidCredentials(),
         VerificationUnavailable(),
     )
-    harness.auth_options_outcomes = AsyncOutcome(_webauthn_options(), VerificationUnavailable())
+    harness.auth_options_outcomes = AsyncOutcome(_webauthn_options(), VerificationUnavailable(), InvalidCredentials())
     harness.list_outcomes = AsyncOutcome((_passkey_metadata(),), VerificationUnavailable())
     app, _ = _mfa_http_app(harness)
     headers = {"x-auth": "valid", "authorization": "Bearer transport"}
@@ -513,6 +513,7 @@ def test_passkey_ceremony_inventory_and_removal_validation_over_http() -> None:
         )
         auth_opts = client.post("/auth/passkeys/authentication/options", json={"account_id": "account-1"})
         auth_opts_503 = client.post("/auth/passkeys/authentication/options", json={"account_id": "account-1"})
+        auth_opts_refused = client.post("/auth/passkeys/authentication/options", json={})
         listed = client.get("/auth/passkeys", headers=headers)
         listed_503 = client.get("/auth/passkeys", headers=headers)
         totp_remove_denied = client.post("/auth/mfa/totp/m1/remove", headers=headers, json={"step_up_grant": "bad"})
@@ -534,6 +535,7 @@ def test_passkey_ceremony_inventory_and_removal_validation_over_http() -> None:
     assert isinstance(auth_opts.json()["binding"], str)
     assert auth_opts.json()["binding"] != ""
     assert auth_opts_503.status_code == 503
+    assert auth_opts_refused.status_code == 400
     assert listed.status_code == 200
     assert listed.json()[0]["credential_id"] == "Y3JlZGVudGlhbA"
     assert "public_key" not in listed.text
@@ -629,19 +631,25 @@ def test_passkey_authentication_verify_sanitizes_missing_binding_and_login_failu
 
 
 @pytest.mark.parametrize(
-    ("session_capable", "token_capable"), [(True, False), (False, True)], ids=["session-only", "tokens-only"]
+    ("session_capable", "token_capable", "client_key", "subject"),
+    [(True, False, None, "passkey:discoverable"), (False, True, "peer", None)],
+    ids=["session-only-shared-bucket", "tokens-only-client-bucket"],
 )
 def test_usernameless_passkey_authentication_establishes_transport_for_credential_owner(
-    *, session_capable: bool, token_capable: bool
+    *, session_capable: bool, token_capable: bool, client_key: str | None, subject: str | None
 ) -> None:
-    """Verify passkey options and verify work without account_id and resolve the credential owner."""
+    """Verify usernameless options and verify resolve the credential owner and always charge one bucket."""
     harness = _MFAHarness()
     harness.passkey_auth_outcomes = AsyncOutcome(
         accounts.VerifiedPasskeyAuthentication(account_id="resolved-owner", evidence=_factor_evidence())
     )
     rate_limits = _RecordingRateLimits(outcome=None)
     app, csrf_key = _mfa_http_app(
-        harness, rate_limits=rate_limits, session_capable=session_capable, token_capable=token_capable
+        harness,
+        rate_limits=rate_limits,
+        client_key=(lambda _connection: client_key) if client_key is not None else None,
+        session_capable=session_capable,
+        token_capable=token_capable,
     )
 
     with TestClient(app) as client:
@@ -660,8 +668,8 @@ def test_usernameless_passkey_authentication_establishes_transport_for_credentia
     assert harness.auth_account_ids == [None, None]
     assert harness.login_account_ids == ["resolved-owner"]
     assert rate_limits.calls == [
-        ("local.passkey.authentication.options", None, None),
-        ("local.passkey.assert", None, None),
+        ("local.passkey.authentication.options", client_key, subject),
+        ("local.passkey.assert", client_key, subject),
     ]
 
 

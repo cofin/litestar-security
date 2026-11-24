@@ -197,6 +197,10 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
     )
 
 
+_UNATTRIBUTED_SUBJECT = "passkey:discoverable"
+"""Shared subject bucket for a request that names neither an account nor a client."""
+
+
 def _transport_binding(request: Request[Any, Any, Any]) -> bytes:
     authorization = request.headers.get("authorization")
     cookies = request.headers.get("cookie")
@@ -222,7 +226,8 @@ async def _check_rate_limit(
         client_key = mfa_service.client_key(request) if mfa_service.client_key is not None else None
     except Exception:  # noqa: BLE001 - application callback failures degrade to the identifier bucket
         client_key = None
-    return await guard.check(operation, client_key=client_key, identifier=account_id)
+    identifier = _UNATTRIBUTED_SUBJECT if account_id is None and client_key is None else account_id
+    return await guard.check(operation, client_key=client_key, identifier=identifier)
 
 
 async def _authorize_step_up(
@@ -356,9 +361,10 @@ class _StepUpController(Controller):
                 amr=("pwd",),
             )
         if data.method == "passkey" and mfa_service.passkeys is not None:
-            return await mfa_service.passkeys.verify_authentication(
+            verified = await mfa_service.passkeys.authenticate(
                 account_id, binding=_transport_binding(request), response=data.credential
             )
+            return verified.evidence if isinstance(verified, VerifiedPasskeyAuthentication) else verified
         return InvalidCredentials()
 
 
@@ -676,10 +682,10 @@ class _PasskeyController(Controller):
 
     @staticmethod
     def _options_response(
-        result: WebAuthnOptions | VerificationUnavailable, *, binding: str | None = None
+        result: WebAuthnOptions | InvalidCredentials | VerificationUnavailable, *, binding: str | None = None
     ) -> Response[Any]:
-        if isinstance(result, VerificationUnavailable):
-            route_error(result, credentials=True)
+        if not isinstance(result, WebAuthnOptions):
+            route_error(result)
         return Response(
             content=PasskeyOptions(options=result.json, expires_at=result.expires_at, binding=binding),
             status_code=HTTP_200_OK,

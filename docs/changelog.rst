@@ -29,7 +29,10 @@ Added
   :class:`~litestar_security.AuthenticationEvidence` while enforcing strict
   bound/unbound ceremony symmetry, and passkey registration requests
   ``residentKey: "preferred"`` so new credentials are discoverable where the
-  authenticator supports it
+  authenticator supports it. ``discoverable_authentication=False`` on
+  :class:`~litestar_security.config.PasskeyConfig` or
+  :class:`~litestar_security.accounts.PasskeyService` turns usernameless
+  ceremonies off
   (`#97 <https://github.com/cofin/litestar-security/issues/97>`__).
 * :meth:`~litestar_security.providers.oauth.StepUpOAuthAuthorizer.from_step_up_service`
   constructs an OAuth step-up authorizer over
@@ -48,6 +51,11 @@ Changed
   checks the round trip.
 * :class:`~litestar_security.accounts.schemas.PasskeyVerification` is
   constructed with keyword arguments only.
+* :meth:`~litestar_security.accounts.PasskeyService.begin_authentication` can
+  return ``InvalidCredentials`` when a discoverable ceremony is refused.
+* Generated passkey step-up verifies through
+  :meth:`~litestar_security.accounts.PasskeyService.authenticate`, the single
+  extension point for assertion policy.
 
 Fixed
 ~~~~~

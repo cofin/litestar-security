@@ -802,9 +802,11 @@ def test_mfa_and_passkey_feature_configs_build_services_and_validate_route_contr
         events=events,
         step_up_store=StepUpStore(),
         register_routes=False,
+        discoverable_authentication=False,
     )
     assert isinstance(passkeys.passkey_service, accounts_module.PasskeyService)
     assert isinstance(passkeys.step_up_service, accounts_module.StepUpService)
+    assert passkeys.passkey_service.discoverable_authentication is False
     assert passkeys.passkey_service.login_methods is login_methods
     assert passkeys.passkey_service.events is events
 

@@ -671,6 +671,7 @@ class PasskeyService:
     login_methods: LoginMethodStore | None = field(default=None, repr=False, compare=False)
     events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
     event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
+    discoverable_authentication: bool = True
 
     def __post_init__(self) -> None:
         """Validate structural capabilities and exact relying-party configuration."""
@@ -707,6 +708,7 @@ class PasskeyService:
             or len(frozenset(self.algorithms)) != len(self.algorithms)
             or not all(algorithm in _SUPPORTED_ALGORITHMS for algorithm in self.algorithms)
             or self.allow_insecure_localhost.__class__ is not bool
+            or self.discoverable_authentication.__class__ is not bool
             or self.worker_timeout.__class__ not in {int, float}
             or not isfinite(self.worker_timeout)
             or self.worker_timeout <= 0
@@ -745,8 +747,14 @@ class PasskeyService:
 
     async def begin_authentication(
         self, account_id: str | None = None, *, binding: bytes
-    ) -> WebAuthnOptions | VerificationUnavailable:
-        """Create bound or discoverable authentication options and persist only the challenge digest."""
+    ) -> WebAuthnOptions | InvalidCredentials | VerificationUnavailable:
+        """Create bound or discoverable authentication options and persist only the challenge digest.
+
+        Omitting ``account_id`` starts a discoverable ceremony, which is refused
+        with ``InvalidCredentials`` when ``discoverable_authentication`` is off.
+        """
+        if account_id is None and not self.discoverable_authentication:
+            return InvalidCredentials()
         return await self._begin(
             account_id=account_id,
             binding=binding,
@@ -850,7 +858,11 @@ class PasskeyService:
     async def authenticate(  # noqa: PLR0911 - each protocol or persistence rejection has a distinct safe outcome
         self, account_id: str | None = None, *, binding: bytes, response: str
     ) -> VerifiedPasskeyAuthentication | InvalidCredentials | VerificationUnavailable:
-        """Consume, verify, and atomically record one assertion, returning the resolved account and evidence."""
+        """Consume, verify, and atomically record one assertion, returning the resolved account and evidence.
+
+        Every generated passkey route verifies through this method, so it is the
+        single place to extend assertion policy.
+        """
         try:
             challenge = await self._run_worker(self.verifier.authentication_challenge, response)
             credential_id = await self._run_worker(self.verifier.credential_id, response)
@@ -1028,15 +1040,15 @@ class PasskeyService:
             return VerificationUnavailable()
         return WebAuthnOptions(challenge=encode_random(challenge), json=json_options, expires_at=expires_at)
 
-    @staticmethod
     def _resolve_authentication_account(
-        account_id: str | None, record: WebAuthnChallenge | None, credential: PasskeyCredential | None
+        self, account_id: str | None, record: WebAuthnChallenge | None, credential: PasskeyCredential | None
     ) -> str | None:
         """Return the credential owner when the ceremony's binding matches the caller's."""
         if record is None or credential is None:
             return None
         if account_id is None:
-            return credential.account_id if record.account_id is None else None
+            discoverable = self.discoverable_authentication and record.account_id is None
+            return credential.account_id if discoverable else None
         if record.account_id != account_id or credential.account_id != account_id:
             return None
         return account_id

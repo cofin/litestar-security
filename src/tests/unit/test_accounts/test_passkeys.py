@@ -194,6 +194,25 @@ async def test_passkey_authentication_enforces_strict_bound_and_unbound_ceremony
     assert isinstance(await service.authenticate("account-2", binding=binding, response="{}"), InvalidCredentials)
 
 
+async def test_disabled_discoverable_authentication_refuses_unbound_ceremonies_only() -> None:
+    binding = b"disabled-binding"
+    challenge_store, store = WebAuthnChallengeStore(), PasskeyStore()
+    store.credentials[b"credential-1"] = stored_passkey()
+    service = build_passkey_service(challenge_store=challenge_store, store=store)
+
+    assert isinstance(await service.begin_authentication(binding=binding), accounts_module.WebAuthnOptions)
+    service.discoverable_authentication = False
+    assert isinstance(await service.authenticate(binding=binding, response="{}"), InvalidCredentials)
+    assert isinstance(await service.begin_authentication(binding=binding), InvalidCredentials)
+    assert challenge_store.records == {}
+
+    assert isinstance(await service.begin_authentication("account-1", binding=binding), accounts_module.WebAuthnOptions)
+    assert isinstance(
+        await service.authenticate("account-1", binding=binding, response="{}"),
+        accounts_module.VerifiedPasskeyAuthentication,
+    )
+
+
 async def test_usernameless_passkey_clone_risk_audits_resolved_account_id() -> None:
     store = PasskeyStore()
     store.credentials[b"credential-1"] = stored_passkey(sign_count=2)
@@ -690,6 +709,7 @@ def test_passkey_values_and_dependency_configuration_reject_invalid_shapes() -> 
         ({"verifier": object()}, "verifier"),
         ({"worker_limiter": object()}, "limiter"),
         ({"worker_timeout": 0}, "configuration"),
+        ({"discoverable_authentication": 1}, "configuration"),
         ({"attestation_trust": object()}, "attestation"),
         ({"origins": ("https://user@example.com",)}, "HTTPS"),
         ({"origins": ("https://example.com/path",)}, "HTTPS"),
@@ -701,6 +721,7 @@ def test_passkey_values_and_dependency_configuration_reject_invalid_shapes() -> 
         "verifier",
         "worker-limiter",
         "worker-timeout",
+        "discoverable-flag",
         "attestation-trust",
         "origin-userinfo",
         "origin-path",
