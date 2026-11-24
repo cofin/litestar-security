@@ -112,6 +112,7 @@ def test_py_webauthn_adapter_builds_exact_options() -> None:
     )
     assert json.loads(registration)["rp"]["id"] == "example.com"
     assert json.loads(registration)["attestation"] == "none"
+    assert json.loads(registration)["authenticatorSelection"]["residentKey"] == "preferred"
     assert json.loads(authentication)["userVerification"] == "required"
 
 
@@ -166,12 +167,15 @@ async def test_usernameless_passkey_authentication_resolves_credential_owner_and
     assert [(event.operation, event.outcome, event.account_id) for event in events.events] == [
         ("local.passkey.assert", "verified", "account-1")
     ]
+    assert isinstance(await service.authenticate(binding=binding, response='{"id":"credential"}'), InvalidCredentials)
 
     verifier.sign_count = 2
     assert isinstance(await service.begin_authentication(None, binding=binding), accounts_module.WebAuthnOptions)
-    evidence = await service.verify_authentication(None, binding=binding, response='{"id":"credential"}')
-    assert isinstance(evidence, AuthenticationEvidence)
-    assert evidence.methods == frozenset({"passkey"})
+    unattributed = await service.verify_authentication(
+        cast("Any", None), binding=binding, response='{"id":"credential"}'
+    )
+    assert isinstance(unattributed, InvalidCredentials)
+    assert len(challenge_store.records) == 1
 
 
 async def test_passkey_authentication_enforces_strict_bound_and_unbound_ceremony_symmetry() -> None:

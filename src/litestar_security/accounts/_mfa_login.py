@@ -179,12 +179,7 @@ class MFALoginService:
                 return VerificationUnavailable()
             token = encode_random(raw_value)
             expires_at = now + self.ttl
-            totp_method_ids: tuple[str, ...] = ()
-            if "totp" in self.methods:
-                login_methods = self.login_methods if self.login_methods is not None else self.mfa.login_methods
-                if login_methods is not None:
-                    enrolled = await login_methods.list_methods(account.account_id)
-                    totp_method_ids = tuple(sorted(method.method_id for method in enrolled if method.kind == "totp"))
+            totp_method_ids = await self._totp_method_ids(account.account_id) if "totp" in self.methods else ()
             await self.store.put(
                 MFALoginChallenge(
                     challenge_digest=self._challenge_digest(self.pepper, token),
@@ -253,15 +248,18 @@ class MFALoginService:
     ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
         """Verify one explicit TOTP factor or resolve enrolled TOTP methods."""
         if method_id is None:
-            login_methods = self.login_methods if self.login_methods is not None else self.mfa.login_methods
-            if login_methods is None:
-                return InvalidCredentials()
-            enrolled = await login_methods.list_methods(account_id)
-            totp_method_ids = tuple(sorted(item.method_id for item in enrolled if item.kind == "totp"))
-            return await self.mfa.verify_any_totp(account_id, code, method_ids=totp_method_ids)
+            return await self.mfa.verify_any_totp(account_id, code, method_ids=await self._totp_method_ids(account_id))
         if method_id.__class__ is not str:
             return InvalidCredentials()
         return await self.mfa.verify_totp(account_id, method_id, code)
+
+    async def _totp_method_ids(self, account_id: str) -> tuple[str, ...]:
+        """Return the account's active TOTP method identifiers in stable order."""
+        login_methods = self.login_methods
+        if login_methods is None:
+            return ()
+        enrolled = await login_methods.list_methods(account_id)
+        return tuple(sorted(method.method_id for method in enrolled if method.kind == "totp"))
 
     @staticmethod
     def _challenge_digest(pepper: bytes, challenge: str) -> bytes:

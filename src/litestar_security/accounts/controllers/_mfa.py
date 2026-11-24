@@ -565,7 +565,7 @@ class _PasskeyController(Controller):
         """Verify and store one passkey registration."""
         account_id = principal_id(principal)
         passkey_service = mfa_service.passkeys
-        if account_id is None or passkey_service is None or data.account_id != account_id:
+        if account_id is None or passkey_service is None or data.account_id not in {None, account_id}:
             route_error(InvalidCredentials(), credentials=True)
         limited = await _check_rate_limit(mfa_service, request, PASSKEY_REGISTER_VERIFY, account_id)
         if limited is not None:
@@ -597,7 +597,7 @@ class _PasskeyController(Controller):
         request: Request[Any, Any, Any],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[PasskeyOptions]:
-        """Create public account-bound assertion options."""
+        """Create public account-bound or discoverable assertion options."""
         passkey_service = mfa_service.passkeys
         if passkey_service is None:  # pragma: no cover - this controller is registered only with a passkey service
             route_error(VerificationUnavailable(), credentials=True)

@@ -27,7 +27,9 @@ Added
   :class:`~litestar_security.accounts.VerifiedPasskeyAuthentication` carrying
   the resolved ``account_id`` and
   :class:`~litestar_security.AuthenticationEvidence` while enforcing strict
-  bound/unbound ceremony symmetry
+  bound/unbound ceremony symmetry, and passkey registration requests
+  ``residentKey: "preferred"`` so new credentials are discoverable where the
+  authenticator supports it
   (`#97 <https://github.com/cofin/litestar-security/issues/97>`__).
 * :meth:`~litestar_security.providers.oauth.StepUpOAuthAuthorizer.from_step_up_service`
   constructs an OAuth step-up authorizer over
@@ -35,6 +37,17 @@ Added
   :class:`~litestar_security.accounts.SecurityEpochStore` with default
   ``Authorization``/``Cookie`` transport-binding derivation matching the
   generated step-up controller.
+
+Changed
+~~~~~~~
+
+* :class:`~litestar_security.accounts.WebAuthnChallengeStore` implementations
+  must persist ``account_id=None`` for discoverable authentication challenges;
+  SQL-backed stores need a nullable column.
+  :func:`~litestar_security.testing.assert_webauthn_challenge_store_conformance`
+  checks the round trip.
+* :class:`~litestar_security.accounts.schemas.PasskeyVerification` is
+  constructed with keyword arguments only.
 
 Fixed
 ~~~~~

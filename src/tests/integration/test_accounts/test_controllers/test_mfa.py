@@ -479,7 +479,10 @@ def test_passkey_ceremony_inventory_and_removal_validation_over_http() -> None:
     )
     harness.reg_options_outcomes = AsyncOutcome(VerificationUnavailable())
     harness.reg_verify_outcomes = AsyncOutcome(
-        SimpleNamespace(credential_id=b"credential"), InvalidCredentials(), VerificationUnavailable()
+        SimpleNamespace(credential_id=b"credential"),
+        SimpleNamespace(credential_id=b"credential"),
+        InvalidCredentials(),
+        VerificationUnavailable(),
     )
     harness.auth_options_outcomes = AsyncOutcome(_webauthn_options(), VerificationUnavailable())
     harness.list_outcomes = AsyncOutcome((_passkey_metadata(),), VerificationUnavailable())
@@ -526,7 +529,7 @@ def test_passkey_ceremony_inventory_and_removal_validation_over_http() -> None:
         reg_missing_account.status_code,
         reg_invalid.status_code,
         reg_unavailable.status_code,
-    ) == (401, 401, 401, 503)
+    ) == (401, 201, 401, 503)
     assert auth_opts.status_code == 200
     assert isinstance(auth_opts.json()["binding"], str)
     assert auth_opts.json()["binding"] != ""

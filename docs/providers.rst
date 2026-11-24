@@ -135,6 +135,11 @@ step-up controller, and fails closed when neither header is present. Supply
 custom ``transport_binding`` or ``session_binding`` callables when an
 application uses a different transport or callback-session binding.
 
+A grant issued from provider reauthentication is bound on the callback
+request, a browser redirect that carries cookies but no ``Authorization``
+header. Token-mode applications that later present a bearer token must supply
+a ``transport_binding`` that is stable across both requests.
+
 Google IAP human, service account, and agent identities
 -------------------------------------------------------
 

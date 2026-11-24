@@ -47,6 +47,7 @@ from litestar_security.typing import (
     AuthenticatorSelectionCriteria,
     COSEAlgorithmIdentifier,
     CredentialDeviceType,
+    ResidentKeyRequirement,
     UserVerificationRequirement,
     ensure_webauthn,
     generate_authentication_options,
@@ -536,7 +537,8 @@ class PyWebAuthnVerifier:
                     else AttestationConveyancePreference.NONE
                 ),
                 authenticator_selection=AuthenticatorSelectionCriteria(
-                    user_verification=UserVerificationRequirement(cast("str", kwargs["user_verification"]))
+                    resident_key=ResidentKeyRequirement.PREFERRED,
+                    user_verification=UserVerificationRequirement(cast("str", kwargs["user_verification"])),
                 ),
                 supported_pub_key_algs=[
                     COSEAlgorithmIdentifier(value) for value in cast("Sequence[int]", kwargs["algorithms"])
@@ -937,9 +939,16 @@ class PasskeyService:
         return VerifiedPasskeyAuthentication(account_id=resolved_account_id, evidence=evidence)
 
     async def verify_authentication(
-        self, account_id: str | None = None, *, binding: bytes, response: str
+        self, account_id: str, *, binding: bytes, response: str
     ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
-        """Consume, verify, and atomically record one assertion."""
+        """Consume, verify, and atomically record one account-bound assertion.
+
+        The returned evidence does not name an account, so this method accepts
+        only a ceremony bound to ``account_id``. Use :meth:`authenticate` for
+        discoverable sign-in, which returns the resolved credential owner.
+        """
+        if cast("object", account_id).__class__ is not str:
+            return InvalidCredentials()
         result = await self.authenticate(account_id, binding=binding, response=response)
         return result.evidence if isinstance(result, VerifiedPasskeyAuthentication) else result
 
@@ -1023,6 +1032,7 @@ class PasskeyService:
     def _resolve_authentication_account(
         account_id: str | None, record: WebAuthnChallenge | None, credential: PasskeyCredential | None
     ) -> str | None:
+        """Return the credential owner when the ceremony's binding matches the caller's."""
         if record is None or credential is None:
             return None
         if account_id is None:

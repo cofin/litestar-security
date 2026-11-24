@@ -508,12 +508,12 @@ class StepUpOAuthAuthorizer:
         """Build an OAuth step-up authorizer from ``StepUpService`` and ``SecurityEpochStore``.
 
         Args:
-            service: Step-up grant service shared with ``_StepUpController``.
+            service: Step-up grant service shared with the generated step-up route.
             epochs: Authoritative security-epoch store.
             transport_binding: Optional request-to-transport binding extractor.
-                Defaults to matching ``_StepUpController`` (``Authorization``
-                header with ``Cookie`` fallback, returning ``None`` when absent
-                so authorization fails closed).
+                Defaults to the generated step-up route's derivation
+                (``Authorization`` header with ``Cookie`` fallback, returning
+                ``None`` when absent so authorization fails closed).
             session_binding: Optional callback-session binding extractor.
                 Defaults to returning ``None``.
 

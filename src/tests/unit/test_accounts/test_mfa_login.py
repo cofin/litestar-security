@@ -743,6 +743,12 @@ async def test_mfa_login_verify_totp_without_method_id_resolves_enrolled_factors
         await service.verify(record, method="totp", method_id="totp-a", code=next_code_a), AuthenticationEvidence
     )
 
+    del cast("Any", mfa.secret_protector).plaintexts[mfa_store.methods["totp-a"].protected_secret.ciphertext]
+    assert await service.verify(record, method="totp", method_id=None, code="000000") == VerificationUnavailable()
+    assert isinstance(
+        await service.verify(record, method="totp", method_id=None, code=next_code_b), AuthenticationEvidence
+    )
+
     login_methods.methods = (accounts_module.LoginMethod(method_id="password-1", kind="password", created_at=_NOW),)
     assert await service.verify(record, method="totp", method_id=None, code=next_code_b) == InvalidCredentials()
 

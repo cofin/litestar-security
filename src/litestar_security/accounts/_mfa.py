@@ -843,7 +843,8 @@ class MFAService:
 
         When ``method_ids`` is omitted, active ``kind == "totp"`` methods are
         loaded from ``self.login_methods``. Verification stops on the first
-        matching method or operational failure.
+        matching method; a method that cannot be checked does not block the
+        remaining candidates.
 
         Args:
             account_id: The expected method owner.
@@ -851,7 +852,8 @@ class MFAService:
             method_ids: Optional explicit candidate TOTP method identifiers.
 
         Returns:
-            Fresh TOTP evidence, generic invalid credentials, or operational failure.
+            Fresh TOTP evidence, generic invalid credentials, or operational
+            failure when no candidate matched and at least one could not be checked.
         """
         if method_ids is None:
             login_methods = self.login_methods
@@ -864,16 +866,15 @@ class MFAService:
                 return VerificationUnavailable()
         else:
             candidates = tuple(method_ids)
+        unavailable = False
         for method_id in candidates:
             if method_id.__class__ is not str:
                 return InvalidCredentials()
-            try:
-                outcome = await self.verify_totp(account_id, method_id, code)
-            except Exception:  # noqa: BLE001 - sanitize overridden verifier failures
-                return VerificationUnavailable()
-            if isinstance(outcome, (AuthenticationEvidence, VerificationUnavailable)):
+            outcome = await self.verify_totp(account_id, method_id, code)
+            if isinstance(outcome, AuthenticationEvidence):
                 return outcome
-        return InvalidCredentials()
+            unavailable = unavailable or isinstance(outcome, VerificationUnavailable)
+        return VerificationUnavailable() if unavailable else InvalidCredentials()
 
     async def generate_recovery_codes(self, account_id: str) -> RecoveryCodeGrant | VerificationUnavailable:
         """Atomically replace and reveal one set of recovery codes.

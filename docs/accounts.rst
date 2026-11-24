@@ -90,12 +90,13 @@ configured ``login_methods`` store, and binding fails when that store does not
 implement it.
 
 When TOTP is permitted, ``LocalMFAChallenge`` includes ``totp_method_ids``
-(serialized as ``totpMethodIds``) listing the account's active TOTP method
-identifiers. Clients completing a TOTP challenge on ``/login/mfa`` or
-``/token/mfa`` may pass an explicit ``method_id`` (``methodId``) or omit it;
-when omitted, ``MFALoginService`` resolves the account's active TOTP methods
-from ``LoginMethodStore`` and verifies the code against each until one succeeds
-atomically.
+listing the account's active TOTP method identifiers. Clients completing a TOTP
+challenge on ``/login/mfa`` or ``/token/mfa`` may pass an explicit
+``method_id`` or omit it; when omitted, ``MFALoginService`` resolves the
+account's active TOTP methods from ``LoginMethodStore`` and verifies the code
+against each until one succeeds atomically. Field names follow
+``SecurityConfig.wire_rename``, so they are ``totpMethodIds`` and ``methodId``
+only under ``wire_rename="camel"``.
 
 Step-up purposes
 ================
@@ -131,5 +132,15 @@ ceremony symmetry—a bound challenge must be verified with the same
 ``account_id``, and an unbound challenge must be verified with
 ``account_id=None``—and returns
 ``VerifiedPasskeyAuthentication(account_id, evidence)`` carrying the resolved
-credential owner. ``PasskeyService.verify_authentication()`` delegates to
-``authenticate()`` and returns the ``AuthenticationEvidence`` directly.
+credential owner. ``PasskeyService.verify_authentication()`` stays
+account-bound: it requires an ``account_id`` and returns only the
+``AuthenticationEvidence``, so use ``authenticate()`` whenever the account is
+not already known.
+
+Registration options request ``residentKey: "preferred"`` so authenticators
+store a discoverable credential when they can. Credentials registered without
+one keep working in account-bound ceremonies but cannot sign in usernameless.
+
+A ``WebAuthnChallengeStore`` must persist ``account_id=None`` for
+authentication challenges; make the column nullable in SQL-backed stores.
+``assert_webauthn_challenge_store_conformance`` checks the round trip.
