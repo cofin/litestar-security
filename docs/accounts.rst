@@ -153,6 +153,7 @@ Every generated passkey route, including step-up, verifies assertions through
 policy.
 
 A usernameless request names no account, so only the client bucket limits it.
-When the client key is also unavailable, the request is charged to one shared
-bucket instead of going unlimited; configure a client-key extractor so callers
-are limited individually.
+When the client key is also unavailable, for example behind a Unix socket or
+when the extractor fails, the request is refused with ``503`` rather than
+running unlimited. Configure a client-key extractor that identifies callers, or
+use ``UnlimitedRateLimiter`` when limiting happens at the edge.

@@ -631,19 +631,19 @@ def test_passkey_authentication_verify_sanitizes_missing_binding_and_login_failu
 
 
 @pytest.mark.parametrize(
-    ("session_capable", "token_capable", "client_key", "subject"),
-    [(True, False, None, "passkey:discoverable"), (False, True, "peer", None)],
-    ids=["session-only-shared-bucket", "tokens-only-client-bucket"],
+    ("session_capable", "token_capable", "client_key", "limiter"),
+    [(True, False, "peer", None), (False, True, None, accounts.UnlimitedRateLimiter())],
+    ids=["session-only-client-bucket", "tokens-only-edge-limited"],
 )
 def test_usernameless_passkey_authentication_establishes_transport_for_credential_owner(
-    *, session_capable: bool, token_capable: bool, client_key: str | None, subject: str | None
+    *, session_capable: bool, token_capable: bool, client_key: str | None, limiter: object
 ) -> None:
-    """Verify usernameless options and verify resolve the credential owner and always charge one bucket."""
+    """Verify usernameless options and verify resolve the credential owner under a usable limiter."""
     harness = _MFAHarness()
     harness.passkey_auth_outcomes = AsyncOutcome(
         accounts.VerifiedPasskeyAuthentication(account_id="resolved-owner", evidence=_factor_evidence())
     )
-    rate_limits = _RecordingRateLimits(outcome=None)
+    rate_limits = _RecordingRateLimits(outcome=None, limiter=limiter)
     app, csrf_key = _mfa_http_app(
         harness,
         rate_limits=rate_limits,
@@ -668,9 +668,25 @@ def test_usernameless_passkey_authentication_establishes_transport_for_credentia
     assert harness.auth_account_ids == [None, None]
     assert harness.login_account_ids == ["resolved-owner"]
     assert rate_limits.calls == [
-        ("local.passkey.authentication.options", client_key, subject),
-        ("local.passkey.assert", client_key, subject),
+        ("local.passkey.authentication.options", client_key, None),
+        ("local.passkey.assert", client_key, None),
     ]
+
+
+def test_usernameless_passkey_requests_fail_closed_when_no_bucket_identifies_the_caller() -> None:
+    """Verify a usernameless request with no client key is refused before any challenge is created."""
+    harness = _MFAHarness()
+    rate_limits = _RecordingRateLimits(outcome=None)
+    app, _ = _mfa_http_app(harness, rate_limits=rate_limits, token_capable=True, session_capable=False)
+
+    with TestClient(app) as client:
+        options = client.post("/auth/passkeys/authentication/options", json={})
+        verified = client.post("/auth/passkeys/authentication/verify", json={"response": "{}", "binding": "binding"})
+        bound = client.post("/auth/passkeys/authentication/options", json={"account_id": "account-1"})
+
+    assert (options.status_code, verified.status_code, bound.status_code) == (503, 503, 200)
+    assert harness.auth_account_ids == ["account-1"]
+    assert rate_limits.calls == [("local.passkey.authentication.options", None, "account-1")]
 
 
 class _HeaderSlot:
@@ -708,8 +724,9 @@ class _AccountResolver:
 
 
 class _RecordingRateLimits:
-    def __init__(self, outcome: object = None) -> None:
+    def __init__(self, outcome: object = None, limiter: object = None) -> None:
         self.outcome = outcome
+        self.limiter = limiter
         self.calls: list[tuple[str, str | None, str | None]] = []
 
     async def check(self, operation: str, *, client_key: str | None = None, identifier: str | None = None) -> object:

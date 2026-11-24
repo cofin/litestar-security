@@ -15,6 +15,7 @@ document raised denials, while ``409`` conflict responses keep their explicit
 from base64 import urlsafe_b64decode
 from collections.abc import Callable
 from dataclasses import dataclass
+from logging import getLogger
 from secrets import token_urlsafe
 from typing import Any
 
@@ -57,7 +58,7 @@ from litestar_security.accounts._passkeys import (
     VerifiedPasskeyAuthentication,
     WebAuthnOptions,
 )
-from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
+from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, UnlimitedRateLimiter
 from litestar_security.accounts._records import (
     PasswordReauthenticationProof,
     RevokeLoginMethodOutcome,
@@ -86,6 +87,7 @@ from litestar_security.schema import WirePolicy
 
 __all__ = ("build_mfa_routes",)
 
+_LOGGER = getLogger(__name__)
 _MFA_TAG = ROUTE_TAGS["mfa"].name
 _PASSKEY_TAG = ROUTE_TAGS["passkeys"].name
 _STEP_UP_TAG = ROUTE_TAGS["step_up"].name
@@ -197,10 +199,6 @@ def build_mfa_routes(  # noqa: PLR0913 - explicit route bundle capabilities rema
     )
 
 
-_UNATTRIBUTED_SUBJECT = "passkey:discoverable"
-"""Shared subject bucket for a request that names neither an account nor a client."""
-
-
 def _transport_binding(request: Request[Any, Any, Any]) -> bytes:
     authorization = request.headers.get("authorization")
     cookies = request.headers.get("cookie")
@@ -226,8 +224,10 @@ async def _check_rate_limit(
         client_key = mfa_service.client_key(request) if mfa_service.client_key is not None else None
     except Exception:  # noqa: BLE001 - application callback failures degrade to the identifier bucket
         client_key = None
-    identifier = _UNATTRIBUTED_SUBJECT if account_id is None and client_key is None else account_id
-    return await guard.check(operation, client_key=client_key, identifier=identifier)
+    if account_id is None and client_key is None and not isinstance(guard.limiter, UnlimitedRateLimiter):
+        _LOGGER.warning("Refusing %s: no account or client key identifies the caller to the rate limiter", operation)
+        return VerificationUnavailable()
+    return await guard.check(operation, client_key=client_key, identifier=account_id)
 
 
 async def _authorize_step_up(
