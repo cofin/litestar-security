@@ -1,6 +1,84 @@
 Changelog
 =========
 
+0.8.0
+-----
+
+Added
+~~~~~
+
+* :class:`~litestar_security.providers.jwks.JWKSJWTVerifier` is exported from
+  :mod:`litestar_security.providers.jwks` and :mod:`litestar_security.providers`
+  for synchronous JWKS-backed JWT verification, and
+  :func:`~litestar_security.providers.oidc.oidc_provider`,
+  :func:`~litestar_security.providers.oidc.google_oidc_provider`, and
+  :func:`~litestar_security.providers.oidc.keycloak_oidc_provider` accept
+  ``jwks`` directly (mutually exclusive with ``verifier``, with optional
+  ``worker_limits``) so synchronous OIDC setup uses public APIs only
+  (`#98 <https://github.com/cofin/litestar-security/issues/98>`__).
+* Usernameless (discoverable credential) passkey authentication is supported by
+  making ``account_id`` optional on
+  :class:`~litestar_security.accounts.schemas.PasskeyAuthenticationStart`,
+  :class:`~litestar_security.accounts.schemas.PasskeyVerification`,
+  :class:`~litestar_security.accounts.WebAuthnChallenge` (for authentication
+  ceremonies only), and
+  :meth:`~litestar_security.accounts.PasskeyService.begin_authentication`.
+  :meth:`~litestar_security.accounts.PasskeyService.authenticate` returns
+  :class:`~litestar_security.accounts.VerifiedPasskeyAuthentication` carrying
+  the resolved ``account_id`` and
+  :class:`~litestar_security.AuthenticationEvidence` while enforcing strict
+  bound/unbound ceremony symmetry, and passkey registration requests
+  ``residentKey: "preferred"`` so new credentials are discoverable where the
+  authenticator supports it. ``discoverable_authentication=False`` on
+  :class:`~litestar_security.config.PasskeyConfig` or
+  :class:`~litestar_security.accounts.PasskeyService` turns usernameless
+  ceremonies off
+  (`#97 <https://github.com/cofin/litestar-security/issues/97>`__).
+* :meth:`~litestar_security.providers.oauth.StepUpOAuthAuthorizer.from_step_up_service`
+  constructs an OAuth step-up authorizer over
+  :class:`~litestar_security.accounts.StepUpService` and
+  :class:`~litestar_security.accounts.SecurityEpochStore` with default
+  ``Authorization``/``Cookie`` transport-binding derivation matching the
+  generated step-up controller.
+
+Changed
+~~~~~~~
+
+* :class:`~litestar_security.accounts.WebAuthnChallengeStore` implementations
+  must persist ``account_id=None`` for discoverable authentication challenges;
+  SQL-backed stores need a nullable column.
+  :func:`~litestar_security.testing.assert_webauthn_challenge_store_conformance`
+  checks the round trip.
+* :class:`~litestar_security.accounts.schemas.PasskeyVerification` is
+  constructed with keyword arguments only.
+* :meth:`~litestar_security.accounts.PasskeyService.begin_authentication` can
+  return ``InvalidCredentials`` when a discoverable ceremony is refused.
+* Generated passkey step-up verifies through
+  :meth:`~litestar_security.accounts.PasskeyService.authenticate`, the single
+  extension point for assertion policy.
+
+Fixed
+~~~~~
+
+* :meth:`~litestar_security.accounts.MFAService.begin_totp_enrollment` passes
+  ``name`` and ``issuer_name`` as keyword arguments to
+  ``pyotp.TOTP.provisioning_uri`` for ``pyotp >= 2.11`` compatibility
+  (`#94 <https://github.com/cofin/litestar-security/issues/94>`__).
+* The generated ``POST <prefix>/step-up/{purpose}`` controller registers the
+  OAuth step-up purposes ``oauth-link``, ``oauth-unlink``,
+  ``oauth-scope-upgrade``, and ``oauth-provider-token-management`` with strong
+  factors (``password`` and ``passkey``) while remaining deny-by-default for
+  unknown purposes
+  (`#95 <https://github.com/cofin/litestar-security/issues/95>`__).
+* :class:`~litestar_security.accounts.MFARequired` and
+  :class:`~litestar_security.accounts.schemas.LocalMFAChallenge` expose active
+  ``totp_method_ids``, and
+  :meth:`~litestar_security.accounts.MFALoginService.verify` resolves active
+  TOTP factors through :class:`~litestar_security.accounts.LoginMethodStore`
+  via :meth:`~litestar_security.accounts.MFAService.verify_any_totp` when
+  ``method_id`` is omitted on ``/login/mfa`` or ``/token/mfa``
+  (`#96 <https://github.com/cofin/litestar-security/issues/96>`__).
+
 0.7.3
 -----
 

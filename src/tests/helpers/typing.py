@@ -29,6 +29,7 @@ from litestar_security import (
     requires_authenticated,
     requires_scope,
 )
+from litestar_security.providers import JWKSJWTVerifier, JWKSProvider, JWTClaims, JWTValidationConfig, JWTVerifier
 
 if TYPE_CHECKING:
     from litestar.types import Scope
@@ -53,6 +54,13 @@ def narrow_current_user(current_user: CurrentUser[User], principal: Principal[Us
     """Prove current-user injection narrows while the principal remains honest."""
     assert_type(current_user, User)
     assert_type(principal.user, User | None)
+
+
+def jwks_verifier_contract(config: JWTValidationConfig, jwks: JWKSProvider) -> JWTVerifier[JWTClaims]:
+    """Prove JWKSJWTVerifier satisfies the generic JWTVerifier[JWTClaims] protocol."""
+    verifier = JWKSJWTVerifier(config=config, jwks=jwks, jwks_uri="https://issuer.example/.well-known/jwks.json")
+    assert_type(verifier, JWKSJWTVerifier)
+    return verifier
 
 
 anonymous: Principal[User] = Principal[User].anonymous()

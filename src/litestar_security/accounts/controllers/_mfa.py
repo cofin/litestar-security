@@ -1,16 +1,21 @@
 """Native Litestar route bundle for MFA, passkeys, and step-up.
 
 ``_PURPOSE_METHODS`` enforces deny-by-default step-up factor admission (only
-``password`` and ``passkey`` satisfy sensitive enrollment, removal, and
-recovery-code replacement purposes) and stays synchronized with
-``_PURPOSE_OPERATIONS`` in ``_authorize_step_up``. Error statuses in
-``_MFA_BAD_REQUEST_RESPONSES`` document raised denials, while ``409`` conflict
-responses keep their explicit ``OperationMessage`` schema.
+``password`` and ``passkey`` satisfy sensitive enrollment, removal,
+recovery-code replacement, and OAuth account-management purposes). Local MFA
+and passkey purposes stay synchronized with ``_PURPOSE_OPERATIONS`` in
+``_authorize_step_up``; OAuth purposes (``oauth-link``, ``oauth-unlink``,
+``oauth-scope-upgrade``, and ``oauth-provider-token-management``) are issued by
+``_StepUpController`` and consumed by ``OAuthLifecycleService`` rather than
+``_authorize_step_up``. Error statuses in ``_MFA_BAD_REQUEST_RESPONSES``
+document raised denials, while ``409`` conflict responses keep their explicit
+``OperationMessage`` schema.
 """
 
 from base64 import urlsafe_b64decode
 from collections.abc import Callable
 from dataclasses import dataclass
+from logging import getLogger
 from secrets import token_urlsafe
 from typing import Any
 
@@ -47,8 +52,13 @@ from litestar_security.accounts._operations import (
     PASSKEY_REMOVE,
     PASSWORD_VERIFY,
 )
-from litestar_security.accounts._passkeys import PasskeyMetadata, PasskeyService, WebAuthnOptions
-from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard
+from litestar_security.accounts._passkeys import (
+    PasskeyMetadata,
+    PasskeyService,
+    VerifiedPasskeyAuthentication,
+    WebAuthnOptions,
+)
+from litestar_security.accounts._rate_limits import RateLimited, RateLimitGuard, UnlimitedRateLimiter
 from litestar_security.accounts._records import (
     PasswordReauthenticationProof,
     RevokeLoginMethodOutcome,
@@ -77,6 +87,7 @@ from litestar_security.schema import WirePolicy
 
 __all__ = ("build_mfa_routes",)
 
+_LOGGER = getLogger(__name__)
 _MFA_TAG = ROUTE_TAGS["mfa"].name
 _PASSKEY_TAG = ROUTE_TAGS["passkeys"].name
 _STEP_UP_TAG = ROUTE_TAGS["step_up"].name
@@ -86,6 +97,10 @@ _PURPOSE_METHODS = {
     "recovery-codes": frozenset({"password", "passkey"}),
     "passkey-register": frozenset({"password", "passkey"}),
     "passkey-remove": frozenset({"password", "passkey"}),
+    "oauth-link": frozenset({"password", "passkey"}),
+    "oauth-unlink": frozenset({"password", "passkey"}),
+    "oauth-scope-upgrade": frozenset({"password", "passkey"}),
+    "oauth-provider-token-management": frozenset({"password", "passkey"}),
 }
 _PURPOSE_OPERATIONS = {
     "totp-enroll": MFA_TOTP_ENROLL,
@@ -200,7 +215,7 @@ async def _current_epoch(mfa_service: _MFAFeatureService, account_id: str) -> in
 
 
 async def _check_rate_limit(
-    mfa_service: _MFAFeatureService, request: Request[Any, Any, Any], operation: str, account_id: str
+    mfa_service: _MFAFeatureService, request: Request[Any, Any, Any], operation: str, account_id: str | None
 ) -> RateLimited | VerificationUnavailable | None:
     guard = mfa_service.rate_limits
     if guard is None:
@@ -209,6 +224,9 @@ async def _check_rate_limit(
         client_key = mfa_service.client_key(request) if mfa_service.client_key is not None else None
     except Exception:  # noqa: BLE001 - application callback failures degrade to the identifier bucket
         client_key = None
+    if account_id is None and client_key is None and not isinstance(guard.limiter, UnlimitedRateLimiter):
+        _LOGGER.warning("Refusing %s: no account or client key identifies the caller to the rate limiter", operation)
+        return VerificationUnavailable()
     return await guard.check(operation, client_key=client_key, identifier=account_id)
 
 
@@ -343,9 +361,10 @@ class _StepUpController(Controller):
                 amr=("pwd",),
             )
         if data.method == "passkey" and mfa_service.passkeys is not None:
-            return await mfa_service.passkeys.verify_authentication(
+            verified = await mfa_service.passkeys.authenticate(
                 account_id, binding=_transport_binding(request), response=data.credential
             )
+            return verified.evidence if isinstance(verified, VerifiedPasskeyAuthentication) else verified
         return InvalidCredentials()
 
 
@@ -552,7 +571,7 @@ class _PasskeyController(Controller):
         """Verify and store one passkey registration."""
         account_id = principal_id(principal)
         passkey_service = mfa_service.passkeys
-        if account_id is None or passkey_service is None or data.account_id != account_id:
+        if account_id is None or passkey_service is None or data.account_id not in {None, account_id}:
             route_error(InvalidCredentials(), credentials=True)
         limited = await _check_rate_limit(mfa_service, request, PASSKEY_REGISTER_VERIFY, account_id)
         if limited is not None:
@@ -584,7 +603,7 @@ class _PasskeyController(Controller):
         request: Request[Any, Any, Any],
         mfa_service: NamedDependency[SkipValidation[_MFAFeatureService]],
     ) -> Response[PasskeyOptions]:
-        """Create public account-bound assertion options."""
+        """Create public account-bound or discoverable assertion options."""
         passkey_service = mfa_service.passkeys
         if passkey_service is None:  # pragma: no cover - this controller is registered only with a passkey service
             route_error(VerificationUnavailable(), credentials=True)
@@ -663,10 +682,10 @@ class _PasskeyController(Controller):
 
     @staticmethod
     def _options_response(
-        result: WebAuthnOptions | VerificationUnavailable, *, binding: str | None = None
+        result: WebAuthnOptions | InvalidCredentials | VerificationUnavailable, *, binding: str | None = None
     ) -> Response[Any]:
-        if isinstance(result, VerificationUnavailable):
-            route_error(result, credentials=True)
+        if not isinstance(result, WebAuthnOptions):
+            route_error(result)
         return Response(
             content=PasskeyOptions(options=result.json, expires_at=result.expires_at, binding=binding),
             status_code=HTTP_200_OK,
@@ -819,14 +838,14 @@ async def _verify_passkey_authentication(
         route_error(limited, credentials=True)
     if data.binding is None:
         route_error(InvalidCredentials(), credentials=True)
-    evidence = await passkey_service.verify_authentication(
+    verified = await passkey_service.authenticate(
         data.account_id, binding=data.binding.encode("utf-8"), response=data.response
     )
-    if not isinstance(evidence, AuthenticationEvidence):
-        route_error(evidence, credentials=True)
+    if not isinstance(verified, VerifiedPasskeyAuthentication):
+        route_error(verified, credentials=True)
     selected_transport = transport if transport is not None else data.transport
     result = await local_auth_service.passkey_login(
-        request, data.account_id, transport=selected_transport, evidence=evidence
+        request, verified.account_id, transport=selected_transport, evidence=verified.evidence
     )
     if isinstance(result, (InvalidCredentials, VerificationUnavailable)):
         route_error(result, credentials=True)

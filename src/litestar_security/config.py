@@ -194,6 +194,7 @@ class PasskeyConfig:
     route_prefix: str = "/auth"
     register_routes: bool = True
     docs: RouteDocs = field(default_factory=RouteDocs, repr=False)
+    discoverable_authentication: bool = True
     passkey_service: object = field(init=False, repr=False, compare=False)
     step_up_service: object | None = field(init=False, repr=False, compare=False)
 
@@ -215,6 +216,7 @@ class PasskeyConfig:
             "worker_timeout": self.worker_timeout,
             "attestation_trust": self.attestation_trust,
             "login_methods": self.login_methods,
+            "discoverable_authentication": self.discoverable_authentication,
         }
         if self.events is not None:
             passkey_service_kwargs["events"] = self.events

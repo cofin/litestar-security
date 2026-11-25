@@ -114,15 +114,21 @@ class PasskeyRegistrationStart(WireStruct, frozen=True):
 
 
 class PasskeyAuthenticationStart(WireStruct, frozen=True):
-    """Request bound passkey authentication options."""
+    """Request passkey authentication options.
 
-    account_id: str
+    Omit ``account_id`` to start a discoverable (usernameless) ceremony.
+    """
+
+    account_id: str | None = None
 
 
-class PasskeyVerification(WireStruct, frozen=True):
-    """Submit one browser WebAuthn JSON response."""
+class PasskeyVerification(WireStruct, frozen=True, kw_only=True):
+    """Submit one browser WebAuthn JSON response.
 
-    account_id: str
+    Omit ``account_id`` to complete a discoverable ceremony started without one.
+    """
+
+    account_id: str | None = None
     response: str
     binding: str | None = None
     transport: str | None = None

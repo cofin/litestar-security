@@ -93,10 +93,21 @@ def test_protected_mfa_and_passkey_routes_require_authentication(
 
 
 @pytest.mark.parametrize(
-    "purpose", ["totp-enroll", "totp-remove", "recovery-codes", "passkey-register", "passkey-remove"]
+    "purpose",
+    [
+        "totp-enroll",
+        "totp-remove",
+        "recovery-codes",
+        "passkey-register",
+        "passkey-remove",
+        "oauth-link",
+        "oauth-unlink",
+        "oauth-scope-upgrade",
+        "oauth-provider-token-management",
+    ],
 )
 def test_step_up_purposes_accept_strong_factors(purpose: str) -> None:
-    """Verify all five allowlisted purposes issue grants for password and passkey factors."""
+    """Verify all allowlisted purposes issue grants for password and passkey factors."""
     harness = _MFAHarness()
     app, _ = _mfa_http_app(harness)
     headers = {"x-auth": "valid", "authorization": "Bearer transport"}
@@ -122,6 +133,7 @@ def test_step_up_purposes_accept_strong_factors(purpose: str) -> None:
     ("purpose", "factor_method", "include_passkeys", "include_local_auth"),
     [
         ("settings", "password", True, True),
+        ("oauth-unknown", "password", True, True),
         ("totp-enroll", "totp", True, True),
         ("passkey-remove", "recovery-code", True, True),
         ("recovery-codes", "unsupported", True, True),
@@ -130,6 +142,7 @@ def test_step_up_purposes_accept_strong_factors(purpose: str) -> None:
     ],
     ids=[
         "unlisted-purpose",
+        "unlisted-oauth-purpose",
         "weak-totp",
         "weak-recovery-code",
         "unknown-method",
@@ -267,7 +280,7 @@ def test_transport_binding_extraction_precedence_over_http(
     assert options.status_code == 200
     assert verified.status_code == 201
     assert harness.bindings == [
-        ("passkeys.verify_authentication", expected_binding),
+        ("passkeys.authenticate", expected_binding),
         ("step_up.issue", expected_binding),
         ("step_up.consume", expected_binding),
         ("passkeys.begin_registration", expected_binding),
@@ -466,9 +479,12 @@ def test_passkey_ceremony_inventory_and_removal_validation_over_http() -> None:
     )
     harness.reg_options_outcomes = AsyncOutcome(VerificationUnavailable())
     harness.reg_verify_outcomes = AsyncOutcome(
-        SimpleNamespace(credential_id=b"credential"), InvalidCredentials(), VerificationUnavailable()
+        SimpleNamespace(credential_id=b"credential"),
+        SimpleNamespace(credential_id=b"credential"),
+        InvalidCredentials(),
+        VerificationUnavailable(),
     )
-    harness.auth_options_outcomes = AsyncOutcome(_webauthn_options(), VerificationUnavailable())
+    harness.auth_options_outcomes = AsyncOutcome(_webauthn_options(), VerificationUnavailable(), InvalidCredentials())
     harness.list_outcomes = AsyncOutcome((_passkey_metadata(),), VerificationUnavailable())
     app, _ = _mfa_http_app(harness)
     headers = {"x-auth": "valid", "authorization": "Bearer transport"}
@@ -486,6 +502,9 @@ def test_passkey_ceremony_inventory_and_removal_validation_over_http() -> None:
         reg_mismatch = client.post(
             "/auth/passkeys/registration/verify", headers=headers, json={"account_id": "other", "response": "{}"}
         )
+        reg_missing_account = client.post(
+            "/auth/passkeys/registration/verify", headers=headers, json={"response": "{}"}
+        )
         reg_invalid = client.post(
             "/auth/passkeys/registration/verify", headers=headers, json={"account_id": "account-1", "response": "{}"}
         )
@@ -494,6 +513,7 @@ def test_passkey_ceremony_inventory_and_removal_validation_over_http() -> None:
         )
         auth_opts = client.post("/auth/passkeys/authentication/options", json={"account_id": "account-1"})
         auth_opts_503 = client.post("/auth/passkeys/authentication/options", json={"account_id": "account-1"})
+        auth_opts_refused = client.post("/auth/passkeys/authentication/options", json={})
         listed = client.get("/auth/passkeys", headers=headers)
         listed_503 = client.get("/auth/passkeys", headers=headers)
         totp_remove_denied = client.post("/auth/mfa/totp/m1/remove", headers=headers, json={"step_up_grant": "bad"})
@@ -505,11 +525,17 @@ def test_passkey_ceremony_inventory_and_removal_validation_over_http() -> None:
     assert (reg_step_up_denied.status_code, reg_options_503.status_code) == (401, 503)
     assert reg_ok.status_code == 201
     assert reg_ok.json() == {"detail": "Passkey registered."}
-    assert (reg_mismatch.status_code, reg_invalid.status_code, reg_unavailable.status_code) == (401, 401, 503)
+    assert (
+        reg_mismatch.status_code,
+        reg_missing_account.status_code,
+        reg_invalid.status_code,
+        reg_unavailable.status_code,
+    ) == (401, 201, 401, 503)
     assert auth_opts.status_code == 200
     assert isinstance(auth_opts.json()["binding"], str)
     assert auth_opts.json()["binding"] != ""
     assert auth_opts_503.status_code == 503
+    assert auth_opts_refused.status_code == 400
     assert listed.status_code == 200
     assert listed.json()[0]["credential_id"] == "Y3JlZGVudGlhbA"
     assert "public_key" not in listed.text
@@ -575,8 +601,9 @@ def test_passkey_hybrid_authentication_verify_splits_csrf_and_fixes_transport() 
 def test_passkey_authentication_verify_sanitizes_missing_binding_and_login_failures() -> None:
     """Verify passkey authentication rejects missing bindings and sanitizes factor or login failures."""
     harness = _MFAHarness()
+    verified_outcome = accounts.VerifiedPasskeyAuthentication(account_id="account-1", evidence=_factor_evidence())
     harness.passkey_auth_outcomes = AsyncOutcome(
-        InvalidCredentials(), VerificationUnavailable(), _factor_evidence(), _factor_evidence()
+        InvalidCredentials(), VerificationUnavailable(), verified_outcome, verified_outcome
     )
     harness.passkey_login_outcomes = AsyncOutcome(InvalidCredentials(), VerificationUnavailable())
     app, _ = _mfa_http_app(harness, token_capable=True)
@@ -601,6 +628,65 @@ def test_passkey_authentication_verify_sanitizes_missing_binding_and_login_failu
     assert missing_binding.status_code == 401
     assert (factor_invalid.status_code, factor_unavailable.status_code) == (401, 503)
     assert (login_invalid.status_code, login_unavailable.status_code) == (401, 503)
+
+
+@pytest.mark.parametrize(
+    ("session_capable", "token_capable", "client_key", "limiter"),
+    [(True, False, "peer", None), (False, True, None, accounts.UnlimitedRateLimiter())],
+    ids=["session-only-client-bucket", "tokens-only-edge-limited"],
+)
+def test_usernameless_passkey_authentication_establishes_transport_for_credential_owner(
+    *, session_capable: bool, token_capable: bool, client_key: str | None, limiter: object
+) -> None:
+    """Verify usernameless options and verify resolve the credential owner under a usable limiter."""
+    harness = _MFAHarness()
+    harness.passkey_auth_outcomes = AsyncOutcome(
+        accounts.VerifiedPasskeyAuthentication(account_id="resolved-owner", evidence=_factor_evidence())
+    )
+    rate_limits = _RecordingRateLimits(outcome=None, limiter=limiter)
+    app, csrf_key = _mfa_http_app(
+        harness,
+        rate_limits=rate_limits,
+        client_key=(lambda _connection: client_key) if client_key is not None else None,
+        session_capable=session_capable,
+        token_capable=token_capable,
+    )
+
+    with TestClient(app) as client:
+        options = client.post("/auth/passkeys/authentication/options", json={})
+        headers = _seed_csrf(client, csrf_key) if session_capable else {}
+        verified = client.post(
+            "/auth/passkeys/authentication/verify",
+            headers=headers,
+            json={"response": "{}", "binding": options.json()["binding"]},
+        )
+
+    assert options.status_code == 200
+    assert isinstance(options.json()["binding"], str)
+    assert verified.status_code == 200
+    assert verified.json() == {"account_id": "resolved-owner", "display_name": None}
+    assert harness.auth_account_ids == [None, None]
+    assert harness.login_account_ids == ["resolved-owner"]
+    assert rate_limits.calls == [
+        ("local.passkey.authentication.options", client_key, None),
+        ("local.passkey.assert", client_key, None),
+    ]
+
+
+def test_usernameless_passkey_requests_fail_closed_when_no_bucket_identifies_the_caller() -> None:
+    """Verify a usernameless request with no client key is refused before any challenge is created."""
+    harness = _MFAHarness()
+    rate_limits = _RecordingRateLimits(outcome=None)
+    app, _ = _mfa_http_app(harness, rate_limits=rate_limits, token_capable=True, session_capable=False)
+
+    with TestClient(app) as client:
+        options = client.post("/auth/passkeys/authentication/options", json={})
+        verified = client.post("/auth/passkeys/authentication/verify", json={"response": "{}", "binding": "binding"})
+        bound = client.post("/auth/passkeys/authentication/options", json={"account_id": "account-1"})
+
+    assert (options.status_code, verified.status_code, bound.status_code) == (503, 503, 200)
+    assert harness.auth_account_ids == ["account-1"]
+    assert rate_limits.calls == [("local.passkey.authentication.options", None, "account-1")]
 
 
 class _HeaderSlot:
@@ -638,8 +724,9 @@ class _AccountResolver:
 
 
 class _RecordingRateLimits:
-    def __init__(self, outcome: object = None) -> None:
+    def __init__(self, outcome: object = None, limiter: object = None) -> None:
         self.outcome = outcome
+        self.limiter = limiter
         self.calls: list[tuple[str, str | None, str | None]] = []
 
     async def check(self, operation: str, *, client_key: str | None = None, identifier: str | None = None) -> object:
@@ -654,6 +741,8 @@ class _MFAHarness:
         self.reject_empty_binding = False
         self.bindings: list[tuple[str, bytes]] = []
         self.transports: list[str | None] = []
+        self.auth_account_ids: list[str | None] = []
+        self.login_account_ids: list[str] = []
         self.epochs = SimpleNamespace(current_epoch=self._default_epoch)
         self.password_outcomes: AsyncOutcome | None = None
         self.passkey_auth_outcomes: AsyncOutcome | None = None
@@ -678,6 +767,7 @@ class _MFAHarness:
         )
         self.passkeys = (
             SimpleNamespace(
+                authenticate=self.authenticate,
                 verify_authentication=self.verify_authentication,
                 begin_registration=self.begin_registration,
                 verify_registration=self.verify_registration,
@@ -730,6 +820,7 @@ class _MFAHarness:
     ) -> object:
         del request, evidence
         self.transports.append(transport)
+        self.login_account_ids.append(account_id)
         if self.passkey_login_outcomes is not None:
             return await self.passkey_login_outcomes()
         return accounts.LocalAccount(account_id=account_id)
@@ -758,7 +849,15 @@ class _MFAHarness:
             return await self.recovery_replace_outcomes()
         return accounts.RecoveryCodeGrant(codes=("rc_v1_00000000000000000000000000000000",))
 
-    async def verify_authentication(self, account_id: str, *, binding: bytes, response: str) -> object:
+    async def authenticate(self, account_id: str | None = None, *, binding: bytes, response: str) -> object:
+        del response
+        self.auth_account_ids.append(account_id)
+        self.bindings.append(("passkeys.authenticate", binding))
+        if self.passkey_auth_outcomes is not None:
+            return await self.passkey_auth_outcomes()
+        return accounts.VerifiedPasskeyAuthentication(account_id=account_id or "account-1", evidence=_factor_evidence())
+
+    async def verify_authentication(self, account_id: str | None = None, *, binding: bytes, response: str) -> object:
         del account_id, response
         self.bindings.append(("passkeys.verify_authentication", binding))
         if self.passkey_auth_outcomes is not None:
@@ -779,8 +878,8 @@ class _MFAHarness:
             return await self.reg_verify_outcomes()
         return SimpleNamespace(credential_id=b"credential")
 
-    async def begin_authentication(self, account_id: str, *, binding: bytes) -> object:
-        del account_id
+    async def begin_authentication(self, account_id: str | None = None, *, binding: bytes) -> object:
+        self.auth_account_ids.append(account_id)
         self.bindings.append(("passkeys.begin_authentication", binding))
         if self.auth_options_outcomes is not None:
             return await self.auth_options_outcomes()

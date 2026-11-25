@@ -88,3 +88,72 @@ enrolled set is read from
 :meth:`~litestar_security.accounts.LoginMethodStore.list_methods` on the
 configured ``login_methods`` store, and binding fails when that store does not
 implement it.
+
+When TOTP is permitted, ``LocalMFAChallenge`` includes ``totp_method_ids``
+listing the account's active TOTP method identifiers. Clients completing a TOTP
+challenge on ``/login/mfa`` or ``/token/mfa`` may pass an explicit
+``method_id`` or omit it; when omitted, ``MFALoginService`` resolves the
+account's active TOTP methods from ``LoginMethodStore`` and verifies the code
+against each until one succeeds atomically. Field names follow
+``SecurityConfig.wire_rename``, so they are ``totpMethodIds`` and ``methodId``
+only under ``wire_rename="camel"``.
+
+Step-up purposes
+================
+
+The generated step-up route (``POST /auth/step-up/{purpose}``) accepts
+``password`` and ``passkey`` verification for local factor-management purposes
+(``totp-enroll``, ``totp-remove``, ``recovery-codes``, ``passkey-register``,
+``passkey-remove``) and OAuth account-management purposes:
+
+* ``oauth-link``
+* ``oauth-unlink``
+* ``oauth-scope-upgrade``
+* ``oauth-provider-token-management``
+
+Unknown purposes are denied by default with ``401``. Grants issued for OAuth
+purposes are consumed by ``OAuthLifecycleService`` via an
+``OAuthStepUpAuthorizer`` (such as
+``StepUpOAuthAuthorizer.from_step_up_service()``).
+
+Discoverable (usernameless) passkey authentication
+==================================================
+
+Passkey authentication supports both account-bound and usernameless
+(discoverable) ceremonies. Omit ``account_id`` (or pass ``account_id=None``) in
+``PasskeyAuthenticationStart``, ``PasskeyVerification``, and
+``PasskeyService.begin_authentication()`` to start a discoverable ceremony
+where the authenticator identifies the account from its stored credential.
+
+``WebAuthnChallenge`` allows ``account_id=None`` strictly when
+``purpose="authentication"``; registration challenges always require a
+non-empty ``account_id``. ``PasskeyService.authenticate()`` enforces exact
+ceremony symmetry—a bound challenge must be verified with the same
+``account_id``, and an unbound challenge must be verified with
+``account_id=None``—and returns
+``VerifiedPasskeyAuthentication(account_id, evidence)`` carrying the resolved
+credential owner. ``PasskeyService.verify_authentication()`` stays
+account-bound: it requires an ``account_id`` and returns only the
+``AuthenticationEvidence``, so use ``authenticate()`` whenever the account is
+not already known.
+
+Registration options request ``residentKey: "preferred"`` so authenticators
+store a discoverable credential when they can. Credentials registered without
+one keep working in account-bound ceremonies but cannot sign in usernameless.
+
+A ``WebAuthnChallengeStore`` must persist ``account_id=None`` for
+authentication challenges; make the column nullable in SQL-backed stores.
+``assert_webauthn_challenge_store_conformance`` checks the round trip. Until a
+store is migrated, set ``PasskeyConfig(discoverable_authentication=False)`` (or
+the same field on ``PasskeyService``): the options route then answers ``400``
+when ``account_id`` is omitted and no unbound challenge is ever stored.
+
+Every generated passkey route, including step-up, verifies assertions through
+``PasskeyService.authenticate()``, so override that method to extend assertion
+policy.
+
+A usernameless request names no account, so only the client bucket limits it.
+When the client key is also unavailable, for example behind a Unix socket or
+when the extractor fails, the request is refused with ``503`` rather than
+running unlimited. Configure a client-key extractor that identifies callers, or
+use ``UnlimitedRateLimiter`` when limiting happens at the edge.

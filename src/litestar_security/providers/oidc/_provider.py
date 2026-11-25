@@ -1,18 +1,17 @@
 """OIDC provider lifecycle layered over OAuth and a distinct JWT verifier."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from hmac import compare_digest
 from typing import NoReturn, cast
 
-from litestar_security.authentication import Authenticated, AuthenticationOutcome
+from litestar_security.authentication import Authenticated
 from litestar_security.config import WorkerLimits
-from litestar_security.providers._internal import DynamicVerifierCache, raise_config
-from litestar_security.providers.jwks import JWKSProvider
-from litestar_security.providers.jwks._verification import verify_jwks_jwt
-from litestar_security.providers.jwt import JWTClaims, JWTValidationConfig, JWTVerifier, PyJWTVerifier
+from litestar_security.providers._internal import raise_config
+from litestar_security.providers.jwks import JWKSJWTVerifier, JWKSProvider
+from litestar_security.providers.jwt import JWTClaims, JWTValidationConfig, JWTVerifier
 from litestar_security.providers.oauth import (
     OAuthClientAuth,
     OAuthEndpointConfig,
@@ -295,31 +294,6 @@ class OIDCProvider:
         raise OAuthProviderError
 
 
-@dataclass(frozen=True, slots=True)
-class _DiscoveredOIDCVerifier:
-    config: JWTValidationConfig
-    jwks: JWKSProvider
-    jwks_uri: str
-    worker_limits: WorkerLimits = field(repr=False, compare=False)
-    _verifiers: DynamicVerifierCache[PyJWTVerifier] = field(
-        default_factory=DynamicVerifierCache[PyJWTVerifier], init=False, repr=False, compare=False
-    )
-
-    async def verify(self, token: str, *, now: datetime) -> AuthenticationOutcome[JWTClaims]:
-        return await verify_jwks_jwt(
-            token,
-            config=self.config,
-            jwks=self.jwks,
-            jwks_uri=self.jwks_uri,
-            verifiers=self._verifiers,
-            mechanism_name="oidc",
-            slot_name="oauth.id-token",
-            worker_limits=self.worker_limits,
-            now=now,
-            maximum_token_bytes=_MAXIMUM_TOKEN_BYTES,
-        )
-
-
 async def discover_oidc_provider(  # noqa: PLR0913 - discovery trust inputs remain explicit
     *,
     name: str,
@@ -401,7 +375,9 @@ def oidc_provider(  # noqa: PLR0913 - constructor keeps every trust and transpor
     client_id: str,
     client_secret: SecretStr | None,
     metadata: OIDCMetadata,
-    verifier: JWTVerifier[JWTClaims],
+    verifier: JWTVerifier[JWTClaims] | None = None,
+    jwks: JWKSProvider | None = None,
+    worker_limits: WorkerLimits | None = None,
     scopes: frozenset[str] = _DEFAULT_SCOPES,
     client_auth: OAuthClientAuth = OAuthClientAuth.CLIENT_SECRET_BASIC,
     revocation_endpoint: str | None = None,
@@ -415,7 +391,9 @@ def oidc_provider(  # noqa: PLR0913 - constructor keeps every trust and transpor
         client_id: Registered OIDC client identifier.
         client_secret: Protected client secret, if required.
         metadata: Validated discovery result.
-        verifier: Distinct verifier pinned to the issuer and client.
+        verifier: Distinct verifier pinned to the issuer and client. Mutually exclusive with ``jwks``.
+        jwks: Shared JWKS provider used to construct a ``JWKSJWTVerifier``. Mutually exclusive with ``verifier``.
+        worker_limits: Bounded crypto-worker budget when constructing a verifier from ``jwks``.
         scopes: Allowed request scopes; ``openid`` is always required.
         client_auth: Token-endpoint client authentication method.
         revocation_endpoint: Optional fixed revocation endpoint.
@@ -426,13 +404,16 @@ def oidc_provider(  # noqa: PLR0913 - constructor keeps every trust and transpor
         A configured OIDC lifecycle provider.
 
     Raises:
-        ImproperlyConfiguredException: If required discovery endpoints are absent.
+        ImproperlyConfiguredException: If required discovery endpoints are absent or verifier inputs conflict.
     """
     if metadata.authorization_endpoint is None or metadata.token_endpoint is None:
         raise_config("OIDC provider requires authorization and token endpoints")
     allowed_scopes = frozenset(scopes)
     if "openid" not in allowed_scopes:
         raise_config("OIDC provider requires the openid scope")
+    resolved_verifier = _resolve_oidc_verifier(
+        metadata=metadata, client_id=client_id, verifier=verifier, jwks=jwks, worker_limits=worker_limits
+    )
     oauth = OAuthProviderClient(
         OAuthEndpointConfig(
             name=name,
@@ -448,7 +429,7 @@ def oidc_provider(  # noqa: PLR0913 - constructor keeps every trust and transpor
         ),
         policy=http_policy,
     )
-    return OIDCProvider(oauth=oauth, metadata=metadata, verifier=verifier)
+    return OIDCProvider(oauth=oauth, metadata=metadata, verifier=resolved_verifier)
 
 
 def google_oidc_provider(  # noqa: PLR0913 - constructor keeps the provider trust inputs explicit
@@ -456,7 +437,9 @@ def google_oidc_provider(  # noqa: PLR0913 - constructor keeps the provider trus
     client_id: str,
     client_secret: SecretStr,
     metadata: OIDCMetadata,
-    verifier: JWTVerifier[JWTClaims],
+    verifier: JWTVerifier[JWTClaims] | None = None,
+    jwks: JWKSProvider | None = None,
+    worker_limits: WorkerLimits | None = None,
     scopes: frozenset[str] = _DEFAULT_SCOPES,
     offline_access: bool = False,
     http_policy: OAuthHTTPPolicy | None = None,
@@ -467,7 +450,9 @@ def google_oidc_provider(  # noqa: PLR0913 - constructor keeps the provider trus
         client_id: Registered Google client identifier.
         client_secret: Protected Google client secret.
         metadata: Validated Google discovery result.
-        verifier: ID-token verifier pinned to Google and the client.
+        verifier: ID-token verifier pinned to Google and the client. Mutually exclusive with ``jwks``.
+        jwks: Shared JWKS provider used to construct a ``JWKSJWTVerifier``. Mutually exclusive with ``verifier``.
+        worker_limits: Bounded crypto-worker budget when constructing a verifier from ``jwks``.
         scopes: Allowed Google scopes.
         offline_access: Request refresh access while the user is absent.
         http_policy: Bounded OAuth transport policy.
@@ -476,7 +461,7 @@ def google_oidc_provider(  # noqa: PLR0913 - constructor keeps the provider trus
         The Google OIDC provider.
 
     Raises:
-        ImproperlyConfiguredException: If discovery does not name Google's exact issuer.
+        ImproperlyConfiguredException: If discovery does not name Google's exact issuer or verifier inputs conflict.
     """
     if metadata.issuer != _GOOGLE_ISSUER:
         raise_config("Google OIDC issuer is invalid")
@@ -486,6 +471,8 @@ def google_oidc_provider(  # noqa: PLR0913 - constructor keeps the provider trus
         client_secret=client_secret,
         metadata=metadata,
         verifier=verifier,
+        jwks=jwks,
+        worker_limits=worker_limits,
         scopes=scopes,
         revocation_endpoint=metadata.revocation_endpoint,
         extra_authorization_parameters={"access_type": "offline"} if offline_access else None,
@@ -506,7 +493,9 @@ def keycloak_oidc_provider(  # noqa: PLR0913 - constructor keeps realm trust and
     client_id: str,
     client_secret: SecretStr | None,
     metadata: OIDCMetadata,
-    verifier: JWTVerifier[JWTClaims],
+    verifier: JWTVerifier[JWTClaims] | None = None,
+    jwks: JWKSProvider | None = None,
+    worker_limits: WorkerLimits | None = None,
     scopes: frozenset[str] = _DEFAULT_SCOPES,
     client_auth: OAuthClientAuth = OAuthClientAuth.CLIENT_SECRET_BASIC,
     http_policy: OAuthHTTPPolicy | None = None,
@@ -519,7 +508,9 @@ def keycloak_oidc_provider(  # noqa: PLR0913 - constructor keeps realm trust and
         client_id: Registered Keycloak client identifier.
         client_secret: Protected client secret, if required.
         metadata: Validated realm discovery result.
-        verifier: ID-token verifier pinned to the realm and client.
+        verifier: ID-token verifier pinned to the realm and client. Mutually exclusive with ``jwks``.
+        jwks: Shared JWKS provider used to construct a ``JWKSJWTVerifier``. Mutually exclusive with ``verifier``.
+        worker_limits: Bounded crypto-worker budget when constructing a verifier from ``jwks``.
         scopes: Allowed Keycloak scopes.
         client_auth: Token-endpoint client authentication method.
         http_policy: Bounded OAuth transport policy.
@@ -528,7 +519,7 @@ def keycloak_oidc_provider(  # noqa: PLR0913 - constructor keeps realm trust and
         The realm-pinned Keycloak OIDC provider.
 
     Raises:
-        ImproperlyConfiguredException: If the realm issuer is not exact.
+        ImproperlyConfiguredException: If the realm issuer is not exact or verifier inputs conflict.
     """
     if (
         not _strict_text(base_url)
@@ -544,27 +535,19 @@ def keycloak_oidc_provider(  # noqa: PLR0913 - constructor keeps realm trust and
         client_secret=client_secret,
         metadata=metadata,
         verifier=verifier,
+        jwks=jwks,
+        worker_limits=worker_limits,
         scopes=scopes,
         client_auth=client_auth,
         http_policy=http_policy,
     )
 
 
-async def _discover_verifier(
-    *,
-    issuer: str,
-    client_id: str,
-    discovery: OIDCDiscoveryClient,
-    jwks: JWKSProvider,
-    worker_limits: WorkerLimits | None,
-) -> tuple[OIDCMetadata, _DiscoveredOIDCVerifier]:
-    if not isinstance(cast("object", discovery), OIDCDiscoveryClient) or not isinstance(
-        cast("object", jwks), JWKSProvider
-    ):
-        raise_config("OIDC discovery factory requires shared discovery and JWKS resources")
-    metadata = await discovery.discover(issuer)
+def _build_oidc_jwks_verifier(
+    *, metadata: OIDCMetadata, client_id: str, jwks: JWKSProvider, worker_limits: WorkerLimits | None
+) -> JWKSJWTVerifier:
     workers = WorkerLimits() if worker_limits is None else worker_limits
-    verifier = _DiscoveredOIDCVerifier(
+    return JWKSJWTVerifier(
         config=JWTValidationConfig(
             issuer=metadata.issuer,
             audiences=frozenset({client_id}),
@@ -575,8 +558,46 @@ async def _discover_verifier(
         ),
         jwks=jwks,
         jwks_uri=metadata.jwks_uri,
+        mechanism_name="oidc",
+        slot_name="oauth.id-token",
         worker_limits=workers,
+        maximum_token_bytes=_MAXIMUM_TOKEN_BYTES,
     )
+
+
+def _resolve_oidc_verifier(
+    *,
+    metadata: OIDCMetadata,
+    client_id: str,
+    verifier: JWTVerifier[JWTClaims] | None,
+    jwks: JWKSProvider | None,
+    worker_limits: WorkerLimits | None,
+) -> JWTVerifier[JWTClaims]:
+    if verifier is not None and jwks is not None:
+        raise_config("OIDC provider requires exactly one of verifier or jwks")
+    if verifier is not None:
+        if worker_limits is not None:
+            raise_config("OIDC provider does not accept worker_limits when verifier is provided")
+        return verifier
+    if jwks is None:
+        raise_config("OIDC provider requires exactly one of verifier or jwks")
+    return _build_oidc_jwks_verifier(metadata=metadata, client_id=client_id, jwks=jwks, worker_limits=worker_limits)
+
+
+async def _discover_verifier(
+    *,
+    issuer: str,
+    client_id: str,
+    discovery: OIDCDiscoveryClient,
+    jwks: JWKSProvider,
+    worker_limits: WorkerLimits | None,
+) -> tuple[OIDCMetadata, JWKSJWTVerifier]:
+    if not isinstance(cast("object", discovery), OIDCDiscoveryClient) or not isinstance(
+        cast("object", jwks), JWKSProvider
+    ):
+        raise_config("OIDC discovery factory requires shared discovery and JWKS resources")
+    metadata = await discovery.discover(issuer)
+    verifier = _build_oidc_jwks_verifier(metadata=metadata, client_id=client_id, jwks=jwks, worker_limits=worker_limits)
     return metadata, verifier
 
 

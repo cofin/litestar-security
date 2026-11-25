@@ -203,6 +203,7 @@ def _mfa_required_response(outcome: MFARequired) -> Response[LocalMFAChallenge]:
             account_id=outcome.account_id,
             expires_at=outcome.expires_at,
             methods=tuple(sorted(outcome.methods)),
+            totp_method_ids=outcome.totp_method_ids,
         ),
         status_code=HTTP_403_FORBIDDEN,
     )

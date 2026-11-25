@@ -371,7 +371,12 @@ class LocalAuthConfig(Generic[UserT]):
         if mfa.require_at_login == "enrolled" and not isinstance(login_methods, LoginMethodStore):
             msg = "Conditional MFA login requires a login-method store implementing LoginMethodStore.list_methods"
             raise ImproperlyConfiguredException(detail=msg)
-        service = MFALoginService(store=store, mfa=mfa.mfa_service, pepper=self.secrets.mfa_login_pepper)
+        service = MFALoginService(
+            store=store,
+            mfa=mfa.mfa_service,
+            pepper=self.secrets.mfa_login_pepper,
+            login_methods=login_methods if login_methods is not None else self.accounts,
+        )
         object.__setattr__(self, "mfa_login", service)
         object.__setattr__(self, "_mfa_login_config", mfa)
         object.__setattr__(

@@ -141,5 +141,9 @@ def test_step_up_purpose_allowlist_covers_every_consumed_purpose_with_strong_fac
         "recovery-codes",
         "passkey-register",
         "passkey-remove",
+        "oauth-link",
+        "oauth-unlink",
+        "oauth-scope-upgrade",
+        "oauth-provider-token-management",
     }
     assert all(methods == frozenset({"password", "passkey"}) for methods in purpose_methods.values())

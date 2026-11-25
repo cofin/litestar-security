@@ -45,6 +45,7 @@ if TYPE_CHECKING:
         AttestationFormat,
         AuthenticatorSelectionCriteria,
         CredentialDeviceType,
+        ResidentKeyRequirement,
         UserVerificationRequirement,
     )
 
@@ -68,6 +69,7 @@ __all__ = (
     "InvalidHashError",
     "MissingDependencyError",
     "OptionalDependencyFlag",
+    "ResidentKeyRequirement",
     "UserVerificationRequirement",
     "VerificationError",
     "VerifyMismatchError",
@@ -406,6 +408,13 @@ class _WebAuthnCredentialDeviceTypeShim:  # pragma: no cover
     MULTI_DEVICE = "multi_device"
 
 
+class _WebAuthnResidentKeyShim:  # pragma: no cover
+    """Fallback shim for ``ResidentKeyRequirement`` when ``webauthn`` is absent."""
+
+    __slots__ = ()
+    PREFERRED = "preferred"
+
+
 class _WebAuthnUserVerificationShim:  # pragma: no cover
     """Fallback shim for ``UserVerificationRequirement`` when ``webauthn`` is absent."""
 
@@ -451,6 +460,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str | None, object]] = {
     "COSEAlgorithmIdentifier": ("webauthn.helpers.cose", "COSEAlgorithmIdentifier", _WebAuthnCOSEAlgorithmShim),
     "CredentialDeviceType": ("webauthn.helpers.structs", "CredentialDeviceType", _WebAuthnCredentialDeviceTypeShim),
     "InvalidHashError": ("argon2.exceptions", "InvalidHashError", Exception),
+    "ResidentKeyRequirement": ("webauthn.helpers.structs", "ResidentKeyRequirement", _WebAuthnResidentKeyShim),
     "UserVerificationRequirement": (
         "webauthn.helpers.structs",
         "UserVerificationRequirement",

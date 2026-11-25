@@ -7,12 +7,14 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 
+import jwt
 import pytest
 from anyio import CancelScope, CapacityLimiter, Event, create_task_group, fail_after, get_cancelled_exc_class
 from anyio.lowlevel import checkpoint
 from litestar.exceptions import ImproperlyConfiguredException
 
-from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
+from litestar_security.authentication import Authenticated, InvalidCredentials, VerificationUnavailable
+from litestar_security.config import WorkerLimits
 from litestar_security.providers.jwks import (
     AsyncJWKSFetcher,
     CachedJWKSProvider,
@@ -20,10 +22,11 @@ from litestar_security.providers.jwks import (
     JWKSCachePolicy,
     JWKSFetchOutcome,
     JWKSFetchTarget,
+    JWKSJWTVerifier,
     JWKSSource,
     normalize_fetcher,
 )
-from litestar_security.providers.jwt import VerificationKey
+from litestar_security.providers.jwt import JWTValidationConfig, JWTVerifier, VerificationKey
 from tests.fixtures.collaborators import RecordingJWKSFetcher
 
 _JWT_NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
@@ -949,3 +952,157 @@ async def test_jwks_provider_accepts_owned_fetchers_without_async_close(close_mo
     provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=fetcher, fetcher_owned=True)
 
     await provider.aclose()
+
+
+def _signed_jwks_token(
+    private_key: bytes, *, algorithm: str, kid: str, issuer: str = _JWT_ISSUER, audience: str = "api"
+) -> str:
+    payload = {
+        "iss": issuer,
+        "sub": "user-1",
+        "aud": audience,
+        "iat": int(_JWT_NOW.timestamp()),
+        "exp": int((_JWT_NOW + timedelta(minutes=10)).timestamp()),
+    }
+    encoded = jwt.encode(payload, private_key, algorithm=algorithm, headers={"kid": kid, "typ": "JWT"})
+    return encoded.decode() if isinstance(encoded, bytes) else encoded
+
+
+@pytest.mark.parametrize("algorithm", ["RS256", "ES256"])
+async def test_jwks_jwt_verifier_verifies_and_caches_per_kid_and_alg(
+    algorithm: str, jwt_key_material: Mapping[str, tuple[bytes, bytes]]
+) -> None:
+    private_key, _public_key = jwt_key_material[algorithm]
+    jwk = _verification_jwk(jwt_key_material, algorithm=algorithm, key_id=f"{algorithm.lower()}-1")
+    fetcher = _RecordingJWKSFetcher(_jwks_response(jwk, cache_control="max-age=60"))
+    provider = CachedJWKSProvider(entries=(_jwks_entry(algorithms=frozenset({"RS256", "ES256"})),), fetcher=fetcher)
+    verifier = JWKSJWTVerifier(
+        config=JWTValidationConfig(
+            issuer=_JWT_ISSUER,
+            audiences=frozenset({"api"}),
+            algorithms=frozenset({"RS256", "ES256"}),
+            access_token_profile=False,
+            token_types=frozenset({"jwt"}),
+        ),
+        jwks=provider,
+        jwks_uri=_JWKS_URI,
+    )
+    assert isinstance(verifier, JWTVerifier)
+    token = _signed_jwks_token(private_key, algorithm=algorithm, kid=f"{algorithm.lower()}-1")
+
+    first = await verifier.verify(token, now=_JWT_NOW)
+    second = await verifier.verify(token, now=_JWT_NOW + timedelta(seconds=1))
+
+    assert isinstance(first, Authenticated)
+    assert first.claims.subject == "user-1"
+    assert first.evidence.mechanism == "jwt"
+    assert first.evidence.slot == "jwks"
+    assert isinstance(second, Authenticated)
+    cache = cast("Any", verifier)._verifiers  # noqa: SLF001
+    assert len(cache) == 1
+    assert len(fetcher.requests) == 1
+    await provider.aclose()
+
+
+async def test_jwks_jwt_verifier_rejects_bad_signature_unknown_kid_and_disallowed_alg(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    es_private, _ = jwt_key_material["ES256"]
+    rs_private, _ = jwt_key_material["RS256"]
+    jwk = _verification_jwk(jwt_key_material, algorithm="ES256", key_id="es-1")
+    fetcher = _RecordingJWKSFetcher(
+        _jwks_response(jwk, cache_control="max-age=60"),
+        JWKSFetchOutcome(status_code=304, headers={"cache-control": "max-age=60"}),
+    )
+    provider = CachedJWKSProvider(entries=(_jwks_entry(algorithms=frozenset({"ES256"})),), fetcher=fetcher)
+    verifier = JWKSJWTVerifier(
+        config=JWTValidationConfig(
+            issuer=_JWT_ISSUER,
+            audiences=frozenset({"api"}),
+            algorithms=frozenset({"ES256"}),
+            access_token_profile=False,
+            token_types=frozenset({"jwt"}),
+        ),
+        jwks=provider,
+        jwks_uri=_JWKS_URI,
+    )
+    valid_token = _signed_jwks_token(es_private, algorithm="ES256", kid="es-1")
+    tampered_token = f"{valid_token[:-2]}AA"
+    unknown_kid_token = _signed_jwks_token(es_private, algorithm="ES256", kid="missing")
+    disallowed_alg_token = _signed_jwks_token(rs_private, algorithm="RS256", kid="es-1")
+
+    assert await verifier.verify(tampered_token, now=_JWT_NOW) == InvalidCredentials()
+    assert await verifier.verify(unknown_kid_token, now=_JWT_NOW) == InvalidCredentials()
+    assert await verifier.verify(disallowed_alg_token, now=_JWT_NOW) == InvalidCredentials()
+    await provider.aclose()
+
+
+async def test_jwks_jwt_verifier_propagates_verification_unavailable(
+    jwt_key_material: Mapping[str, tuple[bytes, bytes]],
+) -> None:
+    es_private, _ = jwt_key_material["ES256"]
+    provider = CachedJWKSProvider(
+        entries=(_jwks_entry(algorithms=frozenset({"ES256"})),), fetcher=_RecordingJWKSFetcher(OSError("down"))
+    )
+    verifier = JWKSJWTVerifier(
+        config=JWTValidationConfig(
+            issuer=_JWT_ISSUER,
+            audiences=frozenset({"api"}),
+            algorithms=frozenset({"ES256"}),
+            access_token_profile=False,
+            token_types=frozenset({"jwt"}),
+        ),
+        jwks=provider,
+        jwks_uri=_JWKS_URI,
+    )
+    token = _signed_jwks_token(es_private, algorithm="ES256", kid="es-1")
+
+    assert await verifier.verify(token, now=_JWT_NOW) == VerificationUnavailable()
+    await provider.aclose()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"config": object()},
+        {"jwks": object()},
+        {"jwks_uri": ""},
+        {"jwks_uri": "   "},
+        {"mechanism_name": ""},
+        {"slot_name": " "},
+        {"worker_limits": object()},
+        {"maximum_token_bytes": 0},
+        {"maximum_token_bytes": -1},
+        {"maximum_token_bytes": True},
+        {"maximum_token_bytes": "16384"},
+    ],
+    ids=[
+        "config-type",
+        "jwks-type",
+        "empty-uri",
+        "blank-uri",
+        "empty-mechanism",
+        "blank-slot",
+        "worker-limits-type",
+        "max-bytes-zero",
+        "max-bytes-negative",
+        "max-bytes-bool",
+        "max-bytes-str",
+    ],
+)
+def test_jwks_jwt_verifier_rejects_invalid_constructor_arguments(overrides: dict[str, object]) -> None:
+    provider = CachedJWKSProvider(entries=(_jwks_entry(),), fetcher=_RecordingJWKSFetcher())
+    kwargs: dict[str, object] = {
+        "config": JWTValidationConfig(
+            issuer=_JWT_ISSUER,
+            audiences=frozenset({"api"}),
+            algorithms=frozenset({"EdDSA"}),
+            access_token_profile=False,
+        ),
+        "jwks": provider,
+        "jwks_uri": _JWKS_URI,
+        "worker_limits": WorkerLimits(),
+    }
+    kwargs.update(overrides)
+    with pytest.raises(ImproperlyConfiguredException):
+        JWKSJWTVerifier(**kwargs)  # type: ignore[arg-type]

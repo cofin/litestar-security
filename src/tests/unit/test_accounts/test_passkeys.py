@@ -112,6 +112,7 @@ def test_py_webauthn_adapter_builds_exact_options() -> None:
     )
     assert json.loads(registration)["rp"]["id"] == "example.com"
     assert json.loads(registration)["attestation"] == "none"
+    assert json.loads(registration)["authenticatorSelection"]["residentKey"] == "preferred"
     assert json.loads(authentication)["userVerification"] == "required"
 
 
@@ -143,6 +144,88 @@ async def test_passkey_authentication_verifies_owner_and_emits_normalized_assura
     assert isinstance(evidence, AuthenticationEvidence)
     assert evidence.methods == frozenset({"passkey"})
     assert evidence.traits == frozenset({"phishing-resistant", "user-verified"})
+
+
+async def test_usernameless_passkey_authentication_resolves_credential_owner_and_emits_audit_event() -> None:
+    challenge_store, store, verifier = WebAuthnChallengeStore(), PasskeyStore(), WebAuthnVerifier()
+    events = SecurityEvents()
+    store.credentials[verifier.expected_credential_id] = stored_passkey()
+    service = build_passkey_service(challenge_store=challenge_store, store=store, verifier=verifier)
+    service.events = events
+    binding = b"discoverable-binding"
+
+    options = await service.begin_authentication(binding=binding)
+    assert isinstance(options, accounts_module.WebAuthnOptions)
+    stored_challenge = next(iter(challenge_store.records.values()))
+    assert stored_challenge.account_id is None
+
+    verified = await service.authenticate(binding=binding, response='{"id":"credential"}')
+    assert isinstance(verified, accounts_module.VerifiedPasskeyAuthentication)
+    assert verified.account_id == "account-1"
+    assert verified.evidence.methods == frozenset({"passkey"})
+    assert verified.evidence.traits == frozenset({"phishing-resistant", "user-verified"})
+    assert [(event.operation, event.outcome, event.account_id) for event in events.events] == [
+        ("local.passkey.assert", "verified", "account-1")
+    ]
+    assert isinstance(await service.authenticate(binding=binding, response='{"id":"credential"}'), InvalidCredentials)
+
+    verifier.sign_count = 2
+    assert isinstance(await service.begin_authentication(None, binding=binding), accounts_module.WebAuthnOptions)
+    unattributed = await service.verify_authentication(
+        cast("Any", None), binding=binding, response='{"id":"credential"}'
+    )
+    assert isinstance(unattributed, InvalidCredentials)
+    assert len(challenge_store.records) == 1
+
+
+async def test_passkey_authentication_enforces_strict_bound_and_unbound_ceremony_symmetry() -> None:
+    binding = b"symmetry-binding"
+    store = PasskeyStore()
+    store.credentials[b"credential-1"] = stored_passkey()
+    service = build_passkey_service(store=store)
+
+    assert isinstance(await service.begin_authentication("account-1", binding=binding), accounts_module.WebAuthnOptions)
+    assert isinstance(await service.authenticate(None, binding=binding, response="{}"), InvalidCredentials)
+
+    assert isinstance(await service.begin_authentication(None, binding=binding), accounts_module.WebAuthnOptions)
+    assert isinstance(await service.authenticate("account-1", binding=binding, response="{}"), InvalidCredentials)
+
+    assert isinstance(await service.begin_authentication("account-2", binding=binding), accounts_module.WebAuthnOptions)
+    assert isinstance(await service.authenticate("account-2", binding=binding, response="{}"), InvalidCredentials)
+
+
+async def test_disabled_discoverable_authentication_refuses_unbound_ceremonies_only() -> None:
+    binding = b"disabled-binding"
+    challenge_store, store = WebAuthnChallengeStore(), PasskeyStore()
+    store.credentials[b"credential-1"] = stored_passkey()
+    service = build_passkey_service(challenge_store=challenge_store, store=store)
+
+    assert isinstance(await service.begin_authentication(binding=binding), accounts_module.WebAuthnOptions)
+    service.discoverable_authentication = False
+    assert isinstance(await service.authenticate(binding=binding, response="{}"), InvalidCredentials)
+    assert isinstance(await service.begin_authentication(binding=binding), InvalidCredentials)
+    assert challenge_store.records == {}
+
+    assert isinstance(await service.begin_authentication("account-1", binding=binding), accounts_module.WebAuthnOptions)
+    assert isinstance(
+        await service.authenticate("account-1", binding=binding, response="{}"),
+        accounts_module.VerifiedPasskeyAuthentication,
+    )
+
+
+async def test_usernameless_passkey_clone_risk_audits_resolved_account_id() -> None:
+    store = PasskeyStore()
+    store.credentials[b"credential-1"] = stored_passkey(sign_count=2)
+    events = SecurityEvents()
+    service = build_passkey_service(store=store, verifier=WebAuthnVerifier(sign_count=1))
+    service.events = events
+    binding = b"clone-binding"
+
+    assert isinstance(await service.begin_authentication(None, binding=binding), accounts_module.WebAuthnOptions)
+    assert isinstance(await service.authenticate(None, binding=binding, response="{}"), InvalidCredentials)
+    assert [(event.operation, event.outcome, event.account_id) for event in events.events] == [
+        ("local.passkey.assert", "clone_risk", "account-1")
+    ]
 
 
 @pytest.mark.parametrize(
@@ -568,6 +651,42 @@ def test_passkey_values_and_dependency_configuration_reject_invalid_shapes() -> 
             algorithms=(-7,),
             expires_at=now,
         )
+    with pytest.raises(ValueError, match="challenge"):
+        accounts_module.WebAuthnChallenge(
+            challenge_digest=b"c" * 32,
+            binding_digest=b"b" * 32,
+            purpose="registration",
+            account_id=None,
+            rp_id="example.com",
+            origins=("https://example.com",),
+            user_verification=accounts_module.UserVerification.REQUIRED,
+            algorithms=(-7,),
+            expires_at=now,
+        )
+    with pytest.raises(ValueError, match="challenge"):
+        accounts_module.WebAuthnChallenge(
+            challenge_digest=b"c" * 32,
+            binding_digest=b"b" * 32,
+            purpose="authentication",
+            account_id="   ",
+            rp_id="example.com",
+            origins=("https://example.com",),
+            user_verification=accounts_module.UserVerification.REQUIRED,
+            algorithms=(-7,),
+            expires_at=now,
+        )
+    discoverable_challenge = accounts_module.WebAuthnChallenge(
+        challenge_digest=b"c" * 32,
+        binding_digest=b"b" * 32,
+        purpose="authentication",
+        account_id=None,
+        rp_id="example.com",
+        origins=("https://example.com",),
+        user_verification=accounts_module.UserVerification.REQUIRED,
+        algorithms=(-7,),
+        expires_at=now,
+    )
+    assert discoverable_challenge.account_id is None
     with pytest.raises(ValueError, match="Passkey credential"):
         replace(stored_passkey(), backup_state=True)
     localhost = accounts_module.PasskeyService(
@@ -590,6 +709,7 @@ def test_passkey_values_and_dependency_configuration_reject_invalid_shapes() -> 
         ({"verifier": object()}, "verifier"),
         ({"worker_limiter": object()}, "limiter"),
         ({"worker_timeout": 0}, "configuration"),
+        ({"discoverable_authentication": 1}, "configuration"),
         ({"attestation_trust": object()}, "attestation"),
         ({"origins": ("https://user@example.com",)}, "HTTPS"),
         ({"origins": ("https://example.com/path",)}, "HTTPS"),
@@ -601,6 +721,7 @@ def test_passkey_values_and_dependency_configuration_reject_invalid_shapes() -> 
         "verifier",
         "worker-limiter",
         "worker-timeout",
+        "discoverable-flag",
         "attestation-trust",
         "origin-userinfo",
         "origin-path",

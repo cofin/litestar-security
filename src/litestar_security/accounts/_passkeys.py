@@ -47,6 +47,7 @@ from litestar_security.typing import (
     AuthenticatorSelectionCriteria,
     COSEAlgorithmIdentifier,
     CredentialDeviceType,
+    ResidentKeyRequirement,
     UserVerificationRequirement,
     ensure_webauthn,
     generate_authentication_options,
@@ -72,6 +73,7 @@ __all__ = (
     "PyWebAuthnVerifier",
     "RegistrationVerification",
     "UserVerification",
+    "VerifiedPasskeyAuthentication",
     "WebAuthnChallenge",
     "WebAuthnChallengeStore",
     "WebAuthnOptions",
@@ -156,7 +158,7 @@ class WebAuthnChallenge:
     challenge_digest: bytes = field(repr=False)
     binding_digest: bytes = field(repr=False)
     purpose: str
-    account_id: str
+    account_id: str | None
     rp_id: str
     origins: tuple[str, ...]
     user_verification: UserVerification
@@ -168,13 +170,16 @@ class WebAuthnChallenge:
         challenge_digest = cast("object", self.challenge_digest)
         binding_digest = cast("object", self.binding_digest)
         expires_at = aware_utc_time(self.expires_at)
+        valid_account_id = (
+            self.purpose == "authentication" if self.account_id is None else strict_context_text(self.account_id)
+        )
         if (
             not isinstance(challenge_digest, bytes)
             or len(challenge_digest) != sha256().digest_size
             or not isinstance(binding_digest, bytes)
             or len(binding_digest) != sha256().digest_size
             or not strict_context_text(self.purpose)
-            or not strict_context_text(self.account_id)
+            or not valid_account_id
             or not strict_context_text(self.rp_id)
             or not self.origins
             or not all(strict_context_text(origin) for origin in self.origins)
@@ -219,6 +224,14 @@ class AuthenticationVerification:
     backup_eligible: bool
     backup_state: bool
     user_verified: bool
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedPasskeyAuthentication:
+    """Resolved account and normalized assurance from a verified passkey assertion."""
+
+    account_id: str
+    evidence: AuthenticationEvidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -524,7 +537,8 @@ class PyWebAuthnVerifier:
                     else AttestationConveyancePreference.NONE
                 ),
                 authenticator_selection=AuthenticatorSelectionCriteria(
-                    user_verification=UserVerificationRequirement(cast("str", kwargs["user_verification"]))
+                    resident_key=ResidentKeyRequirement.PREFERRED,
+                    user_verification=UserVerificationRequirement(cast("str", kwargs["user_verification"])),
                 ),
                 supported_pub_key_algs=[
                     COSEAlgorithmIdentifier(value) for value in cast("Sequence[int]", kwargs["algorithms"])
@@ -657,6 +671,7 @@ class PasskeyService:
     login_methods: LoginMethodStore | None = field(default=None, repr=False, compare=False)
     events: SecurityEventSink = field(default_factory=NoOpSecurityEventSink, repr=False, compare=False)
     event_ids: Callable[[], str] = field(default=new_event_id, repr=False, compare=False)
+    discoverable_authentication: bool = True
 
     def __post_init__(self) -> None:
         """Validate structural capabilities and exact relying-party configuration."""
@@ -693,6 +708,7 @@ class PasskeyService:
             or len(frozenset(self.algorithms)) != len(self.algorithms)
             or not all(algorithm in _SUPPORTED_ALGORITHMS for algorithm in self.algorithms)
             or self.allow_insecure_localhost.__class__ is not bool
+            or self.discoverable_authentication.__class__ is not bool
             or self.worker_timeout.__class__ not in {int, float}
             or not isfinite(self.worker_timeout)
             or self.worker_timeout <= 0
@@ -730,9 +746,15 @@ class PasskeyService:
         )
 
     async def begin_authentication(
-        self, account_id: str, *, binding: bytes
-    ) -> WebAuthnOptions | VerificationUnavailable:
-        """Create bound authentication options and persist only the challenge digest."""
+        self, account_id: str | None = None, *, binding: bytes
+    ) -> WebAuthnOptions | InvalidCredentials | VerificationUnavailable:
+        """Create bound or discoverable authentication options and persist only the challenge digest.
+
+        Omitting ``account_id`` starts a discoverable ceremony, which is refused
+        with ``InvalidCredentials`` when ``discoverable_authentication`` is off.
+        """
+        if account_id is None and not self.discoverable_authentication:
+            return InvalidCredentials()
         return await self._begin(
             account_id=account_id,
             binding=binding,
@@ -833,10 +855,14 @@ class PasskeyService:
         )
         return credential
 
-    async def verify_authentication(  # noqa: PLR0911 - each protocol or persistence rejection has a distinct safe outcome
-        self, account_id: str, *, binding: bytes, response: str
-    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
-        """Consume, verify, and atomically record one assertion."""
+    async def authenticate(  # noqa: PLR0911 - each protocol or persistence rejection has a distinct safe outcome
+        self, account_id: str | None = None, *, binding: bytes, response: str
+    ) -> VerifiedPasskeyAuthentication | InvalidCredentials | VerificationUnavailable:
+        """Consume, verify, and atomically record one assertion, returning the resolved account and evidence.
+
+        Every generated passkey route verifies through this method, so it is the
+        single place to extend assertion policy.
+        """
         try:
             challenge = await self._run_worker(self.verifier.authentication_challenge, response)
             credential_id = await self._run_worker(self.verifier.credential_id, response)
@@ -848,12 +874,8 @@ class PasskeyService:
                 now=now,
             )
             credential = await self.store.get_credential(credential_id)
-            if (
-                record is None
-                or credential is None
-                or record.account_id != account_id
-                or credential.account_id != account_id
-            ):
+            resolved_account_id = self._resolve_authentication_account(account_id, record, credential)
+            if resolved_account_id is None or record is None or credential is None:
                 return InvalidCredentials()
             verified = await self._run_worker(
                 partial(
@@ -897,7 +919,7 @@ class PasskeyService:
                     occurred_at=now,
                     operation=PASSKEY_ASSERT,
                     outcome=OUTCOME_CLONE_RISK,
-                    account_id=account_id,
+                    account_id=resolved_account_id,
                 ),
             )
             if self.clone_risk_policy is CloneRiskPolicy.REJECT:
@@ -910,7 +932,7 @@ class PasskeyService:
                     occurred_at=now,
                     operation=PASSKEY_ASSERT,
                     outcome=OUTCOME_VERIFIED,
-                    account_id=account_id,
+                    account_id=resolved_account_id,
                 ),
             )
         traits = {"phishing-resistant"}
@@ -918,7 +940,7 @@ class PasskeyService:
             traits.add("user-verified")
         if credential.hardware_backed:
             traits.add("hardware-backed")
-        return AuthenticationEvidence(
+        evidence = AuthenticationEvidence(
             mechanism="passkey",
             slot="mfa",
             authenticated_at=now,
@@ -926,6 +948,21 @@ class PasskeyService:
             traits=frozenset(traits),
             amr=("passkey",),
         )
+        return VerifiedPasskeyAuthentication(account_id=resolved_account_id, evidence=evidence)
+
+    async def verify_authentication(
+        self, account_id: str, *, binding: bytes, response: str
+    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        """Consume, verify, and atomically record one account-bound assertion.
+
+        The returned evidence does not name an account, so this method accepts
+        only a ceremony bound to ``account_id``. Use :meth:`authenticate` for
+        discoverable sign-in, which returns the resolved credential owner.
+        """
+        if cast("object", account_id).__class__ is not str:
+            return InvalidCredentials()
+        result = await self.authenticate(account_id, binding=binding, response=response)
+        return result.evidence if isinstance(result, VerifiedPasskeyAuthentication) else result
 
     async def list_credentials(self, account_id: str) -> tuple[PasskeyMetadata, ...] | VerificationUnavailable:
         """List safe credential metadata for one owner."""
@@ -977,7 +1014,7 @@ class PasskeyService:
             return await to_thread.run_sync(function, *args, abandon_on_cancel=True, limiter=self.worker_limiter)
 
     async def _begin(
-        self, *, account_id: str, binding: bytes, purpose: str, options: Callable[[bytes], str]
+        self, *, account_id: str | None, binding: bytes, purpose: str, options: Callable[[bytes], str]
     ) -> WebAuthnOptions | VerificationUnavailable:
         try:
             now = aware_utc_time(self.clock())
@@ -1002,6 +1039,19 @@ class PasskeyService:
         except Exception:  # noqa: BLE001 - sanitize application store, entropy, and dependency failures
             return VerificationUnavailable()
         return WebAuthnOptions(challenge=encode_random(challenge), json=json_options, expires_at=expires_at)
+
+    def _resolve_authentication_account(
+        self, account_id: str | None, record: WebAuthnChallenge | None, credential: PasskeyCredential | None
+    ) -> str | None:
+        """Return the credential owner when the ceremony's binding matches the caller's."""
+        if record is None or credential is None:
+            return None
+        if account_id is None:
+            discoverable = self.discoverable_authentication and record.account_id is None
+            return credential.account_id if discoverable else None
+        if record.account_id != account_id or credential.account_id != account_id:
+            return None
+        return account_id
 
     @staticmethod
     def _binding_digest(binding: bytes) -> bytes:

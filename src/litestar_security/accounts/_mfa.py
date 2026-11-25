@@ -1,7 +1,7 @@
 """MFA assurance, TOTP, recovery, and step-up contracts."""
 
 from base64 import b32decode
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha1, sha256, sha512
@@ -593,6 +593,14 @@ class MFAStore(Protocol):
         ...  # pragma: no cover
 
 
+class _ProvisioningURICallable(Protocol):
+    """Keyword-only PyOTP provisioning URI callable contract."""
+
+    def __call__(self, *, name: str | None = None, issuer_name: str | None = None) -> str:
+        """Build an ``otpauth://`` provisioning URI."""
+        ...  # pragma: no cover
+
+
 @dataclass(slots=True)
 class MFAService:
     """Orchestrate protected TOTP enrollment and replay-safe verification."""
@@ -667,10 +675,10 @@ class MFAService:
             )
             totp = self._totp(secret, self.policy)
             provisioning_uri = cast(
-                "Callable[[str | None, str | None], str]",
+                "_ProvisioningURICallable",
                 totp.provisioning_uri,  # pyright: ignore[reportUnknownMemberType] - PyOTP exposes untyped kwargs
             )
-            uri = provisioning_uri(label, self.issuer)
+            uri = provisioning_uri(name=label, issuer_name=self.issuer)
             await self.store.create_totp_enrollment(pending)
         except Exception:  # noqa: BLE001 - sanitize application protector/store and entropy failures
             return VerificationUnavailable()
@@ -827,6 +835,46 @@ class MFAService:
             ),
         )
         return AuthenticationEvidence(mechanism="totp", slot="mfa", authenticated_at=now, methods=frozenset({"totp"}))
+
+    async def verify_any_totp(
+        self, account_id: str, code: str, *, method_ids: Sequence[str] | None = None
+    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        """Verify a TOTP code against candidate active TOTP methods.
+
+        When ``method_ids`` is omitted, active ``kind == "totp"`` methods are
+        loaded from ``self.login_methods``. Verification stops on the first
+        matching method; a method that cannot be checked does not block the
+        remaining candidates.
+
+        Args:
+            account_id: The expected method owner.
+            code: The presented TOTP value.
+            method_ids: Optional explicit candidate TOTP method identifiers.
+
+        Returns:
+            Fresh TOTP evidence, generic invalid credentials, or operational
+            failure when no candidate matched and at least one could not be checked.
+        """
+        if method_ids is None:
+            login_methods = self.login_methods
+            if login_methods is None:
+                return InvalidCredentials()
+            try:
+                methods = await login_methods.list_methods(account_id)
+                candidates = tuple(sorted(method.method_id for method in methods if method.kind == "totp"))
+            except Exception:  # noqa: BLE001 - sanitize application login-method store failures
+                return VerificationUnavailable()
+        else:
+            candidates = tuple(method_ids)
+        unavailable = False
+        for method_id in candidates:
+            if method_id.__class__ is not str:
+                return InvalidCredentials()
+            outcome = await self.verify_totp(account_id, method_id, code)
+            if isinstance(outcome, AuthenticationEvidence):
+                return outcome
+            unavailable = unavailable or isinstance(outcome, VerificationUnavailable)
+        return VerificationUnavailable() if unavailable else InvalidCredentials()
 
     async def generate_recovery_codes(self, account_id: str) -> RecoveryCodeGrant | VerificationUnavailable:
         """Atomically replace and reveal one set of recovery codes.

@@ -20,6 +20,7 @@ from litestar_security.accounts._internal import (
     valid_security_epoch,
 )
 from litestar_security.accounts._mfa import MFAService
+from litestar_security.accounts._stores import LoginMethodStore
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable
 from litestar_security.context import AuthenticationEvidence
 from litestar_security.typing import ensure_pyotp
@@ -47,6 +48,7 @@ class MFARequired:
     expires_at: datetime
     methods: frozenset[str]
     code: str = "mfa_required"
+    totp_method_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +115,7 @@ class MFALoginService:
     ttl: timedelta = _DEFAULT_MFA_LOGIN_TTL
     clock: Callable[[], datetime] = field(default=utc_now, repr=False, compare=False)
     entropy: Callable[[int], bytes] = field(default=token_bytes, repr=False, compare=False)
+    login_methods: LoginMethodStore | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Require an atomic store and bounded, explicit cryptographic inputs."""
@@ -129,6 +132,14 @@ class MFALoginService:
             raise ImproperlyConfiguredException(detail=message)
         if not isinstance(mfa, MFAService):
             message = "MFA login service MFA capability must be an MFAService"
+            raise ImproperlyConfiguredException(detail=message)
+        login_methods = cast("object", self.login_methods)
+        if login_methods is None:
+            login_methods = cast("object", self.mfa.login_methods)
+            if login_methods is not None:
+                object.__setattr__(self, "login_methods", login_methods)
+        if login_methods is not None and not isinstance(login_methods, LoginMethodStore):
+            message = "MFA login methods must implement LoginMethodStore"
             raise ImproperlyConfiguredException(detail=message)
         if not isinstance(pepper, bytes) or pepper.__class__ is not bytes or len(pepper) < MINIMUM_PEPPER_BYTES:
             message = "MFA login challenge pepper must be at least 32 exact bytes"
@@ -168,6 +179,7 @@ class MFALoginService:
                 return VerificationUnavailable()
             token = encode_random(raw_value)
             expires_at = now + self.ttl
+            totp_method_ids = await self._totp_method_ids(account.account_id) if "totp" in self.methods else ()
             await self.store.put(
                 MFALoginChallenge(
                     challenge_digest=self._challenge_digest(self.pepper, token),
@@ -180,7 +192,13 @@ class MFALoginService:
             )
         except Exception:  # noqa: BLE001 - sanitize clock, entropy, and store failures
             return VerificationUnavailable()
-        return MFARequired(challenge=token, account_id=account.account_id, expires_at=expires_at, methods=self.methods)
+        return MFARequired(
+            challenge=token,
+            account_id=account.account_id,
+            expires_at=expires_at,
+            methods=self.methods,
+            totp_method_ids=totp_method_ids,
+        )
 
     async def consume(
         self, challenge: str, *, account_id: str, security_epoch: int, client_key: str | None
@@ -218,14 +236,30 @@ class MFALoginService:
             return InvalidCredentials()
         try:
             if method == "totp":
-                if method_id is None or method_id.__class__ is not str:
-                    return InvalidCredentials()
-                return await self.mfa.verify_totp(record.account_id, method_id, code)
+                return await self._verify_totp(record.account_id, method_id, code)
             if method == "recovery-code":
                 return await self.mfa.consume_recovery_code(record.account_id, code)
         except Exception:  # noqa: BLE001 - sanitize MFA port failures
             return VerificationUnavailable()
         return InvalidCredentials()
+
+    async def _verify_totp(
+        self, account_id: str, method_id: str | None, code: str
+    ) -> AuthenticationEvidence | InvalidCredentials | VerificationUnavailable:
+        """Verify one explicit TOTP factor or resolve enrolled TOTP methods."""
+        if method_id is None:
+            return await self.mfa.verify_any_totp(account_id, code, method_ids=await self._totp_method_ids(account_id))
+        if method_id.__class__ is not str:
+            return InvalidCredentials()
+        return await self.mfa.verify_totp(account_id, method_id, code)
+
+    async def _totp_method_ids(self, account_id: str) -> tuple[str, ...]:
+        """Return the account's active TOTP method identifiers in stable order."""
+        login_methods = self.login_methods
+        if login_methods is None:
+            return ()
+        enrolled = await login_methods.list_methods(account_id)
+        return tuple(sorted(method.method_id for method in enrolled if method.kind == "totp"))
 
     @staticmethod
     def _challenge_digest(pepper: bytes, challenge: str) -> bytes:

@@ -2582,6 +2582,19 @@ async def assert_webauthn_challenge_store_conformance(
         is not None
     ):
         raise AssertionError("WebAuthnChallengeStore expiry invariant: expired challenges must be rejected")
+    discoverable = _conformance_webauthn_challenge(b"d" * 32, account_id=None)
+    await store.put(discoverable)
+    consumed = await store.consume(
+        discoverable.challenge_digest,
+        binding_digest=discoverable.binding_digest,
+        purpose=discoverable.purpose,
+        now=_DEFAULT_NOW,
+    )
+    if consumed is None or consumed.account_id is not None:
+        raise AssertionError(
+            "WebAuthnChallengeStore discoverable invariant: "
+            "unbound authentication challenges must round-trip with account_id=None"
+        )
 
 
 async def assert_oauth_transaction_store_conformance(factory: Callable[[], OAuthTransactionStore]) -> None:
@@ -3323,7 +3336,7 @@ def _conformance_mfa_login_challenge(
 
 
 def _conformance_webauthn_challenge(
-    digest: bytes, *, expires_at: datetime | None = None, account_id: str = "conformance-account"
+    digest: bytes, *, expires_at: datetime | None = None, account_id: str | None = "conformance-account"
 ) -> WebAuthnChallenge:
     """Build a fixed valid WebAuthn challenge."""
     return WebAuthnChallenge(

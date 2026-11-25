@@ -17,12 +17,14 @@ from litestar.testing import AsyncTestClient
 from litestar_security import SecurityConfig, SecurityPlugin
 from litestar_security.accounts import (
     LocalAccount,
+    PasswordReauthenticationProof,
     RateLimitGuard,
     RateLimitPolicy,
     StepUpCredential,
     StepUpService,
     StoreRateLimiter,
     TokenPair,
+    build_mfa_routes,
 )
 from litestar_security.authentication import AuthenticationEvidence, InvalidCredentials, VerificationUnavailable
 from litestar_security.context import Principal
@@ -1768,3 +1770,160 @@ def test_openapi_never_contains_provider_secrets_or_protocol_credentials(
     forbidden: str, oauth_openapi_document: str
 ) -> None:
     assert forbidden not in oauth_openapi_document
+
+
+class _EpochStore:
+    def __init__(self, epochs: dict[str, int | None]) -> None:
+        self._epochs = epochs
+
+    async def current_epoch(self, account_id: str) -> int | None:
+        return self._epochs.get(account_id)
+
+
+def _step_up_oauth_bridge_app(
+    *,
+    provider: FakeOAuthProvider,
+    store: MemoryOAuthAccountStore,
+    epochs: _EpochStore,
+    step_up_service: StepUpService,
+    retain_tokens: bool = True,
+) -> Litestar:
+    authorizer = StepUpOAuthAuthorizer.from_step_up_service(step_up_service, epochs=epochs)
+    oauth_service = lifecycle_service(
+        provider=provider, store=store, step_up=cast("Any", authorizer), retain_tokens=retain_tokens
+    )
+
+    async def verify_password(account_id: str, credential: str) -> PasswordReauthenticationProof | InvalidCredentials:
+        if account_id == "account-1" and credential == "pw":
+            return PasswordReauthenticationProof(
+                account_id=account_id, security_epoch=2, authenticated_at=NOW, expires_at=NOW + timedelta(minutes=5)
+            )
+        return InvalidCredentials()
+
+    local_auth = SimpleNamespace(password_reauthentication=SimpleNamespace(verify=verify_password))
+    mfa_router = build_mfa_routes(
+        step_up=step_up_service, epochs=epochs, mfa=cast("Any", object()), local_auth=cast("Any", local_auth)
+    )
+    oauth_router = build_oauth_routes(OAuthConfig(oauth_service=oauth_service))
+
+    def provide_principal() -> Principal[object]:
+        return Principal(id="account-1")
+
+    return Litestar(
+        route_handlers=[mfa_router, oauth_router],
+        dependencies={"principal": Provide(provide_principal, sync_to_thread=False)},
+        openapi_config=None,
+    )
+
+
+@pytest.mark.parametrize("transport_mode", ["bearer", "cookie"])
+async def test_step_up_controller_grants_work_end_to_end_with_from_step_up_service(transport_mode: str) -> None:
+    """Verify /auth/step-up/oauth-* grants work end to end with StepUpOAuthAuthorizer.from_step_up_service."""
+    provider = oauth_fake_provider()
+    store = MemoryOAuthAccountStore(login_method_counts={"account-1": 1}, protector=Protector())
+    epochs = _EpochStore({"account-1": 2})
+    step_up_service = StepUpService(InMemoryStepUpStore(), clock=lambda: NOW)
+    app = _step_up_oauth_bridge_app(provider=provider, store=store, epochs=epochs, step_up_service=step_up_service)
+    transport_headers = {"authorization": "Bearer access-token"} if transport_mode == "bearer" else {}
+
+    async with AsyncTestClient(app=app, base_url="https://app.example") as client:
+        if transport_mode == "cookie":
+            client.cookies.set("session", "browser-session")
+        link_step_up = await client.post(
+            "/auth/step-up/oauth-link", headers=transport_headers, json={"method": "password", "credential": "pw"}
+        )
+        assert link_step_up.status_code == 200
+        link_grant = link_step_up.json()["grant"]
+
+        link_start = await client.post(
+            "/auth/oauth/example/link",
+            headers=transport_headers,
+            json={"step_up_grant": link_grant},
+            follow_redirects=False,
+        )
+        assert link_start.status_code == 302
+        link_state = parse_qs(urlsplit(link_start.headers["location"]).query)["state"][0]
+        link_callback = await client.get("/auth/oauth/example/callback", params={"code": "code", "state": link_state})
+        assert link_callback.status_code == 200
+        provider_account_id = link_callback.json()["provider_account_id"]
+
+        provider.tokens = replace(provider.tokens, scopes=frozenset({"profile", "email"}))
+        scope_step_up = await client.post(
+            "/auth/step-up/oauth-scope-upgrade",
+            headers=transport_headers,
+            json={"method": "password", "credential": "pw"},
+        )
+        assert scope_step_up.status_code == 200
+        scope_start = await client.post(
+            "/auth/oauth/example/scopes",
+            headers=transport_headers,
+            json={
+                "provider_account_id": provider_account_id,
+                "scopes": ["email"],
+                "step_up_grant": scope_step_up.json()["grant"],
+            },
+            follow_redirects=False,
+        )
+        assert scope_start.status_code == 302
+        scope_state = parse_qs(urlsplit(scope_start.headers["location"]).query)["state"][0]
+        scope_callback = await client.get("/auth/oauth/example/callback", params={"code": "code", "state": scope_state})
+        assert scope_callback.status_code == 200
+        assert scope_callback.json()["detail"] == "Scopes updated."
+
+        revoke_step_up = await client.post(
+            "/auth/step-up/oauth-provider-token-management",
+            headers=transport_headers,
+            json={"method": "password", "credential": "pw"},
+        )
+        assert revoke_step_up.status_code == 200
+        revoked = await client.post(
+            "/auth/oauth/example/revoke",
+            headers=transport_headers,
+            json={"step_up_grant": revoke_step_up.json()["grant"]},
+        )
+        assert revoked.status_code == 200
+        assert revoked.json()["detail"] == "Revoked."
+
+        unlink_step_up = await client.post(
+            "/auth/step-up/oauth-unlink", headers=transport_headers, json={"method": "password", "credential": "pw"}
+        )
+        assert unlink_step_up.status_code == 200
+        unlinked = await client.post(
+            f"/auth/oauth/example/links/{provider_account_id}/unlink",
+            headers=transport_headers,
+            json={"step_up_grant": unlink_step_up.json()["grant"]},
+        )
+        assert unlinked.status_code == 200
+        assert unlinked.json()["detail"] == "Unlinked."
+
+
+async def test_from_step_up_service_rejects_wrong_purpose_missing_transport_and_invalid_epochs() -> None:
+    """Verify from_step_up_service fails closed on wrong purpose, absent transport headers, and invalid epochs."""
+    step_up_service = StepUpService(InMemoryStepUpStore(), clock=lambda: NOW)
+    with pytest.raises(ImproperlyConfiguredException, match="SecurityEpochStore"):
+        StepUpOAuthAuthorizer.from_step_up_service(step_up_service, epochs=cast("Any", object()))
+
+    provider = oauth_fake_provider()
+    store = MemoryOAuthAccountStore(login_method_counts={"account-1": 1}, protector=Protector())
+    epochs = _EpochStore({"account-1": 2})
+    app = _step_up_oauth_bridge_app(provider=provider, store=store, epochs=epochs, step_up_service=step_up_service)
+    headers = {"authorization": "Bearer access-token"}
+
+    async with AsyncTestClient(app=app, base_url="https://app.example") as client:
+        issued = await client.post(
+            "/auth/step-up/oauth-link", headers=headers, json={"method": "password", "credential": "pw"}
+        )
+        assert issued.status_code == 200
+        wrong_purpose = await client.post(
+            "/auth/oauth/example/revoke", headers=headers, json={"step_up_grant": issued.json()["grant"]}
+        )
+        assert wrong_purpose.status_code == 401
+
+        issued_for_link = await client.post(
+            "/auth/step-up/oauth-link", headers=headers, json={"method": "password", "credential": "pw"}
+        )
+        assert issued_for_link.status_code == 200
+        missing_headers = await client.post(
+            "/auth/oauth/example/link", json={"step_up_grant": issued_for_link.json()["grant"]}, follow_redirects=False
+        )
+        assert missing_headers.status_code == 401

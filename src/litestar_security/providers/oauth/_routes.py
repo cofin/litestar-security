@@ -41,7 +41,13 @@ from litestar.utils.scope.state import ScopeState
 from litestar_security._docs import ROUTE_TAGS, RouteDocs, apply_route_docs, raised_denial
 from litestar_security._dto import apply_wire_dtos
 from litestar_security._internal import GENERATED_ROUTE_OPT_KEY
-from litestar_security.accounts import RateLimited, RateLimitGuard, StepUpCredential, trusted_client_key
+from litestar_security.accounts import (
+    RateLimited,
+    RateLimitGuard,
+    SecurityEpochStore,
+    StepUpCredential,
+    trusted_client_key,
+)
 from litestar_security.authentication import InvalidCredentials, VerificationUnavailable, public, required
 from litestar_security.context import AuthenticationEvidence, Principal
 from litestar_security.providers.oauth._accounts import (
@@ -489,6 +495,53 @@ class StepUpOAuthAuthorizer:
         ):
             message = "OAuth step-up authorizer configuration is invalid"
             raise ImproperlyConfiguredException(detail=message)
+
+    @classmethod
+    def from_step_up_service(
+        cls,
+        service: "StepUpService",
+        *,
+        epochs: SecurityEpochStore,
+        transport_binding: Callable[[Request[Any, Any, Any]], bytes | None] | None = None,
+        session_binding: Callable[[Request[Any, Any, Any]], str | None] | None = None,
+    ) -> "StepUpOAuthAuthorizer":
+        """Build an OAuth step-up authorizer from ``StepUpService`` and ``SecurityEpochStore``.
+
+        Args:
+            service: Step-up grant service shared with the generated step-up route.
+            epochs: Authoritative security-epoch store.
+            transport_binding: Optional request-to-transport binding extractor.
+                Defaults to the generated step-up route's derivation
+                (``Authorization`` header with ``Cookie`` fallback, returning
+                ``None`` when absent so authorization fails closed).
+            session_binding: Optional callback-session binding extractor.
+                Defaults to returning ``None``.
+
+        Returns:
+            A validated ``StepUpOAuthAuthorizer`` bound to ``service`` and ``epochs``.
+
+        Raises:
+            ImproperlyConfiguredException: If ``epochs`` does not implement
+                ``SecurityEpochStore`` or any dependency is invalid.
+        """
+        if not isinstance(cast("object", epochs), SecurityEpochStore):
+            message = "OAuth step-up authorizer epochs must implement SecurityEpochStore"
+            raise ImproperlyConfiguredException(detail=message)
+        return cls(
+            service=service,
+            current_epoch=epochs.current_epoch,
+            transport_binding=cls._default_transport_binding if transport_binding is None else transport_binding,
+            session_binding=cls._default_session_binding if session_binding is None else session_binding,
+        )
+
+    @staticmethod
+    def _default_transport_binding(request: Request[Any, Any, Any]) -> bytes | None:
+        value = request.headers.get("authorization") or request.headers.get("cookie")
+        return value.encode("utf-8") if value else None
+
+    @staticmethod
+    def _default_session_binding(_request: Request[Any, Any, Any]) -> str | None:
+        return None
 
     async def authorize(
         self, *, grant: str, account_id: str, purpose: str, request: Request[Any, Any, Any]
